@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,6 +160,20 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 // в throttle.json per-vault) проверяется до расшифровки и обновляется сразу
 // после неё: неудача пишется на диск НЕМЕДЛЕННО (fail-closed), до того, как
 // решаем, показывать ли "осталось попыток" или переключаться в отсчёт блокировки.
+//
+// Время для throttle — ОНЛАЙН, не локальные часы: при открытии диалога один
+// раз запрашивается сетевое время (core.FetchNetworkTime) и фиксируется в
+// core.TrustedClock (T0 + монотонное смещение) — see core/onlinetime.go.
+// Дальше "сейчас" для CheckThrottle/RegisterFailure/RegisterSuccess и для
+// самого обратного отсчёта берётся из clock.Now(), а не time.Now(), — перевод
+// системных часов пользователем не сбрасывает и не продлевает блокировку.
+// Если сеть недоступна — открытие невозможно (fail-closed: приложению в
+// любом случае нужен интернет для SSH, так что это не новое ограничение).
+//
+// Ограничение (не устраняется online-time и не должно заявляться в UI):
+// удаление throttle.json или откат его резервной копии по-прежнему сбрасывает
+// счётчик попыток — это anti-casual слой, не защита от целенаправленной
+// атаки на файловую систему.
 func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, info *widget.Label) {
 	vaultDir := core.DefaultVaultDir()
 	vaultName := filepath.Base(path)
@@ -176,7 +191,9 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	var d dialog.Dialog
 	var openBtn *widget.Button
+	var retryBtn *widget.Button
 	var ticker *time.Ticker
+	var clock *core.TrustedClock // nil, пока онлайн-время не получено
 	// countdownGen — поколение текущего обратного отсчёта: goroutine тикера
 	// сверяет его перед каждым обновлением UI и завершается сама, если
 	// диалог запустил новый отсчёт или был закрыт (не полагаемся на
@@ -192,14 +209,16 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	// startCountdown переключает диалог в режим обратного отсчёта блокировки:
 	// кнопка "Открыть" дизейблена, статус обновляется раз в секунду, по
-	// истечении блокировка снимается автоматически.
+	// истечении блокировка снимается автоматически. "Сейчас" для расчёта
+	// остатка — доверенное онлайн-время (clock.Now()), НЕ time.Now(): иначе
+	// перевод локальных часов во время отображения отсчёта исказил бы его.
 	var startCountdown func(until time.Time)
 	startCountdown = func(until time.Time) {
 		stopTicker()
 		myGen := countdownGen
 		openBtn.Disable()
 		update := func() bool {
-			remaining := time.Until(until)
+			remaining := until.Sub(clock.Now())
 			if remaining <= 0 {
 				statusLabel.SetText("")
 				openBtn.Enable()
@@ -235,15 +254,26 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	}
 
 	// submit — общее действие и для кнопки "Открыть", и для Enter в поле
-	// пина (единственное поле формы). Если кнопка дизейблена (throttle-блок
-	// или уже идёт расшифровка) — Enter, как и клик, ничего не делает.
+	// пина (единственное поле формы). Если кнопка дизейблена (throttle-блок,
+	// нет онлайн-времени или уже идёт расшифровка) — Enter, как и клик,
+	// ничего не делает.
+	//
+	// Fail-closed инвариант: submit() — ЕДИНСТВЕННЫЙ путь к core.OpenVault и
+	// core.CheckThrottle в этом диалоге (кнопка "Открыть" вызывает его же,
+	// Enter в pinEntry — тоже его же). Guard "clock == nil" гарантирует, что
+	// ни расшифровка, ни throttle-проверка не выполнятся, пока не получено
+	// онлайн-время: до этого openBtn изначально Disable()-нута (см. ниже) и
+	// включается только внутри acquireOnlineTime ПОСЛЕ успешного
+	// FetchNetworkTime (clock уже не nil к этому моменту). Единственный
+	// другой вызов CheckThrottle в файле — тоже внутри acquireOnlineTime,
+	// тоже после присвоения clock.
 	submit := func() {
-		if openBtn.Disabled() {
+		if openBtn.Disabled() || clock == nil {
 			return
 		}
 		pin := pinEntry.Text
-		if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), time.Now()); blocked {
-			startCountdown(time.Now().Add(remaining))
+		if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+			startCountdown(clock.Now().Add(remaining))
 			return
 		}
 		openBtn.Disable()
@@ -255,7 +285,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				payload, err = core.OpenVault(pin, data)
 			}
 			if err != nil {
-				now := time.Now()
+				now := clock.Now()
 				st := core.RegisterFailure(core.LoadThrottle(vaultDir, vaultName), now)
 				_ = core.SaveThrottle(vaultDir, vaultName, st) // fail-closed: пишем счётчик до любого дальнейшего ветвления
 				fyne.Do(func() {
@@ -285,24 +315,62 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		})
 	}
 	openBtn = widget.NewButtonWithIcon("Открыть", theme.LoginIcon(), submit)
+	openBtn.Disable() // включится только после успешного получения онлайн-времени
 	// единственное поле формы — Enter сразу выполняет submit (как нажатие "Открыть")
 	pinEntry.OnSubmitted = func(string) { submit() }
+
+	// acquireOnlineTime получает доверенное время (один сетевой запрос за
+	// сессию диалога) и либо запускает обычный throttle-флоу, либо, если
+	// сети нет, сообщает об этом без упоминания "серверов времени" —
+	// приложению в любом случае нужен интернет для SSH, поэтому это не
+	// новое ограничение, а fail-closed поведение при его отсутствии.
+	var acquireOnlineTime func()
+	acquireOnlineTime = func() {
+		retryBtn.Hide()
+		openBtn.Disable()
+		statusLabel.SetText("Проверка подключения...")
+		goSafe(func() {
+			// 8с — общий дедлайн на весь acquire (core.FetchNetworkTime теперь
+			// опрашивает все хосты параллельно, а не по очереди, поэтому этого
+			// достаточно независимо от размера пула — раньше при
+			// последовательном переборе 5 хостов по 4с могло уходить до ~20с).
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			onlineNow, err := core.FetchNetworkTime(ctx)
+			fyne.Do(func() {
+				if err != nil {
+					clock = nil
+					statusLabel.SetText("Подключение к интернету не обнаружено.")
+					retryBtn.Show()
+					return
+				}
+				tc := core.NewTrustedClock(onlineNow)
+				clock = &tc
+				if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+					startCountdown(clock.Now().Add(remaining))
+					return
+				}
+				statusLabel.SetText("")
+				openBtn.Enable()
+			})
+		})
+	}
+	retryBtn = widget.NewButtonWithIcon("Повторить", theme.ViewRefreshIcon(), func() { acquireOnlineTime() })
+	retryBtn.Hide()
+
 	content := container.NewVBox(
 		widget.NewLabel(label),
 		pinEntry,
 		statusLabel,
 		openBtn,
+		retryBtn,
 	)
 	d = dialog.NewCustom("Введите пин-код", "Отмена", content, u.win)
 	d.SetOnClosed(stopTicker) // не течь тикером, если пользователь закрыл диалог во время отсчёта
-	d.Resize(fyne.NewSize(380, 260))
-
-	// сразу при открытии диалога проверяем throttle — если уже заблокировано
-	// с прошлого раза, показываем отсчёт немедленно, не дожидаясь клика
-	if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), time.Now()); blocked {
-		startCountdown(time.Now().Add(remaining))
-	}
+	d.Resize(fyne.NewSize(380, 280))
 	d.Show()
+
+	acquireOnlineTime()
 }
 
 // attemptConnect декодирует ключ, подключается по SSH и переключает экран.

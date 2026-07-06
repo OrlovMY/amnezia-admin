@@ -1,0 +1,76 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+          - os: windows
+            runner: windows-latest
+          - os: macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Linux GUI deps
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
+      - name: Windows mingw (gcc for CGO GUI build)
+        if: matrix.os == 'windows'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+      - name: Build (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-linux-amd64 ./cmd/cli
+          CGO_ENABLED=1 go build -ldflags "-s -w" -o dist/amnezia-admin-gui-linux-amd64 ./cmd/gui
+      - name: Build (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-macos-arm64 ./cmd/cli
+          CGO_ENABLED=1 go build -ldflags "-s -w" -o dist/amnezia-admin-gui-macos-arm64 ./cmd/gui
+      - name: Build (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-windows-amd64.exe ./cmd/cli
+          CGO_ENABLED=1 go build -ldflags "-s -w -H windowsgui" -o dist/amnezia-admin-gui-windows-amd64.exe ./cmd/gui
+      - name: Test
+        run: go test ./core/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/*
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
