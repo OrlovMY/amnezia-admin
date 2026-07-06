@@ -3,12 +3,12 @@ on:
   push:
     tags:
       - "v*"
-permissions:
-  contents: write
 jobs:
   build:
     name: build ${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -20,16 +20,16 @@ jobs:
           - os: macos
             runner: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.3"
       - name: Linux GUI deps
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
       - name: Windows mingw (gcc for CGO GUI build)
         if: matrix.os == 'windows'
-        uses: egor-tensin/setup-mingw@v2
+        uses: egor-tensin/setup-mingw@84c781b557efd538dec66bde06988d81cd3138cf # v2.2.0
         with:
           platform: x64
       - name: Build (Linux)
@@ -53,7 +53,7 @@ jobs:
           CGO_ENABLED=1 go build -ldflags "-s -w -H windowsgui" -o dist/amnezia-admin-gui-windows-amd64.exe ./cmd/gui
       - name: Test
         run: go test ./core/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.os }}
           path: dist/*
@@ -61,8 +61,10 @@ jobs:
     name: publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
       - name: Collect
@@ -70,7 +72,7 @@ jobs:
           mkdir -p dist
           find artifacts -type f -exec cp {} dist/ \;
           ls -la dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
           generate_release_notes: true
