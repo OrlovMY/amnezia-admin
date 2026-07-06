@@ -2,30 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
-
-	"golang.org/x/sys/windows"
 )
 
-// colorsEnabled — включаем ANSI-цвета, если консоль их поддерживает
+// colorsEnabled — включаем ANSI-цвета, если консоль их поддерживает.
+// enableVT() платформенно-специфична (см. colors_windows.go/colors_other.go).
 var colorsEnabled = enableVT()
-
-func enableVT() bool {
-	// UTF-8 для легаси conhost, иначе кириллица выводится кракозябрами (CP866)
-	windows.SetConsoleOutputCP(65001)
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	h := windows.Handle(os.Stdout.Fd())
-	var mode uint32
-	if err := windows.GetConsoleMode(h, &mode); err != nil {
-		return false // вывод перенаправлен в файл/пайп — без цветов
-	}
-	if err := windows.SetConsoleMode(h, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING); err != nil {
-		return false
-	}
-	return true
-}
 
 func color(code, s string) string {
 	if !colorsEnabled {

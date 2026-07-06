@@ -28,10 +28,19 @@ jobs:
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
       - name: Windows mingw (gcc for CGO GUI build)
+        # windows-latest уже содержит mingw-w64 (MSYS2) в образе рантайма, но
+        # не добавляет его в PATH по умолчанию — см.
+        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
+        # ("MSYS2 ... Note: MSYS2 is pre-installed on image but not added to PATH")
+        # и images/windows/scripts/build/Install-Msys2.ps1 в actions/runner-images,
+        # который ставит gcc через pacman именно в C:\msys64\mingw64\bin.
         if: matrix.os == 'windows'
-        uses: egor-tensin/setup-mingw@84c781b557efd538dec66bde06988d81cd3138cf # v2.2.0
-        with:
-          platform: x64
+        shell: bash
+        run: |
+          echo "C:\msys64\mingw64\bin" >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          which gcc || echo "no gcc"
+          gcc --version || true
       - name: Build (Linux)
         if: matrix.os == 'linux'
         run: |
