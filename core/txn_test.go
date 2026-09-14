@@ -392,3 +392,75 @@ func TestRenameDoesNotSync(t *testing.T) {
 
 	assertOthersUntouched(t, snapshotFiles(c, beforeWG, beforeTbl), srv, subject)
 }
+
+// TestRestoreSyncFailureReportsRuntimeMismatch — SEC-01 (changes-requested,
+// 2026-09-14): восстановление файлов не гарантирует восстановление
+// рантайма, если повторный syncconf при откате падает ПОСЛЕ того, как
+// первый (apply-time) syncconf успел частично примениться. Сценарий:
+// PlanRekey → apply-time syncconf успешно применяется (call #1), но verify
+// проваливается, потому что «сторонний» (не участвующий в rekey) peer не
+// поднялся (DropPeerOnSync) → restore пишет файлы обратно к состоянию до,
+// но его собственный повторный syncconf (call #2) падает (FailSyncconfFrom
+// = 2) → рантайм остаётся таким, каким его оставил call #1: с НОВЫМ ключом
+// рекея (он не был затронут хуком) и без стороннего peer'а — а файл
+// откатился к состоянию "до". Ошибка обязана честно сказать «применить их
+// не удалось», а не «восстановлено и проверено».
+func TestRestoreSyncFailureReportsRuntimeMismatch(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+
+	clients, err := sess.LoadClients(c)
+	if err != nil || len(clients) < 2 {
+		t.Fatalf("LoadClients: %v, %+v (нужно минимум 2 клиента в дефолтном фейке)", err, clients)
+	}
+	subject := clients[0].ClientID    // рекеим этого
+	bystander := clients[1].ClientID  // а этот не должен пострадать, но "не поднимется" по хуку
+
+	beforeWG, ok := srv.File(c.Dir + "/wg0.conf")
+	if !ok {
+		t.Fatal("wg0.conf отсутствует")
+	}
+
+	plan, err := sess.PlanRekey(c, subject)
+	if err != nil {
+		t.Fatalf("PlanRekey: %v", err)
+	}
+	beforeKeys := peerPubKeysFromBytes(plan.wgBefore)
+	newKey := ""
+	for k := range peerPubKeysFromBytes(plan.wgAfter) {
+		if !beforeKeys[k] {
+			newKey = k
+		}
+	}
+	if newKey == "" {
+		t.Fatal("не удалось определить новый ключ рекея из плана")
+	}
+
+	srv.DropPeerOnSync = bystander // call #1 "применяется", но bystander не поднимается
+	srv.FailSyncconfFrom = 2       // call #2 (restore-time retry) падает
+
+	_, err = sess.Apply(plan)
+	if err == nil {
+		t.Fatal("Apply: ожидалась ошибка")
+	}
+	if !strings.Contains(err.Error(), "применить их не удалось") {
+		t.Errorf("текст ошибки не содержит «применить их не удалось»: %v", err)
+	}
+	if strings.Contains(err.Error(), "восстановлено и проверено") {
+		t.Errorf("текст ошибки не должен утверждать «восстановлено и проверено»: %v", err)
+	}
+
+	afterWG, ok := srv.File(c.Dir + "/wg0.conf")
+	if !ok || !bytes.Equal(afterWG, beforeWG) {
+		t.Error("File(wg0.conf) != wgBefore после restore — файл обязан откатиться, даже если рантайм разошёлся")
+	}
+
+	runtime := map[string]bool{}
+	for _, k := range srv.RuntimePeers() {
+		runtime[k] = true
+	}
+	if !runtime[newKey] {
+		t.Errorf("RuntimePeers() не содержит новый ключ рекея %q (рантайм должен был остаться в состоянии после call #1): %v", newKey, srv.RuntimePeers())
+	}
+}

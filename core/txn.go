@@ -751,38 +751,120 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 }
 
 // restore — шаг 6: откат файлов к прочитанному состоянию (теми же командами,
-// что запись — В2 п.3, не cp из backup/). Повторный syncconf — попытка
-// вернуть и рантайм к состоянию "до"; его ошибка НЕ считается провалом
-// restore: настоящий `wg syncconf` при отказе не портит уже применённое
-// состояние интерфейса (в отличие от файла, там нечего "недописать") — он
-// либо применяется целиком, либо оставляет прежний рантайм как есть. Провал
-// restore — это когда не удалось вернуть сами ФАЙЛЫ: тогда сервер может
-// остаться в состоянии, не совпадающем ни с "до", ни с "после", и владельцу
-// нужно восстанавливать вручную из backup/.
+// что запись — В2 п.3, не cp из backup/), с последующей проверкой ИТОГА —
+// SEC-01 (changes-requested, 2026-09-14): настоящий `wg syncconf` при отказе
+// НЕ гарантирует, что рантайм остался прежним — wireguard-tools setconf.c и
+// amneziawg-go device/uapi.go (IpcSetOperation) применяют peer'ы по мере
+// разбора конфигурации и при ошибке возвращают её БЕЗ отката уже применённых
+// строк. Поэтому «файлы вернулись» не означает «рантайм тоже вернулся»:
+// повторный syncconf на восстановлении может успеть частично примениться и
+// упасть, оставив рантайм в состоянии, отличном и от старого, и от нового.
+// Пытаемся записать ОБА файла независимо друг от друга (даже если один не
+// удалось — второй всё равно пробуем), чтобы восстановить максимум
+// возможного. Ровно три исхода:
+//
+//	(а) оба файла записались, и (если wg0.conf менялся) активные peer'ы на
+//	    сервере после повторного syncconf совпадают с wgBefore — «состояние
+//	    восстановлено и проверено», НЕЗАВИСИМО от кода возврата самого
+//	    повторного syncconf (мог вернуть ошибку, но фактическое состояние
+//	    всё равно совпало);
+//	(б) оба файла записались, но проверка (файлов и/или активных peer'ов)
+//	    после повторного syncconf разошлась с wgBefore — «файлы
+//	    восстановлены, но применить их не удалось», с явным предупреждением,
+//	    что активные подключения могут отличаться от wg0.conf;
+//	(в) хотя бы один файл не удалось записать — «восстановить не удалось»,
+//	    с указанием, какой файл вернулся, а какой нет, и путём к backup/.
 func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) error {
-	var writeErr error
+	var wgWriteErr error
 	if wgChanged {
-		if err := s.writeIn(c, c.Dir+"/wg0.conf", p.wgBefore); err != nil {
-			writeErr = err
-		}
+		wgWriteErr = s.writeIn(c, c.Dir+"/wg0.conf", p.wgBefore)
 	}
-	if writeErr == nil {
-		tblBefore := p.tblBefore
-		if !p.tblExisted {
-			tblBefore = []byte{}
-		}
-		if err := s.writeIn(c, c.Dir+"/clientsTable", tblBefore); err != nil {
-			writeErr = err
-		}
+	tblBefore := p.tblBefore
+	if !p.tblExisted {
+		tblBefore = []byte{}
 	}
-	if writeErr != nil {
-		return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось (%v); резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие); исходная причина: %v",
-			writeErr, c.Dir, c.Dir, cause)
+	// clientsTable пишем НЕЗАВИСИМО от исхода записи wg0.conf — один файл не
+	// должен тянуть за собой отказ восстановления другого (SEC-01, п.3).
+	tblWriteErr := s.writeIn(c, c.Dir+"/clientsTable", tblBefore)
+
+	if wgWriteErr != nil || tblWriteErr != nil {
+		wgStatus := "не менялся"
+		if wgChanged {
+			if wgWriteErr != nil {
+				wgStatus = fmt.Sprintf("НЕ восстановлен (%v)", wgWriteErr)
+			} else {
+				wgStatus = "восстановлен"
+			}
+		}
+		tblStatus := "восстановлена"
+		if tblWriteErr != nil {
+			tblStatus = fmt.Sprintf("НЕ восстановлена (%v)", tblWriteErr)
+		}
+		return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — wg0.conf: %s; clientsTable: %s; резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие); исходная причина: %v",
+			wgStatus, tblStatus, c.Dir, c.Dir, cause)
 	}
+
+	// Оба файла точно на месте. Повторный syncconf — попытка вернуть и
+	// рантайм; его код возврата сам по себе ничего не решает (см. комментарий
+	// выше) — решает то, что реально проверим ниже.
+	var syncErr error
 	if wgChanged {
-		_ = s.syncWg(c) // best-effort, см. комментарий над функцией
+		syncErr = s.syncWg(c)
 	}
-	return fmt.Errorf("операция отменена, состояние восстановлено: %v", cause)
+
+	wgNow, wgReadErr := s.catIn(c, c.Dir+"/wg0.conf")
+	tblNow, tblReadErr := s.catIn(c, c.Dir+"/clientsTable")
+	filesVerified := wgReadErr == nil && tblReadErr == nil &&
+		wgNow == string(p.wgBefore) && tblNow == string(tblBefore)
+
+	runtimeVerified := true
+	var runtimeErr error
+	if wgChanged {
+		stats, err := s.GetPeerStats(c)
+		if err != nil {
+			runtimeVerified, runtimeErr = false, err
+		} else {
+			want := peerPubKeysFromBytes(p.wgBefore)
+			if len(stats) != len(want) {
+				runtimeVerified = false
+			} else {
+				for pk := range want {
+					if _, ok := stats[pk]; !ok {
+						runtimeVerified = false
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Код возврата повторного syncconf (syncErr) сам по себе НЕ решает исход —
+	// решает то, что реально проверено ниже (filesVerified/runtimeVerified):
+	// syncconf может вернуть ошибку и тем не менее оставить рантайм таким,
+	// каким он уже был (совпадающим с wgBefore), и наоборот — вернуть 0 и
+	// разойтись. syncErr используется только как дополнительный контекст в
+	// тексте (б), когда runtimeVerified уже и так ложно.
+	var verifyErr error
+	switch {
+	case wgReadErr != nil:
+		verifyErr = fmt.Errorf("проверка wg0.conf после отката: %w", wgReadErr)
+	case tblReadErr != nil:
+		verifyErr = fmt.Errorf("проверка clientsTable после отката: %w", tblReadErr)
+	case !filesVerified:
+		verifyErr = fmt.Errorf("содержимое файлов после отката не совпадает с прочитанным состоянием")
+	case runtimeErr != nil:
+		verifyErr = runtimeErr
+	case !runtimeVerified && syncErr != nil:
+		verifyErr = fmt.Errorf("набор активных peer'ов не совпадает с ожидаемым (повторный syncconf: %w)", syncErr)
+	case !runtimeVerified:
+		verifyErr = fmt.Errorf("набор активных peer'ов на сервере после отката не совпадает с ожидаемым")
+	}
+
+	if verifyErr == nil {
+		return fmt.Errorf("операция отменена, состояние восстановлено и проверено: %v", cause)
+	}
+	return fmt.Errorf("ВНИМАНИЕ: файлы восстановлены, но применить их не удалось (%v): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v",
+		verifyErr, cause)
 }
 
 // ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------

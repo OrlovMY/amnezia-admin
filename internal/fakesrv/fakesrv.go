@@ -49,6 +49,14 @@ type Server struct {
 	// (множество применённых peer'ов) не меняется.
 	FailSyncconf error
 
+	// FailSyncconfFrom — если > 0, `wg syncconf` начинает возвращать ошибку
+	// начиная с N-го по счёту вызова (счёт с 1) и до конца жизни Server;
+	// вызовы до этого — как обычно. Нужен, чтобы отличить в тесте "первый
+	// (apply-time) syncconf прошёл, второй (restore-time retry) — упал" (SEC-01,
+	// PR-2 changes-requested: restore обязан ПРОВЕРЯТЬ состояние, а не
+	// верить коду возврата повторного syncconf).
+	FailSyncconfFrom int
+
 	// DenyOnce — самая первая команда без префикса "sudo " будет отклонена
 	// ошибкой со словом "denied" (проверка sudo-фолбэка в Session.docker).
 	// Все последующие команды, включая повтор той же команды с "sudo ",
@@ -66,11 +74,12 @@ type Server struct {
 	// вернул код 0, но peer фактически не поднялся.
 	DropPeerOnSync string
 
-	mu           sync.Mutex
-	files        map[string][]byte
-	peers        map[string]bool // публичные ключи peer'ов, применённые последним syncconf
-	commands     []string
-	denyOnceUsed bool
+	mu            sync.Mutex
+	files         map[string][]byte
+	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
+	commands      []string
+	denyOnceUsed  bool
+	syncconfCalls int // счётчик вызовов syncconf — для FailSyncconfFrom
 }
 
 // New создаёт Server с дефолтным состоянием: один контейнер amnezia-awg,
@@ -276,8 +285,12 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	case reSyncconf.MatchString(cmd):
 		m := reSyncconf.FindStringSubmatch(cmd)
 		dir := m[2]
+		s.syncconfCalls++
 		if s.FailSyncconf != nil {
 			return "", s.FailSyncconf
+		}
+		if s.FailSyncconfFrom > 0 && s.syncconfCalls >= s.FailSyncconfFrom {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg syncconf: имитированный отказ (вызов №%d)", cmd, s.syncconfCalls)
 		}
 		wg0, ok := s.files[dir+"/wg0.conf"]
 		if !ok {
