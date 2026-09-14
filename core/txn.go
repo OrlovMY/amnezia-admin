@@ -916,13 +916,37 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 
 // ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------
 
-// ErrCASMismatch — сентинел отказа CAS (review PR-2, carryover 1): план
-// построен по уже неактуальному чтению сервера — либо контрольная сумма
-// разошлась, либо её не удалось проверить (нет sha256sum на сервере, сбой
-// команды). До этого коммита cmd/gui/main.go распознавал отказ CAS по
-// русским подстрокам текста ошибки (isCASRefusal); errors.Is(err,
-// ErrCASMismatch) — тот же смысл, но не завязан на формулировку.
-var ErrCASMismatch = errors.New("план устарел: сервер изменился с момента чтения")
+// ErrCASMismatch — сентинел отказа CAS (review PR-2, carryover 1; текст
+// правлен по review-reply PR-3 круга 2, Medium). Сам errors.New(...) текст
+// НИКОГДА не попадает в возвращаемые ошибки — casError.Error() его не
+// печатает; сентинел существует только для errors.Is(err, ErrCASMismatch)
+// (через casError.Is). Первая версия этого сентинела дословно склеивалась в
+// текст через fmt.Errorf("...: %w", ErrCASMismatch, ...), из-за чего ветка
+// расхождения суммы дублировала фразу дважды, а ветка "нет sha256sum" лживо
+// утверждала "сервер изменился" там, где он не менялся — сервер тут ни при
+// чём, проверить просто не удалось. casError разрывает эту связь: текст
+// каждой ветки — свой, ErrCASMismatch — только тег для errors.Is.
+var ErrCASMismatch = errors.New("план построен по неактуальному чтению сервера")
+
+// casError — ошибка CAS. Error() печатает ТОЛЬКО msg (+cause, если он есть);
+// errors.Is(err, ErrCASMismatch) работает через Is(), а не через текст —
+// поэтому смена/уточнение msg в любой из веток ниже не может испортить
+// распознавание отказа в cmd/gui/main.go (isCASRefusal).
+type casError struct {
+	msg   string
+	cause error
+}
+
+func (e *casError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("%s: %v", e.msg, e.cause)
+	}
+	return e.msg
+}
+
+func (e *casError) Unwrap() error { return e.cause }
+
+func (e *casError) Is(target error) bool { return target == ErrCASMismatch }
 
 // checkCAS — шаг 1 Apply. Расхождение контрольной суммы или невозможность её
 // проверить (нет sha256sum на сервере, любой ненулевой код) — отказ ДО любой
@@ -935,10 +959,10 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 	if !p.tblExisted {
 		exists, err := s.probeClientsTable(c)
 		if err != nil {
-			return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w: %w", ErrCASMismatch, err)
+			return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
 		}
 		if exists {
-			return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите: %w", c.Dir+"/clientsTable", ErrCASMismatch)
+			return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")}
 		}
 		return nil
 	}
@@ -950,14 +974,14 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
 	out, err := s.docker(fmt.Sprintf("docker exec %s sha256sum %s", c.Name, path), nil)
 	if err != nil {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w: %w", ErrCASMismatch, err)
+		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
 	}
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum: %w", ErrCASMismatch)
+		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum"}
 	}
 	if fields[0] != wantSHA {
-		return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите: %w", path, ErrCASMismatch)
+		return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", path)}
 	}
 	return nil
 }
