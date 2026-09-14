@@ -334,3 +334,113 @@ func TestRekeyMissingPeerRefused(t *testing.T) {
 		}
 	}
 }
+
+// ---------- TestIntegrationScenarioIPAllocation (Ж, «Интеграция») ----------
+
+// TestIntegrationScenarioIPAllocation прогоняет полный сценарий Ж задания на
+// fakesrv: add Canary → disable Canary → add Second (IP ≠ Canary) → enable
+// Canary (успех, IP прежний) → rekey Canary (IP прежний) → disable Canary →
+// rekey Canary (отказ). Имена Canary/Second (не Alice/Bob) — в дефолтном
+// fakesrv.New() Alice и Bob уже существуют. Дополняет пять именованных
+// Д-тестов сквозной проверкой того, что все правки Г1-Г3 согласованно
+// работают ВМЕСТЕ, в одной сессии, а не только по отдельности.
+func TestIntegrationScenarioIPAllocation(t *testing.T) {
+	srv := fakesrv.New()
+	c := awgContainer()
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	// add Canary
+	canary, err := sess.AddUser(c, "Canary")
+	if err != nil {
+		t.Fatalf("add Canary: %v", err)
+	}
+	canaryIP := canary.IP
+	clients, _ := sess.LoadClients(c)
+	canaryID := ""
+	for _, cl := range clients {
+		if cl.Name() == "Canary" {
+			canaryID = cl.ClientID
+		}
+	}
+	if canaryID == "" {
+		t.Fatal("Canary не найдена после add")
+	}
+
+	// disable Canary
+	if err := sess.SetEnabled(c, canaryID, false); err != nil {
+		t.Fatalf("disable Canary: %v", err)
+	}
+
+	// add Second — IP ≠ Canary (резерв Canary не должен быть выдан)
+	second, err := sess.AddUser(c, "Second")
+	if err != nil {
+		t.Fatalf("add Second: %v", err)
+	}
+	if second.IP == canaryIP {
+		t.Fatalf("Second получил зарезервированный IP Canary: %s", second.IP)
+	}
+
+	// enable Canary — успех, IP прежний
+	if err := sess.SetEnabled(c, canaryID, true); err != nil {
+		t.Fatalf("enable Canary: %v", err)
+	}
+	clients, _ = sess.LoadClients(c)
+	for _, cl := range clients {
+		if cl.ClientID == canaryID && cl.Disabled() {
+			t.Fatal("Canary должна быть активна после enable")
+		}
+	}
+	wgNow, _ := srv.File(c.Dir + "/wg0.conf")
+	conf := parseWgConf(string(wgNow))
+	found := false
+	for _, p := range conf.peers {
+		if p["PublicKey"] == canaryID {
+			found = true
+			if p["AllowedIPs"] != canaryIP+"/32" {
+				t.Errorf("после enable AllowedIPs Canary = %q, want %s/32", p["AllowedIPs"], canaryIP)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("peer Canary не появился в wg0.conf после enable")
+	}
+
+	// rekey Canary — IP прежний
+	rekeyed, err := sess.RegenerateUser(c, canaryID)
+	if err != nil {
+		t.Fatalf("rekey Canary: %v", err)
+	}
+	if rekeyed.IP != canaryIP {
+		t.Errorf("rekey: IP = %q, want %q (прежний)", rekeyed.IP, canaryIP)
+	}
+	clients, _ = sess.LoadClients(c)
+	newCanaryID := ""
+	for _, cl := range clients {
+		if cl.Name() == "Canary" {
+			newCanaryID = cl.ClientID
+		}
+	}
+	if newCanaryID == "" || newCanaryID == canaryID {
+		t.Fatalf("после rekey не нашли новый ClientID Canary (старый %q, новый %q)", canaryID, newCanaryID)
+	}
+
+	// disable Canary ещё раз
+	if err := sess.SetEnabled(c, newCanaryID, false); err != nil {
+		t.Fatalf("повторный disable Canary: %v", err)
+	}
+
+	// rekey Canary (отключена) — отказ
+	before := len(srv.Commands())
+	_, err = sess.RegenerateUser(c, newCanaryID)
+	if err == nil {
+		t.Fatal("rekey отключённой Canary: ожидался отказ")
+	}
+	if !strings.Contains(err.Error(), "сначала включите") {
+		t.Errorf("текст отказа не про «сначала включите»: %v", err)
+	}
+	for _, cmd := range srv.Commands()[before:] {
+		if strings.Contains(cmd, "cat > ") {
+			t.Errorf("rekey отключённой не должен был писать файлы, но: %q", cmd)
+		}
+	}
+}
