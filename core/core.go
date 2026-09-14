@@ -212,9 +212,17 @@ func (s *Session) FindContainers() ([]Container, error) {
 		}
 		if !matched && strings.HasPrefix(n, "amnezia-") {
 			suffix := strings.TrimPrefix(n, "amnezia-")
-			// неизвестные контейнеры WG-семейства (awg2, wireguard2 и т.п.) тоже управляемы
-			managed := strings.HasPrefix(suffix, "awg") || strings.HasPrefix(suffix, "wireguard")
-			found = append(found, Container{Name: n, Dir: "/opt/amnezia/" + suffix, Proto: suffix, Managed: managed})
+			// Неизвестный контейнер (в т.ч. amnezia-awg2 и подобные) — не наш
+			// формат конфига (у awg2 файл называется awg0.conf, а не wg0.conf),
+			// поэтому не управляем; раньше здесь угадывался Managed=true по
+			// префиксу имени, из-за чего awg2 читался как "пустой сервер"
+			// (аудит-2026-09-14, Backlog).
+			found = append(found, Container{
+				Name:    n,
+				Dir:     "/opt/amnezia/" + suffix,
+				Proto:   suffix + " (не поддерживается: другой формат конфига)",
+				Managed: false,
+			})
 		}
 	}
 	if len(found) == 0 {
