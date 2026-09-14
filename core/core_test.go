@@ -146,7 +146,10 @@ AllowedIPs = 10.8.1.4/32
 `
 
 	t.Run("remove middle peer", func(t *testing.T) {
-		res := removePeerFromConf(base, "pk2")
+		res, err := removePeerFromConf(base, "pk2")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 2 {
 			t.Fatalf("peers = %d, want 2", len(conf.peers))
@@ -159,7 +162,10 @@ AllowedIPs = 10.8.1.4/32
 	})
 
 	t.Run("remove nonexistent key", func(t *testing.T) {
-		res := removePeerFromConf(base, "no-such-key")
+		res, err := removePeerFromConf(base, "no-such-key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 3 {
 			t.Errorf("peers = %d, want 3 (ничего не должно удалиться)", len(conf.peers))
@@ -174,7 +180,10 @@ PrivateKey = abc
 PublicKey = pk1
 AllowedIPs = 10.8.1.2/32
 `
-		res := removePeerFromConf(text, "pk1")
+		res, err := removePeerFromConf(text, "pk1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 0 {
 			t.Errorf("peers = %d, want 0", len(conf.peers))
@@ -422,7 +431,10 @@ AllowedIPs = 10.8.1.4/32
 		{ClientID: "pk3", UserData: map[string]any{"clientName": "Carol"}},
 	}
 
-	newConf := removePeerFromConf(confText, "pk2")
+	newConf, err := removePeerFromConf(confText, "pk2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	newClients, found := filterClientsByID(clients, "pk2")
 	if !found {
 		t.Fatal("pk2 должен быть найден")
