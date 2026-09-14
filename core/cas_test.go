@@ -46,6 +46,9 @@ func TestCASMismatchRefuses(t *testing.T) {
 			if strings.Contains(cmd, "cat > ") {
 				t.Fatalf("после sha256sum не должно быть записи, но: %q", cmd)
 			}
+			if strings.Contains(cmd, "mkdir -p") {
+				t.Fatalf("CAS-отказ не должен был вызвать backup (CAS — шаг 1, backup — шаг 2, позже), но: %q", cmd)
+			}
 		}
 		if !sawSha256 {
 			t.Fatal("не увидели ни одной команды sha256sum")

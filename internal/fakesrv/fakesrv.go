@@ -52,6 +52,15 @@ type Server struct {
 	// Low, п.3).
 	FailWrite map[string]error
 
+	// FailWriteFrom — путь → номер по счёту вызова записи ИМЕННО ЭТОГО пути
+	// (счёт с 1), начиная с которого запись возвращает ошибку; более ранние
+	// вызовы по этому же пути — как обычно. В отличие от FailWrite (падает
+	// всегда), нужен, чтобы первая (apply-time) запись прошла, а вторая
+	// (restore-time) — упала (review changes-requested, круг 2, Medium:
+	// TestRestoreTriesBothFilesIndependently должен реально провоцировать
+	// разные исходы записи одного и того же пути на разных этапах).
+	FailWriteFrom map[string]int
+
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
 	// (множество применённых peer'ов) не меняется.
 	FailSyncconf error
@@ -86,7 +95,8 @@ type Server struct {
 	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
 	commands      []string
 	denyOnceUsed  bool
-	syncconfCalls int // счётчик вызовов syncconf — для FailSyncconfFrom
+	syncconfCalls int            // счётчик вызовов syncconf — для FailSyncconfFrom
+	writeCalls    map[string]int // счётчик вызовов записи по пути — для FailWriteFrom
 }
 
 // New создаёт Server с дефолтным состоянием: один контейнер amnezia-awg,
@@ -253,10 +263,17 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		if m[3] != path || m[4] != path {
 			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 		}
+		if s.writeCalls == nil {
+			s.writeCalls = map[string]int{}
+		}
+		s.writeCalls[path]++
 		if s.FailWrite != nil {
 			if err, ok := s.FailWrite[path]; ok {
 				return "", err
 			}
+		}
+		if n, ok := s.FailWriteFrom[path]; ok && n > 0 && s.writeCalls[path] >= n {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: write: имитированный отказ (вызов №%d по пути %s)", cmd, s.writeCalls[path], path)
 		}
 		if s.files == nil {
 			s.files = map[string][]byte{}

@@ -134,8 +134,16 @@ func TestSyncconfFailureRestoresBackup(t *testing.T) {
 	if err == nil {
 		t.Fatal("AddUser: ожидалась ошибка (FailSyncconf)")
 	}
-	if !strings.Contains(err.Error(), "состояние восстановлено") {
-		t.Errorf("текст ошибки не содержит «состояние восстановлено»: %v", err)
+	// Строго ветка (а): файлы и рантайм совпали с прочитанным состоянием
+	// (syncconf ни разу не менял рантайм — он проваливался с самого первого
+	// вызова, поэтому проверять после отката нечего сверх исходного). Раньше
+	// проверялась только подстрока «состояние восстановлено», которая
+	// совпадает и с текстом ветки (б) («…но применить их не удалось: …
+	// состояние восстановлено…» — нет, но по префиксу могла бы совпасть
+	// случайно); review changes-requested (круг 2, Low) — закрепить именно
+	// ветку (а).
+	if !strings.Contains(err.Error(), "восстановлено и проверено") {
+		t.Errorf("текст ошибки не содержит «восстановлено и проверено» (ветка (а)): %v", err)
 	}
 	if newUser != nil {
 		t.Errorf("NewUser = %+v, want nil", newUser)
@@ -499,6 +507,14 @@ func TestRestoreSyncFailureReportsRuntimeMismatch(t *testing.T) {
 	if !runtime[newKey] {
 		t.Errorf("RuntimePeers() не содержит новый ключ рекея %q (рантайм должен был остаться в состоянии после call #1): %v", newKey, srv.RuntimePeers())
 	}
+	// Прямая фиксация потери доступа (review changes-requested, круг 2,
+	// Low): старый ключ субъекта рекея тоже не должен быть в рантайме —
+	// файл откатился к состоянию "до" (со старым ключом), а рантайм всё ещё
+	// на "новом" ключе; ни один из двух активных наборов не содержит старый
+	// ключ subject.
+	if runtime[subject] {
+		t.Errorf("RuntimePeers() содержит старый ключ субъекта рекея %q — он не должен быть активен ни в файле (уже заменён), ни в рантайме (заменён на call #1): %v", subject, srv.RuntimePeers())
+	}
 }
 
 // TestPlanSubjectIsName — review changes-requested (Low): Plan.Subject
@@ -573,10 +589,19 @@ func TestPlanSubjectIsName(t *testing.T) {
 	}
 }
 
-// TestRestoreTriesBothFilesIndependently — review changes-requested (Low,
-// п.3): при провале записи wg0.conf на откате restore всё равно пробует
-// записать clientsTable, и итоговый текст называет оба файла — какой
-// вернулся, какой нет.
+// TestRestoreTriesBothFilesIndependently — review changes-requested (круг 2,
+// Medium): прошлая версия этого теста (FailWrite[wg0.conf] безусловно) была
+// зелёной и на СТАРОМ restore() (он вообще не пытался писать clientsTable
+// после провала wg0.conf) — assert bytes.Equal(clientsTable, tblBefore)
+// проходил тривиально, потому что clientsTable к этому моменту ещё ни разу
+// не менялась (apply даже не успел до неё дойти). Чтобы тест реально что-то
+// доказывал, clientsTable должна быть ГРЯЗНОЙ (== tblAfter) к моменту
+// отката: первая запись wg0.conf (apply-time) обязана пройти, затем
+// clientsTable перезаписывается в tblAfter, и только ПОСЛЕ этого падает
+// syncconf (это и валит Apply) — а откат wg0.conf (вторая запись по этому
+// пути) проваливается через счётный хук FailWriteFrom. Тогда
+// bytes.Equal(clientsTable, tblBefore) нетривиален: он проходит только если
+// restore реально записал clientsTable обратно, невзирая на провал wg0.conf.
 func TestRestoreTriesBothFilesIndependently(t *testing.T) {
 	srv := fakesrv.New()
 	sess := NewSessionWithRunner(srv, testCreds())
@@ -588,9 +613,11 @@ func TestRestoreTriesBothFilesIndependently(t *testing.T) {
 	}
 	tblBefore := append([]byte{}, plan.tblBefore...)
 
-	// wg0.conf не удаётся ни записать при применении, ни вернуть при откате;
-	// clientsTable — обычный файл, ничем не испорчен.
-	srv.FailWrite = map[string]error{c.Dir + "/wg0.conf": fmt.Errorf("write i/o error")}
+	// Первая запись wg0.conf (apply) проходит; вторая (restore) — падает.
+	srv.FailWriteFrom = map[string]int{c.Dir + "/wg0.conf": 2}
+	// Apply валится ПОСЛЕ того, как clientsTable уже перезаписана в tblAfter
+	// (syncWg вызывается после writeIn обоих файлов в applySteps).
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
 
 	_, err = sess.Apply(plan)
 	if err == nil {
@@ -610,7 +637,36 @@ func TestRestoreTriesBothFilesIndependently(t *testing.T) {
 	if !ok {
 		t.Fatal("clientsTable отсутствует")
 	}
+	// Нетривиально: clientsTable была грязной (tblAfter) прямо перед этим —
+	// проходит, только если restore реально её переписал обратно.
 	if !bytes.Equal(afterTbl, tblBefore) {
 		t.Errorf("clientsTable должна была вернуться к состоянию до, даже когда wg0.conf не восстановился:\nбыло:  %s\nстало: %s", tblBefore, afterTbl)
+	}
+
+	// Порядок в Commands(): запись clientsTable при откате обязана идти
+	// ПОСЛЕ второй (провалившейся) попытки записи wg0.conf.
+	cmds := srv.Commands()
+	wgWrites := 0
+	failedWgIdx := -1
+	for i, cmd := range cmds {
+		if strings.Contains(cmd, "cat > ") && strings.Contains(cmd, "wg0.conf") {
+			wgWrites++
+			if wgWrites == 2 {
+				failedWgIdx = i
+			}
+		}
+	}
+	if failedWgIdx < 0 {
+		t.Fatal("не нашли вторую (restore-time) попытку записи wg0.conf в Commands()")
+	}
+	tblWriteAfter := false
+	for _, cmd := range cmds[failedWgIdx+1:] {
+		if strings.Contains(cmd, "cat > ") && strings.Contains(cmd, "clientsTable") {
+			tblWriteAfter = true
+			break
+		}
+	}
+	if !tblWriteAfter {
+		t.Error("запись clientsTable при откате не найдена ПОСЛЕ провалившейся (второй) записи wg0.conf")
 	}
 }
