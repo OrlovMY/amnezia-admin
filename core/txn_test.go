@@ -30,27 +30,40 @@ func snapshotFiles(c *Container, wg, tbl []byte) *fakesrv.Server {
 }
 
 // assertOthersUntouched (Г5, инвариант I1) — доступ прочих пользователей
-// меняют только операции над НИМИ САМИМИ. Для wg0.conf: удаляем subjectID
-// (уже проверенным removePeerFromConf) из обоих снимков и сравниваем
-// остаток байт в байт. Для clientsTable: сравниваем JSON каждой записи,
-// кроме subjectID, и убеждаемся, что ни одна чужая запись не появилась и
-// не пропала.
-func assertOthersUntouched(t *testing.T, before, after *fakesrv.Server, subjectID string) {
+// меняют только операции над НИМИ САМИМИ. subjectIDs — ClientID тех, над
+// кем была мутация (их самих сравнение не касается; пустая строка в списке
+// игнорируется). Для wg0.conf: удаляем все subjectIDs (уже проверенным
+// removePeerFromConf) из обоих снимков и сравниваем остаток байт в байт.
+// Для clientsTable: сравниваем JSON каждой записи, кроме subjectIDs, и
+// убеждаемся, что ни одна чужая запись не появилась и не пропала.
+// Вариативность (BE-01/review changes-requested, Medium): один вызов
+// исключает произвольное число субъектов — нужно для
+// TestParallelAddUsersDistinctIP (8 новых пользователей разом), не только
+// для одиночных мутаций.
+func assertOthersUntouched(t *testing.T, before, after *fakesrv.Server, subjectIDs ...string) {
 	t.Helper()
 	c := awgContainer()
 
+	ids := map[string]bool{}
+	for _, id := range subjectIDs {
+		if id != "" {
+			ids[id] = true
+		}
+	}
+
 	beforeWG, _ := before.File(c.Dir + "/wg0.conf")
 	afterWG, _ := after.File(c.Dir + "/wg0.conf")
-	beforeRest, err := removePeerFromConf(string(beforeWG), subjectID)
-	if err != nil && subjectID != "" {
-		t.Fatalf("assertOthersUntouched: removePeerFromConf(before): %v", err)
-	}
-	afterRest, err := removePeerFromConf(string(afterWG), subjectID)
-	if err != nil && subjectID != "" {
-		t.Fatalf("assertOthersUntouched: removePeerFromConf(after): %v", err)
-	}
-	if subjectID == "" {
-		beforeRest, afterRest = string(beforeWG), string(afterWG)
+	beforeRest, afterRest := string(beforeWG), string(afterWG)
+	for id := range ids {
+		var err error
+		beforeRest, err = removePeerFromConf(beforeRest, id)
+		if err != nil {
+			t.Fatalf("assertOthersUntouched: removePeerFromConf(before, %q): %v", id, err)
+		}
+		afterRest, err = removePeerFromConf(afterRest, id)
+		if err != nil {
+			t.Fatalf("assertOthersUntouched: removePeerFromConf(after, %q): %v", id, err)
+		}
 	}
 	if beforeRest != afterRest {
 		t.Errorf("assertOthersUntouched (I1): чужие peer'ы в wg0.conf изменились:\nбыло:  %q\nстало: %q", beforeRest, afterRest)
@@ -69,7 +82,7 @@ func assertOthersUntouched(t *testing.T, before, after *fakesrv.Server, subjectI
 
 	beforeByID := map[string][]byte{}
 	for _, cl := range beforeClients {
-		if cl.ClientID == subjectID {
+		if ids[cl.ClientID] {
 			continue
 		}
 		b, _ := json.Marshal(cl)
@@ -77,7 +90,7 @@ func assertOthersUntouched(t *testing.T, before, after *fakesrv.Server, subjectI
 	}
 	seen := map[string]bool{}
 	for _, cl := range afterClients {
-		if cl.ClientID == subjectID {
+		if ids[cl.ClientID] {
 			continue
 		}
 		b, _ := json.Marshal(cl)
@@ -289,11 +302,23 @@ func TestDryRunWritesNothing(t *testing.T) {
 
 // TestParallelAddUsersDistinctIP — параллельные AddUser на одном Session
 // сериализуются мьютексом (I5): все успешны, IP различны, wg0.conf и
-// clientsTable содержат всех новых пользователей. Запускать с -race.
+// clientsTable содержат всех новых пользователей; исходные два пользователя
+// (I1) не задеты ни байтом (review changes-requested, Medium — раньше
+// проверялось только "не упало", но не то, что чужие записи остались
+// нетронутыми при параллельной нагрузке). Запускать с -race.
 func TestParallelAddUsersDistinctIP(t *testing.T) {
 	srv := fakesrv.New()
 	sess := NewSessionWithRunner(srv, testCreds())
 	c := awgContainer()
+
+	beforeWG, ok := srv.File(c.Dir + "/wg0.conf")
+	if !ok {
+		t.Fatal("wg0.conf отсутствует")
+	}
+	beforeTbl, ok := srv.File(c.Dir + "/clientsTable")
+	if !ok {
+		t.Fatal("clientsTable отсутствует")
+	}
 
 	const n = 8
 	names := make([]string, n)
@@ -332,13 +357,18 @@ func TestParallelAddUsersDistinctIP(t *testing.T) {
 		t.Fatalf("clientsTable содержит %d записей, want %d (2 исходных + %d новых)", len(clients), 2+n, n)
 	}
 	present := map[string]bool{}
+	byName := map[string]string{}
 	for _, cl := range clients {
 		present[cl.Name()] = true
+		byName[cl.Name()] = cl.ClientID
 	}
+	newIDs := make([]string, 0, n)
 	for _, name := range names {
 		if !present[name] {
 			t.Errorf("имя %q отсутствует в clientsTable", name)
+			continue
 		}
+		newIDs = append(newIDs, byName[name])
 	}
 
 	wg0, ok := srv.File(c.Dir + "/wg0.conf")
@@ -349,6 +379,12 @@ func TestParallelAddUsersDistinctIP(t *testing.T) {
 	if len(peers) != 2+n {
 		t.Errorf("wg0.conf содержит %d peer'ов, want %d", len(peers), 2+n)
 	}
+
+	// I1: исходные два пользователя (Alice, Bob) — байт в байт как до, и в
+	// wg0.conf, и в clientsTable, даже под параллельной нагрузкой на другие
+	// имена. Исключаем из сравнения все 8 НОВЫХ ключей (а не исходные два) —
+	// то, что должно остаться нетронутым, сравнивается напрямую.
+	assertOthersUntouched(t, snapshotFiles(c, beforeWG, beforeTbl), srv, newIDs...)
 }
 
 // TestRenameDoesNotSync — RenameUser не пишет wg0.conf и не вызывает
