@@ -52,6 +52,12 @@ type Server struct {
 	// выполняются как обычно.
 	DenyOnce bool
 
+	// DropPeerOnSync — если задан, `wg syncconf` "применяется" без ошибки, но
+	// этот PublicKey исключается из результирующего рантайма (PR-2,
+	// TestVerifyMissingPeerRestores): имитирует случай, когда syncconf
+	// вернул код 0, но peer фактически не поднялся.
+	DropPeerOnSync string
+
 	mu           sync.Mutex
 	files        map[string][]byte
 	peers        map[string]bool // публичные ключи peer'ов, применённые последним syncconf
@@ -267,7 +273,11 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg-quick: %s/wg0.conf: No such file or directory", cmd, dir)
 		}
-		s.peers = peerKeysFromConf(string(wg0))
+		peers := peerKeysFromConf(string(wg0))
+		if s.DropPeerOnSync != "" {
+			delete(peers, s.DropPeerOnSync)
+		}
+		s.peers = peers
 		return "", nil
 
 	case reWgShow.MatchString(cmd):
