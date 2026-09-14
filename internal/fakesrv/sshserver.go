@@ -47,21 +47,33 @@ type SSHServer struct {
 	ln   net.Listener
 	fp   string
 	wg   sync.WaitGroup
-	done chan struct{}
 	once sync.Once
 
-	// mu/conns — реестр открытых TCP-соединений (SEC-01/BE-01, ревью
-	// PR-4А круг 1, Medium): без него Close() мог зависнуть навечно —
-	// wg.Wait() ждёт handleConn, а handleConn ждёт данные от клиента,
-	// который сам никогда не закроется (например, тест намеренно бросил
-	// *Session, полученную по ошибочному/регрессионному пути, не вызвав
-	// Close()). Регресс тогда не падает, а виснет до таймаута пакета —
-	// неотличимо от "тест ещё не дописан". Close() теперь сам обрывает все
-	// известные соединения ПЕРЕД wg.Wait(), поэтому обслуживающие их
-	// горутины гарантированно получают ошибку чтения/записи и завершаются
-	// быстро, независимо от гигиены вызывающего теста.
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
+	// mu/conns/closed — реестр открытых TCP-соединений и признак остановки
+	// (SEC-01/BE-01, ревью PR-4А круг 1 Medium + круг 2 Low): без реестра
+	// Close() мог зависнуть навечно — wg.Wait() ждёт handleConn, а
+	// handleConn ждёт данные от клиента, который сам никогда не закроется
+	// (например, тест намеренно бросил *Session по ошибочному/
+	// регрессионному пути, не вызвав Close()). Регресс тогда не падает, а
+	// виснет до таймаута пакета — неотличимо от "тест ещё не дописан".
+	// Close() сам обрывает все известные соединения ПЕРЕД wg.Wait().
+	//
+	// closed И регистрация conns/wg.Add ОБЯЗАНЫ читаться/писаться под ОДНИМ
+	// mu (круг 2, Low): иначе есть окно между Accept() (уже вернул conn) и
+	// регистрацией в acceptLoop, в которое Close() успевает пройти мимо —
+	// такое соединение не попадёт в conns и не будет принудительно закрыто,
+	// а wg.Add(1) для него может выполниться уже ПОСЛЕ начала wg.Wait() в
+	// Close() (нарушение контракта sync.WaitGroup, потенциальное
+	// зависание/паника). Проверка s.closed под тем же mu, которым Close()
+	// защищает и установку этого флага, и закрытие всех conns, устраняет
+	// окно: либо acceptLoop успевает зарегистрировать соединение и сделать
+	// wg.Add ДО того, как Close возьмёт mu (тогда Close увидит его в conns
+	// и закроет), либо Close успевает первым — тогда acceptLoop увидит
+	// closed==true и закроет свежепринятое соединение сам, не трогая ни
+	// conns, ни wg.
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
 }
 
 // ListenSSH поднимает SSH-сервер на addr (в тестах "127.0.0.1:0"), принимает
@@ -106,7 +118,6 @@ func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*
 	s := &SSHServer{
 		ln:    ln,
 		fp:    ssh.FingerprintSHA256(hostKey.PublicKey()),
-		done:  make(chan struct{}),
 		conns: make(map[net.Conn]struct{}),
 	}
 	s.wg.Add(1)
@@ -121,16 +132,18 @@ func (s *SSHServer) Addr() string { return s.ln.Addr().String() }
 // Fingerprint — отпечаток (SHA256:…) ключа хоста этого сервера.
 func (s *SSHServer) Fingerprint() string { return s.fp }
 
-// Close останавливает сервер: закрывает слушающий сокет, затем ПРИНУДИТЕЛЬНО
-// закрывает все ещё открытые соединения (см. комментарий у поля conns) и
-// только потом ждёт завершения обслуживающих их горутин. Идемпотентен.
+// Close останавливает сервер: закрывает слушающий сокет, помечает сервер
+// закрытым и ПРИНУДИТЕЛЬНО закрывает все уже зарегистрированные соединения
+// (см. комментарий у полей mu/conns/closed) — всё это под одним mu, единым
+// с acceptLoop, — и только потом ждёт завершения обслуживающих их горутин.
+// Идемпотентен.
 func (s *SSHServer) Close() error {
 	var err error
 	s.once.Do(func() {
-		close(s.done)
 		err = s.ln.Close()
 
 		s.mu.Lock()
+		s.closed = true
 		for c := range s.conns {
 			c.Close()
 		}
@@ -147,11 +160,22 @@ func (s *SSHServer) acceptLoop(cfg *ssh.ServerConfig, exec *Server) {
 		if err != nil {
 			return // закрыт извне (Close) — не ошибка теста
 		}
+
 		s.mu.Lock()
+		if s.closed {
+			// Close() успел пройти мимо этого соединения (окно между
+			// Accept() и этой блокировкой) — закрываем сами и НЕ трогаем
+			// wg: раз мы не регистрируем conn и не делаем wg.Add, Close()
+			// ничего для него ждать не будет, и порядок Add/Wait не
+			// нарушается (круг 2, Low).
+			s.mu.Unlock()
+			conn.Close()
+			continue
+		}
 		s.conns[conn] = struct{}{}
+		s.wg.Add(1)
 		s.mu.Unlock()
 
-		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			defer func() {
