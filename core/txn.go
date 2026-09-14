@@ -336,10 +336,12 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 	if err != nil {
 		return nil, err
 	}
-	newClients, found := filterClientsByID(clients, clientID)
-	if !found {
+	idx := findClient(clients, clientID)
+	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
 	}
+	name := clients[idx].Name() // Subject — имя, не ключ (review changes-requested, Low)
+	newClients, _ := filterClientsByID(clients, clientID)
 
 	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
 	if err != nil {
@@ -357,7 +359,7 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 	p := &Plan{
 		Container:  c,
 		Action:     "delete",
-		Subject:    clientID,
+		Subject:    name,
 		wgBefore:   []byte(raw),
 		wgAfter:    []byte(newConf),
 		tblBefore:  tblBefore,

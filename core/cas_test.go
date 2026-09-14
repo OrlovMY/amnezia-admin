@@ -76,6 +76,9 @@ func TestCASMismatchRefuses(t *testing.T) {
 			if strings.Contains(cmd, "cat > ") {
 				t.Fatalf("NoSha256: обнаружена запись: %q", cmd)
 			}
+			if strings.Contains(cmd, "mkdir -p") {
+				t.Fatalf("NoSha256: backup не должен был вызываться (CAS — до backup, шаг 1 раньше шага 2), но: %q", cmd)
+			}
 		}
 	})
 }

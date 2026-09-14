@@ -45,6 +45,13 @@ type Server struct {
 	// чтение файла: PR-2 пользуется этим же полем, а не заводит своё.
 	FailRead map[string]error
 
+	// FailWrite — путь → ошибка для записи (`cat > <path>.tmp && mv ...`).
+	// Симметричный FailRead хук на запись — нужен, чтобы в тесте отдельно
+	// провалить запись ОДНОГО конкретного файла при откате (restore должен
+	// всё равно попробовать записать второй — review changes-requested,
+	// Low, п.3).
+	FailWrite map[string]error
+
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
 	// (множество применённых peer'ов) не меняется.
 	FailSyncconf error
@@ -245,6 +252,11 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		path := m[2]
 		if m[3] != path || m[4] != path {
 			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		if s.FailWrite != nil {
+			if err, ok := s.FailWrite[path]; ok {
+				return "", err
+			}
 		}
 		if s.files == nil {
 			s.files = map[string][]byte{}

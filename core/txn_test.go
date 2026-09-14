@@ -500,3 +500,117 @@ func TestRestoreSyncFailureReportsRuntimeMismatch(t *testing.T) {
 		t.Errorf("RuntimePeers() не содержит новый ключ рекея %q (рантайм должен был остаться в состоянии после call #1): %v", newKey, srv.RuntimePeers())
 	}
 }
+
+// TestPlanSubjectIsName — review changes-requested (Low): Plan.Subject
+// обязан быть именем пользователя, а не публичным ключом, для всех пяти
+// действий (раньше PlanDelete клал туда ClientID).
+func TestPlanSubjectIsName(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+
+	clients, err := sess.LoadClients(c)
+	if err != nil || len(clients) < 2 {
+		t.Fatalf("LoadClients: %v, %+v (нужно минимум 2 клиента в дефолтном фейке)", err, clients)
+	}
+	keys := map[string]bool{}
+	for _, cl := range clients {
+		keys[cl.ClientID] = true
+	}
+	subject := clients[0].ClientID
+	subjectName := clients[0].Name()
+
+	checkSubject := func(t *testing.T, action, subj string) {
+		t.Helper()
+		if subj == "" {
+			t.Errorf("%s: Subject пуст", action)
+		}
+		if keys[subj] {
+			t.Errorf("%s: Subject = %q похож на публичный ключ, а не на имя", action, subj)
+		}
+	}
+
+	pAdd, err := sess.PlanAddUser(c, "NewGuy")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	checkSubject(t, "add", pAdd.Subject)
+	if pAdd.Subject != "NewGuy" {
+		t.Errorf("add: Subject = %q, want %q", pAdd.Subject, "NewGuy")
+	}
+
+	pDel, err := sess.PlanDelete(c, subject)
+	if err != nil {
+		t.Fatalf("PlanDelete: %v", err)
+	}
+	checkSubject(t, "delete", pDel.Subject)
+	if pDel.Subject != subjectName {
+		t.Errorf("delete: Subject = %q, want %q", pDel.Subject, subjectName)
+	}
+
+	pRekey, err := sess.PlanRekey(c, subject)
+	if err != nil {
+		t.Fatalf("PlanRekey: %v", err)
+	}
+	checkSubject(t, "rekey", pRekey.Subject)
+	if pRekey.Subject != subjectName {
+		t.Errorf("rekey: Subject = %q, want %q", pRekey.Subject, subjectName)
+	}
+
+	pRename, err := sess.PlanRename(c, subject, "RenamedName")
+	if err != nil {
+		t.Fatalf("PlanRename: %v", err)
+	}
+	checkSubject(t, "rename", pRename.Subject)
+
+	pDisable, err := sess.PlanSetEnabled(c, subject, false)
+	if err != nil {
+		t.Fatalf("PlanSetEnabled(false): %v", err)
+	}
+	checkSubject(t, "disable", pDisable.Subject)
+	if pDisable.Subject != subjectName {
+		t.Errorf("disable: Subject = %q, want %q", pDisable.Subject, subjectName)
+	}
+}
+
+// TestRestoreTriesBothFilesIndependently — review changes-requested (Low,
+// п.3): при провале записи wg0.conf на откате restore всё равно пробует
+// записать clientsTable, и итоговый текст называет оба файла — какой
+// вернулся, какой нет.
+func TestRestoreTriesBothFilesIndependently(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+
+	plan, err := sess.PlanAddUser(c, "Carol")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	tblBefore := append([]byte{}, plan.tblBefore...)
+
+	// wg0.conf не удаётся ни записать при применении, ни вернуть при откате;
+	// clientsTable — обычный файл, ничем не испорчен.
+	srv.FailWrite = map[string]error{c.Dir + "/wg0.conf": fmt.Errorf("write i/o error")}
+
+	_, err = sess.Apply(plan)
+	if err == nil {
+		t.Fatal("Apply: ожидалась ошибка")
+	}
+	if !strings.Contains(err.Error(), "восстановить не удалось") {
+		t.Errorf("текст ошибки не про провал восстановления: %v", err)
+	}
+	if !strings.Contains(err.Error(), "wg0.conf") {
+		t.Errorf("текст ошибки должен называть wg0.conf: %v", err)
+	}
+	if !strings.Contains(err.Error(), "clientsTable") {
+		t.Errorf("текст ошибки должен называть clientsTable: %v", err)
+	}
+
+	afterTbl, ok := srv.File(c.Dir + "/clientsTable")
+	if !ok {
+		t.Fatal("clientsTable отсутствует")
+	}
+	if !bytes.Equal(afterTbl, tblBefore) {
+		t.Errorf("clientsTable должна была вернуться к состоянию до, даже когда wg0.conf не восстановился:\nбыло:  %s\nстало: %s", tblBefore, afterTbl)
+	}
+}
