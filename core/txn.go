@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -915,6 +916,14 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 
 // ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------
 
+// ErrCASMismatch — сентинел отказа CAS (review PR-2, carryover 1): план
+// построен по уже неактуальному чтению сервера — либо контрольная сумма
+// разошлась, либо её не удалось проверить (нет sha256sum на сервере, сбой
+// команды). До этого коммита cmd/gui/main.go распознавал отказ CAS по
+// русским подстрокам текста ошибки (isCASRefusal); errors.Is(err,
+// ErrCASMismatch) — тот же смысл, но не завязан на формулировку.
+var ErrCASMismatch = errors.New("план устарел: сервер изменился с момента чтения")
+
 // checkCAS — шаг 1 Apply. Расхождение контрольной суммы или невозможность её
 // проверить (нет sha256sum на сервере, любой ненулевой код) — отказ ДО любой
 // записи. Для отсутствовавшей при планировании clientsTable проверяем не
@@ -926,10 +935,10 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 	if !p.tblExisted {
 		exists, err := s.probeClientsTable(c)
 		if err != nil {
-			return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+			return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w: %w", ErrCASMismatch, err)
 		}
 		if exists {
-			return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")
+			return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите: %w", c.Dir+"/clientsTable", ErrCASMismatch)
 		}
 		return nil
 	}
@@ -941,14 +950,14 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
 	out, err := s.docker(fmt.Sprintf("docker exec %s sha256sum %s", c.Name, path), nil)
 	if err != nil {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w: %w", ErrCASMismatch, err)
 	}
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum")
+		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum: %w", ErrCASMismatch)
 	}
 	if fields[0] != wantSHA {
-		return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", path)
+		return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите: %w", path, ErrCASMismatch)
 	}
 	return nil
 }

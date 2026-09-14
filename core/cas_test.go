@@ -5,6 +5,7 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -82,6 +83,61 @@ func TestCASMismatchRefuses(t *testing.T) {
 			if strings.Contains(cmd, "mkdir -p") {
 				t.Fatalf("NoSha256: backup не должен был вызываться (CAS — до backup, шаг 1 раньше шага 2), но: %q", cmd)
 			}
+		}
+	})
+}
+
+// TestCASMismatchIsErrCASMismatch — review PR-2, carryover 1: отказ CAS
+// обязан распознаваться через errors.Is(err, ErrCASMismatch), а не только по
+// подстроке текста (cmd/gui/main.go:isCASRefusal раньше делал именно так).
+// Проверяем оба пути отказа casCheckFile — расхождение суммы и NoSha256 —
+// и путь checkCAS для отсутствовавшей при планировании clientsTable.
+func TestCASMismatchIsErrCASMismatch(t *testing.T) {
+	t.Run("расхождение контрольной суммы", func(t *testing.T) {
+		srv := fakesrv.New()
+		sess := NewSessionWithRunner(srv, testCreds())
+		c := awgContainer()
+
+		plan, err := sess.PlanAddUser(c, "Carol")
+		if err != nil {
+			t.Fatalf("PlanAddUser: %v", err)
+		}
+		tbl, _ := srv.File(c.Dir + "/clientsTable")
+		srv.SetFile(c.Dir+"/clientsTable", append(append([]byte{}, tbl...), ' '))
+
+		_, err = sess.Apply(plan)
+		if !errors.Is(err, ErrCASMismatch) {
+			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
+		}
+	})
+
+	t.Run("NoSha256", func(t *testing.T) {
+		srv := fakesrv.New()
+		srv.NoSha256 = true
+		sess := NewSessionWithRunner(srv, testCreds())
+		c := awgContainer()
+
+		_, err := sess.AddUser(c, "Carol")
+		if !errors.Is(err, ErrCASMismatch) {
+			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
+		}
+	})
+
+	t.Run("clientsTable появилась, хотя при планировании отсутствовала", func(t *testing.T) {
+		srv := fakesrv.New()
+		c := awgContainer()
+		srv.DeleteFile(c.Dir + "/clientsTable")
+		sess := NewSessionWithRunner(srv, testCreds())
+
+		plan, err := sess.PlanAddUser(c, "Carol")
+		if err != nil {
+			t.Fatalf("PlanAddUser: %v", err)
+		}
+		srv.SetFile(c.Dir+"/clientsTable", []byte("[]"))
+
+		_, err = sess.Apply(plan)
+		if !errors.Is(err, ErrCASMismatch) {
+			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
 		}
 	})
 }
