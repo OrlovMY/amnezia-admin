@@ -426,7 +426,7 @@ func interactive() {
 				// включение — вопрос как раньше, без карточки (Г3: вопрос
 				// при включении не трогаем, владелец им уже пользуется).
 				verb := "включить"
-				if ask(fmt.Sprintf("%s пользователя %q? (y/n): ", strings.ToUpper(verb[:1])+verb[1:], victim.Name())) != "y" {
+				if ask(fmt.Sprintf("%s пользователя %q? (y/n): ", capitalizeFirst(verb), victim.Name())) != "y" {
 					fmt.Println("Отменено.")
 					break
 				}
