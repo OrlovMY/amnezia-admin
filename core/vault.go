@@ -1,9 +1,10 @@
-// Файл vault.go — шифрованное локальное хранилище ключей vpn:// (формат .avlt v1).
+// Файл vault.go — шифрованное локальное хранилище ключей vpn:// (формат .avlt,
+// версии 1 и 2).
 //
 // Формат файла (little-endian):
 //
 //	magic          [4]byte  "AVLT"
-//	version        byte     = 1
+//	version        byte     = 1 или 2
 //	flags          byte     бит0 = DPAPI machine-bind
 //	argonMemoryKiB uint32   параметры Argon2id (KiB)
 //	argonTime      byte
@@ -19,6 +20,16 @@
 // финальный ключ = HKDF-SHA256(argonKey, machineSecret), где machineSecret
 // генерируется случайно при Seal и хранится в файле, зашифрованный DPAPI
 // (доступен для расшифровки только на той же машине/учётке Windows).
+//
+// v1 → v2 (PR-4, host key pinning): единственное отличие — байт version в
+// заголовке и новое (необязательное, omitempty) поле JSON
+// VaultPayload.HostKeyFingerprint внутри зашифрованного payload. Формат
+// заголовка, AEAD, деривация ключа — не изменились. Строка контекста HKDF
+// ("amnezia-admin vault v1") НЕ переименована при переходе на v2: это просто
+// метка домена для деривации ключа, а не номер версии формата, и её смена
+// сделала бы нечитаемыми все файлы v1 с machine-bind (DPAPI) — оставлена как
+// есть намеренно. OpenVault принимает обе версии (1 и 2); версии > 2 —
+// ErrVaultNewerVersion. SealVault всегда пишет текущую (2).
 package core
 
 import (
@@ -43,9 +54,16 @@ import (
 )
 
 const (
-	vaultMagic     = "AVLT"
-	vaultVersion   = 1
-	vaultFlagDPAPI = 1 << 0
+	vaultMagic = "AVLT"
+	// vaultVersion — версия формата, которую пишет SealVault (текущая, 2).
+	// OpenVault/OpenVaultInfo принимают файлы версий 1..vaultVersion; версия
+	// выше vaultVersion — ErrVaultNewerVersion (см. vaultVersionMin).
+	vaultVersion = 2
+	// vaultVersionMin — самая старая версия формата, которую ещё открываем
+	// (обратная совместимость, PR-4: «у кого уже есть настройки не потеряли
+	// доступ»).
+	vaultVersionMin = 1
+	vaultFlagDPAPI  = 1 << 0
 
 	// длина фиксированной части заголовка до dpapiBlob (magic..salt) +
 	// поле длины dpapiBlob (u16)
@@ -75,6 +93,15 @@ type VaultPayload struct {
 	Label   string `json:"label"`
 	Key     string `json:"key"`
 	Created string `json:"created"`
+
+	// HostKeyFingerprint — отпечаток (SHA256:…) подтверждённого ключа хоста
+	// SSH-сервера, к которому относится Key (PR-4, v2). Пусто у файлов v1 и у
+	// v2-файлов, для которых ключ хоста ещё не был подтверждён/перезапечатан
+	// (см. ForgetHostKey, core/hostkey.go) — это НЕ ошибка, просто "ещё не
+	// знаем"; смысловой отказ подключения из-за пустого отпечатка не делается
+	// здесь, а на уровне ConnectWithHostKey (пустой ExpectedFingerprint —
+	// обычный неизвестный сервер).
+	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
 }
 
 // ErrVaultBadPinOrCorrupt — единый текст ошибки для неверного пина и любой
@@ -237,34 +264,53 @@ func deriveFinalKey(argonKey []byte, flags byte, machineSecret []byte) ([]byte, 
 	return finalKey, nil
 }
 
+// VaultInfo — метаданные .avlt-файла, извлечённые при OpenVaultInfo вместе с
+// payload: нужны, чтобы перезапечатать файл (SealVault) с теми же
+// параметрами Argon2 и той же привязкой к машине, не спрашивая пользователя
+// заново (ForgetHostKey, часть Б — Е1 после подтверждения хоста).
+type VaultInfo struct {
+	Version     byte
+	MachineBind bool
+	Params      ArgonParams
+}
+
 // OpenVault расшифровывает .avlt-файл. Любая порча данных или неверный пин —
-// одна и та же ошибка (ErrVaultBadPinOrCorrupt), без паники.
-func OpenVault(pin string, data []byte) (payload VaultPayload, err error) {
+// одна и та же ошибка (ErrVaultBadPinOrCorrupt), без паники. Обёртка над
+// OpenVaultInfo для вызывающих, которым не нужны метаданные.
+func OpenVault(pin string, data []byte) (VaultPayload, error) {
+	payload, _, err := OpenVaultInfo(pin, data)
+	return payload, err
+}
+
+// OpenVaultInfo — как OpenVault, но дополнительно возвращает VaultInfo
+// (версия файла, флаг machine-bind, параметры Argon2 из заголовка).
+func OpenVaultInfo(pin string, data []byte) (payload VaultPayload, info VaultInfo, err error) {
 	defer func() {
 		// защитный рубеж: любая порча не должна приводить к панике вызывающего кода
 		if r := recover(); r != nil {
 			payload = VaultPayload{}
+			info = VaultInfo{}
 			err = ErrVaultBadPinOrCorrupt
 		}
 	}()
 
 	if len(data) < 6 { // magic(4)+version(1)+flags(1)
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	if string(data[0:4]) != vaultMagic {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	version := data[4]
 	if version > vaultVersion {
-		return VaultPayload{}, ErrVaultNewerVersion
+		return VaultPayload{}, VaultInfo{}, ErrVaultNewerVersion
 	}
-	if version != vaultVersion {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+	if version < vaultVersionMin {
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	flags := data[5]
 
 	if len(data) < vaultFixedHeaderLen {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	off := 6
 	memKiB := binary.LittleEndian.Uint32(data[off : off+4])
@@ -277,7 +323,7 @@ func OpenVault(pin string, data []byte) (payload VaultPayload, err error) {
 	// или подсунут злонамеренно) — проверяем границы ДО вызова argon2.IDKey,
 	// иначе можно спровоцировать неограниченное выделение памяти/времени.
 	if err := validateArgonParams(memKiB, t, p); err != nil {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	salt := data[off : off+vaultSaltLen]
 	off += vaultSaltLen
@@ -285,7 +331,7 @@ func OpenVault(pin string, data []byte) (payload VaultPayload, err error) {
 	off += 2
 
 	if len(data) < off+dpapiLen+vaultNonceLen {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	dpapiBlob := data[off : off+dpapiLen]
 	off += dpapiLen
@@ -293,50 +339,52 @@ func OpenVault(pin string, data []byte) (payload VaultPayload, err error) {
 	off += vaultNonceLen
 
 	if len(data) < off+chacha20poly1305.Overhead {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+		return VaultPayload{}, VaultInfo{}, ErrVaultBadPinOrCorrupt
 	}
 	header := data[:off]
 	ciphertext := data[off:]
 
-	// ВАЖНО: OpenVault намеренно НЕ вызывает ValidatePin(pin) — при открытии
-	// принимается пин любой длины/формата, чтобы файлы, сохранённые до
-	// ужесточения политики (например, с 10-символьным пином), продолжали
+	// ВАЖНО: OpenVault(Info) намеренно НЕ вызывает ValidatePin(pin) — при
+	// открытии принимается пин любой длины/формата, чтобы файлы, сохранённые
+	// до ужесточения политики (например, с 10-символьным пином), продолжали
 	// открываться. Единственная проверка пина — попытка расшифровать AEAD
 	// ниже; неверный пин просто не пройдёт аутентификацию тега.
+
+	params := ArgonParams{MemoryKiB: memKiB, Time: t, Threads: p}
+	info = VaultInfo{Version: version, MachineBind: flags&vaultFlagDPAPI != 0, Params: params}
 
 	var machineSecret []byte
 	if flags&vaultFlagDPAPI != 0 {
 		if dpapiUnprotect == nil {
-			return VaultPayload{}, fmt.Errorf("%w (файл привязан к компьютеру, но привязка недоступна на этой ОС)", ErrVaultBadPinOrCorrupt)
+			return VaultPayload{}, info, fmt.Errorf("%w (файл привязан к компьютеру, но привязка недоступна на этой ОС)", ErrVaultBadPinOrCorrupt)
 		}
 		ms, uerr := dpapiUnprotect(dpapiBlob)
 		if uerr != nil {
-			return VaultPayload{}, fmt.Errorf("%w (возможно, файл привязан к другому компьютеру)", ErrVaultBadPinOrCorrupt)
+			return VaultPayload{}, info, fmt.Errorf("%w (возможно, файл привязан к другому компьютеру)", ErrVaultBadPinOrCorrupt)
 		}
 		machineSecret = ms
 	}
 
-	params := ArgonParams{MemoryKiB: memKiB, Time: t, Threads: p}
 	argonKey := argon2.IDKey([]byte(pin), salt, uint32(params.Time), params.MemoryKiB, params.Threads, 32)
-	finalKey, err := deriveFinalKey(argonKey, flags, machineSecret)
-	if err != nil {
-		return VaultPayload{}, err
+	finalKey, ferr := deriveFinalKey(argonKey, flags, machineSecret)
+	if ferr != nil {
+		return VaultPayload{}, info, ferr
 	}
 
-	aead, err := chacha20poly1305.NewX(finalKey)
-	if err != nil {
-		return VaultPayload{}, err
+	aead, aerr := chacha20poly1305.NewX(finalKey)
+	if aerr != nil {
+		return VaultPayload{}, info, aerr
 	}
-	plaintext, err := aead.Open(nil, nonce, ciphertext, header)
-	if err != nil {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+	plaintext, oerr := aead.Open(nil, nonce, ciphertext, header)
+	if oerr != nil {
+		return VaultPayload{}, info, ErrVaultBadPinOrCorrupt
 	}
 
 	var pl VaultPayload
-	if err := json.Unmarshal(plaintext, &pl); err != nil {
-		return VaultPayload{}, ErrVaultBadPinOrCorrupt
+	if jerr := json.Unmarshal(plaintext, &pl); jerr != nil {
+		return VaultPayload{}, info, ErrVaultBadPinOrCorrupt
 	}
-	return pl, nil
+	return pl, info, nil
 }
 
 // ---------- файловые операции ----------
@@ -395,4 +443,26 @@ func SaveVault(dir string, data []byte) (string, error) {
 // LoadVault читает содержимое файла .avlt
 func LoadVault(path string) ([]byte, error) {
 	return os.ReadFile(path)
+}
+
+// WriteVaultFile атомарно перезаписывает УЖЕ СУЩЕСТВУЮЩИЙ файл по заданному
+// пути (tmp + rename, как SaveVault) — в отличие от SaveVault, которая всегда
+// выбирает новое случайное имя, эта функция используется для перезапечатывания
+// на месте (PR-4: ForgetHostKey и, в части Б, дописывание HostKeyFingerprint
+// после первого подтверждённого подключения). Путь не создаётся заново —
+// только каталог назначения, если его вдруг нет.
+func WriteVaultFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
