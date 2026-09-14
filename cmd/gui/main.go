@@ -8,10 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
-	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -23,8 +21,6 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-
-	"golang.org/x/crypto/ssh/knownhosts"
 
 	"amnezia-admin/core"
 )
@@ -470,17 +466,15 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			// НЕ сопровождает вызовом OnChanged (С1: сигнатура ядра, аргументы
 			// нужны только для "изменился") — но UI-01/С3 требует ТОТ ЖЕ
 			// диалог и для "не совпал с хранилищем" ("отдельным термином не
-			// показывать"). Строим его здесь: адрес — как в core
-			// (knownhosts.Normalize на dial-адресе), "сохранённый" отпечаток —
-			// уже известен (expectedFp, это и есть ExpectedFingerprint),
-			// "полученный" — извлекаем из текста ошибки (core/hostkey.go,
-			// checkHostKey: ровно два отпечатка в сообщении, один из них —
-			// expectedFp). Не идеально (завязка на текст), но не требует
-			// трогать core/ (В2 п.6 — часть Б не меняет ядро).
-			if vc != nil && errors.Is(err, core.ErrHostKeyMismatch) {
-				addr := knownhosts.Normalize(net.JoinHostPort(creds.Host, creds.Port))
-				presented := extractOtherFingerprint(err.Error(), expectedFp)
-				u.hostKeyChangedDialog(addr, expectedFp, presented, knownHostsPath, vc, connectBtn, info)
+			// показывать"). Структурные поля (адрес, оба отпечатка) — из
+			// *core.HostKeyError через errors.As (ревью PR-4-Б, круг 1,
+			// SEC-01 Medium: раньше "полученный" отпечаток добывался
+			// регэкспом из текста ошибки — тот же класс хрупкости, что
+			// чинили у ErrCASMismatch в PR-3; core/hostkey.go правлен по
+			// явному разрешению ядра, никакой другой код core не тронут).
+			var hke *core.HostKeyError
+			if vc != nil && errors.Is(err, core.ErrHostKeyMismatch) && errors.As(err, &hke) {
+				u.hostKeyChangedDialog(hke.Addr, hke.KnownFp, hke.PresentedFp, knownHostsPath, vc, connectBtn, info)
 			}
 			u.connectFail(connectBtn, info, "SSH не удался: "+err.Error())
 			return
@@ -544,23 +538,6 @@ func reseal(vc *vaultCtx, fp string) error {
 		return err
 	}
 	return core.WriteVaultFile(vc.path, data)
-}
-
-// fingerprintPattern — вид отпечатка SHA256 ключа хоста (ssh.FingerprintSHA256).
-var fingerprintPattern = regexp.MustCompile(`SHA256:[A-Za-z0-9+/]+=*`)
-
-// extractOtherFingerprint достаёт из текста ошибки ErrHostKeyMismatch
-// отпечаток, отличный от known (уже известного нам из хранилища) — тот
-// самый "полученный" (см. комментарий в attemptConnect). Не найден —
-// возвращает заглушку: диалог всё равно покажет адрес и известный
-// отпечаток, инструкция не потеряется.
-func extractOtherFingerprint(errText, known string) string {
-	for _, m := range fingerprintPattern.FindAllString(errText, -1) {
-		if m != known {
-			return m
-		}
-	}
-	return "неизвестен (см. текст ошибки ниже)"
 }
 
 // hostKeyPrompt — core.HostKeyPolicy.Prompt для GUI (Е1 задания PR-4):
@@ -650,17 +627,36 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 			err := core.ForgetHostKey(pin, vc.path, knownHostsPath, host)
 			fyne.Do(func() {
 				if err != nil {
-					// не идеально известно, какой из двух файлов подвёл
-					// (core.ForgetHostKey не различает это в возвращаемой
-					// ошибке отдельным типом) — сообщения о хранилище
-					// содержат слово "хранилищ" (core/hostkey.go,
-					// core/vault.go), иначе это ошибка known_hosts.
-					path := knownHostsPath
-					if strings.Contains(err.Error(), "хранилищ") {
-						path = vc.path
+					// Различение по ТИПУ ошибки (core.ErrForgetVault /
+					// core.ErrForgetKnownHosts), не по тексту (ревью PR-4-Б,
+					// круг 1, SEC-01 Medium: прежняя эвристика
+					// strings.Contains(err.Error(), "хранилищ") приписывала
+					// голую ошибку ОС от WriteVaultFile known_hosts —
+					// человеку советовали удалить строку, которая ни при
+					// чём, хранилище оставалось со старым отпечатком,
+					// следующая попытка снова давала Mismatch → снова
+					// Forget → снова тот же сбой — замкнутый круг).
+					// Тексты — дополнение ядра к С3, 2026-09-15 03:20.
+					var msg string
+					switch {
+					case errors.Is(err, core.ErrForgetVault):
+						// Ничего не забыто — known_hosts не тронут, .avlt
+						// остался со старым отпечатком. Повторить тот же
+						// Forget можно сразу, инструкция "удалите строку"
+						// здесь была бы в принципе неверной.
+						msg = fmt.Sprintf("Не удалось изменить хранилище %s: %s. Ключ сервера не забыт — повторите.", vc.path, err.Error())
+					case errors.Is(err, core.ErrForgetKnownHosts):
+						// .avlt уже перезапечатан (отпечаток стёрт) — только
+						// здесь уместна инструкция про ручную правку файла.
+						msg = fmt.Sprintf("Не удалось изменить %s: %s. Удалите строку «%s» из файла вручную и подключитесь заново.", knownHostsPath, err.Error(), host)
+					default:
+						// Защитный рубеж — этот case не должен встречаться
+						// (ForgetHostKey всегда оборачивает свою ошибку
+						// одним из двух типов), но молчать о сбое нельзя.
+						msg = fmt.Sprintf("Не удалось забыть ключ сервера: %s.", err.Error())
 					}
 					connectBtn.Enable()
-					info.SetText(fmt.Sprintf("Не удалось изменить %s: %s. Удалите строку «%s» из файла вручную и подключитесь заново.", path, err.Error(), host))
+					info.SetText(msg)
 					return
 				}
 				u.win.SetContent(u.connectScreenWithStatus("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток."))
