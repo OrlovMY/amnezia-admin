@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"unicode"
 
@@ -79,16 +78,6 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 		LastSeen:  lastSeen,
 		Key:       cl.ClientID,
 	}
-}
-
-// stdinIsTTY сообщает, подключён ли stdin к терминалу (а не к пайпу/файлу).
-// Без новых зависимостей: os.Stdin.Stat() + os.ModeCharDevice (В2 п.7).
-func stdinIsTTY() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // needsConfirm — нужен ли вопрос для подкоманды cmd над записью cl.
