@@ -11,6 +11,11 @@
 //   amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //   amnezia-admin toggle -key vpn://... -name Vasya
 //   amnezia-admin rekey  -key vpn://... -name Vasya
+//
+// Флаг -dry-run (для add/del/rename/toggle/rekey) показывает diff wg0.conf и
+// clientsTable, которые получились бы после операции, ничего не записывая на
+// сервер:
+//   amnezia-admin add -key vpn://... -name Vasya -dry-run
 package main
 
 import (
@@ -18,6 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -119,6 +125,26 @@ func printContainers(containers []core.Container, withNotes bool) {
 		}
 		fmt.Printf("  %s %s %s%s\n", cNum(strconv.Itoa(i+1)+"."), c.Proto, cDim("["+c.Name+"]"), note)
 	}
+}
+
+// printPlan печатает построчный diff по обоим файлам плана в формате
+// "--- <path> (было) / +++ <path> (станет)" — общая функция для -dry-run
+// (Е1) и её регресс-теста (Е4: TestDryRunFlagPrintsDiffAndWritesNothing),
+// который вызывает её напрямую на плане, собранном на fakesrv.
+func printPlan(w io.Writer, p *core.Plan) {
+	wgDiff, tblDiff := p.Diff()
+	dir := p.Container.Dir
+	printFileDiff(w, dir+"/wg0.conf", wgDiff)
+	printFileDiff(w, dir+"/clientsTable", tblDiff)
+}
+
+func printFileDiff(w io.Writer, path, diff string) {
+	fmt.Fprintf(w, "--- %s (было)\n+++ %s (станет)\n", path, path)
+	if diff == "" {
+		fmt.Fprintln(w, "(без изменений)")
+		return
+	}
+	fmt.Fprint(w, diff)
 }
 
 // ---------- интерактивный режим ----------
@@ -391,6 +417,7 @@ func main() {
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
 	name := fs.String("name", "", "имя пользователя (для add/del/rename/toggle)")
 	newname := fs.String("newname", "", "новое имя (для rename)")
+	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	fs.Parse(os.Args[2:])
 
 	if *key == "" {
@@ -437,6 +464,19 @@ func main() {
 	case "list":
 		_, err = listUsers(sess, cur)
 	case "add":
+		if *dryRun {
+			plan, e := sess.PlanAddUser(cur, *name)
+			if e != nil {
+				err = e
+				break
+			}
+			// приватный ключ клиента (plan.result.Config) в dry-run не
+			// печатается и не сохраняется — план ещё не применён, конфиг
+			// с ним мог бы и не заработать (Е1).
+			printPlan(os.Stdout, plan)
+			fmt.Println("Ничего не записано (dry-run).")
+			break
+		}
 		u, e := sess.AddUser(cur, *name)
 		if e == nil {
 			e = saveUserConfig(u, cur.Proto)
@@ -455,6 +495,16 @@ func main() {
 			err = e
 			break
 		}
+		if *dryRun {
+			plan, e := sess.PlanDelete(cur, clients[idx].ClientID)
+			if e != nil {
+				err = e
+				break
+			}
+			printPlan(os.Stdout, plan)
+			fmt.Println("Ничего не записано (dry-run).")
+			break
+		}
 		err = sess.DeleteByID(cur, clients[idx].ClientID)
 		if err == nil {
 			fmt.Printf("Пользователь %q удалён.\n", *name)
@@ -470,6 +520,16 @@ func main() {
 		idx, e := core.ResolveNonNumeric(clients, *name)
 		if e != nil {
 			err = e
+			break
+		}
+		if *dryRun {
+			plan, e := sess.PlanRename(cur, clients[idx].ClientID, *newname)
+			if e != nil {
+				err = e
+				break
+			}
+			printPlan(os.Stdout, plan)
+			fmt.Println("Ничего не записано (dry-run).")
 			break
 		}
 		err = sess.RenameUser(cur, clients[idx].ClientID, *newname)
@@ -490,6 +550,16 @@ func main() {
 			break
 		}
 		enable := clients[idx].Disabled()
+		if *dryRun {
+			plan, e := sess.PlanSetEnabled(cur, clients[idx].ClientID, enable)
+			if e != nil {
+				err = e
+				break
+			}
+			printPlan(os.Stdout, plan)
+			fmt.Println("Ничего не записано (dry-run).")
+			break
+		}
 		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
 		if err == nil {
 			if enable {
@@ -509,6 +579,18 @@ func main() {
 		idx, e := core.ResolveNonNumeric(clients, *name)
 		if e != nil {
 			err = e
+			break
+		}
+		if *dryRun {
+			plan, e := sess.PlanRekey(cur, clients[idx].ClientID)
+			if e != nil {
+				err = e
+				break
+			}
+			// приватный ключ клиента (plan.result.Config) в dry-run не
+			// печатается и не сохраняется — см. комментарий у "add".
+			printPlan(os.Stdout, plan)
+			fmt.Println("Ничего не записано (dry-run).")
 			break
 		}
 		u, e := sess.RegenerateUser(cur, clients[idx].ClientID)
