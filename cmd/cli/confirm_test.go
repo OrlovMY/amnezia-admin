@@ -144,6 +144,47 @@ func TestToggleEnableSilent(t *testing.T) {
 	}
 }
 
+// TestConfirmSubcommandTable — ревью PR-5, Medium-4: обвязка
+// needsConfirm+buildCard+confirmOrExit для CLI-подкоманд вынесена в
+// confirmSubcommand (по образцу runDryRun) именно затем, чтобы её можно было
+// накрыть таблицей без os.Exit (os.Exit убил бы тестовый процесс — он
+// остаётся на стороне main()). Покрывает del / toggle-активный /
+// toggle-отключённый / rekey / rename парой (proceed, code).
+func TestConfirmSubcommandTable(t *testing.T) {
+	srv := fakesrv.New()
+	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+
+	active := core.ClientEntry{ClientID: "k1", UserData: map[string]any{"clientName": "Alice"}}
+	disabled := core.ClientEntry{ClientID: "k2", UserData: map[string]any{"clientName": "Bob", "disabled": true}}
+
+	for _, tc := range []struct {
+		name        string
+		cmd         string
+		cl          core.ClientEntry
+		yes         bool
+		answer      string
+		wantProceed bool
+		wantCode    int
+	}{
+		{"del-yes-no-question", "del", active, true, "", true, 0},
+		{"del-answer-n", "del", active, false, "n\n", false, 2},
+		{"toggle-active-asks-y", "toggle", active, false, "y\n", true, 0},
+		{"toggle-active-asks-n", "toggle", active, false, "n\n", false, 2},
+		{"toggle-disabled-silent", "toggle", disabled, false, "", true, 0},
+		{"rekey-yes-no-question", "rekey", active, true, "", true, 0},
+		{"rename-never-asks", "rename", active, false, "", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			proceed, code := confirmSubcommand(strings.NewReader(tc.answer), &out, &errOut, true, tc.yes, tc.cmd, tc.cl, sess, c, "удалить")
+			if proceed != tc.wantProceed || code != tc.wantCode {
+				t.Errorf("%s: proceed=%v code=%d, хочу %v/%d", tc.name, proceed, code, tc.wantProceed, tc.wantCode)
+			}
+		})
+	}
+}
+
 // TestCardTextSharedBetweenMenuAndSubcommand (рекомендация Д) — renderCard
 // обязан быть единственным местом с текстом карточки: "Публичный ключ:" —
 // ровно один раз в confirm.go и ни разу в main.go (иначе меню и подкоманды
@@ -166,8 +207,9 @@ func TestCardTextSharedBetweenMenuAndSubcommand(t *testing.T) {
 
 // TestDryRunBeatsYes (рекомендация Д) — -dry-run обязан побеждать -yes: план
 // печатается, ничего не пишется, вопрос не задаётся. В main() это гарантирует
-// порядок кода (проверка *dryRun с break — раньше needsConfirm в каждой из
-// веток del/toggle/rekey); тест ловит регресс, если порядок веток в switch
+// порядок кода (проверка *dryRun с break — раньше confirmSubcommand в каждой
+// из веток del/toggle/rekey — confirmSubcommand внутри решает needsConfirm,
+// ревью PR-5, Medium-4); тест ловит регресс, если порядок веток в switch
 // когда-нибудь поменяют местами. Плюс fakesrv.Commands(): сам runDryRun для
 // del ничего не пишет (без "cat > "), то есть даже если бы очередь дошла до
 // вопроса/-yes, писать было бы нечего.
@@ -200,15 +242,15 @@ func TestDryRunBeatsYes(t *testing.T) {
 		}
 		block := rest[:end]
 		dryIdx := strings.Index(block, "*dryRun")
-		confIdx := strings.Index(block, "needsConfirm(")
+		confIdx := strings.Index(block, "confirmSubcommand(")
 		if dryIdx < 0 {
 			t.Fatalf("%s: не нашёл проверку *dryRun в ветке switch", cmd)
 		}
 		if confIdx < 0 {
-			t.Fatalf("%s: не нашёл needsConfirm( в ветке switch", cmd)
+			t.Fatalf("%s: не нашёл confirmSubcommand( в ветке switch", cmd)
 		}
 		if dryIdx > confIdx {
-			t.Errorf("%s: needsConfirm встречается раньше проверки *dryRun — -dry-run обязан побеждать -yes/вопрос", cmd)
+			t.Errorf("%s: confirmSubcommand встречается раньше проверки *dryRun — -dry-run обязан побеждать -yes/вопрос", cmd)
 		}
 	}
 

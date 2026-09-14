@@ -109,6 +109,23 @@ func needsConfirm(cmd string, cl core.ClientEntry) bool {
 	}
 }
 
+// confirmSubcommand — обвязка "нужен ли вопрос → карточка → confirmOrExit"
+// для CLI-подкоманд (del/rekey/toggle в main()). Вынесена из трёх одинаковых
+// копий в case-ветках (ревью PR-5, Medium-4; по образцу runDryRun) — раньше
+// пропажа os.Exit(code) в любой из трёх копий не давила ни один тест, а цена
+// такой пропажи — необратимое действие вопреки отказу. os.Exit — на стороне
+// вызывающего (main()), не здесь: os.Exit убил бы тестовый процесс, поэтому
+// функция только решает (proceed, code), как и confirmOrExit. Если
+// needsConfirm==false — buildCard/confirmOrExit не вызываются вовсе (не
+// трогаем GetHandshakes и не печатаем карточку для rename/add и подобных).
+func confirmSubcommand(in io.Reader, out, errOut io.Writer, isTTY, yes bool, cmd string, cl core.ClientEntry, sess *core.Session, cur *core.Container, action string) (proceed bool, code int) {
+	if !needsConfirm(cmd, cl) {
+		return true, 0
+	}
+	card := buildCard(sess, cur, cl, action)
+	return confirmOrExit(in, out, errOut, isTTY, yes, card)
+}
+
 // confirmOrExit решает судьбу необратимого действия. Карточка печатается в
 // out всегда — даже при yes=true, чтобы действие осталось в журнале скрипта.
 //

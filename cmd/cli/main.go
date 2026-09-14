@@ -582,12 +582,8 @@ func main() {
 			err = e
 			break
 		}
-		if needsConfirm(cmd, clients[idx]) {
-			card := buildCard(sess, cur, clients[idx], "удалить")
-			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
-			if !proceed {
-				os.Exit(code)
-			}
+		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "удалить"); !proceed {
+			os.Exit(code)
 		}
 		err = sess.DeleteByID(cur, clients[idx].ClientID)
 		if err == nil {
@@ -632,12 +628,8 @@ func main() {
 			break
 		}
 		enable := clients[idx].Disabled()
-		if needsConfirm(cmd, clients[idx]) {
-			card := buildCard(sess, cur, clients[idx], "отключить")
-			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
-			if !proceed {
-				os.Exit(code)
-			}
+		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
+			os.Exit(code)
 		}
 		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
 		if err == nil {
@@ -664,12 +656,8 @@ func main() {
 			err = e
 			break
 		}
-		if needsConfirm(cmd, clients[idx]) {
-			card := buildCard(sess, cur, clients[idx], "перевыпустить конфиг")
-			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
-			if !proceed {
-				os.Exit(code)
-			}
+		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "перевыпустить конфиг"); !proceed {
+			os.Exit(code)
 		}
 		u, e := sess.RegenerateUser(cur, clients[idx].ClientID)
 		if e == nil {
