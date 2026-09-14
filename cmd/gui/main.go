@@ -978,9 +978,20 @@ func diffOrNote(diff string) string {
 // newDiffGrid строит widget.TextGrid (моноширинный по устройству — UI-01,
 // ревью, High: widget.MultiLineEntry монoширинность не гарантировал) с
 // построчной раскраской: "+" — цвет успеха темы, "-" — цвет ошибки темы (оба
-// автоматически согласованы со светлой/тёмной темой). TextGrid, в отличие от
-// Entry, read-only по своей природе — Disable() не нужен (UI-01, ревью,
-// Medium: единственное содержимое окна не должно выглядеть приглушённым).
+// автоматически согласованы со светлой/тёмной темой в МОМЕНТ ПОСТРОЕНИЯ).
+// TextGrid, в отличие от Entry, read-only по своей природе — Disable() не
+// нужен (UI-01, ревью, Medium: единственное содержимое окна не должно
+// выглядеть приглушённым).
+//
+// Названное решение (UI-01, ревью круга 2, Low): theme.Color() вычисляется
+// ОДИН раз здесь, а не через подписку на смену темы — если пользователь
+// переключит тему ОС/приложения, пока diff-окно открыто, раскраска этого
+// открытого окна останется от прежней темы до его переоткрытия. Осознанно не
+// чиним: diff-окно — короткоживущее модальное окно (секунды-минуты между
+// «Показать изменения» и «Применить»/«Закрыть»), а подписка TextGrid на
+// fyne.Settings().AddChangeListener ради этого случая добавляет постоянно
+// живущий колбэк и его отписку по закрытии диалога — сложность несоразмерна
+// вероятности "открыл diff-окно и посреди этого переключил системную тему".
 func newDiffGrid(diff string) *widget.TextGrid {
 	grid := widget.NewTextGridFromString(diffOrNote(diff))
 	if diff == "" {
@@ -1050,6 +1061,7 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	applyBtn = widget.NewButtonWithIcon("Применить", theme.ConfirmIcon(), func() {
 		applyBtn.Disable()
 		u.setBusy(true)
+		statusLabel.Importance = widget.MediumImportance
 		statusLabel.SetText("Применяю...")
 		goSafe(func() {
 			nu, err := u.sess.Apply(plan)
@@ -1057,9 +1069,14 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 				u.setBusy(false)
 				if err != nil {
 					if isCASRefusal(err) {
+						// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
+						// должно отличаться от "Применяю..." не только
+						// словами: DangerImportance == theme.ColorNameError.
+						statusLabel.Importance = widget.DangerImportance
 						statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
 						return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
 					}
+					statusLabel.Importance = widget.MediumImportance
 					statusLabel.SetText("")
 					applyBtn.Enable()
 					dialog.ShowError(err, u.win)
@@ -1073,6 +1090,14 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 		})
 	})
 
+	// container.NewScroll — TextGrid не имеет собственной прокрутки (UI-01,
+	// ревью, High): без неё длинный diff обрезался без доступа к остатку, ни
+	// по вертикали, ни по горизонтали. Не редкий случай — lineDiff не
+	// минимален, и при rekey/удалении раннего peer'а в "изменившуюся"
+	// середину попадают все последующие блоки [Peer] (~4 строки на
+	// пользователя); на сервере с 20+ пользователями это сотни строк в
+	// панели высотой ~250px. container.NewScroll даёт прокрутку в обе
+	// стороны по умолчанию (ScrollBoth) — низ и правый край доступны.
 	content := container.NewBorder(
 		nil,
 		container.NewVBox(applyBtn, statusLabel),
@@ -1080,10 +1105,10 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 		container.NewVSplit(
 			container.NewBorder(
 				widget.NewLabelWithStyle(plan.Container.Dir+"/wg0.conf", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-				nil, nil, nil, wgGrid),
+				nil, nil, nil, container.NewScroll(wgGrid)),
 			container.NewBorder(
 				widget.NewLabelWithStyle(plan.Container.Dir+"/clientsTable", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-				nil, nil, nil, tblGrid),
+				nil, nil, nil, container.NewScroll(tblGrid)),
 		),
 	)
 	d = dialog.NewCustom("Изменения перед применением: "+title, "Закрыть", content, u.win)
