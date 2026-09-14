@@ -89,3 +89,50 @@ func TestPrintPlanNoChangeShowsNote(t *testing.T) {
 		t.Errorf("printPlan не показал новое имя в diff clientsTable; got:\n%s", out)
 	}
 }
+
+// TestRunDryRunAllActionsWriteNothing — ревью BE-01, круг 2 (Medium): раньше
+// обвязка флага -dry-run в main() (разбор аргументов, пять веток по cmd,
+// break после печати) ничем не стереглась — тест звал только printPlan
+// напрямую, а не саму пятиветочную развилку. Табличный тест по всем пяти
+// действиям (add/del/rename/toggle/rekey) через runDryRun — функцию, в
+// которую эта развилка вынесена из main() — и проверка Commands() на
+// отсутствие записи/sync/backup для каждого действия.
+func TestRunDryRunAllActionsWriteNothing(t *testing.T) {
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+
+	for _, cmd := range []string{"add", "del", "rename", "toggle", "rekey"} {
+		t.Run(cmd, func(t *testing.T) {
+			srv := fakesrv.New()
+			sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
+
+			name, newname := "Alice", ""
+			if cmd == "add" {
+				name = "Канарейка"
+			}
+			if cmd == "rename" {
+				newname = "Новое Имя"
+			}
+
+			var buf bytes.Buffer
+			if err := runDryRun(&buf, sess, c, cmd, name, newname); err != nil {
+				t.Fatalf("runDryRun(%s): %v", cmd, err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "Ничего не записано (dry-run).") {
+				t.Errorf("%s: вывод не содержит финальную строку dry-run: %q", cmd, out)
+			}
+
+			for _, sent := range srv.Commands() {
+				if strings.Contains(sent, "cat > ") {
+					t.Errorf("%s: dry-run не должен писать: %q", cmd, sent)
+				}
+				if strings.Contains(sent, "syncconf") {
+					t.Errorf("%s: dry-run не должен вызывать syncconf: %q", cmd, sent)
+				}
+				if strings.Contains(sent, "backup") {
+					t.Errorf("%s: dry-run не должен делать backup: %q", cmd, sent)
+				}
+			}
+		})
+	}
+}
