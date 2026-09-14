@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"amnezia-admin/internal/fakesrv"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // ---------- вспомогательные функции для тестов на настоящем SSH ----------
@@ -85,6 +88,17 @@ func credsForFakeSSH(t *testing.T, srv *fakesrv.SSHServer) *ServerCreds {
 
 func alwaysTrustPrompt(string, string) bool { return true }
 
+// closeIfAny закрывает сессию, если подключение неожиданно удалось на
+// ветке, где тест ожидает отказ (SEC-01/BE-01, ревью PR-4А круг 1, Medium):
+// без этого регрессия «принимает то, что должна отклонять» не падает
+// быстро, а виснет — Close() встроенного сервера в t.Cleanup ждёт клиента,
+// который сам никогда не отключится.
+func closeIfAny(sess *Session) {
+	if sess != nil {
+		sess.Close()
+	}
+}
+
 func assertKnownHostsEmpty(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -107,7 +121,8 @@ func TestHostKeyUnknown(t *testing.T) {
 		creds := credsForFakeSSH(t, srv)
 		khPath := filepath.Join(t.TempDir(), "known_hosts")
 
-		_, err := ConnectWithHostKey(creds, HostKeyPolicy{KnownHostsPath: khPath})
+		sess, err := ConnectWithHostKey(creds, HostKeyPolicy{KnownHostsPath: khPath})
+		closeIfAny(sess)
 		if !errors.Is(err, ErrHostKeyUnknown) {
 			t.Fatalf("err = %v, want ErrHostKeyUnknown", err)
 		}
@@ -120,10 +135,11 @@ func TestHostKeyUnknown(t *testing.T) {
 		khPath := filepath.Join(t.TempDir(), "known_hosts")
 		called := false
 
-		_, err := ConnectWithHostKey(creds, HostKeyPolicy{
+		sess, err := ConnectWithHostKey(creds, HostKeyPolicy{
 			KnownHostsPath: khPath,
 			Prompt:         func(host, fp string) bool { called = true; return false },
 		})
+		closeIfAny(sess)
 		if !errors.Is(err, ErrHostKeyUnknown) {
 			t.Fatalf("err = %v, want ErrHostKeyUnknown", err)
 		}
@@ -247,7 +263,7 @@ func TestHostKeyMismatch(t *testing.T) {
 
 	var gotHost, gotKnown, gotPresented string
 	promptCalls, onChangedCalls := 0, 0
-	_, err = ConnectWithHostKey(credsB, HostKeyPolicy{
+	sessB, err := ConnectWithHostKey(credsB, HostKeyPolicy{
 		KnownHostsPath: khPath,
 		Prompt:         func(string, string) bool { promptCalls++; return true },
 		OnChanged: func(host, knownFp, presentedFp string) {
@@ -255,6 +271,7 @@ func TestHostKeyMismatch(t *testing.T) {
 			gotHost, gotKnown, gotPresented = host, knownFp, presentedFp
 		},
 	})
+	closeIfAny(sessB)
 	if !errors.Is(err, ErrHostKeyChanged) {
 		t.Fatalf("err = %v, want ErrHostKeyChanged", err)
 	}
@@ -281,23 +298,27 @@ func TestHostKeyMismatch(t *testing.T) {
 	}
 
 	t.Run("ExpectedFingerprint == fp(B) тоже не помогает", func(t *testing.T) {
-		_, err := ConnectWithHostKey(credsB, HostKeyPolicy{
+		sess, err := ConnectWithHostKey(credsB, HostKeyPolicy{
 			KnownHostsPath:      khPath,
 			ExpectedFingerprint: fpB,
 		})
+		closeIfAny(sess)
 		if !errors.Is(err, ErrHostKeyChanged) {
 			t.Fatalf("err = %v, want ErrHostKeyChanged (ExpectedFingerprint не должен обходить смену ключа)", err)
 		}
 	})
 }
 
-// TestForgetThenTOFU — часть А: ForgetHostKey сам по себе не подключается
-// (нет ssh.Dial); после него хранилище открывается с пустым
-// HostKeyFingerprint, MachineBind сохранён. Отдельно (уже с реальным
-// ssh.Dial на fakesrv) проверяем, что следующее ConnectWithHostKey идёт
-// обычным путём неизвестного сервера — Prompt, а не OnChanged. Вызов
-// ForgetHostKey из UI — решение владельца R2 (часть Б); сама функция и тест
-// не зависят от этого решения (П1 PQ-01).
+// TestForgetThenTOFU — часть А, сигнатура и поведение по правке координатора
+// 2026-09-14 23:58 у Г1 (SEC-01 High, круг 1 ревью PR-4А): прежний
+// ForgetHostKey(pin, path) снимал след ТОЛЬКО в .avlt, и после легитимной
+// переустановки сервера на той же машине R2 зацикливался — известный-но-
+// другой ключ никуда не девался из known_hosts, следующая попытка снова
+// давала ErrHostKeyChanged. ForgetHostKey теперь снимает ОБА следа: .avlt И
+// строку АДРЕСА в known_hosts (прочие адреса не трогает). Сам вызов
+// по-прежнему не создаёт соединений (нет ssh.Dial внутри ForgetHostKey);
+// проверка "следующее подключение идёт путём неизвестного сервера" делает
+// это уже отдельным, настоящим ConnectWithHostKey к fakesrv.
 func TestForgetThenTOFU(t *testing.T) {
 	pin := "forgetPin1234"
 	payload := VaultPayload{
@@ -310,16 +331,49 @@ func TestForgetThenTOFU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealVault: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "test.avlt")
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	vaultPath := filepath.Join(t.TempDir(), "test.avlt")
+	if err := os.WriteFile(vaultPath, data, 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := ForgetHostKey(pin, path); err != nil {
+	// Сервер, к которому в итоге подключимся; known_hosts заранее содержит
+	// СТАРЫЙ (не совпадающий с реальным) ключ этого же адреса — имитация
+	// "сервер переустановили на той же машине, адрес прежний, ключ другой" —
+	// и отдельную строку ДРУГОГО адреса, которая обязана пережить Forget.
+	srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
+	addr := knownhosts.Normalize(srv.Addr())
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	oldKey, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatalf("fakesrv.NewHostKey (старый ключ): %v", err)
+	}
+	if err := appendKnownHost(khPath, addr, oldKey.PublicKey()); err != nil {
+		t.Fatalf("appendKnownHost(старый ключ этого адреса): %v", err)
+	}
+	otherAddr := "other-host.example:2222"
+	otherKey, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatalf("fakesrv.NewHostKey (другой адрес): %v", err)
+	}
+	if err := appendKnownHost(khPath, otherAddr, otherKey.PublicKey()); err != nil {
+		t.Fatalf("appendKnownHost(другой адрес): %v", err)
+	}
+
+	before, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts до Forget: %v", err)
+	}
+	if strings.Count(string(before), "\n") != 2 {
+		t.Fatalf("тестовая настройка сломана: ожидалось 2 строки known_hosts, получено %q", before)
+	}
+
+	if err := ForgetHostKey(pin, vaultPath, khPath, addr); err != nil {
 		t.Fatalf("ForgetHostKey: %v", err)
 	}
 
-	newData, err := os.ReadFile(path)
+	// .avlt: отпечаток снят, остальное не изменилось.
+	newData, err := os.ReadFile(vaultPath)
 	if err != nil {
 		t.Fatalf("ReadFile после ForgetHostKey: %v", err)
 	}
@@ -337,11 +391,26 @@ func TestForgetThenTOFU(t *testing.T) {
 		t.Fatalf("остальной payload не должен меняться: got %+v", got)
 	}
 
-	// Следующее подключение — обычный путь неизвестного сервера.
-	srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
-	creds := credsForFakeSSH(t, srv)
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	// known_hosts: строка ЭТОГО адреса пропала, строка ДРУГОГО осталась.
+	afterKH, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts после ForgetHostKey: %v", err)
+	}
+	lines := nonEmptyLines(string(afterKH))
+	if len(lines) != 1 {
+		t.Fatalf("known_hosts после Forget: %d строк, want 1 (только другой адрес): %q", len(lines), afterKH)
+	}
+	if !strings.Contains(lines[0], "other-host.example") {
+		t.Fatalf("строка другого адреса пропала: %q", afterKH)
+	}
+	if strings.Contains(string(afterKH), addr) {
+		t.Fatalf("строка забытого адреса %q всё ещё в known_hosts: %q", addr, afterKH)
+	}
 
+	// Следующее подключение — обычный путь НЕИЗВЕСТНОГО сервера (запись
+	// адреса удалена), а не OnChanged (сервер предъявляет свой настоящий
+	// ключ, которого в known_hosts после Forget уже нет вовсе).
+	creds := credsForFakeSSH(t, srv)
 	promptCalls, onChangedCalls := 0, 0
 	sess, err := ConnectWithHostKey(creds, HostKeyPolicy{
 		KnownHostsPath:      khPath,
@@ -350,6 +419,9 @@ func TestForgetThenTOFU(t *testing.T) {
 		OnChanged:           func(string, string, string) { onChangedCalls++ },
 	})
 	if err != nil {
+		if sess != nil {
+			sess.Close()
+		}
 		t.Fatalf("ConnectWithHostKey после Forget: %v", err)
 	}
 	defer sess.Close()
@@ -359,6 +431,26 @@ func TestForgetThenTOFU(t *testing.T) {
 	if onChangedCalls != 0 {
 		t.Fatalf("onChangedCalls = %d, want 0", onChangedCalls)
 	}
+
+	// Строка другого адреса пережила весь сценарий целиком.
+	finalKH, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts в конце теста: %v", err)
+	}
+	if !strings.Contains(string(finalKH), "other-host.example") {
+		t.Fatalf("строка другого адреса пропала к концу теста: %q", finalKH)
+	}
+}
+
+// nonEmptyLines — вспомогательная для проверок содержимого known_hosts.
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // TestHostKeyExpectedFingerprintPins — рекомендация Д: ExpectedFingerprint
@@ -393,10 +485,11 @@ func TestHostKeyExpectedFingerprintPins(t *testing.T) {
 		creds := credsForFakeSSH(t, srv)
 		khPath := filepath.Join(t.TempDir(), "known_hosts")
 
-		_, err := ConnectWithHostKey(creds, HostKeyPolicy{
+		sess, err := ConnectWithHostKey(creds, HostKeyPolicy{
 			KnownHostsPath:      khPath,
 			ExpectedFingerprint: "SHA256:wrongWrongWrongWrongWrongWrongWrongWrong00",
 		})
+		closeIfAny(sess)
 		if !errors.Is(err, ErrHostKeyMismatch) {
 			t.Fatalf("err = %v, want ErrHostKeyMismatch", err)
 		}
@@ -419,11 +512,12 @@ func TestVaultVsKnownHostsDisagreeRefuses(t *testing.T) {
 	sess1.Close()
 
 	promptCalls := 0
-	_, err = ConnectWithHostKey(creds, HostKeyPolicy{
+	sess2, err := ConnectWithHostKey(creds, HostKeyPolicy{
 		KnownHostsPath:      khPath,
 		ExpectedFingerprint: "SHA256:vaultSaysSomethingElseVaultSaysSomethingEl",
 		Prompt:              func(string, string) bool { promptCalls++; return true },
 	})
+	closeIfAny(sess2)
 	if !errors.Is(err, ErrHostKeyMismatch) {
 		t.Fatalf("err = %v, want ErrHostKeyMismatch", err)
 	}
@@ -432,21 +526,37 @@ func TestVaultVsKnownHostsDisagreeRefuses(t *testing.T) {
 	}
 }
 
-// TestNoInsecureHostKey — страж (рекомендация Д): полное отключение проверки
-// ключа хоста не должно возвращаться в пакет core ни под каким предлогом
-// (В2 п.3).
+// TestNoInsecureHostKey — страж (рекомендация Д, расширен по ревью PR-4А
+// круг 1, SEC-01 Low): полное отключение проверки ключа хоста не должно
+// возвращаться никуда в модуле — не только в core (часть Б будет
+// переписывать подключение в cmd/cli и cmd/gui, и страж обязан заметить
+// регресс и там), а не только в *текущем* пакете. Идёт от корня модуля
+// (".."), т.к. `go test` запускает пакет из его собственного каталога.
 func TestNoInsecureHostKey(t *testing.T) {
-	matches, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("Glob: %v", err)
-	}
-	for _, f := range matches {
-		data, err := os.ReadFile(f)
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("ReadFile(%s): %v", f, err)
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return fmt.Errorf("ReadFile(%s): %w", path, rerr)
 		}
 		if strings.Contains(string(data), "Insecure"+"IgnoreHostKey") {
-			t.Errorf("%s: содержит полное отключение проверки ключа хоста — запрещено (В2 п.3)", f)
+			t.Errorf("%s: содержит полное отключение проверки ключа хоста — запрещено (В2 п.3)", path)
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("обход дерева модуля от %s: %v", root, err)
 	}
 }

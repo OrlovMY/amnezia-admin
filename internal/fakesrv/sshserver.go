@@ -44,22 +44,48 @@ func NewHostKey() (ssh.Signer, error) {
 // SSHServer — работающий SSH-сервер поверх net.Listener; каждая сессия exec
 // исполняется через переданный exec (*Server).
 type SSHServer struct {
-	ln     net.Listener
-	fp     string
-	wg     sync.WaitGroup
-	done   chan struct{}
-	once   sync.Once
+	ln   net.Listener
+	fp   string
+	wg   sync.WaitGroup
+	done chan struct{}
+	once sync.Once
+
+	// mu/conns — реестр открытых TCP-соединений (SEC-01/BE-01, ревью
+	// PR-4А круг 1, Medium): без него Close() мог зависнуть навечно —
+	// wg.Wait() ждёт handleConn, а handleConn ждёт данные от клиента,
+	// который сам никогда не закроется (например, тест намеренно бросил
+	// *Session, полученную по ошибочному/регрессионному пути, не вызвав
+	// Close()). Регресс тогда не падает, а виснет до таймаута пакета —
+	// неотличимо от "тест ещё не дописан". Close() теперь сам обрывает все
+	// известные соединения ПЕРЕД wg.Wait(), поэтому обслуживающие их
+	// горутины гарантированно получают ошибку чтения/записи и завершаются
+	// быстро, независимо от гигиены вызывающего теста.
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
 }
 
 // ListenSSH поднимает SSH-сервер на addr (в тестах "127.0.0.1:0"), принимает
 // пароль password для user, сессии с запросом "exec" исполняет через
 // exec.Run (тот же фейк, что для Runner), отвечает stdout + exit-status.
+// addr обязан резолвиться в loopback-адрес (127.0.0.0/8 или ::1) — В2 п.1:
+// встроенный сервер не должен слушать ни на каком внешнем интерфейсе, и это
+// ограничение — забота самого ListenSSH, а не только вызывающего кода
+// (cmd/fakeserver и тесты и так передают только "127.0.0.1:…", но ограничение
+// внутри функции не даёт этому стать негласным допущением).
 func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*SSHServer, error) {
 	if hostKey == nil {
 		return nil, fmt.Errorf("fakesrv: ListenSSH: hostKey обязателен")
 	}
 	if exec == nil {
 		return nil, fmt.Errorf("fakesrv: ListenSSH: exec (*Server) обязателен")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("fakesrv: ListenSSH: адрес %q: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return nil, fmt.Errorf("fakesrv: ListenSSH: адрес %q — разрешён только loopback (127.0.0.1 или ::1); встроенный сервер не должен слушать на внешних интерфейсах", addr)
 	}
 
 	cfg := &ssh.ServerConfig{
@@ -78,9 +104,10 @@ func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*
 	}
 
 	s := &SSHServer{
-		ln:   ln,
-		fp:   ssh.FingerprintSHA256(hostKey.PublicKey()),
-		done: make(chan struct{}),
+		ln:    ln,
+		fp:    ssh.FingerprintSHA256(hostKey.PublicKey()),
+		done:  make(chan struct{}),
+		conns: make(map[net.Conn]struct{}),
 	}
 	s.wg.Add(1)
 	go s.acceptLoop(cfg, exec)
@@ -94,13 +121,20 @@ func (s *SSHServer) Addr() string { return s.ln.Addr().String() }
 // Fingerprint — отпечаток (SHA256:…) ключа хоста этого сервера.
 func (s *SSHServer) Fingerprint() string { return s.fp }
 
-// Close останавливает сервер и дожидается завершения всех обслуживаемых
-// соединений (t.Cleanup в тестах).
+// Close останавливает сервер: закрывает слушающий сокет, затем ПРИНУДИТЕЛЬНО
+// закрывает все ещё открытые соединения (см. комментарий у поля conns) и
+// только потом ждёт завершения обслуживающих их горутин. Идемпотентен.
 func (s *SSHServer) Close() error {
 	var err error
 	s.once.Do(func() {
 		close(s.done)
 		err = s.ln.Close()
+
+		s.mu.Lock()
+		for c := range s.conns {
+			c.Close()
+		}
+		s.mu.Unlock()
 	})
 	s.wg.Wait()
 	return err
@@ -113,9 +147,18 @@ func (s *SSHServer) acceptLoop(cfg *ssh.ServerConfig, exec *Server) {
 		if err != nil {
 			return // закрыт извне (Close) — не ошибка теста
 		}
+		s.mu.Lock()
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
+
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer func() {
+				s.mu.Lock()
+				delete(s.conns, conn)
+				s.mu.Unlock()
+			}()
 			s.handleConn(conn, cfg, exec)
 		}()
 	}

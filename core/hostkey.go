@@ -245,16 +245,25 @@ func appendKnownHost(path, addr string, key ssh.PublicKey) error {
 	return nil
 }
 
-// ForgetHostKey — «забыть ключ сервера» для записи хранилища .avlt по пути
-// path: перезапечатывает файл с пустым HostKeyFingerprint, сохраняя
-// MachineBind и параметры Argon2 как были. Соединения НЕ создаёт и НИЧЕГО не
-// обходит — это чистая операция над файлом; следующее ConnectWithHostKey с
-// пустым ExpectedFingerprint пройдёт обычным путём неизвестного сервера
-// (Prompt с показом нового отпечатка), а не тихим принятием. Решение
-// владельца 2026-09-14 (R2): вызов из UI — часть Б; здесь функция готова и
-// покрыта тестом независимо от этого решения (П1 PQ-01).
-func ForgetHostKey(pin string, path string) error {
-	data, err := LoadVault(path)
+// ForgetHostKey — «забыть ключ сервера» для записи хранилища vaultPath:
+// снимает ОБА следа, как того требует SEC-01 (handoff-2026-09-14/
+// С3-позиция-ядра.md, п.1) и правка координатора 2026-09-14 23:58 у Г1
+// (заменяет прежнюю сигнатуру ForgetHostKey(pin, path) — та снимала след
+// ТОЛЬКО в .avlt и после переустановки сервера на той же машине зацикливала
+// R2: ErrHostKeyChanged → Forget → снова ErrHostKeyChanged, потому что
+// известный-но-другой ключ в known_hosts никуда не девался):
+//  1. перезапечатывает .avlt с пустым HostKeyFingerprint (MachineBind и
+//     параметры Argon2 сохраняются);
+//  2. АТОМАРНО удаляет из known_hosts по пути knownHostsPath строки, чей
+//     адрес после knownhosts.Normalize совпадает с host — прочие строки
+//     (другие сервера) остаются нетронутыми.
+//
+// Соединения НЕ создаёт и НИЧЕГО не обходит — после этого следующее
+// ConnectWithHostKey идёт обычным путём НЕИЗВЕСТНОГО сервера (Prompt с
+// показом нового отпечатка), а не тихим принятием и не повторным отказом.
+// Решение владельца 2026-09-14 (R2): вызов из UI — часть Б.
+func ForgetHostKey(pin, vaultPath, knownHostsPath, host string) error {
+	data, err := LoadVault(vaultPath)
 	if err != nil {
 		return fmt.Errorf("не удалось прочитать хранилище: %w", err)
 	}
@@ -267,5 +276,66 @@ func ForgetHostKey(pin string, path string) error {
 	if err != nil {
 		return fmt.Errorf("не удалось перезапечатать хранилище: %w", err)
 	}
-	return WriteVaultFile(path, sealed)
+	if err := WriteVaultFile(vaultPath, sealed); err != nil {
+		return err
+	}
+	return removeKnownHostLines(knownHostsPath, host)
+}
+
+// removeKnownHostLines удаляет из known_hosts по пути path строки, чей
+// адрес (первое, до пробела, поле строки; несколько адресов через запятую —
+// как пишет knownhosts.Line) после knownhosts.Normalize совпадает с
+// knownhosts.Normalize(host). Прочие строки (в т.ч. записи других серверов,
+// комментарии) сохраняются как есть, в исходном порядке. Отсутствие файла —
+// не ошибка (нечего забывать). Запись атомарна (tmp + rename, 0600), как
+// appendKnownHost/SaveVault.
+func removeKnownHostLines(path, host string) error {
+	target := knownhosts.Normalize(host)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var kept []string
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		match := false
+		if len(fields) > 0 && !strings.HasPrefix(fields[0], "#") {
+			for _, a := range strings.Split(fields[0], ",") {
+				if knownhosts.Normalize(a) == target {
+					match = true
+					break
+				}
+			}
+		}
+		if match {
+			continue // это и есть "забыть" — строка выброшена
+		}
+		kept = append(kept, line)
+	}
+
+	var buf bytes.Buffer
+	for _, l := range kept {
+		buf.WriteString(l)
+		buf.WriteByte('\n')
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
