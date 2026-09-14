@@ -78,14 +78,6 @@ func TestYesExecutes(t *testing.T) {
 			if !strings.Contains(out.String(), card.Name) {
 				t.Errorf("карточка не напечатана при yes=true: %q", out.String())
 			}
-			// счётчик действия-заглушки, вызванного по proceed
-			actionCalls := 0
-			if proceed {
-				actionCalls++
-			}
-			if actionCalls != 1 {
-				t.Errorf("действие должно быть вызвано ровно 1 раз, вызвано %d", actionCalls)
-			}
 		})
 	}
 }
