@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -43,8 +44,56 @@ type Plan struct {
 // Diff возвращает построчный diff «-/+» по обоим файлам (без unified-формата
 // и контекстных строк — только изменившееся; см. В2 п.7 задания). Пустая
 // строка означает «файл не меняется» (например, wg0.conf при RenameUser).
+// Значения секретов (PresharedKey/PrivateKey в wg0.conf, "psk" в
+// clientsTable) замаскированы — см. maskSecrets.
 func (p *Plan) Diff() (wgDiff, tblDiff string) {
-	return lineDiff(p.wgBefore, p.wgAfter), lineDiff(p.tblBefore, p.tblAfter)
+	return maskSecrets(lineDiff(p.wgBefore, p.wgAfter)), maskSecrets(lineDiff(p.tblBefore, p.tblAfter))
+}
+
+// ---------- маскировка секретов в предпросмотре (SEC-01, review-reply PR-2Б
+// круг 1, 2026-09-14, High) ----------
+//
+// Diff() — единственное, что видят CLI (-dry-run) и GUI («Показать
+// изменения») ДО применения плана; маскировка стоит здесь одним местом,
+// чтобы cmd/ ничего не дублировали. Решение владельца (форма, 14.09.2026):
+// PSK в предпросмотре скрывать ВСЕГДА, флага раскрытия (-show-secrets) не
+// заводить — ни в CLI, ни в GUI.
+//
+// Маскировать нужно не только "свои" секреты субъекта операции, но и
+// секреты ДРУГИХ пользователей: lineDiff (см. выше) не минимален — общий
+// суффикс обрезается посимвольно по строкам, и при rekey (removePeerFromConf
+// в середине файла + buildPeerBlock в конец) все peer-блоки ПОСЛЕ удалённого
+// сдвигаются на одну позицию и показываются как «изменившиеся», хотя их
+// содержимое — включая PresharedKey постороннего пользователя — то же
+// самое. Реальный прогон (SEC-01) подтвердил утечку такого рода.
+var (
+	// reWgSecretLine — "PresharedKey = …" / "PrivateKey = …" строка wg0.conf,
+	// с учётом ведущего "-"/"+" из lineDiff и произвольных пробелов вокруг "=".
+	reWgSecretLine = regexp.MustCompile(`^([-+]\s*)(PresharedKey|PrivateKey)(\s*=\s*).*$`)
+	// reTblSecretLine — строка JSON clientsTable вида `"psk": "<value>",` —
+	// сохранённый PresharedKey отключённого пользователя (planDisableLocked).
+	reTblSecretLine = regexp.MustCompile(`^([-+]\s*"psk"\s*:\s*)".*"(,?)\s*$`)
+)
+
+// maskSecrets заменяет значения секретов на плейсхолдер построчно; формат
+// строки (какой файл — wg0.conf или clientsTable) не важен, оба паттерна
+// проверяются на каждой строке, так что одна функция обслуживает оба
+// вызова Diff() выше.
+func maskSecrets(diff string) string {
+	if diff == "" {
+		return diff
+	}
+	lines := strings.Split(diff, "\n")
+	for i, l := range lines {
+		if m := reWgSecretLine.FindStringSubmatch(l); m != nil {
+			lines[i] = m[1] + m[2] + m[3] + "<скрыто>"
+			continue
+		}
+		if m := reTblSecretLine.FindStringSubmatch(l); m != nil {
+			lines[i] = m[1] + `"<скрыто>"` + m[2]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // lineDiff — простой построчный diff: общий префикс и общий суффикс строк
