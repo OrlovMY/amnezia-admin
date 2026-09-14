@@ -16,6 +16,16 @@
 // clientsTable, которые получились бы после операции, ничего не записывая на
 // сервер:
 //   amnezia-admin add -key vpn://... -name Vasya -dry-run
+//
+// Необратимые команды (del, rekey и toggle в сторону отключения) требуют
+// подтверждения: у терминала печатают карточку (сервер/контейнер/имя/дата
+// создания/последнее подключение/ключ) и спрашивают "y/n"; без терминала —
+// только флаг -yes (для скриптов), без него — отказ. -dry-run побеждает
+// -yes: план печатается, ничего не пишется, вопрос не задаётся.
+//   amnezia-admin del -key vpn://... -name Vasya -yes
+//
+// Коды возврата: 0 — успех; 1 — ошибка; 2 — отказ из-за отсутствия
+// подтверждения (нет терминала и нет -yes, либо явный отказ "n" у терминала).
 package main
 
 import (
@@ -352,25 +362,15 @@ func interactive() {
 				break
 			}
 			victim := clients[idx]
-			fmt.Println()
-			fmt.Println(cHead("Будет удалён:"))
-			fmt.Println("  Имя:            " + cHead(victim.Name()))
-			fmt.Println("  Создан:         " + victim.Created())
-			fmt.Println("  Публичный ключ: " + cDim(victim.ClientID))
-			hs := sess.GetHandshakes(cur)[victim.ClientID]
-			if hs != "" && hs != "—" {
-				fmt.Println(cWarn("  ⚠ Внимание: у этого клиента была активность, последнее подключение: " + hs))
-			} else {
-				fmt.Println(cDim("  Подключений не было."))
+			card := buildCard(sess, cur, victim, "удалить")
+			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
+			if !proceed {
+				break
 			}
-			if ask(fmt.Sprintf("Точно удалить %q? (y/n): ", victim.Name())) == "y" {
-				if err := sess.DeleteByID(cur, victim.ClientID); err != nil {
-					printErr(err)
-				} else {
-					fmt.Println(cOK(fmt.Sprintf("Пользователь %q удалён.", victim.Name())))
-				}
+			if err := sess.DeleteByID(cur, victim.ClientID); err != nil {
+				printErr(err)
 			} else {
-				fmt.Println("Отменено.")
+				fmt.Println(cOK(fmt.Sprintf("Пользователь %q удалён.", victim.Name())))
 			}
 		case "6":
 			if !cur.Managed {
@@ -422,13 +422,20 @@ func interactive() {
 			}
 			victim := clients[idx]
 			enable := victim.Disabled()
-			verb := "отключить"
 			if enable {
-				verb = "включить"
-			}
-			if ask(fmt.Sprintf("%s пользователя %q? (y/n): ", strings.ToUpper(verb[:1])+verb[1:], victim.Name())) != "y" {
-				fmt.Println("Отменено.")
-				break
+				// включение — вопрос как раньше, без карточки (Г3: вопрос
+				// при включении не трогаем, владелец им уже пользуется).
+				verb := "включить"
+				if ask(fmt.Sprintf("%s пользователя %q? (y/n): ", strings.ToUpper(verb[:1])+verb[1:], victim.Name())) != "y" {
+					fmt.Println("Отменено.")
+					break
+				}
+			} else {
+				card := buildCard(sess, cur, victim, "отключить")
+				proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
+				if !proceed {
+					break
+				}
 			}
 			if err := sess.SetEnabled(cur, victim.ClientID, enable); err != nil {
 				printErr(err)
@@ -457,9 +464,9 @@ func interactive() {
 				break
 			}
 			victim := clients[idx]
-			fmt.Println(cWarn(fmt.Sprintf("Старый конфиг %q перестанет работать после перевыпуска.", victim.Name())))
-			if ask(fmt.Sprintf("Перевыпустить конфиг для %q? (y/n): ", victim.Name())) != "y" {
-				fmt.Println("Отменено.")
+			card := buildCard(sess, cur, victim, "перевыпустить конфиг")
+			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
+			if !proceed {
 				break
 			}
 			u, err := sess.RegenerateUser(cur, victim.ClientID)
@@ -502,6 +509,7 @@ func main() {
 	name := fs.String("name", "", "имя пользователя (для add/del/rename/toggle)")
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
+	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
 	fs.Parse(os.Args[2:])
 
 	if *key == "" {
@@ -574,6 +582,13 @@ func main() {
 			err = e
 			break
 		}
+		if needsConfirm(cmd, clients[idx]) {
+			card := buildCard(sess, cur, clients[idx], "удалить")
+			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
+			if !proceed {
+				os.Exit(code)
+			}
+		}
 		err = sess.DeleteByID(cur, clients[idx].ClientID)
 		if err == nil {
 			fmt.Printf("Пользователь %q удалён.\n", *name)
@@ -617,6 +632,13 @@ func main() {
 			break
 		}
 		enable := clients[idx].Disabled()
+		if needsConfirm(cmd, clients[idx]) {
+			card := buildCard(sess, cur, clients[idx], "отключить")
+			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
+			if !proceed {
+				os.Exit(code)
+			}
+		}
 		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
 		if err == nil {
 			if enable {
@@ -641,6 +663,13 @@ func main() {
 		if e != nil {
 			err = e
 			break
+		}
+		if needsConfirm(cmd, clients[idx]) {
+			card := buildCard(sess, cur, clients[idx], "перевыпустить конфиг")
+			proceed, code := confirmOrExit(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, card)
+			if !proceed {
+				os.Exit(code)
+			}
 		}
 		u, e := sess.RegenerateUser(cur, clients[idx].ClientID)
 		if e == nil {
