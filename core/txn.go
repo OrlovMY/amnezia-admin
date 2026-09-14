@@ -2,10 +2,9 @@ package core
 
 // Транзакционный слой поверх мутаций сервера (PR-2): каждая мутация делится
 // на «план» (Plan* — только чтение, вычисляет новое содержимое wg0.conf и
-// clientsTable) и «применение» (Apply — пишет и проверяет). Разделение даёт
-// dry-run (план без записи, core/txn.go:Diff) и транзакцию с verify/restore
-// (I2) бесплатно — один и тот же план используется в обоих случаях. CAS по
-// sha256sum (Г4) добавляется отдельным коммитом поверх этого слоя.
+// clientsTable) и «применение» (Apply — CAS → пишет → проверяет). Разделение
+// даёт dry-run (план без записи, core/txn.go:Diff) и транзакцию с CAS/verify/
+// restore (I2) бесплатно — один и тот же план используется в обоих случаях.
 //
 // Мьютекс (I5): экспортированные Plan*/Apply берут s.mu сами; внутри пакета —
 // варианты без блокировки (*Locked), которыми пользуются старые обёртки
@@ -16,6 +15,8 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -34,6 +35,7 @@ type Plan struct {
 	wgBefore, wgAfter   []byte
 	tblBefore, tblAfter []byte // tblBefore == nil, если clientsTable отсутствовала
 	tblExisted          bool
+	wgSHA, tblSHA       string // hex sha256 прочитанных байтов (для CAS); tblSHA пуст, если !tblExisted
 
 	result *NewUser // для add/rekey: конфиг клиента (приватный ключ!) — наружу только после Apply
 }
@@ -179,6 +181,20 @@ func peerPubKeysFromBytes(data []byte) map[string]bool {
 	return out
 }
 
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// fillSHA считает контрольные суммы прочитанных байтов (для CAS, Г4) — Plan*
+// вызывает её последней, когда wgBefore/tblBefore уже собраны.
+func (s *Session) fillSHA(p *Plan) {
+	p.wgSHA = sha256Hex(p.wgBefore)
+	if p.tblExisted {
+		p.tblSHA = sha256Hex(p.tblBefore)
+	}
+}
+
 // ---------- Plan* — только чтение ----------
 
 // PlanAddUser планирует создание пользователя (см. AddUser).
@@ -300,6 +316,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		tblExisted: tblExisted,
 		result:     &NewUser{Name: name, IP: clientIP, Config: config},
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -347,6 +364,7 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -445,6 +463,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		tblExisted: tblExisted,
 		result:     &NewUser{Name: name, IP: clientIP, Config: config},
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -492,6 +511,7 @@ func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Pla
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -572,6 +592,7 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -632,6 +653,7 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
 	}
+	s.fillSHA(p)
 	return p, nil
 }
 
@@ -650,20 +672,26 @@ func (s *Session) Apply(p *Plan) (*NewUser, error) {
 func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 	c := p.Container
 
-	// backup — существующая команда, без изменений.
+	// 1. CAS — до любой записи (fail-safe: сервер с неизвестным busybox лучше
+	// оставить как есть, чем записать поверх изменённого файла).
+	if err := s.checkCAS(c, p); err != nil {
+		return nil, err
+	}
+
+	// 2. backup — существующая команда, без изменений.
 	if err := s.backup(c); err != nil {
 		return nil, err
 	}
 
 	wgChanged := !bytes.Equal(p.wgBefore, p.wgAfter)
 
-	// запись → sync → verify
+	// 3-5. запись → sync → verify
 	if err := s.applySteps(c, p, wgChanged); err != nil {
-		// откат к прочитанному состоянию
+		// 6. откат к прочитанному состоянию
 		return nil, s.restore(c, p, wgChanged, err)
 	}
 
-	// только после успешного verify — конфиг наружу
+	// 7. только после успешного verify — конфиг наружу
 	return p.result, nil
 }
 
@@ -755,5 +783,45 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		_ = s.syncWg(c) // best-effort, см. комментарий над функцией
 	}
 	return fmt.Errorf("операция отменена, состояние восстановлено: %v", cause)
+}
+
+// ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------
+
+// checkCAS — шаг 1 Apply. Расхождение контрольной суммы или невозможность её
+// проверить (нет sha256sum на сервере, любой ненулевой код) — отказ ДО любой
+// записи. Для отсутствовавшей при планировании clientsTable проверяем не
+// сумму, а сам факт отсутствия (test -f), как и предписано Г4.
+func (s *Session) checkCAS(c *Container, p *Plan) error {
+	if err := s.casCheckFile(c, c.Dir+"/wg0.conf", p.wgSHA); err != nil {
+		return err
+	}
+	if !p.tblExisted {
+		exists, err := s.probeClientsTable(c)
+		if err != nil {
+			return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+		}
+		if exists {
+			return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")
+		}
+		return nil
+	}
+	return s.casCheckFile(c, c.Dir+"/clientsTable", p.tblSHA)
+}
+
+// casCheckFile — единственная новая серверная команда этого PR: sha256sum
+// через s.docker (чтобы работал sudo-фолбэк).
+func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
+	out, err := s.docker(fmt.Sprintf("docker exec %s sha256sum %s", c.Name, path), nil)
+	if err != nil {
+		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum")
+	}
+	if fields[0] != wantSHA {
+		return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", path)
+	}
+	return nil
 }
 

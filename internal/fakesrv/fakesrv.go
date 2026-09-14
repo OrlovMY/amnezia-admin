@@ -7,15 +7,18 @@
 //
 // Server разбирает РОВНО те серверные команды, что на 2026-09-14 шлёт core
 // (docker ps/exec, резервное копирование, wg syncconf/show, sudo-фолбэк,
-// test -f) — и только их. Любая другая команда возвращает ошибку "неизвестная
-// команда": это не удобство, а страж — если core когда-нибудь начнёт слать на
+// test -f, sha256sum — PR-2, CAS) — и только их. Любая другая команда
+// возвращает ошибку "неизвестная команда": это не удобство, а страж — если
+// core когда-нибудь начнёт слать на
 // сервер что-то новое или изменит текст существующей команды, тест на
 // fakesrv тут же упадёт, а не тихо отработает "как-нибудь".
 package fakesrv
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -51,6 +54,11 @@ type Server struct {
 	// Все последующие команды, включая повтор той же команды с "sudo ",
 	// выполняются как обычно.
 	DenyOnce bool
+
+	// NoSha256 — если true, `sha256sum` вернёт ошибку "sh: sha256sum: not
+	// found" (PR-2, CAS, Г4): на сервере с неизвестным busybox команды может
+	// не быть, и это должно быть отказом без записи, а не паникой/успехом.
+	NoSha256 bool
 
 	// DropPeerOnSync — если задан, `wg syncconf` "применяется" без ошибки, но
 	// этот PublicKey исключается из результирующего рантайма (PR-2,
@@ -178,6 +186,8 @@ var (
 		`ls -1t (\S+)/backup/clientsTable\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
 	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c 'wg syncconf wg0 <\(wg-quick strip (\S+)/wg0\.conf\)'$`)
 	reWgShow   = regexp.MustCompile(`^docker exec (\S+) wg show wg0 dump$`)
+	// reSha256 — PR-2, Г4: единственная новая серверная команда этого PR (CAS).
+	reSha256 = regexp.MustCompile(`^docker exec (\S+) sha256sum (\S+)$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -279,6 +289,19 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		}
 		s.peers = peers
 		return "", nil
+
+	case reSha256.MatchString(cmd):
+		if s.NoSha256 {
+			return "", fmt.Errorf("команда %q: exit status 127; stderr: sh: sha256sum: not found", cmd)
+		}
+		m := reSha256.FindStringSubmatch(cmd)
+		path := m[2]
+		data, ok := s.files[path]
+		if !ok {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: sha256sum: %s: No such file or directory", cmd, path)
+		}
+		sum := sha256.Sum256(data)
+		return fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), path), nil
 
 	case reWgShow.MatchString(cmd):
 		var b strings.Builder
