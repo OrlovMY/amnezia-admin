@@ -73,6 +73,65 @@ var (
 	ErrHostKeyMismatch = errors.New("ключ сервера не совпадает с ожидаемым отпечатком")
 )
 
+// HostKeyError — типизированная ошибка проверки ключа хоста (ревью PR-4-Б,
+// круг 1, SEC-01 Medium): вызывающий код (GUI) раньше добывал "полученный"
+// отпечаток регэкспом из текста ошибки для случая ErrHostKeyMismatch — тот
+// же класс хрупкой связи через текст, что уже правили у ErrCASMismatch
+// (PR-3). Теперь отпечатки и адрес — поля структуры, достаются через
+// errors.As, регэксп в GUI больше не нужен.
+//
+// Kind — один из ErrHostKeyUnknown/ErrHostKeyChanged/ErrHostKeyMismatch;
+// Unwrap возвращает его, поэтому errors.Is(err, ErrHostKeyChanged) и т.п.
+// продолжают работать как раньше, ничего в вызывающем коде (кроме GUI,
+// который теперь достаёт поля через errors.As) менять не нужно. Error()
+// возвращает ТОТ ЖЕ текст, что раньше собирал fmt.Errorf(..., %w, ...) в
+// checkHostKey — построчный текст в CLI/логах не меняется.
+//
+// KnownFp — отпечаток, который считался верным ДО этого подключения:
+// записанный в known_hosts (случай ErrHostKeyChanged) либо ожидавшийся по
+// хранилищу/-hostkey (случай ErrHostKeyMismatch); "" — для ErrHostKeyUnknown
+// (сервер вообще не встречался). PresentedFp — то, что сервер предъявил
+// ИМЕННО СЕЙЧАС, в этом подключении.
+type HostKeyError struct {
+	Kind        error
+	Addr        string
+	KnownFp     string
+	PresentedFp string
+	text        string
+}
+
+func (e *HostKeyError) Error() string { return e.text }
+func (e *HostKeyError) Unwrap() error { return e.Kind }
+
+var (
+	// ErrForgetVault — ForgetHostKey не смог перезапечатать .avlt (чтение,
+	// разбор пином, шифрование или запись файла) — НИЧЕГО не забыто:
+	// known_hosts не трогался вовсе (ревью PR-4-Б, круг 1, SEC-01 Medium:
+	// до этого различение шло по strings.Contains(err.Error(), "хранилищ"),
+	// что для голой ошибки ОС без этого слова приписывало сбой known_hosts и
+	// давало человеку ложную инструкцию — замкнутый круг с ErrForgetKnownHosts).
+	ErrForgetVault = errors.New("не удалось перезапечатать хранилище — ключ сервера не забыт")
+	// ErrForgetKnownHosts — .avlt уже успешно перезапечатан (отпечаток
+	// стёрт, MachineBind сохранён), но правка known_hosts не удалась.
+	// Только эта ошибка означает "вручную удалите строку из known_hosts" —
+	// ErrForgetVault до этого шага не доходит вовсе.
+	ErrForgetKnownHosts = errors.New("не удалось изменить known_hosts")
+)
+
+// newHostKeyError строит текст ошибки в точности как раньше делал
+// fmt.Errorf("%w: "+format, kind, args...) (kind.Error() на месте %w — то же
+// самое, что %s/%v для error), и заполняет структурные поля для errors.As.
+func newHostKeyError(kind error, addr, knownFp, presentedFp, format string, args ...any) *HostKeyError {
+	head := kind.Error() + ": "
+	return &HostKeyError{
+		Kind:        kind,
+		Addr:        addr,
+		KnownFp:     knownFp,
+		PresentedFp: presentedFp,
+		text:        head + fmt.Sprintf(format, args...),
+	}
+}
+
 // ConnectWithHostKey — как Connect, но с политикой проверки ключа хоста pol
 // вместо полного отключения проверки. Единственный путь установления SSH-
 // соединения в пакете core, начиная с PR-4.
@@ -140,8 +199,9 @@ func checkHostKey(pol HostKeyPolicy, addr string, remote net.Addr, fp string, ke
 	if keyErr == nil {
 		// Шаг 3: ключ принят по known_hosts (записан и совпал).
 		if pol.ExpectedFingerprint != "" && pol.ExpectedFingerprint != fp {
-			return false, fmt.Errorf("%w: адрес %s, ожидался %s (из хранилища), известный и предъявленный ключ сервера — %s",
-				ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp)
+			return false, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
+				"адрес %s, ожидался %s (из хранилища), известный и предъявленный ключ сервера — %s",
+				addr, pol.ExpectedFingerprint, fp)
 		}
 		return true, nil
 	}
@@ -154,15 +214,16 @@ func checkHostKey(pol HostKeyPolicy, addr string, remote net.Addr, fp string, ke
 		if pol.OnChanged != nil {
 			pol.OnChanged(addr, knownFp, fp)
 		}
-		return false, fmt.Errorf("%w: адрес %s, было %s, стало %s (known_hosts: %s); если сервер переустанавливали, удалите строку %q из %s и подключитесь заново",
-			ErrHostKeyChanged, addr, knownFp, fp, pol.KnownHostsPath, addr, pol.KnownHostsPath)
+		return false, newHostKeyError(ErrHostKeyChanged, addr, knownFp, fp,
+			"адрес %s, было %s, стало %s (known_hosts: %s); если сервер переустанавливали, удалите строку %q из %s и подключитесь заново",
+			addr, knownFp, fp, pol.KnownHostsPath, addr, pol.KnownHostsPath)
 	}
 
 	// Шаг 2: записи нет — неизвестный сервер.
 	if pol.ExpectedFingerprint != "" {
 		if pol.ExpectedFingerprint != fp {
-			return false, fmt.Errorf("%w: адрес %s, ожидался %s, предъявлен %s",
-				ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp)
+			return false, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
+				"адрес %s, ожидался %s, предъявлен %s", addr, pol.ExpectedFingerprint, fp)
 		}
 		if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
 			return false, err
@@ -170,10 +231,10 @@ func checkHostKey(pol HostKeyPolicy, addr string, remote net.Addr, fp string, ke
 		return true, nil
 	}
 	if pol.Prompt == nil {
-		return false, fmt.Errorf("%w: адрес %s, отпечаток %s", ErrHostKeyUnknown, addr, fp)
+		return false, newHostKeyError(ErrHostKeyUnknown, addr, "", fp, "адрес %s, отпечаток %s", addr, fp)
 	}
 	if !pol.Prompt(addr, fp) {
-		return false, fmt.Errorf("%w: адрес %s, отпечаток %s", ErrHostKeyUnknown, addr, fp)
+		return false, newHostKeyError(ErrHostKeyUnknown, addr, "", fp, "адрес %s, отпечаток %s", addr, fp)
 	}
 	if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
 		return false, err
@@ -265,21 +326,30 @@ func appendKnownHost(path, addr string, key ssh.PublicKey) error {
 func ForgetHostKey(pin, vaultPath, knownHostsPath, host string) error {
 	data, err := LoadVault(vaultPath)
 	if err != nil {
-		return fmt.Errorf("не удалось прочитать хранилище: %w", err)
+		return fmt.Errorf("%w: не удалось прочитать хранилище: %w", ErrForgetVault, err)
 	}
 	payload, info, err := OpenVaultInfo(pin, data)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrForgetVault, err)
 	}
 	payload.HostKeyFingerprint = ""
 	sealed, err := SealVault(pin, payload, info.Params, info.MachineBind)
 	if err != nil {
-		return fmt.Errorf("не удалось перезапечатать хранилище: %w", err)
+		return fmt.Errorf("%w: не удалось перезапечатать хранилище: %w", ErrForgetVault, err)
 	}
 	if err := WriteVaultFile(vaultPath, sealed); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrForgetVault, err)
 	}
-	return removeKnownHostLines(knownHostsPath, host)
+	// Хранилище уже перезапечатано (отпечаток стёрт) — отсюда и дальше
+	// любой сбой относится ТОЛЬКО к known_hosts, ни в коем случае не к
+	// хранилищу: перепутать эти два источника — значит дать человеку ЛОЖНУЮ
+	// инструкцию ("удалите строку known_hosts", когда на самом деле не
+	// записался .avlt, или наоборот) и загнать его в замкнутый круг
+	// (ревью PR-4-Б, круг 1, SEC-01 Medium).
+	if err := removeKnownHostLines(knownHostsPath, host); err != nil {
+		return fmt.Errorf("%w: %w", ErrForgetKnownHosts, err)
+	}
+	return nil
 }
 
 // removeKnownHostLines удаляет из known_hosts по пути path строки, чей

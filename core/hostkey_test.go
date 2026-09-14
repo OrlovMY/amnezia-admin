@@ -560,3 +560,257 @@ func TestNoInsecureHostKey(t *testing.T) {
 		t.Fatalf("обход дерева модуля от %s: %v", root, err)
 	}
 }
+
+// TestHostKeyErrorFieldsViaErrorsAs — ревью PR-4-Б, круг 1, SEC-01 Medium:
+// GUI раньше добывал "полученный" отпечаток регэкспом из текста ошибки
+// ErrHostKeyMismatch (тот же класс хрупкости, что чинили у ErrCASMismatch в
+// PR-3). Теперь Addr/KnownFp/PresentedFp — поля *HostKeyError, достаются
+// через errors.As; errors.Is(err, ErrHostKeyChanged/Mismatch) продолжает
+// работать (Unwrap), а текст Error() — тот же, что был у fmt.Errorf(%w...).
+func TestHostKeyErrorFieldsViaErrorsAs(t *testing.T) {
+	t.Run("ErrHostKeyChanged — Addr/KnownFp/PresentedFp совпадают с аргументами OnChanged", func(t *testing.T) {
+		khPath := filepath.Join(t.TempDir(), "known_hosts")
+		srvA, _ := newFakeSSHServer(t, "127.0.0.1:0")
+		credsA := credsForFakeSSH(t, srvA)
+		fpA := srvA.Fingerprint()
+
+		sessA, err := ConnectWithHostKey(credsA, HostKeyPolicy{KnownHostsPath: khPath, Prompt: alwaysTrustPrompt})
+		if err != nil {
+			t.Fatalf("подключение к A: %v", err)
+		}
+		sessA.Close()
+
+		srvB := restartFakeSSHServerSameAddr(t, srvA)
+		fpB := srvB.Fingerprint()
+		credsB := credsForFakeSSH(t, srvB)
+
+		sess, err := ConnectWithHostKey(credsB, HostKeyPolicy{KnownHostsPath: khPath})
+		closeIfAny(sess)
+
+		var hke *HostKeyError
+		if !errors.As(err, &hke) {
+			t.Fatalf("errors.As(err, *HostKeyError) = false; err = %v", err)
+		}
+		if !errors.Is(err, ErrHostKeyChanged) {
+			t.Fatalf("errors.Is(err, ErrHostKeyChanged) = false (Unwrap сломан?); err = %v", err)
+		}
+		if hke.KnownFp != fpA {
+			t.Errorf("hke.KnownFp = %s, want %s (записанный в known_hosts)", hke.KnownFp, fpA)
+		}
+		if hke.PresentedFp != fpB {
+			t.Errorf("hke.PresentedFp = %s, want %s (только что предъявленный)", hke.PresentedFp, fpB)
+		}
+		if hke.Addr == "" {
+			t.Error("hke.Addr пуст")
+		}
+		// Текст Error() — тот же, что раньше собирал fmt.Errorf(%w...): содержит
+		// оба отпечатка и слово "ИЗМЕНИЛСЯ" (ErrHostKeyChanged.Error()).
+		for _, want := range []string{"ИЗМЕНИЛСЯ", fpA, fpB} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err.Error() не содержит %q: %q", want, err.Error())
+			}
+		}
+	})
+
+	t.Run("ErrHostKeyMismatch (vault vs known_hosts) — KnownFp/PresentedFp", func(t *testing.T) {
+		srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
+		creds := credsForFakeSSH(t, srv)
+		khPath := filepath.Join(t.TempDir(), "known_hosts")
+
+		sess1, err := ConnectWithHostKey(creds, HostKeyPolicy{KnownHostsPath: khPath, Prompt: alwaysTrustPrompt})
+		if err != nil {
+			t.Fatalf("первичное подключение: %v", err)
+		}
+		sess1.Close()
+
+		expected := "SHA256:vaultSaysSomethingElseVaultSaysSomethingEl"
+		sess2, err := ConnectWithHostKey(creds, HostKeyPolicy{KnownHostsPath: khPath, ExpectedFingerprint: expected})
+		closeIfAny(sess2)
+
+		var hke *HostKeyError
+		if !errors.As(err, &hke) {
+			t.Fatalf("errors.As(err, *HostKeyError) = false; err = %v", err)
+		}
+		if !errors.Is(err, ErrHostKeyMismatch) {
+			t.Fatalf("errors.Is(err, ErrHostKeyMismatch) = false; err = %v", err)
+		}
+		if hke.KnownFp != expected {
+			t.Errorf("hke.KnownFp = %s, want %s (ожидавшийся по хранилищу)", hke.KnownFp, expected)
+		}
+		if hke.PresentedFp != srv.Fingerprint() {
+			t.Errorf("hke.PresentedFp = %s, want %s (настоящий ключ сервера)", hke.PresentedFp, srv.Fingerprint())
+		}
+	})
+
+	t.Run("ErrHostKeyUnknown — KnownFp пуст, PresentedFp заполнен", func(t *testing.T) {
+		srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
+		creds := credsForFakeSSH(t, srv)
+		khPath := filepath.Join(t.TempDir(), "known_hosts")
+
+		sess, err := ConnectWithHostKey(creds, HostKeyPolicy{KnownHostsPath: khPath})
+		closeIfAny(sess)
+
+		var hke *HostKeyError
+		if !errors.As(err, &hke) {
+			t.Fatalf("errors.As(err, *HostKeyError) = false; err = %v", err)
+		}
+		if hke.KnownFp != "" {
+			t.Errorf("hke.KnownFp = %q, want пусто (сервер вообще не встречался)", hke.KnownFp)
+		}
+		if hke.PresentedFp != srv.Fingerprint() {
+			t.Errorf("hke.PresentedFp = %s, want %s", hke.PresentedFp, srv.Fingerprint())
+		}
+	})
+}
+
+// mkVaultTmpBlocker создаёт path+".tmp" КАК ДИРЕКТОРИЮ — WriteVaultFile/
+// removeKnownHostLines пишут через tmp+rename (как SaveVault), и запись в
+// путь, который уже занят директорией, гарантированно и детерминированно
+// падает на любой ОС (Windows в том числе) без манипуляций правами доступа.
+func mkVaultTmpBlocker(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path+".tmp", 0755); err != nil {
+		t.Fatalf("mkVaultTmpBlocker(%s): %v", path, err)
+	}
+}
+
+// TestForgetHostKeyVaultWriteFails — ревью PR-4-Б, круг 1, SEC-01 Medium
+// (сценарий, найденный ревьюером): раньше GUI различал сбой хранилища и
+// сбой known_hosts по strings.Contains(err.Error(), "хранилищ") — голая
+// ошибка ОС от WriteVaultFile этого слова не содержит, поэтому сбой ЗАПИСИ
+// .avlt приписывался known_hosts, человеку советовали "удалите строку", а
+// хранилище оставалось со старым отпечатком — следующая попытка снова
+// давала Mismatch/Changed → снова Forget → снова сбой записи: замкнутый
+// круг. Тест доказывает: (1) ошибка — ErrForgetVault, НЕ ErrForgetKnownHosts;
+// (2) .avlt НЕ изменился (отпечаток остался старым — "ничего не забыто");
+// (3) known_hosts вообще не тронут (removeKnownHostLines не вызывается).
+func TestForgetHostKeyVaultWriteFails(t *testing.T) {
+	pin := "forgetPin1234"
+	oldFp := "SHA256:oldFingerprintPlaceholderXXXXXXXXXXXXXXXXXX"
+	payload := VaultPayload{Label: "Test", Key: "vpn://abc", Created: "2024-01-01T00:00:00Z", HostKeyFingerprint: oldFp}
+	data, err := SealVault(pin, payload, testArgonParams, false)
+	if err != nil {
+		t.Fatalf("SealVault: %v", err)
+	}
+	vaultPath := filepath.Join(t.TempDir(), "test.avlt")
+	if err := os.WriteFile(vaultPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	addr := "some-host.example:22"
+	key, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatalf("fakesrv.NewHostKey: %v", err)
+	}
+	if err := appendKnownHost(khPath, addr, key.PublicKey()); err != nil {
+		t.Fatalf("appendKnownHost: %v", err)
+	}
+	khBefore, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts до Forget: %v", err)
+	}
+
+	mkVaultTmpBlocker(t, vaultPath) // WriteVaultFile упадёт на os.WriteFile(vaultPath+".tmp", ...)
+
+	err = ForgetHostKey(pin, vaultPath, khPath, addr)
+	if err == nil {
+		t.Fatal("ForgetHostKey вернул nil при заблокированной записи .avlt")
+	}
+	if !errors.Is(err, ErrForgetVault) {
+		t.Errorf("err = %v, want errors.Is(err, ErrForgetVault)", err)
+	}
+	if errors.Is(err, ErrForgetKnownHosts) {
+		t.Errorf("err ошибочно классифицирован как ErrForgetKnownHosts (ложная инструкция «удалите строку»): %v", err)
+	}
+
+	// .avlt не тронут — отпечаток остался СТАРЫМ (ничего не забыто).
+	stillSealed, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(vaultPath) после неудачного Forget: %v", err)
+	}
+	got, err := OpenVault(pin, stillSealed)
+	if err != nil {
+		t.Fatalf("OpenVault после неудачного Forget: %v", err)
+	}
+	if got.HostKeyFingerprint != oldFp {
+		t.Errorf("HostKeyFingerprint = %q, want прежний %q (ForgetHostKey не должен был ничего забыть)", got.HostKeyFingerprint, oldFp)
+	}
+
+	// known_hosts вообще не тронут.
+	khAfter, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts после неудачного Forget: %v", err)
+	}
+	if !bytes.Equal(khBefore, khAfter) {
+		t.Fatalf("known_hosts изменился при сбое записи хранилища:\nбыло:  %q\nстало: %q", khBefore, khAfter)
+	}
+}
+
+// TestForgetHostKeyKnownHostsWriteFails — обратный сценарий: .avlt уже
+// успешно перезапечатан (отпечаток стёрт), но правка known_hosts не
+// удалась. Ошибка обязана быть ErrForgetKnownHosts (не ErrForgetVault) —
+// только эта ветка means "исправьте known_hosts вручную", хранилище уже в
+// порядке и трогать его снова не нужно.
+func TestForgetHostKeyKnownHostsWriteFails(t *testing.T) {
+	pin := "forgetPin1234"
+	oldFp := "SHA256:oldFingerprintPlaceholderXXXXXXXXXXXXXXXXXX"
+	payload := VaultPayload{Label: "Test", Key: "vpn://abc", Created: "2024-01-01T00:00:00Z", HostKeyFingerprint: oldFp}
+	data, err := SealVault(pin, payload, testArgonParams, false)
+	if err != nil {
+		t.Fatalf("SealVault: %v", err)
+	}
+	vaultPath := filepath.Join(t.TempDir(), "test.avlt")
+	if err := os.WriteFile(vaultPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	addr := "some-host.example:22"
+	key, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatalf("fakesrv.NewHostKey: %v", err)
+	}
+	if err := appendKnownHost(khPath, addr, key.PublicKey()); err != nil {
+		t.Fatalf("appendKnownHost: %v", err)
+	}
+	khBefore, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts до Forget: %v", err)
+	}
+
+	mkVaultTmpBlocker(t, khPath) // removeKnownHostLines упадёт на os.WriteFile(khPath+".tmp", ...)
+
+	err = ForgetHostKey(pin, vaultPath, khPath, addr)
+	if err == nil {
+		t.Fatal("ForgetHostKey вернул nil при заблокированной записи known_hosts")
+	}
+	if !errors.Is(err, ErrForgetKnownHosts) {
+		t.Errorf("err = %v, want errors.Is(err, ErrForgetKnownHosts)", err)
+	}
+	if errors.Is(err, ErrForgetVault) {
+		t.Errorf("err ошибочно классифицирован как ErrForgetVault (хранилище уже перезапечатано успешно): %v", err)
+	}
+
+	// .avlt УЖЕ перезапечатан — отпечаток стёрт, несмотря на общий отказ Forget.
+	stillSealed, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(vaultPath) после Forget: %v", err)
+	}
+	got, err := OpenVault(pin, stillSealed)
+	if err != nil {
+		t.Fatalf("OpenVault после Forget: %v", err)
+	}
+	if got.HostKeyFingerprint != "" {
+		t.Errorf("HostKeyFingerprint = %q, want пусто (хранилище должно быть перезапечатано ДО сбоя known_hosts)", got.HostKeyFingerprint)
+	}
+
+	// known_hosts не изменился (WriteFile(tmp) упал до Rename).
+	khAfter, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("known_hosts после Forget: %v", err)
+	}
+	if !bytes.Equal(khBefore, khAfter) {
+		t.Fatalf("known_hosts изменился, хотя запись должна была упасть:\nбыло:  %q\nстало: %q", khBefore, khAfter)
+	}
+}
