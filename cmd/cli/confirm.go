@@ -59,6 +59,12 @@ func renderCard(card ActionCard) string {
 	if card.LastSeen != "" && card.LastSeen != "—" {
 		fmt.Fprintln(&b, cWarn("  ⚠ Внимание: у этого клиента была активность."))
 	}
+	if card.Action == "перевыпустить конфиг" {
+		// раньше это предупреждение печаталось только в меню (main.go, пункт
+		// 8); подкоманда rekey его не показывала вовсе (ревью PR-5, Medium-2).
+		// В GUI такое предупреждение уже есть — CLI молчал.
+		fmt.Fprintln(&b, cWarn("  ⚠ Старый конфиг перестанет работать, пользователю нужно установить новый."))
+	}
 	return b.String()
 }
 
