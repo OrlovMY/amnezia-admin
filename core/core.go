@@ -277,10 +277,31 @@ func (e ClientEntry) Disabled() bool {
 	return b
 }
 
+// LoadClients читает clientsTable. "Файла нет" и "не удалось прочитать" —
+// разные исходы: отсутствие таблицы до первого пользователя — это нормально
+// (пустой список, err == nil), а сбой чтения (нет прав, контейнер
+// перезапускается и т.п.) обязан быть ошибкой, а не тихо превращаться в
+// пустой список — иначе AddUser поверх такой ошибки сохранит таблицу из
+// одной новой записи и сотрёт всех существующих пользователей (аудит
+// 2026-09-14, Critical). Различаем через `test -f` + echo yes/no, а не по
+// коду возврата `cat`: `test -f` даёт код 1 и при "нет файла", и при прочих
+// отказах exec, а различить их по *ssh.ExitError фейковый сервер не сможет
+// (поля Waitmsg не экспортированы) — текст в stdout одинаково даёт и
+// реальный сервер, и фейк.
 func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
+	probe, err := s.docker(fmt.Sprintf("docker exec %s sh -c 'test -f %s/clientsTable && echo yes || echo no'", c.Name, c.Dir), nil)
+	if err != nil {
+		return nil, fmt.Errorf("проверка наличия clientsTable: %w", err)
+	}
+	if strings.TrimSpace(probe) == "no" {
+		return []ClientEntry{}, nil // таблицы ещё нет — до первого пользователя это нормально
+	}
 	out, err := s.catIn(c, c.Dir+"/clientsTable")
-	if err != nil || strings.TrimSpace(out) == "" {
-		return []ClientEntry{}, nil // таблицы может не быть — это не ошибка
+	if err != nil {
+		return nil, fmt.Errorf("чтение clientsTable: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return []ClientEntry{}, nil // пустой файл (например, после восстановления) — не ошибка
 	}
 	var list []ClientEntry
 	if err := json.Unmarshal([]byte(out), &list); err != nil {
