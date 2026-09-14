@@ -80,6 +80,20 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 	}
 }
 
+// readLine читает одну строку из in. Если in уже *bufio.Reader (как in в
+// interactive() — общий на весь цикл меню), читаем прямо через него, а не
+// оборачиваем в новый bufio.NewReader: второй слой съел бы вставленные
+// заранее строки (пайп, ввод в несколько строк подряд) в свой собственный
+// буфер, и следующий ask() в меню их бы не увидел (ревью PR-5, Low-6).
+func readLine(in io.Reader) string {
+	if br, ok := in.(*bufio.Reader); ok {
+		line, _ := br.ReadString('\n')
+		return line
+	}
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	return line
+}
+
 // needsConfirm — нужен ли вопрос для подкоманды cmd над записью cl.
 // del → true; rekey → true; toggle → true, если cl активен (то есть будет
 // ОТКЛЮЧЁН); toggle над отключённым (включение) → false; rename, add, list
@@ -116,8 +130,7 @@ func confirmOrExit(in io.Reader, out, errOut io.Writer, isTTY, yes bool, card Ac
 		return false, 2
 	}
 	fmt.Fprintf(out, "%s %q? (y/n): ", capitalizeFirst(card.Action), card.Name)
-	line, _ := bufio.NewReader(in).ReadString('\n')
-	answer := strings.ToLower(strings.TrimSpace(line))
+	answer := strings.ToLower(strings.TrimSpace(readLine(in)))
 	if answer == "y" || answer == "yes" {
 		return true, 0
 	}
