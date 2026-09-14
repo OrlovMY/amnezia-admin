@@ -24,6 +24,39 @@ func testCard() ActionCard {
 	}
 }
 
+// rekeyConfigWarning — дословный текст предупреждения о перевыпуске конфига
+// (ревью PR-5, круг 1, Medium-2); вынесен в константу, чтобы тест и код не
+// сверялись по копии строки, размноженной вручную в двух местах.
+const rekeyConfigWarning = "Старый конфиг перестанет работать, пользователю нужно установить новый."
+
+// TestRenderCardRekeyWarningOnlyForRekey — ревью PR-5, круг 2, Low (BE-01):
+// renderCard обязан печатать предупреждение о перевыпуске конфига только для
+// действия "перевыпустить конфиг" — и не печатать его для "удалить"/
+// "отключить" (там уместность этого текста не проверялась ни разу: до этого
+// теста таблица TestConfirmSubcommandTable гоняла все случаи с действием
+// "удалить", и удаление строки предупреждения в renderCard не покраснило бы
+// ни один тест).
+func TestRenderCardRekeyWarningOnlyForRekey(t *testing.T) {
+	for _, tc := range []struct {
+		action   string
+		wantWarn bool
+	}{
+		{"перевыпустить конфиг", true},
+		{"удалить", false},
+		{"отключить", false},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			card := testCard()
+			card.Action = tc.action
+			out := renderCard(card)
+			got := strings.Contains(out, rekeyConfigWarning)
+			if got != tc.wantWarn {
+				t.Errorf("renderCard(Action=%q) содержит предупреждение о перевыпуске = %v, хочу %v; out:\n%s", tc.action, got, tc.wantWarn, out)
+			}
+		})
+	}
+}
+
 // TestNonTTYWithoutYesExit2 — без терминала и без -yes действие обязано
 // отказать с кодом 2: скрипт, запущенный без TTY (cron, CI) и без явного
 // -yes, не должен случайно выполнить необратимое действие.
