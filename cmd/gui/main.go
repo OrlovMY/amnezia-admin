@@ -573,8 +573,12 @@ func (u *ui) hostKeyPrompt(host, fingerprint string) bool {
 // а "забыть" в CLI/без-хранилища не заводится (SEC-01).
 func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
 	fyne.Do(func() {
+		// Каждый отпечаток на своей строке (ревью PR-4-Б, круг 1, UI-01
+		// Low) — слова текста С3 не менялись, только разбивка строк для
+		// читаемости; длинные SHA256:… в одну строку с преамбулой сливались
+		// визуально.
 		body := widget.NewLabel(fmt.Sprintf(
-			"Сервер %s. Сохранённый отпечаток: %s Полученный: %s Так бывает после переустановки сервера. "+
+			"Сервер %s.\nСохранённый отпечаток: %s\nПолученный: %s\nТак бывает после переустановки сервера. "+
 				"Если вы его не переустанавливали — возможна подмена: не подключайтесь.",
 			host, knownFp, presentedFp,
 		))
@@ -582,14 +586,31 @@ func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath str
 
 		content := container.NewVBox(body)
 		var d dialog.Dialog
+		// forgetClicked различает "закрыто нажатием «Забыть ключ сервера…»"
+		// (пин ещё нужен — его использует confirmForgetHostKey сразу после
+		// d.Hide() ниже) от любого другого закрытия диалога ("Закрыть",
+		// Escape, крестик — все они одинаково идут через SetOnClosed). Во
+		// втором случае ссылка на пин в vc сбрасывается сразу (ревью PR-4-Б,
+		// круг 1, SEC-01 Low): решение "не забывать ключ сейчас" принято,
+		// дальше этот pin в vc не понадобится — незачем держать на него
+		// ссылку дольше, чем нужно (В2 п.5, общий принцип).
+		forgetClicked := false
 		if vc != nil {
 			forgetBtn := widget.NewButton("Забыть ключ сервера…", func() {
+				forgetClicked = true
 				d.Hide()
 				u.confirmForgetHostKey(host, knownHostsPath, vc, connectBtn, info)
 			})
 			content.Add(forgetBtn)
 		}
 		d = dialog.NewCustom("Ключ сервера изменился", "Закрыть", content, u.win)
+		if vc != nil {
+			d.SetOnClosed(func() {
+				if !forgetClicked {
+					vc.pin = nil
+				}
+			})
+		}
 		d.Resize(fyne.NewSize(480, 280))
 		d.Show()
 	})
