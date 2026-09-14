@@ -102,13 +102,23 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 		n, _ := strconv.Atoi(m[2])
 		used[n] = true
 	}
+	// Подсеть при отсутствующем Address — обходом СРЕЗА conf.peers (порядок
+	// в тексте wg0.conf, детерминированный), а не обходом map usedIPs
+	// (порядок итерации карты в Go не определён — review круг 2, Low,
+	// AR-01: недетерминизм, внесённый этим PR; nextFreeIP до PR-3 читала
+	// подсеть тем же способом, через conf.peers).
+	if subnet == "" {
+		for _, p := range conf.peers {
+			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
+				subnet = m[1]
+				break
+			}
+		}
+	}
 	for ip := range usedIPs(conf, clients) {
 		m := ipRe.FindStringSubmatch(ip)
 		if m == nil {
 			continue
-		}
-		if subnet == "" {
-			subnet = m[1]
 		}
 		n, _ := strconv.Atoi(m[2])
 		used[n] = true

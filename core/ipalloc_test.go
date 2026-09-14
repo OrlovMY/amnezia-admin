@@ -93,3 +93,40 @@ func TestHostIP(t *testing.T) {
 		}
 	}
 }
+
+// TestAllocateIPSubnetDeterministic — review-reply PR-3 круга 2 (Low,
+// AR-01): при отсутствующем Address в [Interface] подсеть раньше бралась
+// обходом map usedIPs — порядок итерации карты в Go не определён и меняется
+// от запуска к запуску, поэтому результат мог "мигать" между несколькими
+// подсетями при одних и тех же входных данных. Конфиг ниже без Address,
+// с peer'ами в ДВУХ разных подсетях (10.8.2.x первым в срезе conf.peers,
+// 10.8.3.x вторым) и резервом отключённого в ТРЕТЬЕЙ (10.8.9.x) — если бы
+// подсеть бралась из map, результат мог бы совпасть с любой из трёх.
+// Правильный (детерминированный) результат — всегда первая по СРЕЗУ
+// conf.peers подсеть (10.8.2.x), независимо от resulting map usedIPs.
+// Много итераций — Go рандомизирует порядок обхода map при каждом range,
+// а не один раз на программу, поэтому один прогон недостаточен, чтобы
+// поймать регресс.
+func TestAllocateIPSubnetDeterministic(t *testing.T) {
+	conf := parseWgConf(
+		"[Interface]\nListenPort = 51820\n\n" + // без Address
+			"[Peer]\nPublicKey = A\nAllowedIPs = 10.8.2.5/32\n\n" +
+			"[Peer]\nPublicKey = B\nAllowedIPs = 10.8.3.7/32\n")
+	clients := []ClientEntry{
+		{ClientID: "A", UserData: map[string]any{"clientName": "Alice"}},
+		{ClientID: "B", UserData: map[string]any{"clientName": "Bob"}},
+		{ClientID: "RESERVED", UserData: map[string]any{
+			"clientName": "Carol", "disabled": true, "allowedIP": "10.8.9.9/32",
+		}},
+	}
+	const want = "10.8.2.2" // used[5,7,9] заняты (по номеру хоста, без учёта подсети), .2 свободен
+	for i := 0; i < 200; i++ {
+		ip, err := allocateIP(conf, clients)
+		if err != nil {
+			t.Fatalf("итерация %d: allocateIP: %v", i, err)
+		}
+		if ip != want {
+			t.Fatalf("итерация %d: ip = %q, want %q (подсеть должна браться из первого peer'а в срезе conf.peers, детерминированно)", i, ip, want)
+		}
+	}
+}
