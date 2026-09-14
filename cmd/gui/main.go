@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -21,6 +23,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"amnezia-admin/core"
 )
@@ -90,6 +94,15 @@ func goSafe(fn func()) {
 // ---------- экран подключения ----------
 
 func (u *ui) connectScreen() fyne.CanvasObject {
+	return u.connectScreenWithStatus("")
+}
+
+// connectScreenWithStatus — connectScreen() с предзаполненным статусом в
+// info-лейбле; используется после "Забыть ключ сервера" (R2, Е1) — экран
+// подключения, куда возвращает вторая (подтверждающая) диалоговая форма,
+// сразу показывает "Ключ сервера забыт. Нажмите «Подключиться»..." (С3,
+// UI-01, "Статус после").
+func (u *ui) connectScreenWithStatus(status string) fyne.CanvasObject {
 	keyEntry := widget.NewMultiLineEntry()
 	keyEntry.SetPlaceHolder("Вставьте админский ключ vpn://...")
 	keyEntry.Wrapping = fyne.TextWrapBreak
@@ -97,7 +110,7 @@ func (u *ui) connectScreen() fyne.CanvasObject {
 		keyEntry.SetText(k)
 	}
 
-	info := widget.NewLabel("")
+	info := widget.NewLabel(status)
 	info.Wrapping = fyne.TextWrapWord
 
 	var connectBtn *widget.Button
@@ -107,7 +120,7 @@ func (u *ui) connectScreen() fyne.CanvasObject {
 			info.SetText("Ключ пустой.")
 			return
 		}
-		u.attemptConnect(key, false, connectBtn, info)
+		u.attemptConnect(key, nil, connectBtn, info)
 	})
 
 	title := widget.NewLabelWithStyle("Amnezia Admin", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
@@ -288,8 +301,9 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		goSafe(func() {
 			data, err := core.LoadVault(path)
 			var payload core.VaultPayload
+			var vinfo core.VaultInfo
 			if err == nil {
-				payload, err = core.OpenVault(pin, data)
+				payload, vinfo, err = core.OpenVaultInfo(pin, data)
 			}
 			if err != nil {
 				now := clock.Now()
@@ -314,10 +328,18 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				return
 			}
 			_ = core.SaveThrottle(vaultDir, vaultName, core.RegisterSuccess())
+			// vc — контекст открытого хранилища для attemptConnect (Е1):
+			// ExpectedFingerprint (payload.HostKeyFingerprint), перезапечатывание
+			// после первого подтверждённого подключения (если поле было пусто) и
+			// кнопка "Забыть ключ сервера" на диалоге ErrHostKeyChanged/Mismatch.
+			// pin — указатель на ЭТУ переменную (уникальна для данного вызова
+			// submit()); обнуляется в attemptConnect/confirmForgetHostKey сразу
+			// после того, как он больше не нужен (SEC-01, С3, п.2).
+			vc := &vaultCtx{path: path, pin: &pin, info: vinfo, payload: payload}
 			fyne.Do(func() {
 				stopTicker()
 				d.Hide()
-				u.attemptConnect(payload.Key, true, connectBtn, info)
+				u.attemptConnect(payload.Key, vc, connectBtn, info)
 			})
 		})
 	}
@@ -380,12 +402,39 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	acquireOnlineTime()
 }
 
-// attemptConnect декодирует ключ, подключается по SSH и переключает экран.
-// fromVault=false (ключ введён вручную) — после первого успешного подключения
-// предлагает сохранить ключ в зашифрованное хранилище.
-func (u *ui) attemptConnect(key string, fromVault bool, connectBtn *widget.Button, info *widget.Label) {
+// vaultCtx — контекст открытого хранилища (.avlt), нужный attemptConnect для
+// (1) подстановки ExpectedFingerprint из payload.HostKeyFingerprint, (2)
+// перезапечатывания файла новым отпечатком после первого подтверждённого
+// подключения, если поле было пусто (v1 или v2 без отпечатка), и (3) кнопки
+// "Забыть ключ сервера" на диалоге ErrHostKeyChanged/ErrHostKeyMismatch (R2,
+// С3-позиция-ядра.md). nil — ключ введён вручную, хранилища нет: диалог
+// смены ключа тогда показывается БЕЗ кнопки "Забыть" (Forget действует
+// только "при открытии из хранилища" — Е1 задания PR-4).
+//
+// pin — указатель на переменную с пином из showVaultPinDialog.submit():
+// живёт в памяти ровно до момента, когда он больше не нужен — либо сразу
+// после перезапечатывания при успешном подключении, либо сразу после вызова
+// core.ForgetHostKey при отказе (SEC-01, С3, п.2: "отдельного ввода пина не
+// требовать... пин обнуляется сразу после; если обнулён — спросить заново").
+// Пин нигде не сохраняется на диск и не логируется (В2 п.5).
+type vaultCtx struct {
+	path    string
+	pin     *string
+	info    core.VaultInfo
+	payload core.VaultPayload
+}
+
+// attemptConnect декодирует ключ, подключается по SSH (с проверкой ключа
+// хоста, PR-4) и переключает экран. vc == nil — ключ введён вручную: после
+// первого успешного подключения предлагает сохранить ключ в хранилище
+// (offerSaveKey). vc != nil — ключ открыт из хранилища: ExpectedFingerprint
+// берётся из vc.payload.HostKeyFingerprint, а после первого подключения (там,
+// где это поле было пусто) отпечаток дописывается в файл.
+func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
 	connectBtn.Disable()
 	info.SetText("Декодирую ключ и подключаюсь по SSH...")
+
+	knownHostsPath := filepath.Join(core.DefaultVaultDir(), "known_hosts")
 
 	goSafe(func() {
 		cfg, err := core.DecodeVpnKey(key)
@@ -398,8 +447,41 @@ func (u *ui) attemptConnect(key string, fromVault bool, connectBtn *widget.Butto
 			u.connectFail(connectBtn, info, err.Error())
 			return
 		}
-		sess, err := core.Connect(creds)
+
+		expectedFp := ""
+		if vc != nil {
+			expectedFp = vc.payload.HostKeyFingerprint
+		}
+		// Prompt/OnChanged вызываются СИНХРОННО внутри ssh.Dial (см. эту же
+		// горутину goSafe) — обновлять UI можно только через fyne.Do; Prompt
+		// дополнительно блокируется на канале, дожидаясь ответа человека
+		// (иначе ssh.Dial получил бы решение раньше, чем оно принято).
+		sess, err := core.ConnectWithHostKey(creds, core.HostKeyPolicy{
+			KnownHostsPath: knownHostsPath,
+			Prompt:         u.hostKeyPrompt,
+			OnChanged: func(host, knownFp, presentedFp string) {
+				u.hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath, vc, connectBtn, info)
+			},
+			ExpectedFingerprint: expectedFp,
+		})
 		if err != nil {
+			// ErrHostKeyChanged уже показал диалог через OnChanged выше (core
+			// зовёт его сама перед возвратом ошибки). ErrHostKeyMismatch core
+			// НЕ сопровождает вызовом OnChanged (С1: сигнатура ядра, аргументы
+			// нужны только для "изменился") — но UI-01/С3 требует ТОТ ЖЕ
+			// диалог и для "не совпал с хранилищем" ("отдельным термином не
+			// показывать"). Строим его здесь: адрес — как в core
+			// (knownhosts.Normalize на dial-адресе), "сохранённый" отпечаток —
+			// уже известен (expectedFp, это и есть ExpectedFingerprint),
+			// "полученный" — извлекаем из текста ошибки (core/hostkey.go,
+			// checkHostKey: ровно два отпечатка в сообщении, один из них —
+			// expectedFp). Не идеально (завязка на текст), но не требует
+			// трогать core/ (В2 п.6 — часть Б не меняет ядро).
+			if vc != nil && errors.Is(err, core.ErrHostKeyMismatch) {
+				addr := knownhosts.Normalize(net.JoinHostPort(creds.Host, creds.Port))
+				presented := extractOtherFingerprint(err.Error(), expectedFp)
+				u.hostKeyChangedDialog(addr, expectedFp, presented, knownHostsPath, vc, connectBtn, info)
+			}
 			u.connectFail(connectBtn, info, "SSH не удался: "+err.Error())
 			return
 		}
@@ -409,6 +491,24 @@ func (u *ui) attemptConnect(key string, fromVault bool, connectBtn *widget.Butto
 			u.connectFail(connectBtn, info, err.Error())
 			return
 		}
+
+		if vc != nil && vc.payload.HostKeyFingerprint == "" {
+			// v1-хранилище (или v2, сохранённое ДО подтверждения ключа) — это
+			// первое подтверждённое подключение, отпечаток узнаём только
+			// сейчас (Е1). Ошибка перезапечатывания не фатальна — соединение
+			// остаётся, просто отпечаток не будет запечатан на этот раз.
+			if resealErr := reseal(vc, sess.HostKeyFingerprint); resealErr != nil {
+				fyne.Do(func() {
+					if u.status != nil {
+						u.status.SetText("Не удалось сохранить отпечаток ключа в хранилище: " + resealErr.Error())
+					}
+				})
+			}
+		}
+		if vc != nil && vc.pin != nil {
+			*vc.pin = "" // пин больше не нужен (SEC-01, В2 п.5)
+		}
+
 		fyne.Do(func() {
 			u.sess = sess
 			u.containers = containers
@@ -421,11 +521,152 @@ func (u *ui) attemptConnect(key string, fromVault bool, connectBtn *widget.Butto
 			}
 			u.win.SetContent(u.mainScreen())
 			u.refresh()
-			if !fromVault {
-				u.offerSaveKey(key, creds.Host)
+			if vc == nil {
+				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
 			}
 		})
 	})
+}
+
+// reseal перезапечатывает .avlt хранилища vc с только что принятым
+// отпечатком ключа хоста fp — теми же параметрами Argon2 и той же
+// привязкой к машине, что были при открытии (vc.info из OpenVaultInfo), тем
+// же пином, которым файл был открыт (используется ДО его обнуления в
+// attemptConnect).
+func reseal(vc *vaultCtx, fp string) error {
+	if vc.pin == nil {
+		return fmt.Errorf("пин недоступен")
+	}
+	payload := vc.payload
+	payload.HostKeyFingerprint = fp
+	data, err := core.SealVault(*vc.pin, payload, vc.info.Params, vc.info.MachineBind)
+	if err != nil {
+		return err
+	}
+	return core.WriteVaultFile(vc.path, data)
+}
+
+// fingerprintPattern — вид отпечатка SHA256 ключа хоста (ssh.FingerprintSHA256).
+var fingerprintPattern = regexp.MustCompile(`SHA256:[A-Za-z0-9+/]+=*`)
+
+// extractOtherFingerprint достаёт из текста ошибки ErrHostKeyMismatch
+// отпечаток, отличный от known (уже известного нам из хранилища) — тот
+// самый "полученный" (см. комментарий в attemptConnect). Не найден —
+// возвращает заглушку: диалог всё равно покажет адрес и известный
+// отпечаток, инструкция не потеряется.
+func extractOtherFingerprint(errText, known string) string {
+	for _, m := range fingerprintPattern.FindAllString(errText, -1) {
+		if m != known {
+			return m
+		}
+	}
+	return "неизвестен (см. текст ошибки ниже)"
+}
+
+// hostKeyPrompt — core.HostKeyPolicy.Prompt для GUI (Е1 задания PR-4):
+// показывает диалог "Неизвестный сервер" и ждёт ответ по каналу. Вызывается
+// синхронно внутри ssh.Dial из фоновой горутины (goSafe) — диалог
+// показываем через fyne.Do, результат ждём по chan bool, иначе Fyne
+// упал бы на обращении к UI из чужой горутины, а ssh.Dial получил бы ответ
+// раньше, чем человек его дал.
+func (u *ui) hostKeyPrompt(host, fingerprint string) bool {
+	result := make(chan bool, 1)
+	fyne.Do(func() {
+		body := widget.NewLabel(fmt.Sprintf(
+			"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
+			host, fingerprint,
+		))
+		body.Wrapping = fyne.TextWrapWord
+		d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
+			result <- ok
+		}, u.win)
+		d.Resize(fyne.NewSize(480, 240))
+		d.Show()
+	})
+	return <-result
+}
+
+// hostKeyChangedDialog показывает диалог "Ключ сервера изменился" (UI-01,
+// дословно; С3-позиция-ядра.md) — и для ErrHostKeyChanged (данные из
+// OnChanged), и для ErrHostKeyMismatch при открытии из хранилища (тот же
+// диалог, отдельным термином не показывается — С3: "«Не совпал с
+// хранилищем при пустом known_hosts» — тот же диалог «изменился»"). vc ==
+// nil (ключ введён вручную, хранилища нет) — кнопки "Забыть ключ сервера…"
+// нет: принять сменившийся ключ нельзя в любом случае (правка 4.5 PQ-01),
+// а "забыть" в CLI/без-хранилища не заводится (SEC-01).
+func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
+	fyne.Do(func() {
+		body := widget.NewLabel(fmt.Sprintf(
+			"Сервер %s. Сохранённый отпечаток: %s Полученный: %s Так бывает после переустановки сервера. "+
+				"Если вы его не переустанавливали — возможна подмена: не подключайтесь.",
+			host, knownFp, presentedFp,
+		))
+		body.Wrapping = fyne.TextWrapWord
+
+		content := container.NewVBox(body)
+		var d dialog.Dialog
+		if vc != nil {
+			forgetBtn := widget.NewButton("Забыть ключ сервера…", func() {
+				d.Hide()
+				u.confirmForgetHostKey(host, knownHostsPath, vc, connectBtn, info)
+			})
+			content.Add(forgetBtn)
+		}
+		d = dialog.NewCustom("Ключ сервера изменился", "Закрыть", content, u.win)
+		d.Resize(fyne.NewSize(480, 280))
+		d.Show()
+	})
+}
+
+// confirmForgetHostKey — второй, отдельный диалог подтверждения (UX-01:
+// "Действие живёт только на диалоге «Ключ сервера изменился». Второй шаг —
+// отдельный диалог."), дословный текст — С3-позиция-ядра.md. "Забыть" зовёт
+// core.ForgetHostKey (правка координатора 2026-09-14 23:58: снимает ОБА
+// следа — .avlt и known_hosts) и, вне зависимости от исхода, обнуляет пин
+// (vc.pin) — дальше подключение этим вызовом не устанавливается (SEC-01, п.
+// 2-3 в С3-позиция-ядра.md). Если пин уже обнулён (например, повторный клик
+// после того, как первая попытка уже его использовала) — просит открыть
+// хранилище заново, ForgetHostKey с пустым пином не зовём.
+func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
+	if vc == nil || vc.pin == nil || *vc.pin == "" {
+		info.SetText("Пин уже сброшен — откройте сохранённый ключ ещё раз и подключитесь заново.")
+		return
+	}
+	msg := widget.NewLabel(fmt.Sprintf(
+		"Забыть ключ сервера %s? Утилита сотрёт сохранённый отпечаток — в хранилище и в файле known_hosts. "+
+			"Подключение сейчас установлено не будет: при следующем подключении вы увидите новый отпечаток и решите, доверять ли ему. "+
+			"Делайте это, только если сами переустанавливали сервер.", host,
+	))
+	msg.Wrapping = fyne.TextWrapWord
+	dialog.NewCustomConfirm("Забыть ключ сервера?", "Забыть", "Отмена", msg, func(ok bool) {
+		if !ok {
+			return
+		}
+		pin := *vc.pin
+		*vc.pin = ""
+		connectBtn.Disable()
+		info.SetText("Забываю ключ сервера...")
+		goSafe(func() {
+			err := core.ForgetHostKey(pin, vc.path, knownHostsPath, host)
+			fyne.Do(func() {
+				if err != nil {
+					// не идеально известно, какой из двух файлов подвёл
+					// (core.ForgetHostKey не различает это в возвращаемой
+					// ошибке отдельным типом) — сообщения о хранилище
+					// содержат слово "хранилищ" (core/hostkey.go,
+					// core/vault.go), иначе это ошибка known_hosts.
+					path := knownHostsPath
+					if strings.Contains(err.Error(), "хранилищ") {
+						path = vc.path
+					}
+					connectBtn.Enable()
+					info.SetText(fmt.Sprintf("Не удалось изменить %s: %s. Удалите строку «%s» из файла вручную и подключитесь заново.", path, err.Error(), host))
+					return
+				}
+				u.win.SetContent(u.connectScreenWithStatus("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток."))
+			})
+		})
+	}, u.win).Show()
 }
 
 func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
@@ -436,9 +677,13 @@ func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
 }
 
 // offerSaveKey предлагает сохранить только что использованный (введённый
-// вручную) ключ в зашифрованное хранилище .avlt. Отказ ("Не сохранять")
-// просто закрывает диалог без побочных эффектов.
-func (u *ui) offerSaveKey(key, defaultLabel string) {
+// вручную) ключ в зашифрованное хранилище .avlt — сразу с отпечатком ключа
+// хоста, принятым при ЭТОМ подключении (hostKeyFingerprint ==
+// sess.HostKeyFingerprint, Е1 задания PR-4): новое хранилище с самого начала
+// v2-полноценно, второй вопрос про ключ хоста при следующем открытии не
+// нужен. Отказ ("Не сохранять") просто закрывает диалог без побочных
+// эффектов.
+func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	labelEntry := widget.NewEntry()
 	labelEntry.SetText(defaultLabel)
 	pinEntry := widget.NewEntry()
@@ -506,9 +751,10 @@ func (u *ui) offerSaveKey(key, defaultLabel string) {
 		statusLabel.SetText("Шифрую...")
 		goSafe(func() {
 			payload := core.VaultPayload{
-				Label:   label,
-				Key:     key,
-				Created: time.Now().Format(time.RFC3339),
+				Label:              label,
+				Key:                key,
+				Created:            time.Now().Format(time.RFC3339),
+				HostKeyFingerprint: hostKeyFingerprint,
 			}
 			data, err := core.SealVault(pin, payload, core.ProdArgonParams, machineBind)
 			if err == nil {
