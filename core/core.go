@@ -119,6 +119,7 @@ func CredsFromConfig(cfg map[string]any) (*ServerCreds, error) {
 type Session struct {
 	Client *ssh.Client
 	Creds  *ServerCreds
+	r      Runner // транспорт команд; см. core/runner.go
 }
 
 func Connect(creds *ServerCreds) (*Session, error) {
@@ -151,7 +152,7 @@ func Connect(creds *ServerCreds) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: client, Creds: creds}, nil
+	return &Session{Client: client, Creds: creds, r: sshRunner{client}}, nil
 }
 
 func (s *Session) Close() {
@@ -161,22 +162,7 @@ func (s *Session) Close() {
 }
 
 func (s *Session) run(cmd string, stdin []byte) (string, error) {
-	sess, err := s.Client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer sess.Close()
-	if stdin != nil {
-		sess.Stdin = bytes.NewReader(stdin)
-	}
-	var out, errb bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &errb
-	err = sess.Run(cmd)
-	if err != nil {
-		return out.String(), fmt.Errorf("команда %q: %w; stderr: %s", cmd, err, errb.String())
-	}
-	return out.String(), nil
+	return s.r.Run(cmd, stdin)
 }
 
 // docker выполняет команду, при отказе прав пробует с sudo
