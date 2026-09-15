@@ -3,6 +3,46 @@
 // internal/guiview, который сам импортирует core — во внутреннем пакете core
 // (core_test.go, "package core") это дало бы цикл импорта. Внешний тестовый
 // пакет core_test импортирует и core, и internal/guiview напрямую, цикла нет.
+//
+// ---------- таблица «было в d6b3a5a → стало» (артефакт приёмки, В2/К) ----------
+//
+// "Было" проверено чтением d6b3a5a (не по памяти): LoadClients глотал ЛЮБУЮ
+// ошибку cat (отсутствие файла и сбой чтения неразличимы) и возвращал пустой
+// список без ошибки; refresh() вызывал LoadClients+GetHandshakes+GetPeerStats
+// для ЛЮБОГО контейнера и добавлял к статусу суффикс "— только просмотр,
+// управление для этого протокола не поддерживается" для !Managed. Проверено:
+// `git show d6b3a5a:core/core.go` (LoadClients, knownContainers,
+// FindContainers) и `git show d6b3a5a:cmd/gui/main.go` (refresh(), :410 Managed
+// по умолчанию, :562/:904/:1005/:1048/:1094/:1132 диалоги-отказы).
+//
+//	Контейнер (Proto)      Managed d6b3a5a→8c20da1+FIX  Было (d6b3a5a)                                           Стало (эта правка)
+//	amnezia-awg            true → true (не менялся)     "Пользователей: N · трафик..."                          без изменений
+//	amnezia-wireguard      true → true (не менялся)     "Пользователей: N · трафик..."                          без изменений
+//	amnezia-xray           false → false (не менялся)   ok/missing/failread: "Пользователей: N — только         ok: "Пользователей: N — только просмотр: управление
+//	                                                     просмотр..."; badjson: "Ошибка: ..."                    для XRay не поддерживается."; missing: "Протокол XRay
+//	                                                                                                             не ведёт список..."; failread/badjson: "Не удалось
+//	                                                                                                             прочитать список пользователей XRay: ..." (реш. А/В)
+//	amnezia-openvpn        false → false                то же, что xray, Proto=OpenVPN                          то же, что xray, Proto=OpenVPN
+//	amnezia-shadowsocks    false → false                то же, Proto=OpenVPN+ShadowSocks                        то же, Proto=OpenVPN+ShadowSocks
+//	amnezia-openvpn-cloak  false → false                то же, Proto=OpenVPN+Cloak                              то же, Proto=OpenVPN+Cloak
+//	amnezia-ikev2          false → false                то же, Proto=IKEv2                                      то же, Proto=IKEv2
+//	amnezia-sftp           false → false                то же, Proto=SFTP                                       то же, Proto=SFTP
+//	amnezia-tor            false → false                то же, Proto=Tor site                                   то же, Proto=Tor site
+//	amnezia-dns            false → false                то же, Proto=DNS — В ЧАСТНОСТИ ЭТО жалоба владельца     то же, Proto=DNS — теперь "Протокол DNS не ведёт
+//	                                                     "DNS выдавало 0 пользователей" (missing/failread давали  список..." вместо лживого "0" (реш. А/В)
+//	                                                     "Пользователей: 0 — только просмотр...")
+//	amnezia-awg2           true(!) → false               Managed=true (баг: угадан по префиксу имени, "пустой    Managed=false (реш. Б, до этого PR); статус —
+//	                                                     сервер"); Managed=false случай не существовал           как у xray/dns/... (Proto=awg2, без хвоста — Э1)
+//	amnezia-foo            false → false                то же, что xray, Proto=foo (в 8c20da1 Proto нёс хвост   то же, что xray, Proto=foo без хвоста (Э1 — отличие
+//	                                                     "(не поддерживается: другой формат конфига)")           только от 8c20da1, не от d6b3a5a)
+//
+// Отличия "стало" от "было" — намеренные (не находки), см. комментарий над
+// TestContainersWasNowTable: (а) awg2 Managed — решение Б, до этого PR; (б)
+// !Managed различает "файла нет"/"ошибка чтения" вместо унаследованного
+// "Пользователей: 0" — реш. А/В (это причина жалобы владельца на DNS); (в)
+// Proto неизвестных amnezia-* без хвоста — Э1, отличие от 8c20da1, не от
+// d6b3a5a; (г) для !Managed не запрашивается wg-статистика — реш. А. Managed
+// (awg/wireguard) поведение не менялось этой правкой.
 package core_test
 
 import (
