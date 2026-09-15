@@ -257,7 +257,7 @@ func interactive() {
 		return strings.TrimSpace(line)
 	}
 
-	fmt.Println(cTitle("=== Amnezia Admin ==="))
+	fmt.Println(cTitle("=== Amnezia Admin " + version.String() + " ==="))
 	key := os.Getenv("AMNEZIA_KEY")
 	if key == "" {
 		key = ask("Вставьте админский ключ (vpn://...): ")
