@@ -49,11 +49,25 @@ func ProtoLabel(c core.Container) string {
 
 // ViewState решает состояние GUI для контейнера c по результату
 // c.LoadClientsView (clients, existed, err), см. таблицу дословных строк в
-// задании FIX-VIEW, Д2.
-//
-// ЗАГЛУШКА (коммит 1 FIX-VIEW): возвращает пустой View{} всегда — только для
-// компиляции TestViewState с контролируемым FAIL. Реализация — следующий
-// коммит.
+// задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed — единственная
+// переменная, влияющая на них; err/existed влияют только на текст Status.
 func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err error) View {
-	return View{}
+	v := View{
+		LoadList:  true, // Д2: список пробуем читать для ЛЮБОГО amnezia-*
+		LoadStats: c.Managed,
+		CanManage: c.Managed,
+	}
+	switch {
+	case c.Managed && err != nil:
+		v.Status = "Ошибка: " + err.Error()
+	case c.Managed:
+		v.Status = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
+	case err != nil:
+		v.Status = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", c.Proto, err.Error())
+	case !existed:
+		v.Status = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой утилите — только просмотр.", c.Proto)
+	default:
+		v.Status = fmt.Sprintf("Пользователей: %d — только просмотр: управление для протокола %s не поддерживается.", len(clients), c.Proto)
+	}
+	return v
 }

@@ -23,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/version"
 )
 
@@ -40,6 +41,13 @@ type ui struct {
 	status      *widget.Label
 	protoSelect *widget.Select
 	selectedRow int
+
+	// canManage — решение guiview.ViewState для ТЕКУЩЕГО протокола (u.cur),
+	// обновляется в конце refresh() ДО setBusy(false) (FIX-VIEW, Э3а):
+	// setBusy(false) включает кнопки управления, только если canManage
+	// (иначе они остаются Disable() — Д3), а рендер колонок активности/
+	// трафика в таблице пишет "—" вместо "?"/"0 B" при !canManage.
+	canManage bool
 
 	// Кнопки главного экрана — поля, чтобы setBusy(true/false) могла
 	// Disable()/Enable() их во время любой серверной операции (от нажатия до
@@ -832,11 +840,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 
 	names := make([]string, len(u.containers))
 	for i, c := range u.containers {
-		label := c.Proto
-		if !c.Managed {
-			label += " (просмотр)"
-		}
-		names[i] = label
+		names[i] = guiview.ProtoLabel(c) // единственное место этой подписи (Д2, Э1)
 	}
 	u.protoSelect = widget.NewSelect(names, func(_ string) {
 		i := u.protoSelect.SelectedIndex()
@@ -1041,9 +1045,16 @@ func (u *ui) buildTable() {
 				}
 				l.SetText(created)
 			case 3:
-				if cl.Disabled() {
+				switch {
+				case !u.canManage:
+					// Для непроверяемых протоколов (XRay, DNS и т.п.) статистика
+					// не запрашивается вовсе (guiview.View.LoadStats — Д2), поэтому
+					// "?" здесь означало бы "не подключался", а не "не измеряется" —
+					// разные вещи (Д3, УИ-01).
+					l.SetText("—")
+				case cl.Disabled():
 					l.SetText("отключён")
-				} else {
+				default:
 					hs := u.handshakes[cl.ClientID]
 					if hs == "" {
 						hs = "?"
@@ -1051,8 +1062,12 @@ func (u *ui) buildTable() {
 					l.SetText(hs)
 				}
 			case 4:
-				st := u.peerStats[cl.ClientID]
-				l.SetText(core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes))
+				if !u.canManage {
+					l.SetText("—")
+				} else {
+					st := u.peerStats[cl.ClientID]
+					l.SetText(core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes))
+				}
 			case 5:
 				l.SetText(cl.ClientID)
 			}
@@ -1132,11 +1147,25 @@ func (u *ui) applySort() {
 // вторую операцию поверх ещё не завершившейся первой — со уже устаревшим
 // selectedRow.
 func (u *ui) setBusy(busy bool) {
-	for _, b := range []*widget.Button{u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn} {
+	if b := u.refreshBtn; b != nil {
+		if busy {
+			b.Disable()
+		} else {
+			b.Enable()
+		}
+	}
+	// Кнопки управления пользователями: во время операции — всегда Disable()
+	// (как и раньше); по её завершении — Enable() только если протокол
+	// управляемый (u.canManage, решение guiview.ViewState для u.cur — Д3).
+	// Для !canManage они остаются недоступны ПОСТОЯННО, а не только на время
+	// сетевого запроса — иначе после refresh() кнопки для XRay/DNS снова
+	// становились бы кликабельными, и отказ был бы виден только по клику
+	// (диалог-заглушка в обработчике), а не по внешнему виду кнопки.
+	for _, b := range []*widget.Button{u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn} {
 		if b == nil {
 			continue
 		}
-		if busy {
+		if busy || !u.canManage {
 			b.Disable()
 		} else {
 			b.Enable()
@@ -1152,7 +1181,18 @@ func (u *ui) setBusy(busy bool) {
 	}
 }
 
-// refresh перечитывает пользователей с сервера (в фоне).
+// refresh перечитывает пользователей с сервера (в фоне) для ЛЮБОГО
+// amnezia-* контейнера, управляемого или нет (FIX-VIEW: до этой правки
+// !Managed обрывался ранним guard'ом — "LoadClients для !Managed падает",
+// предпосылка не проверялась и была неверна; см. секцию А задания).
+//
+// refresh() НЕ содержит собственных условий по Container.Managed (Э3а,
+// решение ядра 15.09): что грузить (LoadClientsView — всегда), нужна ли
+// серверная статистика (wg show), доступно ли управление и что написать в
+// статусе — решает ТОЛЬКО guiview.ViewState по результату LoadClientsView.
+// Так табличный тест на подмену ViewState (Э3б) реально ловит регресс: если
+// бы refresh() держал свой параллельный guard "if !cur.Managed", подмена в
+// guiview его бы не увидела.
 //
 // Снимок cur делается дважды: один раз здесь (для запроса к нужному
 // протоколу) и повторно сверяется с u.cur внутри fyne.Do — если пользователь
@@ -1168,51 +1208,31 @@ func (u *ui) refresh() {
 	}
 	cur := u.cur
 	u.setBusy(true)
-
-	// LoadClients для контейнеров с Managed == false (протокол без
-	// поддерживаемого формата конфига) возвращает ошибку, а не пустой список
-	// (core.LoadClients рассчитан на управляемые WG/AmneziaWG-контейнеры) —
-	// как и CLI (listUsers), просто не дёргаем сеть и показываем пустую
-	// таблицу с пояснением вместо диалога с сырой ошибкой (ревью PR-1, BE-01,
-	// Medium). Текст статуса (UI-01, ревью, High): без слова "просмотр" —
-	// пустая таблица рядом с обещанием "просмотра" читается как "пользователей
-	// нет" (подмена "неизвестно" нулём), поэтому явно "список недоступен".
-	if !cur.Managed {
-		u.clients = nil
-		u.handshakes = nil
-		u.peerStats = nil
-		u.applySort()
-		u.table.Refresh()
-		u.table.ScrollToTop()
-		u.status.SetText(fmt.Sprintf("Протокол %s не поддерживается этой утилитой: список пользователей недоступен.", cur.Proto))
-		u.setBusy(false)
-		return
-	}
-
 	u.status.SetText("Загружаю список пользователей...")
 	goSafe(func() {
-		clients, err := u.sess.LoadClients(cur)
-		hs := u.sess.GetHandshakes(cur)
-		stats, statErr := u.sess.GetPeerStats(cur)
-		if statErr != nil {
-			stats = map[string]core.PeerStat{}
+		clients, existed, err := u.sess.LoadClientsView(cur)
+		view := guiview.ViewState(*cur, clients, existed, err)
+
+		var hs map[string]string
+		stats := map[string]core.PeerStat{}
+		if view.LoadStats {
+			hs = u.sess.GetHandshakes(cur)
+			if s, statErr := u.sess.GetPeerStats(cur); statErr == nil {
+				stats = s
+			}
 		}
+
 		fyne.Do(func() {
-			// setBusy(false) — первым действием колбэка, ДО проверки на
-			// устаревший ответ (BE-01, ревью, Medium): раньше return по
-			// staleness уходил, не сняв блокировку, а корректность держалась
-			// на негласном допущении, что busy снимет какой-то ДРУГОЙ,
-			// более поздний вызов refresh() — хрупкая связь между двумя
-			// независимыми решениями. Каждый завершившийся запрос теперь
-			// освобождает СВОЮ заявку на занятость сам, безусловно.
+			// setBusy(false) — определяет ТЕКУЩЕЕ u.canManage (обновлённое
+			// ниже, если ответ не устарел) и лишь потом снимает занятость —
+			// поэтому вызван через defer, а не первой строкой: иначе кнопки
+			// на мгновение включались бы по CanManage от ПРЕДЫДУЩЕГО
+			// протокола (BE-01, ревью, Medium).
 			defer u.setBusy(false)
 			if cur != u.cur {
 				return // протокол сменился ещё раз, пока шёл запрос — ответ устарел
 			}
-			if err != nil {
-				u.status.SetText("Ошибка: " + err.Error())
-				return
-			}
+			u.canManage = view.CanManage
 			u.clients = clients
 			u.handshakes = hs
 			u.peerStats = stats
@@ -1225,7 +1245,7 @@ func (u *ui) refresh() {
 			// таблица выглядит пустой, пока пользователь не проскроллит вручную.
 			u.table.Refresh()
 			u.table.ScrollToTop()
-			u.status.SetText(fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients)))
+			u.status.SetText(view.Status)
 		})
 	})
 }
