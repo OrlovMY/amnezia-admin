@@ -16,6 +16,7 @@ crash.log
 *.exe
 *.exe~
 *.out
+/dist/
 
 # --- Прочее ---
 .DS_Store
