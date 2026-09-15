@@ -1,3 +1,4 @@
 # Скрипты релиза выполняются в bash на Linux/Windows-раннерах CI — LF
 # обязателен независимо от локального core.autocrlf (тут — true).
 *.sh text eol=lf
+.github/**/*.yml text eol=lf
