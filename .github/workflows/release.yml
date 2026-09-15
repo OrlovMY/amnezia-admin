@@ -87,7 +87,11 @@ jobs:
         # Разрешено ядром (В2 п.3) как `go run` без установки в систему;
         # версия закреплена явно, без @latest.
         if: matrix.os == 'linux'
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml .github/dependabot.yml
+        # dependabot.yml НЕ передаём: actionlint принимает любой переданный
+        # файл за workflow и на dependabot.yml даёт 4 ложные ошибки
+        # ("jobs"/"on" section is missing, unexpected key version/updates) —
+        # test был бы красным на каждом теге (QA-01, ревью round1).
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml
 
       - name: go vet
         run: go vet ./...
