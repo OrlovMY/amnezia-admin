@@ -286,6 +286,23 @@ func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
 	return parseClientsTable(data) // пустой файл (например, после восстановления) — пустой список, не ошибка
 }
 
+// LoadClientsView — то же чтение clientsTable, что и LoadClients
+// (readClientsTableRaw+parseClientsTable), но БЕЗ проверки Managed и с
+// сохранением признака "файл существовал" (existed) — GUI (internal/guiview)
+// различает по нему три состояния для непроверяемых протоколов (XRay, DNS и
+// т.п.): "файла нет" (existed=false, err=nil), "не удалось прочитать/разобрать"
+// (err!=nil) и "список есть" (existed=true, err=nil). LoadClients не подходит
+// для этого: она намеренно схлопывает "файла нет" в пустой список без
+// признака существования (FIX-VIEW, задание Д1).
+//
+// ЗАГЛУШКА (коммит 1 FIX-VIEW): возвращает nil, false, nil всегда — нужна
+// только чтобы TestContainersWasNowTable и TestLoadClientsViewNoExtraCommands
+// скомпилировались и дали контролируемый FAIL по сравнению с ожиданиями, а не
+// ошибку компиляции. Реализация — следующий коммит.
+func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed bool, err error) {
+	return nil, false, nil
+}
+
 func (s *Session) saveClients(c *Container, list []ClientEntry) error {
 	tbl, _ := json.MarshalIndent(list, "", "    ")
 	return s.writeIn(c, c.Dir+"/clientsTable", tbl)
