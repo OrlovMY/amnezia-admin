@@ -26,6 +26,17 @@ go build -o amnezia-admin.exe ./cmd/cli
 CGO_ENABLED=1 go build -ldflags "-s -w -H windowsgui" -o amnezia-admin-gui.exe ./cmd/gui
 ```
 
+Версия вшивается в бинарь только через `-ldflags -X` (второй источник номера
+в код не заводится — версия равна git-тегу):
+
+```sh
+go build -trimpath \
+  -ldflags "-X amnezia-admin/internal/version.Version=v1.2.3 -X amnezia-admin/internal/version.Commit=$(git rev-parse HEAD)" \
+  -o amnezia-admin.exe ./cmd/cli
+```
+
+Без `-ldflags` бинарь печатает `dev (unknown)`. Проверка — `amnezia-admin version`.
+
 ## Использование
 
 Запустите GUI (`amnezia-admin-gui.exe`) и вставьте административный ключ `vpn://…`,

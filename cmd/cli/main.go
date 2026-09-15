@@ -11,6 +11,7 @@
 //   amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //   amnezia-admin toggle -key vpn://... -name Vasya
 //   amnezia-admin rekey  -key vpn://... -name Vasya
+//   amnezia-admin version
 //
 // Флаг -dry-run (для add/del/rename/toggle/rekey) показывает diff wg0.conf и
 // clientsTable, которые получились бы после операции, ничего не записывая на
