@@ -1233,6 +1233,17 @@ func (u *ui) refresh() {
 				return // протокол сменился ещё раз, пока шёл запрос — ответ устарел
 			}
 			u.canManage = view.CanManage
+			if err != nil && view.CanManage {
+				// Управляемый протокол, ошибка чтения: поведение НЕ меняем
+				// относительно d6b3a5a/8c20da1 (Г2 п.5) — таблица сохраняет
+				// последние успешно загруженные данные, меняется только
+				// статус. Для непроверяемых протоколов ошибка/отсутствие
+				// файла — другое решение (Д3, П4: u.clients = nil, без
+				// числа в статусе) — это ветка ниже (err или !existed
+				// естественно даёт clients == nil от LoadClientsView).
+				u.status.SetText(view.Status)
+				return
+			}
 			u.clients = clients
 			u.handshakes = hs
 			u.peerStats = stats
