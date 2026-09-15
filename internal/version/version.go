@@ -17,8 +17,13 @@ var (
 // "<Version, а если пусто — "dev"> (<первые 7 символов Commit, если
 // len(Commit) >= 7, иначе Commit целиком>)".
 func String() string {
-	// СТАБ (шаг 1 серии тестов): намеренно неверная реализация — доказывает,
-	// что TestVersionStringDefault/TestVersionStringFormat различают верную и
-	// неверную версию, а не просто проверяют компиляцию.
-	return ""
+	v := Version
+	if v == "" {
+		v = "dev"
+	}
+	c := Commit
+	if len(c) >= 7 {
+		c = c[:7]
+	}
+	return v + " (" + c + ")"
 }
