@@ -41,10 +41,17 @@ jobs:
       # тега" ниже) гарантирует только "fetch all history for all branches and
       # tags" при fetch-depth: 0 — не гарантирует, что при checkout тега
       # появится именно локальная remote-tracking ссылка refs/remotes/origin/main.
-      # Раньше, чем полагаться на недокументированное поведение, тянем main
-      # явно (безопасно и идемпотентно — обычный fetch одной ветки).
+      # Решение ядра (SEC-01, 15.09 13:45, ответ на PARK-вопрос): голое
+      # `git fetch origin main` тоже не годится — оно обновляет origin/main
+      # только при подходящем remote.origin.fetch, то есть снова зависит от
+      # конфигурации checkout. Явный refspec создаёт ссылку независимо от
+      # конфигурации; вторая строка — внятный отказ вместо загадочной ошибки
+      # merge-base, если она всё же не появилась.
       - name: Гарантировать origin/main для merge-base
-        run: git fetch origin main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
 
       - name: Происхождение тега
         # Дословно повторяется в test/build/release (композитный action не
@@ -125,7 +132,10 @@ jobs:
           fetch-depth: 0
 
       - name: Гарантировать origin/main для merge-base
-        run: git fetch origin main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
 
       - name: Происхождение тега
         run: |
@@ -232,7 +242,10 @@ jobs:
           fetch-depth: 0
 
       - name: Гарантировать origin/main для merge-base
-        run: git fetch origin main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
 
       - name: Происхождение тега
         run: |
