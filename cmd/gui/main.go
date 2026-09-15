@@ -23,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/version"
 )
 
 type ui struct {
@@ -60,7 +61,7 @@ type ui struct {
 func main() {
 	defer logPanic()
 	a := app.New()
-	w := a.NewWindow("Amnezia Admin")
+	w := a.NewWindow("Amnezia Admin " + version.String())
 	w.Resize(fyne.NewSize(980, 620))
 
 	u := &ui{win: w, selectedRow: -1}
@@ -120,10 +121,13 @@ func (u *ui) connectScreenWithStatus(status string) fyne.CanvasObject {
 	})
 
 	title := widget.NewLabelWithStyle("Amnezia Admin", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	// Строка версии под заголовком (Г3 PR-6а) — вариант на ревью UI-01;
+	// альтернатива: вписать version.String() прямо в текст title.
+	versionLabel := widget.NewLabelWithStyle(version.String(), fyne.TextAlignCenter, fyne.TextStyle{})
 	hint := widget.NewLabel("Нужен админский ключ — внутри него SSH-доступ к серверу.\nПользовательский (share) ключ не подойдёт.")
 	hint.Wrapping = fyne.TextWrapWord
 
-	form := container.NewVBox(title, hint, keyEntry, connectBtn, info)
+	form := container.NewVBox(title, versionLabel, hint, keyEntry, connectBtn, info)
 
 	if vaultBlock := u.savedVaultsBlock(connectBtn, info); vaultBlock != nil {
 		form.Add(vaultBlock)
