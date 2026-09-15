@@ -295,12 +295,16 @@ func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
 // для этого: она намеренно схлопывает "файла нет" в пустой список без
 // признака существования (FIX-VIEW, задание Д1).
 //
-// ЗАГЛУШКА (коммит 1 FIX-VIEW): возвращает nil, false, nil всегда — нужна
-// только чтобы TestContainersWasNowTable и TestLoadClientsViewNoExtraCommands
-// скомпилировались и дали контролируемый FAIL по сравнению с ожиданиями, а не
-// ошибку компиляции. Реализация — следующий коммит.
 func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed bool, err error) {
-	return nil, false, nil
+	data, existed, err := s.readClientsTableRaw(c)
+	if err != nil {
+		return nil, existed, err
+	}
+	if !existed {
+		return nil, false, nil
+	}
+	clients, err = parseClientsTable(data)
+	return clients, true, err
 }
 
 func (s *Session) saveClients(c *Container, list []ClientEntry) error {
