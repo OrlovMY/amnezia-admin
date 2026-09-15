@@ -41,6 +41,7 @@ import (
 	"strings"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/version"
 )
 
 func pad(s string, n int) string {
@@ -537,6 +538,15 @@ func main() {
 // в TestNonTTYWithoutYesExit2 до этого рефакторинга.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPath string) int {
 	cmd := args[0]
+
+	// version/-version/--version — до flag.NewFlagSet и до любой работы с
+	// ключом/сетью/known_hosts (ПР-6а, Г2): run() иначе требует -key ради
+	// печати номера версии. Лишние аргументы игнорируются (П19).
+	if cmd == "version" || cmd == "-version" || cmd == "--version" {
+		fmt.Fprintln(stdout, "amnezia-admin "+version.String())
+		return 0
+	}
+
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
