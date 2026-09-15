@@ -189,7 +189,19 @@ jobs:
         # проверяется как буквальная строка внутри бинаря (она используется в
         # заголовке окна и в тексте экрана подключения, cmd/gui/main.go, и не
         # вырезается -s -w — это данные программы, не отладочные символы).
-        # go version -m годится только для -trimpath=true.
+        #
+        # SEC-01 (ревью round1, Medium): один только grep по строке версии —
+        # ложный PASS. С Go 1.24+ `go build` САМ вшивает в buildinfo версию
+        # модуля из git-тега на HEAD, даже без -ldflags -X — при регрессии
+        # "-X не передан" grep всё равно нашёл бы тег (взятый Go из git, а не
+        # из нашего -X), а сам бинарь при этом печатал бы "dev (unknown)".
+        # scripts/build-release.sh теперь собирает с -buildvcs=false — тогда
+        # при отсутствии -X модуль в buildinfo помечен "(devel)" без версии;
+        # проверка ниже требует ОБА признака: строка тега в теле бинаря И
+        # "mod amnezia-admin (devel)" в go version -m (доказывает, что тег
+        # пришёл не от авто-vcs-стемпинга Go, а от нашего -X). Происхождение
+        # коммита не теряется — он отдельно вшит -X Commit и виден в
+        # аттестации SHA256SUMS.
         run: |
           set -euo pipefail
           case "${{ matrix.os }}" in
@@ -199,6 +211,7 @@ jobs:
           esac
           grep -aF -- "$GITHUB_REF_NAME" "$bin" >/dev/null || { echo "СТОП: версия $GITHUB_REF_NAME не найдена в теле $bin" >&2; exit 1; }
           go version -m "$bin" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: -trimpath=true не подтверждён в $bin" >&2; exit 1; }
+          go version -m "$bin" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: версия в $bin могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

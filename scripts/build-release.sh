@@ -41,17 +41,23 @@ mkdir -p dist
 
 ldflags="-s -w -X amnezia-admin/internal/version.Version=${VERSION} -X amnezia-admin/internal/version.Commit=${COMMIT}"
 
+# -buildvcs=false (SEC-01, ревью round1, Medium): с Go 1.24+ `go build`
+# сам вшивает в buildinfo версию модуля из git-тега на HEAD, даже без
+# -ldflags -X. Без этого флага регрессия «-X не передан» осталась бы
+# незамеченной: `go version -m` показал бы правильный тег из vcs-стемпинга,
+# а бинарь при этом печатал бы version.String() = "dev (unknown)" — ложный
+# PASS проверки версии GUI (см. Г2а в задании и подсадку в Д2).
 case "$os" in
 linux)
-	CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/amnezia-admin-linux-amd64 ./cmd/cli
-	CGO_ENABLED=1 go build -trimpath -ldflags "$ldflags" -o dist/amnezia-admin-gui-linux-amd64 ./cmd/gui
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-linux-amd64 ./cmd/cli
+	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-gui-linux-amd64 ./cmd/gui
 	;;
 windows)
-	CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/amnezia-admin-windows-amd64.exe ./cmd/cli
-	CGO_ENABLED=1 go build -trimpath -ldflags "$ldflags -H windowsgui" -o dist/amnezia-admin-gui-windows-amd64.exe ./cmd/gui
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-windows-amd64.exe ./cmd/cli
+	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$ldflags -H windowsgui" -o dist/amnezia-admin-gui-windows-amd64.exe ./cmd/gui
 	;;
 macos)
-	CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/amnezia-admin-macos-arm64 ./cmd/cli
-	CGO_ENABLED=1 go build -trimpath -ldflags "$ldflags" -o dist/amnezia-admin-gui-macos-arm64 ./cmd/gui
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-macos-arm64 ./cmd/cli
+	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-gui-macos-arm64 ./cmd/gui
 	;;
 esac
