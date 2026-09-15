@@ -1,5 +1,7 @@
 # amnezia-admin
 
+Лицензия: GPL-3.0, см. [LICENSE](LICENSE).
+
 Утилита администрирования сервера [Amnezia VPN](https://amnezia.org/) (AmneziaWG / WireGuard) через SSH.
 Работает по административному ключу `vpn://…`, внутри которого — SSH-доступ к серверу.
 Есть графическая версия (GUI на [Fyne](https://fyne.io/)) и консольная (CLI).
@@ -16,7 +18,7 @@
 
 ## Сборка
 
-Требуется Go 1.21+. Для GUI нужен C-компилятор (CGO) — например MinGW-w64 на Windows.
+Требуется Go 1.26.3 (точная версия — в `go.mod`). Для GUI нужен C-компилятор (CGO) — например MinGW-w64 на Windows.
 
 ```sh
 # CLI (без CGO)
@@ -36,6 +38,8 @@ go build -trimpath \
 ```
 
 Без `-ldflags` бинарь печатает `dev (unknown)`. Проверка — `amnezia-admin version`.
+
+Выпуск релиза — [RELEASING.md](RELEASING.md) (выполняет владелец).
 
 ## Использование
 
@@ -294,3 +298,9 @@ go run ./cmd/fakeserver -hostkey-file key.bin     # ключ хоста сохр
 обеспечивают длина пин-кода и параметры Argon2id, а привязка к учётной записи Windows (DPAPI)
 делает файл бесполезным на другом компьютере. Управление пользователями поддержано для
 протоколов семейства WireGuard/AmneziaWG.
+
+## Лицензия
+
+Copyright (C) 2026 OMYx
+
+Распространяется на условиях GNU General Public License v3.0 — полный текст в [LICENSE](LICENSE).
