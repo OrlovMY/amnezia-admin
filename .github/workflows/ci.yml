@@ -99,6 +99,37 @@ jobs:
           export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
+      - name: Версии инструментов (раннер предъявляет себя)
+        # Оба ложных PASS этого проекта выглядели как зелёный прогон: один раз
+        # actionlint молча отключил shellcheck, не найдя его в PATH, второй раз
+        # `go version` печаталась до setup-go. Поэтому шаг обязан ПАДАТЬ, если
+        # инструмента нет или вывод пуст: пустая строка вместо версии — это и
+        # есть «инструмента нет», и она обязана ронять job, а не украшать
+        # журнал. Ни || true, ни continue-on-error здесь быть не может.
+        #
+        # Шаг стоит после setup-go и после шагов gcc — иначе повторится
+        # ced1fa5: печать версии инструмента до его установки.
+        #
+        # Строк ровно столько, сколько инструментов этот job использует.
+        # shellcheck и actionlint в job checks не печатаются: их здесь нет и
+        # они здесь не нужны — они живут в job lint. Декоративная строка рядом
+        # с настоящими заставляет считать проверенным то, что не проверялось.
+        run: |
+          set -euo pipefail
+          say() {
+            local label="$1"
+            shift
+            local out
+            out="$("$@" 2>&1)" || { echo "СТОП: '$*' не выполнилась — инструмента нет" >&2; exit 1; }
+            test -n "$out" || { echo "СТОП: '$*' дала пустой вывод — это и есть «инструмента нет»" >&2; exit 1; }
+            printf '%-12s %s\n' "$label" "${out%%$'\n'*}"
+          }
+          test -n "${ImageOS:-}" || { echo "СТОП: ImageOS пуста — раннер не предъявил образ" >&2; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "СТОП: ImageVersion пуста — раннер не предъявил образ" >&2; exit 1; }
+          printf '%-12s %s\n' "ОС образа:" "$ImageOS $ImageVersion"
+          say "go:" go version
+          say "gcc:" gcc --version
+
   lint:
     # Без матрицы и без единого `if:` — это свойство конструкции, а не
     # совпадение строк: шаг под `if: matrix.os == 'linux'` при любой опечатке
@@ -122,3 +153,28 @@ jobs:
         # прогона — два разных бинаря под одним зелёным цветом.
         # Скрипт кладёт путь в $GITHUB_ENV как SHELLCHECK_BIN.
         run: bash scripts/dev-tools.sh
+
+      - name: Версии инструментов (раннер предъявляет себя)
+        # Три строки, по одному инструменту, который этот job действительно
+        # использует: gcc здесь не печатается, потому что gofmt и actionlint
+        # его не зовут. Число строк на разных job разное — так и должно быть.
+        #
+        # actionlint в этом шаге не печатается вовсе: он предъявляет себя
+        # канарейкой ниже, и это доказательство сильнее строки с номером
+        # версии — в случае 1 shellcheck был установлен, но не в том PATH,
+        # который видел actionlint, и номер версии этого не показал бы.
+        #
+        # Печатается версия ИМЕННО того бинаря, который ниже передаётся
+        # actionlint флагом -shellcheck, а не первого найденного в PATH.
+        run: |
+          set -euo pipefail
+          test -n "${ImageOS:-}" || { echo "СТОП: ImageOS пуста — раннер не предъявил образ" >&2; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "СТОП: ImageVersion пуста — раннер не предъявил образ" >&2; exit 1; }
+          printf '%-12s %s\n' "ОС образа:" "$ImageOS $ImageVersion"
+          go_out="$(go version 2>&1)" || { echo "СТОП: go не выполнилась — инструмента нет" >&2; exit 1; }
+          test -n "$go_out" || { echo "СТОП: go version дала пустой вывод" >&2; exit 1; }
+          printf '%-12s %s\n' "go:" "$go_out"
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста — scripts/dev-tools.sh не отдал путь" >&2; exit 1; }
+          sc_out="$("$SHELLCHECK_BIN" --version 2>&1)" || { echo "СТОП: $SHELLCHECK_BIN не запускается" >&2; exit 1; }
+          sc_ver="$(printf '%s\n' "$sc_out" | grep '^version:')" || { echo "СТОП: $SHELLCHECK_BIN не назвал версию" >&2; exit 1; }
+          printf '%-12s %s (%s)\n' "shellcheck:" "$sc_ver" "$SHELLCHECK_BIN"
