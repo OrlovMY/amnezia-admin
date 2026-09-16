@@ -1,0 +1,311 @@
+name: ci
+
+# Проверки на pull request и на push в main. До этого файла все проверки жили
+# только в release.yml на `push: tags`, то есть первый прогон go vet /
+# go test -race / actionlint случался на релизе: ошибку в коде видел тег, а не
+# автор изменения.
+#
+# release.yml этой веткой не изменён ни одной строкой (решение ядра): новый
+# job lint разбирает оба workflow-файла, включая release.yml, на каждом PR —
+# значит любая правка релизного workflow попадает под разбор до тега.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Ничего сверх чтения: CI на публичном репозитории по определению исполняет
+# код, пришедший из чужой ветки. Триггер именно pull_request, а НЕ
+# pull_request_target: последний исполняется в контексте базового репозитория
+# и отдал бы секреты и токен с правом записи чужому коду. Публикации, теги,
+# аттестация, загрузка ассетов — территория release.yml.
+permissions:
+  contents: read
+
+# На Windows-раннере shell по умолчанию — pwsh, где `test`, `${VAR:0:7}`,
+# `export` не работают; все run: ниже написаны для bash.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Отличие от release.yml (там false) намеренное: на PR прогон запускается на
+  # каждый push, и очередь из пяти прогонов на трёх ОС занимает раннеры ради
+  # результатов, которые никто не прочтёт. Прерванная публикация релиза хуже
+  # лишнего прогона — там цена отмены другая, и `false` оттуда копировать
+  # нельзя.
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    # Ревью, З7. Без явного предела GitHub даёт job шесть часов, и один
+    # зависший прогон съедает восемнадцать часов раннеров на трёх ОС. Предел
+    # выбран с запасом к самому долгому здесь — холодной CGO-сборке GUI
+    # (Fyne/glfw), которая локально идёт около десяти минут; если тридцати не
+    # хватит, это находка, а не повод поднять число молча.
+    timeout-minutes: 30
+    strategy:
+      # Отличие от job test в release.yml (там true) намеренное: автору PR
+      # нужны все три ОС за один прогон, а не первая поломка из трёх.
+      fail-fast: false
+      matrix:
+        include:
+          # Три пары — как в job build файла release.yml. Его job test идёт
+          # только на двух ОС (linux, windows) — известное расхождение внутри
+          # release.yml, править который в этой ветке запрещено (решение
+          # ядра). CI берёт надмножество: всё, что гоняется на теге, гоняется
+          # и на PR.
+          #
+          # Совпадение множеств пар стережёт internal/ciguard/matrix_test.go —
+          # он читает оба файла и краснеет при расхождении; расхождение двух
+          # списков в двух файлах в этом проекте уже дважды роняло релиз.
+          #
+          # Закреплённые метки на 15.09.2026 —
+          # https://github.com/actions/runner-images#available-images
+          # (то, на что сейчас резолвятся *-latest); архитектура macOS-метки
+          # macos-26 — arm64.
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-2025
+          - os: macos
+            runner: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        # fetch-depth по умолчанию: merge-base и полная история нужны
+        # release.yml для проверки происхождения тега, здесь — нет.
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        # До любого шага, печатающего или вызывающего go: на macos-26 нет
+        # предустановленного go, и `go version` до setup-go падал бы
+        # "command not found" (случай ced1fa5).
+        with:
+          go-version-file: go.mod
+
+      - name: Linux GUI deps
+        # go vet ./... ниже разбирает и cmd/gui (Fyne/glfw/GL) — без этих
+        # заголовков он не соберёт даже типы. Дословно как в release.yml.
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev
+          gcc --version
+
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
+        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
+        # ронять job, иначе -race тихо выключится вместе с cgo.
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
+      - name: Версии инструментов (раннер предъявляет себя)
+        # Оба ложных PASS этого проекта выглядели как зелёный прогон: один раз
+        # actionlint молча отключил shellcheck, не найдя его в PATH, второй раз
+        # `go version` печаталась до setup-go. Поэтому шаг обязан ПАДАТЬ, если
+        # инструмента нет или вывод пуст: пустая строка вместо версии — это и
+        # есть «инструмента нет», и она обязана ронять job, а не украшать
+        # журнал. Ни || true, ни continue-on-error здесь быть не может.
+        #
+        # Шаг стоит после setup-go и после шагов gcc — иначе повторится
+        # ced1fa5: печать версии инструмента до его установки.
+        #
+        # Строк ровно столько, сколько инструментов этот job использует.
+        # shellcheck и actionlint в job checks не печатаются: их здесь нет и
+        # они здесь не нужны — они живут в job lint. Декоративная строка рядом
+        # с настоящими заставляет считать проверенным то, что не проверялось.
+        run: |
+          set -euo pipefail
+          say() {
+            local label="$1"
+            shift
+            local out
+            out="$("$@" 2>&1)" || { echo "СТОП: '$*' не выполнилась — инструмента нет" >&2; exit 1; }
+            test -n "$out" || { echo "СТОП: '$*' дала пустой вывод — это и есть «инструмента нет»" >&2; exit 1; }
+            printf '%-12s %s\n' "$label" "${out%%$'\n'*}"
+          }
+          test -n "${ImageOS:-}" || { echo "СТОП: ImageOS пуста — раннер не предъявил образ" >&2; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "СТОП: ImageVersion пуста — раннер не предъявил образ" >&2; exit 1; }
+          printf '%-12s %s\n' "ОС образа:" "$ImageOS $ImageVersion"
+          say "go:" go version
+          say "gcc:" gcc --version
+
+      - name: go vet
+        # Дословно как в release.yml; на linux требует шага Linux GUI deps.
+        run: go vet ./...
+
+      - name: go test -race
+        # Дословно как в release.yml, включая -count=1: иначе кэш отдаст
+        # вчерашний результат. Сюда же попадает сторож матриц
+        # internal/ciguard — значит расхождение ci.yml и release.yml ловится
+        # и на теге, куда ci.yml не приходит.
+        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/
+
+      - name: Сборка
+        # Скрипт требует непустых VERSION и COMMIT и падает без них: версия
+        # фиктивная, SHA настоящий. Собранное никуда не загружается — ни
+        # upload-artifact, ни релиза: это территория release.yml. dist/
+        # остаётся на раннере и умирает вместе с ним.
+        run: bash scripts/build-release.sh ${{ matrix.os }}
+        env:
+          VERSION: v0.0.0-ci
+          COMMIT: ${{ github.sha }}
+
+  lint:
+    # Без матрицы и без единого `if:` — это свойство конструкции, а не
+    # совпадение строк: шаг под `if: matrix.os == 'linux'` при любой опечатке
+    # в значении матрицы не исполняется МОЛЧА, и job остаётся зелёным.
+    # Проверки, которые обязаны выполниться ровно один раз (gofmt, actionlint),
+    # живут там, где «ровно один раз» нельзя отключить опечаткой.
+    name: lint
+    runs-on: ubuntu-24.04
+    # Ревью, З7. Здесь ничего не собирается: загрузка shellcheck, gofmt и два
+    # прогона actionlint. Пятнадцать минут — заведомый запас; всё, что дольше,
+    # уже зависло.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Инструменты (пиновый shellcheck)
+        # Один источник версий для CI и для машины разработчика. Версия
+        # shellcheck из образа раннера не используется никогда, даже при
+        # совпадении номера: образ обновляется еженедельно, и «берём из
+        # образа, если совпало» делает выбор линтера зависимым от недели
+        # прогона — два разных бинаря под одним зелёным цветом.
+        # Скрипт кладёт путь в $GITHUB_ENV как SHELLCHECK_BIN.
+        run: bash scripts/dev-tools.sh
+
+      - name: Версии инструментов (раннер предъявляет себя)
+        # Три строки, по одному инструменту, который этот job действительно
+        # использует: gcc здесь не печатается, потому что gofmt и actionlint
+        # его не зовут. Число строк на разных job разное — так и должно быть.
+        #
+        # actionlint в этом шаге не печатается вовсе: он предъявляет себя
+        # канарейкой ниже, и это доказательство сильнее строки с номером
+        # версии — в случае 1 shellcheck был установлен, но не в том PATH,
+        # который видел actionlint, и номер версии этого не показал бы.
+        #
+        # Печатается версия ИМЕННО того бинаря, который ниже передаётся
+        # actionlint флагом -shellcheck, а не первого найденного в PATH.
+        run: |
+          set -euo pipefail
+          test -n "${ImageOS:-}" || { echo "СТОП: ImageOS пуста — раннер не предъявил образ" >&2; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "СТОП: ImageVersion пуста — раннер не предъявил образ" >&2; exit 1; }
+          printf '%-12s %s\n' "ОС образа:" "$ImageOS $ImageVersion"
+          go_out="$(go version 2>&1)" || { echo "СТОП: go не выполнилась — инструмента нет" >&2; exit 1; }
+          test -n "$go_out" || { echo "СТОП: go version дала пустой вывод" >&2; exit 1; }
+          printf '%-12s %s\n' "go:" "$go_out"
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста — scripts/dev-tools.sh не отдал путь" >&2; exit 1; }
+          sc_out="$("$SHELLCHECK_BIN" --version 2>&1)" || { echo "СТОП: $SHELLCHECK_BIN не запускается" >&2; exit 1; }
+          sc_ver="$(printf '%s\n' "$sc_out" | grep '^version:')" || { echo "СТОП: $SHELLCHECK_BIN не назвал версию" >&2; exit 1; }
+          printf '%-12s %s (%s)\n' "shellcheck:" "$sc_ver" "$SHELLCHECK_BIN"
+
+      - name: gofmt
+        # `gofmt -l` сам по себе возвращает 0 даже при найденных файлах —
+        # падение делается явной проверкой непустого вывода.
+        #
+        # Ровно один прогон, и только здесь: форматирование — свойство
+        # содержимого репозитория, а не ОС. Три прогона внесли бы зависимость
+        # от того, как раннер разворачивает окончания строк при checkout; на
+        # машине с core.autocrlf=true `gofmt -l .` перечисляет ВСЕ файлы, хотя
+        # в объектах git лежит LF и ни один файл не сломан. Красный CI без
+        # единой настоящей ошибки хуже отсутствующей проверки: ему перестают
+        # верить.
+        run: |
+          set -euo pipefail
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "СТОП: файлы не по gofmt:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
+
+      - name: Канарейка shellcheck
+        # ГЛАВНОЕ МЕСТО ЭТОГО ФАЙЛА. Доказательство, живущее только в отчёте
+        # исполнителя, защищает один прогон; защита нужна каждому.
+        #
+        # В release.yml слова shellcheck нет вовсе — actionlint на КАЖДОМ
+        # теге, включая выпуск v0.1.0, разбирал только YAML, и шаг был
+        # зелёным. Ниже заведомый shell-дефект, который ловит ТОЛЬКО
+        # shellcheck (SC2086 — неквотированная переменная; ни YAML-ошибкой,
+        # ни замечанием самого actionlint он не является, иначе доказывалось
+        # бы не то). Нет кода правила в выводе или код возврата 0 — значит
+        # shellcheck не применялся, и job обязан упасть, а не порадовать
+        # зелёным.
+        #
+        # actionlint получает shellcheck явным абсолютным путём, а не через
+        # PATH: PATH шага и PATH, в котором ищет actionlint, — не одно и то
+        # же, и именно на этой разнице проект уже горел.
+        run: |
+          set -euo pipefail
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста — scripts/dev-tools.sh не отдал путь" >&2; exit 1; }
+          test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста — scripts/dev-tools.sh не отдал версию" >&2; exit 1; }
+          canary="$RUNNER_TEMP/canary-workflow.yml"
+          cat > "$canary" <<'CANARY_YAML'
+          name: canary
+          on: push
+          jobs:
+            canary:
+              runs-on: ubuntu-24.04
+              steps:
+                - name: Заведомо неквотированная переменная — это ловит только shellcheck
+                  run: |
+                    target=$1
+                    echo $target
+          CANARY_YAML
+          rc=0
+          out="$(go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" -shellcheck "$SHELLCHECK_BIN" "$canary" 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then
+            echo "СТОП: actionlint не видит shellcheck — разбор bash внутри run: не выполняется, прогон ничего не проверил" >&2
+            exit 1
+          fi
+          echo "Канарейка сработала: shellcheck применён к bash внутри run:"
+
+      - name: actionlint (оба workflow)
+        # Только после канарейки. Оба файла передаются явными путями, включая
+        # release.yml: правка релизного workflow попадает под разбор до тега.
+        # dependabot.yml и прочие не-workflow файлы НЕ передавать — actionlint
+        # считает любой переданный файл workflow и даёт на них ложные ошибки
+        # (уже ловили); глоб по каталогу принёс бы то же самое.
+        run: |
+          set -euo pipefail
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста" >&2; exit 1; }
+          test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста" >&2; exit 1; }
+          go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" \
+            -shellcheck "$SHELLCHECK_BIN" \
+            .github/workflows/release.yml \
+            .github/workflows/ci.yml
+
+      - name: shellcheck на наши собственные scripts/*.sh
+        # Ревью, З4: actionlint разбирает shell ТОЛЬКО внутри run: в
+        # workflow-файлах. Наши собственные скрипты — build-release.sh,
+        # check-version-growth.sh, dev-tools.sh — до этой правки не проверял
+        # никто, хотя именно они собирают релиз. Сегодня они чисты, но
+        # «чисто» без проверки — это не проверка.
+        #
+        # Тем же пиновым бинарём, что получает actionlint: два разных
+        # shellcheck под одним зелёным цветом — ровно то, от чего заведена
+        # канарейка.
+        #
+        # Пустой перечень файлов роняет шаг: если скрипты переедут, молчаливо
+        # зелёный шаг «проверил ноль файлов» ничем не отличался бы от
+        # работающей проверки.
+        run: |
+          set -euo pipefail
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста" >&2; exit 1; }
+          shopt -s nullglob
+          files=(scripts/*.sh)
+          test "${#files[@]}" -gt 0 || { echo "СТОП: не найдено ни одного scripts/*.sh — проверять нечего, шаг перестал что-либо проверять" >&2; exit 1; }
+          printf 'проверяю %d файл(ов): %s\n' "${#files[@]}" "${files[*]}"
+          "$SHELLCHECK_BIN" "${files[@]}"
