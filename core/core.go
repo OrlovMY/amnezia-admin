@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -122,6 +122,12 @@ type Session struct {
 	Creds  *ServerCreds
 	r      Runner // транспорт команд; см. core/runner.go
 
+	// HostKeyFingerprint — отпечаток (SHA256:…) ключа хоста, принятого при
+	// установлении ЭТОГО соединения (core/hostkey.go, PR-4). Пусто, если
+	// Session собрана в обход ConnectWithHostKey (например,
+	// NewSessionWithRunner в тестах).
+	HostKeyFingerprint string
+
 	// mu — мьютекс мутаций (I5, core/txn.go). Экспортированные Plan*/Apply
 	// берут его сами; AddUser/DeleteByID/... держат его один раз на весь
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
@@ -129,37 +135,17 @@ type Session struct {
 	mu sync.Mutex
 }
 
+// Connect — ОБЁРТКА над ConnectWithHostKey БЕЗ Prompt (PR-4, часть А): любой
+// неизвестный сервер отвергается (ErrHostKeyUnknown), известный —
+// подключается молча, смена ключа — всегда отказ. Оставлена только ради
+// сборки cmd/cli и cmd/gui без правок в части А (там, где раньше вызывался
+// небезопасный Connect без проверки ключа хоста) — часть Б переводит эти
+// вызовы на ConnectWithHostKey с настоящим Prompt/OnChanged и удаляет эту
+// обёртку.
 func Connect(creds *ServerCreds) (*Session, error) {
-	var auths []ssh.AuthMethod
-	if strings.Contains(creds.Password, "PRIVATE KEY") {
-		signer, err := ssh.ParsePrivateKey([]byte(creds.Password))
-		if err != nil {
-			return nil, fmt.Errorf("не удалось разобрать SSH-ключ из конфига: %w", err)
-		}
-		auths = append(auths, ssh.PublicKeys(signer))
-	} else {
-		auths = append(auths,
-			ssh.Password(creds.Password),
-			ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
-				ans := make([]string, len(questions))
-				for i := range questions {
-					ans[i] = creds.Password
-				}
-				return ans, nil
-			}),
-		)
-	}
-	conf := &ssh.ClientConfig{
-		User:            creds.User,
-		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         15 * time.Second,
-	}
-	client, err := ssh.Dial("tcp", net.JoinHostPort(creds.Host, creds.Port), conf)
-	if err != nil {
-		return nil, err
-	}
-	return &Session{Client: client, Creds: creds, r: sshRunner{client}}, nil
+	return ConnectWithHostKey(creds, HostKeyPolicy{
+		KnownHostsPath: filepath.Join(DefaultVaultDir(), "known_hosts"),
+	})
 }
 
 func (s *Session) Close() {

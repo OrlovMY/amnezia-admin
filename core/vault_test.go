@@ -332,3 +332,118 @@ func TestMachineBindUnavailableOnNonWindows(t *testing.T) {
 		t.Fatal("expected error: machine-bind недоступен на этой ОС")
 	}
 }
+
+// ---------- PR-4: vault v2 (HostKeyFingerprint) ----------
+
+// TestVaultV1StillOpens — обратная совместимость (Д): golden v1.avlt
+// продолжает открываться (TestGoldenVault), OpenVaultInfo для него отдаёт
+// Version == 1 и пустой HostKeyFingerprint; отдельно — что SealVault теперь
+// пишет версию 2 и roundtrip через неё работает.
+func TestVaultV1StillOpens(t *testing.T) {
+	data, err := os.ReadFile("testdata/v1.avlt")
+	if err != nil {
+		t.Fatalf("не удалось прочитать golden-файл v1: %v", err)
+	}
+	payload, info, err := OpenVaultInfo("golden1234", data)
+	if err != nil {
+		t.Fatalf("OpenVaultInfo(v1): %v", err)
+	}
+	if info.Version != 1 {
+		t.Errorf("info.Version = %d, want 1", info.Version)
+	}
+	if payload.HostKeyFingerprint != "" {
+		t.Errorf("payload.HostKeyFingerprint = %q, want пусто (v1-файл не знает про отпечаток)", payload.HostKeyFingerprint)
+	}
+	if info.MachineBind {
+		t.Error("v1.avlt не должен быть machine-bind")
+	}
+
+	// SealVault пишет текущую версию (2); roundtrip через неё работает.
+	p := VaultPayload{Label: "L", Key: "vpn://k", Created: "2024-01-01T00:00:00Z"}
+	sealed, err := SealVault("roundtrip123", p, testArgonParams, false)
+	if err != nil {
+		t.Fatalf("SealVault: %v", err)
+	}
+	if sealed[4] != 2 {
+		t.Fatalf("байт версии заголовка = %d, want 2 (SealVault обязан писать текущую версию)", sealed[4])
+	}
+	got, err := OpenVault("roundtrip123", sealed)
+	if err != nil {
+		t.Fatalf("OpenVault(только что запечатанный v2): %v", err)
+	}
+	if got != p {
+		t.Errorf("roundtrip: got %+v, want %+v", got, p)
+	}
+}
+
+// TestVaultV2SealsFingerprint — payload с HostKeyFingerprint переживает
+// seal→open без потерь.
+func TestVaultV2SealsFingerprint(t *testing.T) {
+	payload := VaultPayload{
+		Label:              "Server",
+		Key:                "vpn://xyz",
+		Created:            "2024-01-01T00:00:00Z",
+		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}
+	data, err := SealVault("fpPin1234567", payload, testArgonParams, false)
+	if err != nil {
+		t.Fatalf("SealVault: %v", err)
+	}
+	got, info, err := OpenVaultInfo("fpPin1234567", data)
+	if err != nil {
+		t.Fatalf("OpenVaultInfo: %v", err)
+	}
+	if got != payload {
+		t.Errorf("got %+v, want %+v", got, payload)
+	}
+	if info.Version != 2 {
+		t.Errorf("info.Version = %d, want 2", info.Version)
+	}
+}
+
+// TestGoldenVaultV2 — как TestGoldenVault, но на новой golden-фикстуре
+// testdata/v2.avlt: запечатана SealVault-совместимым путём с тем же пином
+// "golden1234", что и v1.avlt (Г2 PR-4), с непустым HostKeyFingerprint и
+// machineBind=false (байт 5 заголовка обязан быть 0x00 — иначе файл
+// открывается только на машине автора через DPAPI и тест красный у всех
+// остальных).
+func TestGoldenVaultV2(t *testing.T) {
+	data, err := os.ReadFile("testdata/v2.avlt")
+	if err != nil {
+		t.Fatalf("не удалось прочитать golden-файл v2: %v", err)
+	}
+	if data[4] != 2 {
+		t.Fatalf("байт версии = %d, want 2", data[4])
+	}
+	if data[5] != 0x00 {
+		t.Fatalf("байт флагов = %#x, want 0x00 (machineBind=false — иначе тест красный не на машине автора)", data[5])
+	}
+
+	payload, info, err := OpenVaultInfo("golden1234", data)
+	if err != nil {
+		t.Fatalf("OpenVaultInfo(golden v2): %v", err)
+	}
+	if payload.Label != "Golden Server" || payload.Key != "vpn://golden-fixture-key" {
+		t.Errorf("payload = %+v, want Label=Golden Server, Key=vpn://golden-fixture-key", payload)
+	}
+	if payload.HostKeyFingerprint == "" {
+		t.Error("HostKeyFingerprint пуст, want непустой отпечаток тестового ключа")
+	}
+	if !strings.HasPrefix(payload.HostKeyFingerprint, "SHA256:") {
+		t.Errorf("HostKeyFingerprint = %q, want префикс SHA256:", payload.HostKeyFingerprint)
+	}
+	if info.Version != 2 {
+		t.Errorf("info.Version = %d, want 2", info.Version)
+	}
+	if info.MachineBind {
+		t.Error("golden v2.avlt не должен быть machine-bind")
+	}
+
+	_, err = OpenVault("wrong-pin-99", data)
+	if err == nil {
+		t.Fatal("expected error for wrong pin on golden v2 file")
+	}
+	if errors.Is(err, ErrVaultNewerVersion) {
+		t.Errorf("v2-файл не должен давать ErrVaultNewerVersion, получено: %v", err)
+	}
+}
