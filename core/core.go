@@ -119,6 +119,7 @@ func CredsFromConfig(cfg map[string]any) (*ServerCreds, error) {
 type Session struct {
 	Client *ssh.Client
 	Creds  *ServerCreds
+	r      Runner // транспорт команд; см. core/runner.go
 }
 
 func Connect(creds *ServerCreds) (*Session, error) {
@@ -151,7 +152,7 @@ func Connect(creds *ServerCreds) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: client, Creds: creds}, nil
+	return &Session{Client: client, Creds: creds, r: sshRunner{client}}, nil
 }
 
 func (s *Session) Close() {
@@ -161,22 +162,7 @@ func (s *Session) Close() {
 }
 
 func (s *Session) run(cmd string, stdin []byte) (string, error) {
-	sess, err := s.Client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer sess.Close()
-	if stdin != nil {
-		sess.Stdin = bytes.NewReader(stdin)
-	}
-	var out, errb bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &errb
-	err = sess.Run(cmd)
-	if err != nil {
-		return out.String(), fmt.Errorf("команда %q: %w; stderr: %s", cmd, err, errb.String())
-	}
-	return out.String(), nil
+	return s.r.Run(cmd, stdin)
 }
 
 // docker выполняет команду, при отказе прав пробует с sudo
@@ -226,9 +212,17 @@ func (s *Session) FindContainers() ([]Container, error) {
 		}
 		if !matched && strings.HasPrefix(n, "amnezia-") {
 			suffix := strings.TrimPrefix(n, "amnezia-")
-			// неизвестные контейнеры WG-семейства (awg2, wireguard2 и т.п.) тоже управляемы
-			managed := strings.HasPrefix(suffix, "awg") || strings.HasPrefix(suffix, "wireguard")
-			found = append(found, Container{Name: n, Dir: "/opt/amnezia/" + suffix, Proto: suffix, Managed: managed})
+			// Неизвестный контейнер (в т.ч. amnezia-awg2 и подобные) — не наш
+			// формат конфига (у awg2 файл называется awg0.conf, а не wg0.conf),
+			// поэтому не управляем; раньше здесь угадывался Managed=true по
+			// префиксу имени, из-за чего awg2 читался как "пустой сервер"
+			// (аудит-2026-09-14, Backlog).
+			found = append(found, Container{
+				Name:    n,
+				Dir:     "/opt/amnezia/" + suffix,
+				Proto:   suffix + " (не поддерживается: другой формат конфига)",
+				Managed: false,
+			})
 		}
 	}
 	if len(found) == 0 {
@@ -291,10 +285,31 @@ func (e ClientEntry) Disabled() bool {
 	return b
 }
 
+// LoadClients читает clientsTable. "Файла нет" и "не удалось прочитать" —
+// разные исходы: отсутствие таблицы до первого пользователя — это нормально
+// (пустой список, err == nil), а сбой чтения (нет прав, контейнер
+// перезапускается и т.п.) обязан быть ошибкой, а не тихо превращаться в
+// пустой список — иначе AddUser поверх такой ошибки сохранит таблицу из
+// одной новой записи и сотрёт всех существующих пользователей (аудит
+// 2026-09-14, Critical). Различаем через `test -f` + echo yes/no, а не по
+// коду возврата `cat`: `test -f` даёт код 1 и при "нет файла", и при прочих
+// отказах exec, а различить их по *ssh.ExitError фейковый сервер не сможет
+// (поля Waitmsg не экспортированы) — текст в stdout одинаково даёт и
+// реальный сервер, и фейк.
 func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
+	probe, err := s.docker(fmt.Sprintf("docker exec %s sh -c 'test -f %s/clientsTable && echo yes || echo no'", c.Name, c.Dir), nil)
+	if err != nil {
+		return nil, fmt.Errorf("проверка наличия clientsTable: %w", err)
+	}
+	if strings.TrimSpace(probe) == "no" {
+		return []ClientEntry{}, nil // таблицы ещё нет — до первого пользователя это нормально
+	}
 	out, err := s.catIn(c, c.Dir+"/clientsTable")
-	if err != nil || strings.TrimSpace(out) == "" {
-		return []ClientEntry{}, nil // таблицы может не быть — это не ошибка
+	if err != nil {
+		return nil, fmt.Errorf("чтение clientsTable: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return []ClientEntry{}, nil // пустой файл (например, после восстановления) — не ошибка
 	}
 	var list []ClientEntry
 	if err := json.Unmarshal([]byte(out), &list); err != nil {
@@ -507,8 +522,20 @@ func parseWgConf(text string) *wgConf {
 	return conf
 }
 
-// removePeerFromConf удаляет блок [Peer] с указанным PublicKey из текста конфига
-func removePeerFromConf(text, pubKey string) string {
+// removePeerFromConf удаляет блок [Peer] с указанным PublicKey из текста
+// конфига. Сравнение точное: строка разбирается как key=value (SplitN по
+// первому "=", TrimSpace обеих частей), совпадением считается
+// EqualFold(key, "PublicKey") && value == pubKey. Раньше здесь была проверка
+// strings.Contains(строка, pubKey) — пустой pubKey входит в любую строку, и
+// блок [Peer] с ЛЮБЫМ ключом считался найденным (удалялись все peer'ы);
+// ключ-подстрока другого ключа тоже совпадал бы (аудит 2026-09-14, High).
+// Пустой (после TrimSpace) pubKey теперь отклоняется явной ошибкой — удалять
+// "все, у кого есть PublicKey" не входит в контракт этой функции.
+func removePeerFromConf(text, pubKey string) (string, error) {
+	key := strings.TrimSpace(pubKey)
+	if key == "" {
+		return text, fmt.Errorf("отказ: пустой публичный ключ — удалять нечего")
+	}
 	lines := strings.Split(text, "\n")
 	var out []string
 	i := 0
@@ -522,7 +549,8 @@ func removePeerFromConf(text, pubKey string) string {
 				if strings.HasPrefix(t, "[") {
 					break
 				}
-				if strings.HasPrefix(t, "PublicKey") && strings.Contains(t, pubKey) {
+				kv := strings.SplitN(t, "=", 2)
+				if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), "PublicKey") && strings.TrimSpace(kv[1]) == key {
 					hasKey = true
 				}
 				j++
@@ -540,7 +568,18 @@ func removePeerFromConf(text, pubKey string) string {
 	}
 	res := strings.Join(out, "\n")
 	res = regexp.MustCompile(`\n{3,}`).ReplaceAllString(res, "\n\n")
-	return res
+	return res, nil
+}
+
+// requireClientID отклоняет пустой (после TrimSpace) идентификатор клиента
+// до любого обращения к серверу: filterClientsByID мог бы найти запись с
+// пустым ClientID, если такая по ошибке оказалась в таблице, и удаление/
+// операция пошли бы дальше по ложному совпадению.
+func requireClientID(clientID string) error {
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("отказ: пустой идентификатор клиента")
+	}
+	return nil
 }
 
 // ---------- крипто WireGuard ----------
@@ -760,6 +799,9 @@ func (s *Session) DeleteByID(c *Container, clientID string) error {
 	if !c.Managed {
 		return fmt.Errorf("удаление пользователей для %s не поддерживается этой утилитой", c.Proto)
 	}
+	if err := requireClientID(clientID); err != nil {
+		return err
+	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
 		return err
@@ -777,7 +819,10 @@ func (s *Session) DeleteByID(c *Container, clientID string) error {
 	if err != nil {
 		return fmt.Errorf("чтение wg0.conf: %w", err)
 	}
-	newConf := removePeerFromConf(raw, clientID)
+	newConf, err := removePeerFromConf(raw, clientID)
+	if err != nil {
+		return err
+	}
 	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConf)); err != nil {
 		return fmt.Errorf("запись wg0.conf: %w", err)
 	}
@@ -833,6 +878,9 @@ func rekeyClientInList(clients []ClientEntry, oldID, newID string) ([]ClientEntr
 func (s *Session) RegenerateUser(c *Container, clientID string) (*NewUser, error) {
 	if !c.Managed {
 		return nil, fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", c.Proto)
+	}
+	if err := requireClientID(clientID); err != nil {
+		return nil, err
 	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
@@ -928,7 +976,11 @@ func (s *Session) RegenerateUser(c *Container, clientID string) (*NewUser, error
 
 	// wg0.conf: убрать старый peer (если был) и добавить новый с тем же IP —
 	// порядок "сначала новый, потом старый" не нужен, это тот же пользователь
-	newConfText := removePeerFromConf(raw, clientID) + buildPeerBlock(pub, psk, clientIP+"/32")
+	removedConf, err := removePeerFromConf(raw, clientID)
+	if err != nil {
+		return nil, err
+	}
+	newConfText := removedConf + buildPeerBlock(pub, psk, clientIP+"/32")
 	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConfText)); err != nil {
 		return nil, fmt.Errorf("запись wg0.conf: %w", err)
 	}
@@ -992,6 +1044,9 @@ func (s *Session) RenameUser(c *Container, clientID, newName string) error {
 	if !c.Managed {
 		return fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", c.Proto)
 	}
+	if err := requireClientID(clientID); err != nil {
+		return err
+	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
 		return err
@@ -1033,6 +1088,9 @@ func (s *Session) SetEnabled(c *Container, clientID string, enabled bool) error 
 }
 
 func (s *Session) disableClient(c *Container, clientID string) error {
+	if err := requireClientID(clientID); err != nil {
+		return err
+	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
 		return err
@@ -1071,7 +1129,10 @@ func (s *Session) disableClient(c *Container, clientID string) error {
 		return fmt.Errorf("peer с ключом %q не найден в wg0.conf", clientID)
 	}
 
-	newConf := removePeerFromConf(raw, clientID)
+	newConf, err := removePeerFromConf(raw, clientID)
+	if err != nil {
+		return err
+	}
 	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConf)); err != nil {
 		return fmt.Errorf("запись wg0.conf: %w", err)
 	}
@@ -1098,6 +1159,9 @@ func (s *Session) disableClient(c *Container, clientID string) error {
 }
 
 func (s *Session) enableClient(c *Container, clientID string) error {
+	if err := requireClientID(clientID); err != nil {
+		return err
+	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
 		return err

@@ -6,9 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"amnezia-admin/internal/fakesrv"
 )
 
 // ---------- DecodeVpnKey ----------
@@ -146,7 +151,10 @@ AllowedIPs = 10.8.1.4/32
 `
 
 	t.Run("remove middle peer", func(t *testing.T) {
-		res := removePeerFromConf(base, "pk2")
+		res, err := removePeerFromConf(base, "pk2")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 2 {
 			t.Fatalf("peers = %d, want 2", len(conf.peers))
@@ -159,7 +167,10 @@ AllowedIPs = 10.8.1.4/32
 	})
 
 	t.Run("remove nonexistent key", func(t *testing.T) {
-		res := removePeerFromConf(base, "no-such-key")
+		res, err := removePeerFromConf(base, "no-such-key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 3 {
 			t.Errorf("peers = %d, want 3 (ничего не должно удалиться)", len(conf.peers))
@@ -174,12 +185,87 @@ PrivateKey = abc
 PublicKey = pk1
 AllowedIPs = 10.8.1.2/32
 `
-		res := removePeerFromConf(text, "pk1")
+		res, err := removePeerFromConf(text, "pk1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		conf := parseWgConf(res)
 		if len(conf.peers) != 0 {
 			t.Errorf("peers = %d, want 0", len(conf.peers))
 		}
 	})
+}
+
+// TestRemovePeerExactMatch проверяет, что сравнение — точное: ключ "abc" не
+// должен удалять peer с ключом "abcd" или "xabc" (раньше — strings.Contains,
+// см. аудит 2026-09-14, High).
+func TestRemovePeerExactMatch(t *testing.T) {
+	text := `[Interface]
+PrivateKey = serverpriv
+
+[Peer]
+PublicKey = abcd
+AllowedIPs = 10.8.1.2/32
+
+[Peer]
+PublicKey = xabc
+AllowedIPs = 10.8.1.3/32
+`
+	t.Run("substring key does not match", func(t *testing.T) {
+		res, err := removePeerFromConf(text, "abc")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		conf := parseWgConf(res)
+		if len(conf.peers) != 2 {
+			t.Fatalf("peers = %d, want 2 (ничего не должно удалиться)", len(conf.peers))
+		}
+	})
+
+	t.Run("exact key removes exactly its block, others untouched byte-for-byte", func(t *testing.T) {
+		res, err := removePeerFromConf(text, "abcd")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		conf := parseWgConf(res)
+		if len(conf.peers) != 1 {
+			t.Fatalf("peers = %d, want 1", len(conf.peers))
+		}
+		if conf.peers[0]["PublicKey"] != "xabc" || conf.peers[0]["AllowedIPs"] != "10.8.1.3/32" {
+			t.Errorf("оставшийся блок изменён: %+v", conf.peers[0])
+		}
+	})
+}
+
+// TestRemovePeerEmptyKeyRefused проверяет отказ на пустом/пробельном ключе:
+// текст не меняется, DeleteByID отказывает до любой команды записи.
+func TestRemovePeerEmptyKeyRefused(t *testing.T) {
+	text := `[Interface]
+PrivateKey = serverpriv
+
+[Peer]
+PublicKey = pk1
+AllowedIPs = 10.8.1.2/32
+`
+	for _, key := range []string{"", "   "} {
+		res, err := removePeerFromConf(text, key)
+		if err == nil {
+			t.Fatalf("key %q: expected error, got nil", key)
+		}
+		if res != text {
+			t.Fatalf("key %q: текст конфига не должен меняться", key)
+		}
+	}
+
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, &ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
+	c := &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	if err := sess.DeleteByID(c, ""); err == nil {
+		t.Fatal("DeleteByID(\"\") должен вернуть ошибку")
+	}
+	if len(srv.Commands()) != 0 {
+		t.Errorf("DeleteByID(\"\") не должен посылать ни одной команды, получено: %v", srv.Commands())
+	}
 }
 
 // ---------- ResolveClient ----------
@@ -422,7 +508,10 @@ AllowedIPs = 10.8.1.4/32
 		{ClientID: "pk3", UserData: map[string]any{"clientName": "Carol"}},
 	}
 
-	newConf := removePeerFromConf(confText, "pk2")
+	newConf, err := removePeerFromConf(confText, "pk2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	newClients, found := filterClientsByID(clients, "pk2")
 	if !found {
 		t.Fatal("pk2 должен быть найден")
@@ -757,5 +846,362 @@ func TestQRPNG(t *testing.T) {
 			n = 8
 		}
 		t.Errorf("PNG-сигнатура не найдена, первые байты: %v", png[:n])
+	}
+}
+
+// ---------- Runner / fakesrv (PR-1) ----------
+//
+// Ниже — тесты на internal/fakesrv.Server: без сети, без диска (кроме map в
+// памяти самого fakesrv), без реального SSH. Тестового сервера у владельца
+// нет и не будет (bk-consult-2026-09-14, ответ 6) — это единственный способ
+// проверить операции над сервером.
+
+func testCreds() *ServerCreds {
+	return &ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"}
+}
+
+func awgContainer() *Container {
+	return &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+}
+
+// TestLoadClientsMissingVsError — "нет файла" не ошибка, "не удалось
+// прочитать" — ошибка (аудит 2026-09-14, Critical: раньше обе ветки давали
+// пустой список, и AddUser поверх сбойного чтения стирал всех пользователей).
+func TestLoadClientsMissingVsError(t *testing.T) {
+	c := awgContainer()
+
+	t.Run("a: файла нет — пустой список, не ошибка", func(t *testing.T) {
+		srv := fakesrv.New()
+		srv.DeleteFile(c.Dir + "/clientsTable")
+		sess := NewSessionWithRunner(srv, testCreds())
+
+		list, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(list) != 0 {
+			t.Errorf("list = %+v, want empty", list)
+		}
+	})
+
+	t.Run("b: файл есть, cat падает — ошибка, AddUser ничего не пишет", func(t *testing.T) {
+		srv := fakesrv.New()
+		srv.FailRead = map[string]error{c.Dir + "/clientsTable": fmt.Errorf("i/o timeout")}
+		sess := NewSessionWithRunner(srv, testCreds())
+
+		list, err := sess.LoadClients(c)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if list != nil {
+			t.Errorf("list = %+v, want nil", list)
+		}
+
+		if _, err := sess.AddUser(c, "Carol"); err == nil {
+			t.Fatal("AddUser: expected error")
+		}
+		for _, cmd := range srv.Commands() {
+			if strings.Contains(cmd, "cat > ") {
+				t.Fatalf("AddUser не должен был выполнить ни одной записи, но выполнил: %q", cmd)
+			}
+		}
+	})
+
+	t.Run("c: файл есть и пуст — пустой список, не ошибка", func(t *testing.T) {
+		srv := fakesrv.New()
+		srv.SetFile(c.Dir+"/clientsTable", []byte("   \n"))
+		sess := NewSessionWithRunner(srv, testCreds())
+
+		list, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(list) != 0 {
+			t.Errorf("list = %+v, want empty", list)
+		}
+	})
+}
+
+// TestAwg2Unsupported — amnezia-awg2 (и любой другой неизвестный WG-подобный
+// контейнер) считается неуправляемым, а не "пустым сервером" (аудит
+// 2026-09-14, Backlog: у awg2 конфиг называется awg0.conf, а не wg0.conf).
+func TestAwg2Unsupported(t *testing.T) {
+	srv := fakesrv.New()
+	srv.Names = append(srv.Names, "amnezia-awg2")
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	containers, err := sess.FindContainers()
+	if err != nil {
+		t.Fatalf("FindContainers: %v", err)
+	}
+	var awg2 *Container
+	for i := range containers {
+		if containers[i].Name == "amnezia-awg2" {
+			awg2 = &containers[i]
+		}
+	}
+	if awg2 == nil {
+		t.Fatalf("amnezia-awg2 не найден среди контейнеров: %+v", containers)
+	}
+	if awg2.Managed {
+		t.Error("amnezia-awg2 должен быть Managed == false")
+	}
+
+	if _, err := sess.AddUser(awg2, "Dave"); err == nil {
+		t.Fatal("AddUser на awg2 должен вернуть ошибку")
+	} else if !strings.Contains(err.Error(), "не поддерживается") {
+		t.Errorf("текст ошибки не содержит «не поддерживается»: %v", err)
+	}
+
+	for _, cmd := range srv.Commands() {
+		if strings.Contains(cmd, "/opt/amnezia/awg2/") {
+			t.Fatalf("AddUser на awg2 не должен обращаться к /opt/amnezia/awg2/, но: %q", cmd)
+		}
+	}
+}
+
+// dyn — маркер динамической части (имя контейнера / каталог) в шаблонах
+// cmdTemplates; строится в regex как \S+. Значение — непечатный байт, который
+// не встречается в самих командах, поэтому regexp.QuoteMeta его не трогает.
+const dyn = "\x00"
+
+// cmdTemplates — литеральные шаблоны серверных команд, скопированные из
+// core/core.go на базовом коммите d6b3a5a (В2, п.2 задания PR-1) + новая
+// команда test -f (Г3). Именно эти строки нельзя менять без обновления
+// TestServerCommandsUnchanged — тест ловит любое расхождение.
+var cmdTemplates = []string{
+	// core.go:212
+	"docker ps --format '{{.Names}}'",
+	// core.go:241
+	"docker exec " + dyn + " cat " + dyn,
+	// core.go:246
+	"docker exec -i " + dyn + " sh -c 'cat > " + dyn + ".tmp && mv " + dyn + ".tmp " + dyn + "'",
+	// core.go:258-264
+	"docker exec " + dyn + " sh -c 'mkdir -p " + dyn + "/backup && ts=$(date +%Y%m%d-%H%M%S) && " +
+		"cp " + dyn + "/wg0.conf " + dyn + "/backup/wg0.conf.$ts && " +
+		"(cp " + dyn + "/clientsTable " + dyn + "/backup/clientsTable.$ts 2>/dev/null; " +
+		"ls -1t " + dyn + "/backup/wg0.conf.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done; " +
+		"ls -1t " + dyn + "/backup/clientsTable.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done)'",
+	// core.go:351
+	"docker exec " + dyn + " wg show wg0 dump",
+	// core.go:586
+	"docker exec " + dyn + " bash -c 'wg syncconf wg0 <(wg-quick strip " + dyn + "/wg0.conf)'",
+	// core.go: LoadClients (Г3, новая команда этого PR)
+	"docker exec " + dyn + " sh -c 'test -f " + dyn + "/clientsTable && echo yes || echo no'",
+}
+
+func mustTemplateRegex(tmpl string) *regexp.Regexp {
+	escaped := regexp.QuoteMeta(tmpl)
+	return regexp.MustCompile("^" + strings.ReplaceAll(escaped, dyn, `\S+`) + "$")
+}
+
+// TestServerCommandsUnchanged — эталон на запрет В2 п.2: серверные команды,
+// проверенные на живом сервере, не должны измениться ни на байт. Прогоняет
+// весь набор операций и сверяет каждую команду из Commands() с множеством
+// шаблонов cmdTemplates (порядок и кратность не важны, но каждый шаблон
+// обязан встретиться хотя бы раз). Обязательно DenyOnce == false — иначе
+// команды пойдут с префиксом "sudo " и не совпадут ни с одним шаблоном
+// (sudo-фолбэк проверяет отдельный TestSudoFallback).
+func TestServerCommandsUnchanged(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	containers, err := sess.FindContainers()
+	if err != nil {
+		t.Fatalf("FindContainers: %v", err)
+	}
+	var c *Container
+	for i := range containers {
+		if containers[i].Name == "amnezia-awg" {
+			c = &containers[i]
+		}
+	}
+	if c == nil {
+		t.Fatalf("amnezia-awg не найден: %+v", containers)
+	}
+
+	if _, err := sess.LoadClients(c); err != nil {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	if _, err := sess.GetPeerStats(c); err != nil {
+		t.Fatalf("GetPeerStats: %v", err)
+	}
+	if _, err := sess.AddUser(c, "Carol"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+
+	clients, err := sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients после AddUser: %v", err)
+	}
+	carolID := ""
+	for _, cl := range clients {
+		if cl.Name() == "Carol" {
+			carolID = cl.ClientID
+		}
+	}
+	if carolID == "" {
+		t.Fatalf("Carol не найдена после AddUser: %+v", clients)
+	}
+
+	if err := sess.RenameUser(c, carolID, "Carol2"); err != nil {
+		t.Fatalf("RenameUser: %v", err)
+	}
+	if err := sess.SetEnabled(c, carolID, false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	if err := sess.SetEnabled(c, carolID, true); err != nil {
+		t.Fatalf("SetEnabled(true): %v", err)
+	}
+	if _, err := sess.RegenerateUser(c, carolID); err != nil {
+		t.Fatalf("RegenerateUser: %v", err)
+	}
+
+	clients, err = sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients после RegenerateUser: %v", err)
+	}
+	carol2ID := ""
+	for _, cl := range clients {
+		if cl.Name() == "Carol2" {
+			carol2ID = cl.ClientID
+		}
+	}
+	if carol2ID == "" {
+		t.Fatalf("Carol2 не найдена после RegenerateUser: %+v", clients)
+	}
+
+	if err := sess.DeleteByID(c, carol2ID); err != nil {
+		t.Fatalf("DeleteByID: %v", err)
+	}
+
+	templates := make([]*regexp.Regexp, len(cmdTemplates))
+	for i, tmpl := range cmdTemplates {
+		templates[i] = mustTemplateRegex(tmpl)
+	}
+	seen := make([]bool, len(templates))
+	for _, cmd := range srv.Commands() {
+		matched := -1
+		for i, re := range templates {
+			if re.MatchString(cmd) {
+				matched = i
+				break
+			}
+		}
+		if matched < 0 {
+			t.Fatalf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd)
+		}
+		seen[matched] = true
+	}
+	for i, ok := range seen {
+		if !ok {
+			t.Errorf("шаблон ни разу не встретился: %s", cmdTemplates[i])
+		}
+	}
+}
+
+// TestSudoFallback — при отказе первой команды с "denied" повтор идёт с
+// префиксом "sudo ", результат тот же.
+func TestSudoFallback(t *testing.T) {
+	srv := fakesrv.New()
+	srv.DenyOnce = true
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	containers, err := sess.FindContainers()
+	if err != nil {
+		t.Fatalf("FindContainers: %v", err)
+	}
+	if len(containers) == 0 {
+		t.Fatal("контейнеры не найдены")
+	}
+
+	cmds := srv.Commands()
+	if len(cmds) != 2 {
+		t.Fatalf("commands = %v, want 2 (первая отклонена, вторая — с sudo)", cmds)
+	}
+	if strings.HasPrefix(cmds[0], "sudo ") {
+		t.Errorf("первая команда не должна быть с sudo: %q", cmds[0])
+	}
+	if !strings.HasPrefix(cmds[1], "sudo ") {
+		t.Errorf("вторая команда должна быть с sudo: %q", cmds[1])
+	}
+	if strings.TrimPrefix(cmds[1], "sudo ") != cmds[0] {
+		t.Errorf("вторая команда должна повторять первую с префиксом sudo: %q vs %q", cmds[0], cmds[1])
+	}
+}
+
+// TestAddUserDeleteByIDIntegration — сквозной сценарий на fakesrv (раздел Ж,
+// "Интеграция"): AddUser → LoadClients содержит 3 записи → DeleteByID →
+// 2 записи; wg0.conf и рантайм фейка (последний применённый syncconf)
+// согласованы на каждом шаге.
+func TestAddUserDeleteByIDIntegration(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	containers, err := sess.FindContainers()
+	if err != nil {
+		t.Fatalf("FindContainers: %v", err)
+	}
+	var c *Container
+	for i := range containers {
+		if containers[i].Name == "amnezia-awg" {
+			c = &containers[i]
+		}
+	}
+	if c == nil {
+		t.Fatalf("amnezia-awg не найден: %+v", containers)
+	}
+
+	if _, err := sess.AddUser(c, "Dave"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	clients, err := sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	if len(clients) != 3 {
+		t.Fatalf("clients = %d, want 3: %+v", len(clients), clients)
+	}
+	daveID := ""
+	for _, cl := range clients {
+		if cl.Name() == "Dave" {
+			daveID = cl.ClientID
+		}
+	}
+	if daveID == "" {
+		t.Fatalf("Dave не найден: %+v", clients)
+	}
+
+	runtimePeers := func() map[string]bool {
+		m := map[string]bool{}
+		for _, p := range srv.RuntimePeers() {
+			m[p] = true
+		}
+		return m
+	}
+	if !runtimePeers()[daveID] {
+		t.Errorf("рантайм фейка не содержит нового peer после AddUser: %v", srv.RuntimePeers())
+	}
+	wg0, ok := srv.File(c.Dir + "/wg0.conf")
+	if !ok || !strings.Contains(string(wg0), daveID) {
+		t.Errorf("wg0.conf не содержит нового peer после AddUser")
+	}
+
+	if err := sess.DeleteByID(c, daveID); err != nil {
+		t.Fatalf("DeleteByID: %v", err)
+	}
+	clients, err = sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients после DeleteByID: %v", err)
+	}
+	if len(clients) != 2 {
+		t.Fatalf("clients = %d, want 2: %+v", len(clients), clients)
+	}
+	if runtimePeers()[daveID] {
+		t.Errorf("рантайм фейка всё ещё содержит удалённый peer: %v", srv.RuntimePeers())
+	}
+	wg0, ok = srv.File(c.Dir + "/wg0.conf")
+	if !ok || strings.Contains(string(wg0), daveID) {
+		t.Errorf("wg0.conf всё ещё содержит удалённый peer")
 	}
 }
