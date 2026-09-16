@@ -1,0 +1,124 @@
+name: ci
+
+# Проверки на pull request и на push в main. До этого файла все проверки жили
+# только в release.yml на `push: tags`, то есть первый прогон go vet /
+# go test -race / actionlint случался на релизе: ошибку в коде видел тег, а не
+# автор изменения.
+#
+# release.yml этой веткой не изменён ни одной строкой (решение ядра): новый
+# job lint разбирает оба workflow-файла, включая release.yml, на каждом PR —
+# значит любая правка релизного workflow попадает под разбор до тега.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Ничего сверх чтения: CI на публичном репозитории по определению исполняет
+# код, пришедший из чужой ветки. Триггер именно pull_request, а НЕ
+# pull_request_target: последний исполняется в контексте базового репозитория
+# и отдал бы секреты и токен с правом записи чужому коду. Публикации, теги,
+# аттестация, загрузка ассетов — территория release.yml.
+permissions:
+  contents: read
+
+# На Windows-раннере shell по умолчанию — pwsh, где `test`, `${VAR:0:7}`,
+# `export` не работают; все run: ниже написаны для bash.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Отличие от release.yml (там false) намеренное: на PR прогон запускается на
+  # каждый push, и очередь из пяти прогонов на трёх ОС занимает раннеры ради
+  # результатов, которые никто не прочтёт. Прерванная публикация релиза хуже
+  # лишнего прогона — там цена отмены другая, и `false` оттуда копировать
+  # нельзя.
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Отличие от job test в release.yml (там true) намеренное: автору PR
+      # нужны все три ОС за один прогон, а не первая поломка из трёх.
+      fail-fast: false
+      matrix:
+        include:
+          # Три пары — как в job build файла release.yml. Его job test идёт
+          # только на двух ОС (linux, windows) — известное расхождение внутри
+          # release.yml, править который в этой ветке запрещено (решение
+          # ядра). CI берёт надмножество: всё, что гоняется на теге, гоняется
+          # и на PR.
+          #
+          # Совпадение множеств пар стережёт internal/ciguard/matrix_test.go —
+          # он читает оба файла и краснеет при расхождении; расхождение двух
+          # списков в двух файлах в этом проекте уже дважды роняло релиз.
+          #
+          # Закреплённые метки на 15.09.2026 —
+          # https://github.com/actions/runner-images#available-images
+          # (то, на что сейчас резолвятся *-latest); архитектура macOS-метки
+          # macos-26 — arm64.
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-2025
+          - os: macos
+            runner: macos-26
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        # fetch-depth по умолчанию: merge-base и полная история нужны
+        # release.yml для проверки происхождения тега, здесь — нет.
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        # До любого шага, печатающего или вызывающего go: на macos-26 нет
+        # предустановленного go, и `go version` до setup-go падал бы
+        # "command not found" (случай ced1fa5).
+        with:
+          go-version-file: go.mod
+
+      - name: Linux GUI deps
+        # go vet ./... ниже разбирает и cmd/gui (Fyne/glfw/GL) — без этих
+        # заголовков он не соберёт даже типы. Дословно как в release.yml.
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev
+          gcc --version
+
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
+        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
+        # ронять job, иначе -race тихо выключится вместе с cgo.
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
+  lint:
+    # Без матрицы и без единого `if:` — это свойство конструкции, а не
+    # совпадение строк: шаг под `if: matrix.os == 'linux'` при любой опечатке
+    # в значении матрицы не исполняется МОЛЧА, и job остаётся зелёным.
+    # Проверки, которые обязаны выполниться ровно один раз (gofmt, actionlint),
+    # живут там, где «ровно один раз» нельзя отключить опечаткой.
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Инструменты (пиновый shellcheck)
+        # Один источник версий для CI и для машины разработчика. Версия
+        # shellcheck из образа раннера не используется никогда, даже при
+        # совпадении номера: образ обновляется еженедельно, и «берём из
+        # образа, если совпало» делает выбор линтера зависимым от недели
+        # прогона — два разных бинаря под одним зелёным цветом.
+        # Скрипт кладёт путь в $GITHUB_ENV как SHELLCHECK_BIN.
+        run: bash scripts/dev-tools.sh
