@@ -103,6 +103,142 @@ func TestMaskSecretsClosedListOfPublicNames(t *testing.T) {
 	})
 }
 
+// TestMaskSecretsClosedListForClientsTable — ревью SEC-01, замечание 2.
+//
+// Раньше в clientsTable маскировались ТОЛЬКО три известных имени: закрытый
+// список действовал лишь на wg0.conf, потому что reWgKVLine требовал имя с
+// буквы, а строка JSON начинается с кавычки. Между тем ClientEntry.UserData —
+// map[string]any (core/core.go:255), и кладёт туда что угодно КЛИЕНТ Amnezia,
+// а не мы; readClientsTableRaw читает это с боевого сервера как есть.
+//
+// Подмена «снять закрытый список для clientsTable» → FAIL.
+func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
+	t.Run("неизвестное имя — значение скрыто, имя видно", func(t *testing.T) {
+		in := `-            "clientPrivKey": "` + fakeCasePSK + `",`
+		want := `-            "clientPrivKey": "` + hiddenPlaceholder + `",`
+		got := maskSecrets(in)
+		if strings.Contains(got, fakeCasePSK) {
+			t.Errorf("поле userData с неизвестным именем не замаскировано: %s", got)
+		}
+		if got != want {
+			t.Errorf("имя поля или структура строки не сохранены.\n хочу: %s\nполучил: %s", want, got)
+		}
+	})
+
+	t.Run("значение без запятой на последней строке объекта", func(t *testing.T) {
+		in := `+            "clientPrivKey": "` + fakeCasePSK + `"`
+		want := `+            "clientPrivKey": "` + hiddenPlaceholder + `"`
+		if got := maskSecrets(in); got != want {
+			t.Errorf("\n хочу: %s\nполучил: %s", want, got)
+		}
+	})
+
+	t.Run("нестроковые значения тоже скрываются", func(t *testing.T) {
+		for _, in := range []string{
+			`+            "secretCount": 42,`,
+			`+            "secretFlag": true`,
+			`+            "secretNull": null,`,
+		} {
+			got := maskSecrets(in)
+			if !strings.Contains(got, hiddenPlaceholder) {
+				t.Errorf("нестроковое значение неизвестного поля не скрыто: %s", got)
+			}
+		}
+	})
+
+	t.Run("имена из закрытого списка остаются открытыми", func(t *testing.T) {
+		for _, line := range []string{
+			`+        "clientId": "` + fakeCasePSK + `",`,
+			`+            "clientName": "Alice",`,
+			`+            "creationDate": "2026-09-16T20:18:56+07:00"`,
+			`+            "allowedIP": "10.8.1.2/32",`,
+			`+            "disabled": true,`,
+			`+            "disabledAt": "2026-09-16T20:18:56+07:00",`,
+		} {
+			if got := maskSecrets(line); got != line {
+				t.Errorf("строка из закрытого списка несекретных имён замаскирована.\n было: %s\nстало: %s", line, got)
+			}
+		}
+	})
+
+	t.Run("открывающие скобки вложенных структур не трогаются", func(t *testing.T) {
+		for _, line := range []string{
+			`+        "userData": {`,
+			`+        "someList": [`,
+		} {
+			if got := maskSecrets(line); got != line {
+				t.Errorf("открывающая скобка изменена — значения на этой строке нет.\n было: %s\nстало: %s", line, got)
+			}
+		}
+	})
+}
+
+// TestPlanDiffMasksUnknownClientsTableKey — та же утечка сквозным путём:
+// поле, положенное в userData КЛИЕНТОМ Amnezia, не показывается открытым в
+// предпросмотре. Воспроизводит прогон ревьюера (`[userData privkey] leak=true`).
+func TestPlanDiffMasksUnknownClientsTableKey(t *testing.T) {
+	c := awgContainer()
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	clients, err := sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	if len(clients) < 2 {
+		t.Fatal("fakesrv.New() должен дать двух клиентов")
+	}
+
+	tbl, ok := srv.File(c.Dir + "/clientsTable")
+	if !ok {
+		t.Fatal("нет clientsTable в fakesrv")
+	}
+	const anchor = `"clientName"`
+	if !strings.Contains(string(tbl), anchor) {
+		t.Fatalf("в clientsTable fakesrv нет опорной строки %s — тест перестал что-либо проверять", anchor)
+	}
+	// Поле, которого продукт не кладёт и знать не может: его кладёт клиент
+	// Amnezia. UserData — map[string]any, туда попадает что угодно.
+	txt := strings.Replace(string(tbl), anchor,
+		`"clientPrivKey": "`+fakeCasePSK+"\",\n            "+anchor, 1)
+	srv.SetFile(c.Dir+"/clientsTable", []byte(txt))
+
+	plan, err := sess.PlanDelete(c, clients[1].ClientID)
+	if err != nil {
+		t.Fatalf("PlanDelete: %v", err)
+	}
+	_, tblDiff := plan.Diff()
+
+	if !strings.Contains(tblDiff, "clientPrivKey") {
+		t.Fatalf("строка clientPrivKey не попала в diff — тест перестал что-либо проверять:\n%s", tblDiff)
+	}
+	if strings.Contains(tblDiff, fakeCasePSK) {
+		t.Errorf("Plan.Diff() показал значение поля userData открытым:\n%s", tblDiff)
+	}
+	if !strings.Contains(tblDiff, `"clientPrivKey": "`+hiddenPlaceholder+`"`) {
+		t.Errorf("имя поля пропало из diff — теряется диагностика:\n%s", tblDiff)
+	}
+}
+
+// TestMaskSecretsNameWithDot — ревью SEC-01, замечание 6.
+//
+// Строка wg0.conf вида "Some.Name = …" не подходила под прежний шаблон имени
+// ([A-Za-z][A-Za-z0-9_-]*) и проваливалась в «открыто», а не в «скрыто». В
+// конструкции «запрет по умолчанию» это дыра наизнанку: непонятая строка
+// обязана скрываться. Подмена «вернуть узкий класс имени» → FAIL.
+func TestMaskSecretsNameWithDot(t *testing.T) {
+	for _, name := range []string{"Some.Name", "vendor.secret.key", "x-team_secret", "«имя»"} {
+		in := "+" + name + " = " + fakeCasePSK
+		got := maskSecrets(in)
+		if strings.Contains(got, fakeCasePSK) {
+			t.Errorf("строка с именем %q не замаскирована: %s", name, got)
+		}
+		if got != "+"+name+" = "+hiddenPlaceholder {
+			t.Errorf("имя или структура строки не сохранены для %q: %s", name, got)
+		}
+	}
+}
+
 // TestPlanDiffMasksUnknownWgKey — то же сквозным путём: неизвестное имя
 // ключа, попавшее в настоящий wg0.conf на сервере, не показывается открытым
 // в предпросмотре Plan.Diff().
