@@ -4,15 +4,16 @@
 // утилита определяет сервер, протоколы и показывает меню доступных команд.
 //
 // Также поддерживаются подкоманды для скриптов:
-//   amnezia-admin decode -key vpn://...
-//   amnezia-admin list   -key vpn://...
-//   amnezia-admin add    -key vpn://... -name Vasya
-//   amnezia-admin del    -key vpn://... -name Vasya
-//   amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
-//   amnezia-admin toggle -key vpn://... -name Vasya
-//   amnezia-admin rekey  -key vpn://... -name Vasya
-//   amnezia-admin version
-//   amnezia-admin check
+//
+//	amnezia-admin decode -key vpn://...
+//	amnezia-admin list   -key vpn://...
+//	amnezia-admin add    -key vpn://... -name Vasya
+//	amnezia-admin del    -key vpn://... -name Vasya
+//	amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
+//	amnezia-admin toggle -key vpn://... -name Vasya
+//	amnezia-admin rekey  -key vpn://... -name Vasya
+//	amnezia-admin version
+//	amnezia-admin check
 //
 // Подкоманда check печатает признаки окружения (ОС, архитектура, библиотека
 // C, библиотеки графики, графическая сессия) и говорит заранее, запустится
@@ -21,14 +22,16 @@
 // Флаг -dry-run (для add/del/rename/toggle/rekey) показывает diff wg0.conf и
 // clientsTable, которые получились бы после операции, ничего не записывая на
 // сервер:
-//   amnezia-admin add -key vpn://... -name Vasya -dry-run
+//
+//	amnezia-admin add -key vpn://... -name Vasya -dry-run
 //
 // Необратимые команды (del, rekey и toggle в сторону отключения) требуют
 // подтверждения: у терминала печатают карточку (сервер/контейнер/имя/дата
 // создания/последнее подключение/ключ) и спрашивают "y/n"; без терминала —
 // только флаг -yes (для скриптов), без него — отказ. -dry-run побеждает
 // -yes: план печатается, ничего не пишется, вопрос не задаётся.
-//   amnezia-admin del -key vpn://... -name Vasya -yes
+//
+//	amnezia-admin del -key vpn://... -name Vasya -yes
 //
 // Коды возврата: 0 — успех; 1 — ошибка; 2 — отказ из-за отсутствия
 // подтверждения (нет терминала и нет -yes, либо явный отказ "n" у терминала).

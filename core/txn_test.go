@@ -458,8 +458,8 @@ func TestRestoreSyncFailureReportsRuntimeMismatch(t *testing.T) {
 	if err != nil || len(clients) < 2 {
 		t.Fatalf("LoadClients: %v, %+v (нужно минимум 2 клиента в дефолтном фейке)", err, clients)
 	}
-	subject := clients[0].ClientID    // рекеим этого
-	bystander := clients[1].ClientID  // а этот не должен пострадать, но "не поднимется" по хуку
+	subject := clients[0].ClientID   // рекеим этого
+	bystander := clients[1].ClientID // а этот не должен пострадать, но "не поднимется" по хуку
 
 	beforeWG, ok := srv.File(c.Dir + "/wg0.conf")
 	if !ok {
