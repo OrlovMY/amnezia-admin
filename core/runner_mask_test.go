@@ -1,0 +1,148 @@
+package core
+
+// Тест на звенья (A2, Г4(а)): ошибка, поднятая из sshRunner.Run с заведомо
+// фиктивным секретом в stderr, проводится по цепочке до места печати, и ни
+// на одном звене секрет не присутствует.
+//
+// Звенья, которые тест проходит:
+//   - значение ошибки, напечатанное через %v;
+//   - err.Error();
+//   - обёртка fmt.Errorf("...: %w", err) — одинарная и двойная;
+//   - каждое звено цепочки errors.Unwrap.
+//
+// ЧЕГО ТЕСТ НЕ ПРОХОДИТ, и это называется прямо: диалог GUI (cmd/gui в этот
+// PR не входит вовсе) и печать ошибки внутри run() в cmd/cli. И CLI, и GUI
+// печатают именно err.Error() — звено, которое здесь проверено, — но сама
+// ветка печати здесь не исполняется. Проверка CLI-текста — в
+// cmd/cli/stderrmask_test.go.
+//
+// СВЕРКА — ПО ПОДСТРОКЕ САМОГО СЕКРЕТА, а не по наличию маски: маска может
+// стоять рядом с непомаскированным оригиналом, и проверка «есть <скрыто>»
+// это пропустит.
+//
+// Сервер — fakesrv.ListenSSH на ЭФЕМЕРНОМ порту 127.0.0.1:0 (никакого порта
+// 22 — инцидент 15.09), транспорт — настоящий sshRunner: именно его, а не
+// fakesrv.Server напрямую, предмет этого теста.
+//
+// Секрет — заведомо фиктивный литерал, узнаваемый глазом.
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// fakeStderrSecret — фиктивный PSK. Ни на что настоящее не похож.
+const fakeStderrSecret = "test-psk-AAAABBBBCCCC"
+
+// runWithSecretInStderr поднимает настоящий SSH к fakesrv и выполняет
+// команду, которую fakesrv не знает: тот возвращает ошибку с текстом
+// команды, sshserver пишет её в Channel.Stderr(), и sshRunner.Run
+// подставляет её в fmt.Errorf. Секрет оказывается СРАЗУ В ОБЕИХ
+// подстановках — и в %q текста команды, и в stderr, — то есть тест
+// покрывает оба требования Г2 одним прогоном.
+func runWithSecretInStderr(t *testing.T) error {
+	t.Helper()
+	srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
+	sess, err := ConnectWithHostKey(credsForFakeSSH(t, srv), HostKeyPolicy{
+		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
+		Prompt:         alwaysTrustPrompt,
+	})
+	if err != nil {
+		t.Fatalf("ConnectWithHostKey: %v", err)
+	}
+	t.Cleanup(sess.Close)
+
+	_, runErr := sess.r.Run("echo PresharedKey = "+fakeStderrSecret, nil)
+	if runErr == nil {
+		t.Fatal("ожидалась ошибка от неизвестной команды — без неё тесту нечего проверять")
+	}
+	return runErr
+}
+
+func TestRunErrorChainHasNoSecret(t *testing.T) {
+	runErr := runWithSecretInStderr(t)
+
+	links := map[string]string{
+		"значение ошибки (%v)": fmt.Sprintf("%v", runErr),
+		"err.Error()":          runErr.Error(),
+		"обёртка %w":           fmt.Errorf("не удалось выполнить операцию: %w", runErr).Error(),
+		"двойная обёртка %w":   fmt.Errorf("внешняя: %w", fmt.Errorf("внутренняя: %w", runErr)).Error(),
+		"печать обёртки (%v)":  fmt.Sprintf("%v", fmt.Errorf("не удалось выполнить операцию: %w", runErr)),
+		"текст, который печатает CLI (fmt.Sprintln как в run())": fmt.Sprintln("Ошибка:", runErr),
+	}
+	for _, e := errors.Unwrap(runErr), error(nil); e != nil; e = errors.Unwrap(e) {
+		links["звено errors.Unwrap: "+fmt.Sprintf("%T", e)] = e.Error()
+	}
+
+	for name, text := range links {
+		if strings.Contains(text, fakeStderrSecret) {
+			t.Errorf("звено %q содержит секрет в открытом виде: %q\nтекст: %s", name, fakeStderrSecret, text)
+		}
+	}
+
+	// Диагностика обязана остаться: имя ключа и структура строки сохраняются,
+	// маскируется только значение. Маскировка, съедающая строку, чинит утечку
+	// ценой того, ради чего сообщение печатается.
+	got := runErr.Error()
+	if !strings.Contains(got, "PresharedKey = "+hiddenPlaceholder) {
+		t.Errorf("маскировка съела имя ключа или структуру строки — ожидалось %q в:\n%s",
+			"PresharedKey = "+hiddenPlaceholder, got)
+	}
+	if !strings.Contains(got, "stderr:") {
+		t.Errorf("из сообщения пропала часть про stderr — диагностика потеряна:\n%s", got)
+	}
+}
+
+// TestMaskSecretsIsNoOpOnFreeText — предъявление механизма, на котором
+// строится покраснение 3а, наблюдением, а не рассуждением: существующая
+// maskSecrets на свободном тексте stderr не меняет НИ ОДНОГО СИМВОЛА, потому
+// что обе её регулярки привязаны к ^([-+]\s*) — строке диффа.
+//
+// Тест защищает от того, чтобы кто-нибудь «упростил» sshRunner.Run до вызова
+// maskSecrets: функция с подходящим именем уже есть, и это правдоподобнейшая
+// ошибка исполнения.
+func TestMaskSecretsIsNoOpOnFreeText(t *testing.T) {
+	const stderr = `wg: неизвестная строка "PresharedKey = ` + fakeStderrSecret + `"`
+
+	if got := maskSecrets(stderr); got != stderr {
+		t.Fatalf("maskSecrets изменила свободный текст — якорь ^([-+]\\s*) исчез?\nбыло:  %s\nстало: %s", stderr, got)
+	}
+	if !strings.Contains(maskSecrets(stderr), fakeStderrSecret) {
+		t.Fatal("внутренняя несогласованность теста")
+	}
+	if got := maskFreeText(stderr); strings.Contains(got, fakeStderrSecret) {
+		t.Errorf("maskFreeText пропустила секрет: %s", got)
+	}
+}
+
+// TestMaskFreeTextForms — формы, в которых сервер печатает секрет. Имя ключа
+// и структура строки сохраняются, длина значения не сохраняется.
+func TestMaskFreeTextForms(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"wg0.conf-строка", "PresharedKey = " + fakeStderrSecret, "PresharedKey = " + hiddenPlaceholder},
+		{"без пробелов", "PrivateKey=" + fakeStderrSecret, "PrivateKey=" + hiddenPlaceholder},
+		{"JSON-поле", `"psk": "` + fakeStderrSecret + `"`, `"psk": "` + hiddenPlaceholder + `"`},
+		{"в середине сообщения", `sh: bad line "PresharedKey = ` + fakeStderrSecret + `" at 3`, `sh: bad line "PresharedKey = ` + hiddenPlaceholder + `" at 3`},
+		{"нижний регистр", "presharedkey = " + fakeStderrSecret, "presharedkey = " + hiddenPlaceholder},
+		{"верхний регистр", "PRESHAREDKEY = " + fakeStderrSecret, "PRESHAREDKEY = " + hiddenPlaceholder},
+		{"пустой вход", "", ""},
+		{"нет секретов — текст не трогается", "cat: /opt/amnezia/awg/wg0.conf: No such file", "cat: /opt/amnezia/awg/wg0.conf: No such file"},
+		{"имя без значения не ломает текст", "wg: invalid PresharedKey", "wg: invalid PresharedKey"},
+	}
+	for _, c := range cases {
+		if got := maskFreeText(c.in); got != c.want {
+			t.Errorf("%s: maskFreeText(%q)\n хочу: %q\nполучил: %q", c.name, c.in, c.want, got)
+		}
+	}
+
+	// Длина секрета не сохраняется: разные по длине значения дают один и тот
+	// же вывод.
+	short := maskFreeText("PresharedKey = ABC")
+	long := maskFreeText("PresharedKey = " + strings.Repeat("Z", 44))
+	if short != long {
+		t.Errorf("длина секрета видна по выводу: %q против %q", short, long)
+	}
+}
