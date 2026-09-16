@@ -93,11 +93,66 @@ var (
 	// остаётся на месте. Именно из-за него maskSecrets непригодна для
 	// свободного текста stderr — там строк с "-"/"+" нет вовсе; для stderr
 	// заведена отдельная maskFreeText.
-	reWgSecretLine = regexp.MustCompile(`^([-+]\s*)(` + secretNamesAlt + `)(\s*=\s*).*$`)
+	// (?i) — конфиг, записанный как "presharedkey =" или "PRESHAREDKEY =",
+	// проходил открытым текстом (A2, Г3).
+	reWgSecretLine = regexp.MustCompile(`^([-+]\s*)((?i:` + secretNamesAlt + `))(\s*=\s*).*$`)
 	// reTblSecretLine — строка JSON clientsTable вида `"psk": "<value>",` —
 	// сохранённый PresharedKey отключённого пользователя (planDisableLocked).
-	reTblSecretLine = regexp.MustCompile(`^([-+]\s*"(` + secretNamesAlt + `)"\s*:\s*)".*"(,?)\s*$`)
+	reTblSecretLine = regexp.MustCompile(`^([-+]\s*"((?i:` + secretNamesAlt + `))"\s*:\s*)".*"(,?)\s*$`)
+
+	// reWgKVLine — ЛЮБАЯ строка wg0.conf вида "<имя> = <значение>" с ведущим
+	// "-"/"+" из lineDiff. Имя начинается с буквы, поэтому строки JSON
+	// clientsTable (начинаются с кавычки) и заголовки секций ("[Peer]") сюда
+	// не попадают.
+	reWgKVLine = regexp.MustCompile(`^([-+]\s*)([A-Za-z][A-Za-z0-9_-]*)(\s*=\s*)(.*)$`)
 )
+
+// wgPublicNames — ЗАКРЫТЫЙ СПИСОК ЗАВЕДОМО НЕСЕКРЕТНЫХ имён строк wg0.conf.
+// Строка "<имя> = <значение>", чьё имя сюда не входит, маскируется (A2, Г3).
+//
+// Приём тот же, что в cmd/cli для полей конфига: перечислять ДОПУСТИМОЕ.
+// Обоснование прямое: список СЕКРЕТНЫХ имён пополняется только после того,
+// как утечка уже случилась; список НЕСЕКРЕТНЫХ пополняется осознанно и видно
+// в диффе. Каждое добавление сюда — видимая строка диффа, и утверждает его
+// SEC-01 поимённо.
+//
+// ЭТО ВИДИМОЕ ИЗМЕНЕНИЕ ПОВЕДЕНИЯ, а не внутренняя починка: раньше в
+// Plan.Diff() открытыми показывались ВСЕ строки, кроме PresharedKey/
+// PrivateKey/"psk"; теперь открытыми остаются только строки с именами
+// отсюда. Таблица «было → стало» — в отчёте PR.
+//
+// Ключи хранятся в нижнем регистре, сверка — по strings.ToLower.
+var wgPublicNames = map[string]bool{
+	// [Interface] — параметры интерфейса сервера и клиента.
+	"address":    true,
+	"listenport": true,
+	"dns":        true,
+	"mtu":        true,
+	"table":      true,
+	"fwmark":     true,
+	"saveconfig": true,
+	"preup":      true,
+	"postup":     true,
+	"predown":    true,
+	"postdown":   true,
+	// junk-параметры AmneziaWG (core/core.go:buildClientConfigText) —
+	// параметры обфускации, не секреты.
+	"jc":   true,
+	"jmin": true,
+	"jmax": true,
+	"s1":   true,
+	"s2":   true,
+	"h1":   true,
+	"h2":   true,
+	"h3":   true,
+	"h4":   true,
+	// [Peer] — PublicKey и clientId это публичные идентификаторы, а не
+	// секреты (то же основание, что в core/mask_test.go:assertNoStrayBase64).
+	"publickey":           true,
+	"allowedips":          true,
+	"endpoint":            true,
+	"persistentkeepalive": true,
+}
 
 // ---------- маскировка свободного текста (A2, Г2) ----------
 //
@@ -159,6 +214,15 @@ func maskSecrets(diff string) string {
 		if m := reTblSecretLine.FindStringSubmatch(l); m != nil {
 			// m[2] — имя ключа, m[3] — необязательная запятая в конце строки.
 			lines[i] = m[1] + `"` + hiddenPlaceholder + `"` + m[3]
+			continue
+		}
+		// Закрытый список несекретных имён wg0.conf: имя, которого в нём нет,
+		// маскируется. Проверяется ПОСЛЕ известных секретных имён — те
+		// маскируются всегда, независимо от содержимого этого списка.
+		if m := reWgKVLine.FindStringSubmatch(l); m != nil {
+			if !wgPublicNames[strings.ToLower(m[2])] {
+				lines[i] = m[1] + m[2] + m[3] + hiddenPlaceholder
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
