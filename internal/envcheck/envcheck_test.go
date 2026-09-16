@@ -80,6 +80,8 @@ func linuxAllGood() *fakeOS {
 		out: map[string]string{
 			"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
 			"ldconfig -p":              ldconfigOut(allLibs...),
+			// ПО ПАМЯТИ — НЕ ДОКАЗАТЕЛЬСТВО, источник: память модели.
+			"cat /etc/os-release": "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nID=debian\n",
 		},
 		files: map[string]bool{},
 	}
@@ -454,10 +456,26 @@ func TestReportGolden(t *testing.T) {
 	}
 }
 
+// TestOSNameFromOsRelease: PRETTY_NAME читается и очищается от кавычек.
+// Образец /etc/os-release — ПО ПАМЯТИ, НЕ ДОКАЗАТЕЛЬСТВО, источник: память модели.
+func TestOSNameFromOsRelease(t *testing.T) {
+	f := linuxAllGood()
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if r.OSName != "Debian GNU/Linux 12 (bookworm)" {
+		t.Fatalf("OSName = %q", r.OSName)
+	}
+	if got := verdict(r); got != textWillRun {
+		t.Fatalf("итог = %q, хочу %q", got, textWillRun)
+	}
+}
+
 // TestOSNameUnknown: ОС не прочиталась — «определить не удалось», и это
 // попадает в итог, а не подменяется чем-то утвердительным.
 func TestOSNameUnknown(t *testing.T) {
-	f := linuxAllGood()
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              ldconfigOut(allLibs...),
+	}}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
 	if r.OSName != "" {
 		t.Fatalf("OSName = %q, хочу пустую (/etc/os-release не читается)", r.OSName)
