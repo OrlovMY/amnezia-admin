@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -102,6 +103,9 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 //   - строка с вызовом закомментирована внутри самого `run:` (shell-комментарий);
 //   - шаг стоит под `if:` с условием, которое никогда не истинно;
 //   - то же условие стоит этажом выше, на job;
+//   - условие ДОПУСТИМОЕ ПО ТЕКСТУ, но ложное по контексту: `matrix.os ==
+//     'linux'` в job без матрицы, или значение `linux`, вынутое из матрицы
+//     этого job. Текст цел, смысл — ложь; см. allowedActionlintGates;
 //   - шаг или job помечен `continue-on-error: true` — тогда он исполняется, но
 //     его падение ничего не роняет, то есть проверка есть и не проверяет ничего.
 //
@@ -151,10 +155,76 @@ var actionlintAnyRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/a
 // бесконечно много, — а перечислить допустимые можно, их на этой базе одно.
 // Значение строки — причина, по которой условие допущено; она печатается в
 // сообщении об ошибке, чтобы правящий видел, во что вписывается.
+//
+// НО ТЕКСТА УСЛОВИЯ НЕДОСТАТОЧНО, и это отдельный урок (ревью, MEDIUM-1/2).
+// Допущенное по тексту условие бывает ложным ВСЕГДА — из-за контекста, а не
+// из-за текста:
+//   - `matrix.os == 'linux'` в job, у которого матрицы нет вовсе (в ci.yml job
+//     lint именно такой): ссылка на matrix.os не истинна никогда, шаг молчит,
+//     сторож зелёный. Строки между workflow переносят постоянно, так что это
+//     самая обычная правка. Цена особая: ci.yml в комментарии к job lint
+//     ОБЪЯВЛЯЕТ отсутствие матрицы и `if:` защитным свойством — свойство
+//     объявлено, а сторожа у него не было;
+//   - то же с другой стороны: условие цело, а `os: linux` вынут из матрицы job
+//     test в release.yml — шаг умолкает молча. Соседний сторож это не ловит:
+//     matrix_test.go сверяет job `build` против job `checks`, а матрица job
+//     `test` не сверяется ничем, хотя именно от неё зависит, запустится ли
+//     actionlint на теге.
+//
+// Поэтому допускается ПАРА «условие + контекст»: если условие ссылается на
+// `matrix.<ключ> == '<значение>'`, в матрице ЭТОГО job такое значение обязано
+// присутствовать. Нет матрицы или нет значения — красный, с тем же требованием
+// внести условие явной строкой. Это тот же приём, только применённый к правой
+// части условия.
 var allowedActionlintGates = map[string]string{
 	"": "условия нет — шаг исполняется всегда",
-	"matrix.os == 'linux'": "release.yml, job test: actionlint гоняется один раз из трёх ОС матрицы — " +
-		"разбор workflow от ОС не зависит, гонять его трижды незачем. Условие сужает, но не отключает",
+	"matrix.os == 'linux'": "release.yml, job test: actionlint гоняется один раз из ОС матрицы — " +
+		"разбор workflow от ОС не зависит, гонять его дважды незачем. Условие сужает, но не отключает — " +
+		"при условии, что os: linux в матрице этого job есть, что и проверяется",
+}
+
+// Ссылка на матрицу в условии: `matrix.<ключ> == '<значение>'` (кавычки любые).
+var matrixRefRe = regexp.MustCompile(`^matrix\.([A-Za-z0-9_.-]+) == ['"]([^'"]*)['"]$`)
+
+// gateAllowed — допустимо ли условие с учётом матрицы того job, в котором оно
+// стоит. Возвращает причину отказа, готовую к печати.
+func gateAllowed(gate, jobName string, matrix []map[string]string) (bool, string) {
+	if _, ok := allowedActionlintGates[gate]; !ok {
+		return false, fmt.Sprintf("условие if: %q, которого НЕТ в закрытом списке allowedActionlintGates — "+
+			"сторож не берётся считать такой шаг исполняемым.\n"+
+			"      Условие законно? Внеси его в allowedActionlintGates отдельной строкой с причиной — "+
+			"тогда это видно в диффе", gate)
+	}
+
+	m := matrixRefRe.FindStringSubmatch(gate)
+	if m == nil {
+		return true, ""
+	}
+	key, want := m[1], m[2]
+
+	if len(matrix) == 0 {
+		return false, fmt.Sprintf("условие if: %q допустимо СПИСКОМ, но у job %s НЕТ МАТРИЦЫ ВОВСЕ — "+
+			"ссылка на matrix.%s не истинна никогда, и шаг не исполнится ни разу.\n"+
+			"      Текст условия цел, смысл его — ложь. Условие законно в этом контексте? "+
+			"Внеси его в allowedActionlintGates отдельной строкой с причиной — тогда это видно в диффе",
+			gate, jobName, key)
+	}
+
+	var seen []string
+	for _, entry := range matrix {
+		if v, ok := entry[key]; ok {
+			seen = append(seen, v)
+			if v == want {
+				return true, ""
+			}
+		}
+	}
+	sort.Strings(seen)
+	return false, fmt.Sprintf("условие if: %q допустимо СПИСКОМ, но в матрице job %s нет элемента с %s: %s "+
+		"(есть: %v) — шаг не исполнится ни разу.\n"+
+		"      Значение вынули из матрицы, а условие осталось: текст цел, смысл его — ложь. "+
+		"Так и задумано? Внеси условие в allowedActionlintGates отдельной строкой с причиной — "+
+		"тогда это видно в диффе", gate, jobName, key, want, seen)
 }
 
 // actionlintRequirement — один ТРЕБУЕМЫЙ ШАГ: вызов такой-то формы, в одном
@@ -208,7 +278,12 @@ type wfSteps struct {
 	Jobs map[string]struct {
 		If              interface{} `yaml:"if"`
 		ContinueOnError interface{} `yaml:"continue-on-error"`
-		Steps           []struct {
+		Strategy        struct {
+			Matrix struct {
+				Include []map[string]string `yaml:"include"`
+			} `yaml:"matrix"`
+		} `yaml:"strategy"`
+		Steps []struct {
 			If              interface{} `yaml:"if"`
 			ContinueOnError interface{} `yaml:"continue-on-error"`
 			Run             string      `yaml:"run"`
@@ -278,8 +353,9 @@ func runStepsOf(t *testing.T, path string) []runStep {
 	var out []runStep
 	total := 0
 	for jobName, job := range wf.Jobs {
+		matrix := job.Strategy.Matrix.Include
 		jobGate := normalizeGate(job.If)
-		_, jobGateOK := allowedActionlintGates[jobGate]
+		jobGateOK, jobGateWhy := gateAllowed(jobGate, jobName, matrix)
 		jobCOE := isTrue(job.ContinueOnError)
 
 		for _, step := range job.Steps {
@@ -288,7 +364,7 @@ func runStepsOf(t *testing.T, path string) []runStep {
 				continue
 			}
 			stepGate := normalizeGate(step.If)
-			_, stepGateOK := allowedActionlintGates[stepGate]
+			stepGateOK, stepGateWhy := gateAllowed(stepGate, jobName, matrix)
 
 			s := runStep{job: jobName, body: stripShellComments(step.Run), live: true}
 			switch {
@@ -299,15 +375,9 @@ func runStepsOf(t *testing.T, path string) []runStep {
 				s.live, s.reason = false, "шаг помечен continue-on-error: true — он исполняется, "+
 					"но его падение ничего не роняет, то есть проверка есть и не проверяет ничего"
 			case !jobGateOK:
-				s.live, s.reason = false, fmt.Sprintf("job %s стоит под условием if: %q, которого НЕТ в закрытом "+
-					"списке allowedActionlintGates — сторож не берётся считать такой шаг исполняемым.\n"+
-					"      Условие законно? Внеси его в allowedActionlintGates отдельной строкой с причиной — "+
-					"тогда это видно в диффе", jobName, jobGate)
+				s.live, s.reason = false, "job "+jobName+" стоит под условием, которое сторож не принял: "+jobGateWhy
 			case !stepGateOK:
-				s.live, s.reason = false, fmt.Sprintf("шаг стоит под условием if: %q, которого НЕТ в закрытом "+
-					"списке allowedActionlintGates — сторож не берётся считать такой шаг исполняемым.\n"+
-					"      Условие законно? Внеси его в allowedActionlintGates отдельной строкой с причиной — "+
-					"тогда это видно в диффе", stepGate)
+				s.live, s.reason = false, "шаг стоит под условием, которое сторож не принял: "+stepGateWhy
 			}
 			out = append(out, s)
 		}
