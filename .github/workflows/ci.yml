@@ -77,7 +77,7 @@ jobs:
         # fetch-depth по умолчанию: merge-base и полная история нужны
         # release.yml для проверки происхождения тега, здесь — нет.
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         # До любого шага, печатающего или вызывающего go: на macos-26 нет
         # предустановленного go, и `go version` до setup-go падал бы
         # "command not found" (случай ced1fa5).
@@ -172,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
