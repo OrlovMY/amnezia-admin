@@ -130,6 +130,27 @@ jobs:
           say "go:" go version
           say "gcc:" gcc --version
 
+      - name: go vet
+        # Дословно как в release.yml; на linux требует шага Linux GUI deps.
+        run: go vet ./...
+
+      - name: go test -race
+        # Дословно как в release.yml, включая -count=1: иначе кэш отдаст
+        # вчерашний результат. Сюда же попадает сторож матриц
+        # internal/ciguard — значит расхождение ci.yml и release.yml ловится
+        # и на теге, куда ci.yml не приходит.
+        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/
+
+      - name: Сборка
+        # Скрипт требует непустых VERSION и COMMIT и падает без них: версия
+        # фиктивная, SHA настоящий. Собранное никуда не загружается — ни
+        # upload-artifact, ни релиза: это территория release.yml. dist/
+        # остаётся на раннере и умирает вместе с ним.
+        run: bash scripts/build-release.sh ${{ matrix.os }}
+        env:
+          VERSION: v0.0.0-ci
+          COMMIT: ${{ github.sha }}
+
   lint:
     # Без матрицы и без единого `if:` — это свойство конструкции, а не
     # совпадение строк: шаг под `if: matrix.os == 'linux'` при любой опечатке
@@ -178,3 +199,80 @@ jobs:
           sc_out="$("$SHELLCHECK_BIN" --version 2>&1)" || { echo "СТОП: $SHELLCHECK_BIN не запускается" >&2; exit 1; }
           sc_ver="$(printf '%s\n' "$sc_out" | grep '^version:')" || { echo "СТОП: $SHELLCHECK_BIN не назвал версию" >&2; exit 1; }
           printf '%-12s %s (%s)\n' "shellcheck:" "$sc_ver" "$SHELLCHECK_BIN"
+
+      - name: gofmt
+        # `gofmt -l` сам по себе возвращает 0 даже при найденных файлах —
+        # падение делается явной проверкой непустого вывода.
+        #
+        # Ровно один прогон, и только здесь: форматирование — свойство
+        # содержимого репозитория, а не ОС. Три прогона внесли бы зависимость
+        # от того, как раннер разворачивает окончания строк при checkout; на
+        # машине с core.autocrlf=true `gofmt -l .` перечисляет ВСЕ файлы, хотя
+        # в объектах git лежит LF и ни один файл не сломан. Красный CI без
+        # единой настоящей ошибки хуже отсутствующей проверки: ему перестают
+        # верить.
+        run: |
+          set -euo pipefail
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "СТОП: файлы не по gofmt:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
+
+      - name: Канарейка shellcheck
+        # ГЛАВНОЕ МЕСТО ЭТОГО ФАЙЛА. Доказательство, живущее только в отчёте
+        # исполнителя, защищает один прогон; защита нужна каждому.
+        #
+        # В release.yml слова shellcheck нет вовсе — actionlint на КАЖДОМ
+        # теге, включая выпуск v0.1.0, разбирал только YAML, и шаг был
+        # зелёным. Ниже заведомый shell-дефект, который ловит ТОЛЬКО
+        # shellcheck (SC2086 — неквотированная переменная; ни YAML-ошибкой,
+        # ни замечанием самого actionlint он не является, иначе доказывалось
+        # бы не то). Нет кода правила в выводе или код возврата 0 — значит
+        # shellcheck не применялся, и job обязан упасть, а не порадовать
+        # зелёным.
+        #
+        # actionlint получает shellcheck явным абсолютным путём, а не через
+        # PATH: PATH шага и PATH, в котором ищет actionlint, — не одно и то
+        # же, и именно на этой разнице проект уже горел.
+        run: |
+          set -euo pipefail
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста — scripts/dev-tools.sh не отдал путь" >&2; exit 1; }
+          test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста — scripts/dev-tools.sh не отдал версию" >&2; exit 1; }
+          canary="$RUNNER_TEMP/canary-workflow.yml"
+          cat > "$canary" <<'CANARY_YAML'
+          name: canary
+          on: push
+          jobs:
+            canary:
+              runs-on: ubuntu-24.04
+              steps:
+                - name: Заведомо неквотированная переменная — это ловит только shellcheck
+                  run: |
+                    target=$1
+                    echo $target
+          CANARY_YAML
+          rc=0
+          out="$(go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" -shellcheck "$SHELLCHECK_BIN" "$canary" 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then
+            echo "СТОП: actionlint не видит shellcheck — разбор bash внутри run: не выполняется, прогон ничего не проверил" >&2
+            exit 1
+          fi
+          echo "Канарейка сработала: shellcheck применён к bash внутри run:"
+
+      - name: actionlint (оба workflow)
+        # Только после канарейки. Оба файла передаются явными путями, включая
+        # release.yml: правка релизного workflow попадает под разбор до тега.
+        # dependabot.yml и прочие не-workflow файлы НЕ передавать — actionlint
+        # считает любой переданный файл workflow и даёт на них ложные ошибки
+        # (уже ловили); глоб по каталогу принёс бы то же самое.
+        run: |
+          set -euo pipefail
+          test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста" >&2; exit 1; }
+          test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста" >&2; exit 1; }
+          go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" \
+            -shellcheck "$SHELLCHECK_BIN" \
+            .github/workflows/release.yml \
+            .github/workflows/ci.yml
