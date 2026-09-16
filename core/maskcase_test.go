@@ -57,7 +57,7 @@ func TestMaskSecretsIsCaseInsensitive(t *testing.T) {
 	t.Run("clientsTable: \"PSK\" в другом регистре тоже маскируется", func(t *testing.T) {
 		for _, name := range []string{"psk", "PSK", "Psk"} {
 			line := `+        "` + name + `": "` + fakeCasePSK + `",`
-			got := maskSecrets(line)
+			got := maskTableSecrets(line)
 			if strings.Contains(got, fakeCasePSK) {
 				t.Errorf("maskSecrets пропустила секрет clientsTable при написании %q: %s", name, got)
 			}
@@ -105,10 +105,25 @@ func TestMaskSecretsClosedListOfPublicNames(t *testing.T) {
 		}
 	})
 
-	t.Run("заголовки секций и строки без '=' не трогаются", func(t *testing.T) {
-		for _, line := range []string{"+[Peer]", "-[Interface]", "+", "-  ", `+    {`, `-    ],`} {
+	t.Run("заголовки секций и пустые строки не трогаются", func(t *testing.T) {
+		for _, line := range []string{"+[Peer]", "-[Interface]", "+", "-  ", "-\t", "+[Interface] "} {
 			if got := maskSecrets(line); got != line {
-				t.Errorf("строка без пары «имя = значение» изменена.\n было: %q\nстало: %q", line, got)
+				t.Errorf("структурная строка wg0.conf изменена.\n было: %q\nстало: %q", line, got)
+			}
+		}
+	})
+
+	// Ревью SEC-01, Новое-2: запрет по умолчанию действует и в wg0.conf —
+	// строка, не подошедшая ни под одно правило, скрывается, а не
+	// показывается. Раньше она проваливалась в «открыто».
+	t.Run("непонятая строка wg0.conf скрывается целиком", func(t *testing.T) {
+		for _, line := range []string{"+" + fakeCasePSK, "-  " + fakeCasePSK, "+какой-то мусор"} {
+			got := maskSecrets(line)
+			if got == line {
+				t.Errorf("строка, не подошедшая ни под одно правило, осталась открытой: %q", line)
+			}
+			if strings.Contains(got, fakeCasePSK) {
+				t.Errorf("секрет виден в непонятой строке: %s", got)
 			}
 		}
 	})
@@ -127,7 +142,7 @@ func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
 	t.Run("неизвестное имя — значение скрыто, имя видно", func(t *testing.T) {
 		in := `-            "clientPrivKey": "` + fakeCasePSK + `",`
 		want := `-            "clientPrivKey": "` + hiddenPlaceholder + `",`
-		got := maskSecrets(in)
+		got := maskTableSecrets(in)
 		if strings.Contains(got, fakeCasePSK) {
 			t.Errorf("поле userData с неизвестным именем не замаскировано: %s", got)
 		}
@@ -139,7 +154,7 @@ func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
 	t.Run("значение без запятой на последней строке объекта", func(t *testing.T) {
 		in := `+            "clientPrivKey": "` + fakeCasePSK + `"`
 		want := `+            "clientPrivKey": "` + hiddenPlaceholder + `"`
-		if got := maskSecrets(in); got != want {
+		if got := maskTableSecrets(in); got != want {
 			t.Errorf("\n хочу: %s\nполучил: %s", want, got)
 		}
 	})
@@ -150,7 +165,7 @@ func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
 			`+            "secretFlag": true`,
 			`+            "secretNull": null,`,
 		} {
-			got := maskSecrets(in)
+			got := maskTableSecrets(in)
 			if !strings.Contains(got, hiddenPlaceholder) {
 				t.Errorf("нестроковое значение неизвестного поля не скрыто: %s", got)
 			}
@@ -166,19 +181,54 @@ func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
 			`+            "disabled": true,`,
 			`+            "disabledAt": "2026-09-16T20:18:56+07:00",`,
 		} {
-			if got := maskSecrets(line); got != line {
+			if got := maskTableSecrets(line); got != line {
 				t.Errorf("строка из закрытого списка несекретных имён замаскирована.\n было: %s\nстало: %s", line, got)
 			}
 		}
 	})
 
-	t.Run("открывающие скобки вложенных структур не трогаются", func(t *testing.T) {
+	t.Run("открывающие и закрывающие скобки не трогаются", func(t *testing.T) {
 		for _, line := range []string{
 			`+        "userData": {`,
 			`+        "someList": [`,
+			`+    {`,
+			`-    },`,
+			`-            ],`,
+			`+    }`,
+			`-`,
+			`+   `,
 		} {
-			if got := maskSecrets(line); got != line {
-				t.Errorf("открывающая скобка изменена — значения на этой строке нет.\n было: %s\nстало: %s", line, got)
+			if got := maskTableSecrets(line); got != line {
+				t.Errorf("структурная строка JSON изменена — значения на этой строке нет.\n было: %q\nстало: %q", line, got)
+			}
+		}
+	})
+
+	// Ревью SEC-01, Новое-2 — воспроизведено прогоном (leak=true).
+	t.Run("элемент массива: имени нет, значение всё равно скрыто", func(t *testing.T) {
+		in := `+                "` + fakeCasePSK + `",`
+		got := maskTableSecrets(in)
+		if strings.Contains(got, fakeCasePSK) {
+			t.Errorf("элемент массива JSON напечатан открытым: %s", got)
+		}
+		if got != `+                "`+hiddenPlaceholder+`",` {
+			t.Errorf("отступ или завершающая запятая не сохранены: %q", got)
+		}
+	})
+
+	t.Run("ключ с экранированной кавычкой скрывается целиком", func(t *testing.T) {
+		in := `+            "a\"b": "` + fakeCasePSK + `",`
+		got := maskTableSecrets(in)
+		if strings.Contains(got, fakeCasePSK) {
+			t.Errorf("значение под ключом с экранированной кавычкой напечатано открытым: %s", got)
+		}
+	})
+
+	t.Run("нестроковый элемент массива тоже скрыт", func(t *testing.T) {
+		for _, in := range []string{`+                42,`, `+                true`} {
+			got := maskTableSecrets(in)
+			if !strings.Contains(got, hiddenPlaceholder) {
+				t.Errorf("нестроковый элемент массива не скрыт: %s", got)
 			}
 		}
 	})
@@ -295,5 +345,51 @@ func TestPlanDiffMasksUnknownWgKey(t *testing.T) {
 	}
 	if !strings.Contains(wgDiff, "SecretBlob = "+hiddenPlaceholder) {
 		t.Errorf("имя неизвестного поля пропало из diff — теряется диагностика:\n%s", wgDiff)
+	}
+}
+
+// TestPlanDiffMasksArrayElement — ревью SEC-01, Новое-2, сквозным путём.
+//
+// Клиент Amnezia положил в userData МАССИВ. У его элементов имени нет:
+// правило для пар `"имя": значение` их не видит, правило для `имя = значение`
+// требует знака равенства — и строка проваливалась в «открыто». Ровно та
+// дыра наизнанку, которую мы чинили для wg0.conf по замечанию 6.
+// Воспроизведено прогоном до правки: leak=true.
+func TestPlanDiffMasksArrayElement(t *testing.T) {
+	c := awgContainer()
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+
+	clients, err := sess.LoadClients(c)
+	if err != nil {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	if len(clients) < 2 {
+		t.Fatal("fakesrv.New() должен дать двух клиентов")
+	}
+
+	tbl, ok := srv.File(c.Dir + "/clientsTable")
+	if !ok {
+		t.Fatal("нет clientsTable в fakesrv")
+	}
+	const anchor = `"clientName"`
+	if !strings.Contains(string(tbl), anchor) {
+		t.Fatalf("в clientsTable fakesrv нет опорной строки %s — тест перестал что-либо проверять", anchor)
+	}
+	txt := strings.Replace(string(tbl), anchor,
+		"\"keys\": [\n                \""+fakeCasePSK+"\"\n            ],\n            "+anchor, 1)
+	srv.SetFile(c.Dir+"/clientsTable", []byte(txt))
+
+	plan, err := sess.PlanDelete(c, clients[1].ClientID)
+	if err != nil {
+		t.Fatalf("PlanDelete: %v", err)
+	}
+	_, tblDiff := plan.Diff()
+
+	if !strings.Contains(tblDiff, "keys") {
+		t.Fatalf("массив keys не попал в diff — тест перестал что-либо проверять:\n%s", tblDiff)
+	}
+	if strings.Contains(tblDiff, fakeCasePSK) {
+		t.Errorf("Plan.Diff() показал элемент массива открытым:\n%s", tblDiff)
 	}
 }

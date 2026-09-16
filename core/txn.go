@@ -47,7 +47,8 @@ type Plan struct {
 // Значения секретов (PresharedKey/PrivateKey в wg0.conf, "psk" в
 // clientsTable) замаскированы — см. maskSecrets.
 func (p *Plan) Diff() (wgDiff, tblDiff string) {
-	return maskSecrets(lineDiff(p.wgBefore, p.wgAfter)), maskSecrets(lineDiff(p.tblBefore, p.tblAfter))
+	return maskSecrets(lineDiff(p.wgBefore, p.wgAfter)),
+		maskTableSecrets(lineDiff(p.tblBefore, p.tblAfter))
 }
 
 // ---------- маскировка секретов в предпросмотре (SEC-01, review-reply PR-2Б
@@ -121,6 +122,18 @@ var (
 	// открывающая скобка вложенной структуры, у которой значения на этой
 	// строке нет.
 	reTblKVLine = regexp.MustCompile(`^([-+]\s*")([^"]+)("\s*:\s*)(.*)$`)
+
+	// reDiffLead — ведущий знак "-"/"+" с отступом и остаток строки. Нужен
+	// маскировке строки целиком: отступ сохраняется, содержимое — нет.
+	reDiffLead = regexp.MustCompile(`^([-+]\s*)(.*)$`)
+
+	// reTblStructuralLine — строка JSON, состоящая только из скобок, запятых
+	// и пробелов: значения в ней нет, скрывать нечего.
+	reTblStructuralLine = regexp.MustCompile(`^[-+]?[\s{}\[\],]*$`)
+
+	// reWgStructuralLine — пустая строка или заголовок секции wg0.conf
+	// ("[Interface]", "[Peer]"): значения в ней нет.
+	reWgStructuralLine = regexp.MustCompile(`^[-+]?\s*(\[[^\]]*\])?\s*$`)
 )
 
 // tblPublicNames — ЗАКРЫТЫЙ СПИСОК ЗАВЕДОМО НЕСЕКРЕТНЫХ имён полей
@@ -327,41 +340,114 @@ func maskSecrets(diff string) string {
 			lines[i] = m[1] + m[2] + m[3] + hiddenPlaceholder
 			continue
 		}
+		// Закрытый список несекретных имён wg0.conf: имя, которого в нём нет,
+		// маскируется. Проверяется ПОСЛЕ известных секретных имён — те
+		// маскируются всегда, независимо от содержимого этого списка.
+		if m := reWgKVLine.FindStringSubmatch(l); m != nil {
+			switch {
+			case wgPublicNames[strings.ToLower(m[2])]:
+				// Имя из закрытого списка несекретных — строка как есть.
+			case strings.TrimSpace(m[4]) == "":
+				// Значения после "=" нет, а имя неизвестно. Это не пара
+				// «имя = значение», а скорее всего сам секрет: голая строка
+				// base64 оканчивается на "=" и разбирается как имя с пустым
+				// значением. Показать такое «имя» значит показать секрет,
+				// поэтому скрывается ВСЯ строка, а не только хвост.
+				lines[i] = maskWholeLine(l)
+			default:
+				lines[i] = m[1] + m[2] + m[3] + hiddenPlaceholder
+			}
+			continue
+		}
+		// ЗАПРЕТ ПО УМОЛЧАНИЮ. Строка без пары «имя = значение» — это либо
+		// заголовок секции ("[Peer]"), либо пустая строка, и в обоих случаях
+		// значения в ней нет. Всё прочее — строка, которую мы НЕ ПОНЯЛИ, и
+		// по правилу «непонятое скрывается» она маскируется целиком, а не
+		// показывается (ревью SEC-01, Новое-2: тот же довод, что для
+		// замечания 6).
+		if reWgStructuralLine.MatchString(l) {
+			continue
+		}
+		lines[i] = maskWholeLine(l)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// maskTableSecrets — маскировка построчного диффа clientsTable (JSON).
+//
+// Отдельная функция, а не общая с maskSecrets: у JSON и у ini-подобного
+// wg0.conf разная структура, и «строка, не подошедшая ни под одно правило»
+// значит в них разное. Пока функция была одна, элемент массива JSON
+// проваливался в «открыто»: правило для пар `"имя": значение` его не видит
+// (имени нет), а правило для `имя = значение` требует знака равенства
+// (ревью SEC-01, Новое-2; воспроизведено прогоном, leak=true).
+//
+// ЗАПРЕТ ПО УМОЛЧАНИЮ: строка, не подошедшая ни под одно правило,
+// маскируется целиком. Этим же закрывается ключ с экранированной кавычкой
+// (`"a\"b": "…"`), на котором класс имени [^"]+ обрывается о косую.
+func maskTableSecrets(diff string) string {
+	if diff == "" {
+		return diff
+	}
+	lines := strings.Split(diff, "\n")
+	for i, l := range lines {
 		if m := reTblSecretLine.FindStringSubmatch(l); m != nil {
 			// m[2] — имя ключа, m[3] — необязательная запятая в конце строки.
 			lines[i] = m[1] + `"` + hiddenPlaceholder + `"` + m[3]
 			continue
 		}
-		// Закрытый список несекретных имён clientsTable. Строки JSON
-		// разбираются ДО строк wg0.conf и всегда завершают обработку строки:
-		// одна и та же строка не может быть и той, и другой.
 		if m := reTblKVLine.FindStringSubmatch(l); m != nil {
 			rest := strings.TrimSpace(m[4])
-			// "{" и "[" — открывающая скобка вложенной структуры: значения на
-			// этой строке нет, скрывать нечего, а содержимое внутри закроют
-			// эти же правила на своих строках.
 			switch {
 			case rest == "{" || rest == "[":
+				// Открывающая скобка вложенной структуры: значения на этой
+				// строке нет, скрывать нечего. Содержимое внутри закрывают
+				// эти же правила на своих строках — включая правило запрета
+				// по умолчанию ниже, без которого элементы массива уходили
+				// открытыми.
 			case tblPublicNames[strings.ToLower(m[2])]:
 			default:
 				comma := ""
 				if strings.HasSuffix(rest, ",") {
 					comma = ","
 				}
+				// ЗАПИСЬ ГРАНИЦЫ (ревью SEC-01, под запись): нестроковое
+				// значение неизвестного поля становится СТРОКОЙ
+				// ("port": 51820 → "port": "<скрыто>"). Из-за этого в
+				// clientsTable теряется различение «пусто / скрыто», на
+				// котором мы настаиваем для decode: пустая строка и
+				// скрытый ноль выглядят по-разному, но скрытая пустая
+				// строка и скрытый ноль — одинаково. Принято осознанно:
+				// показать тип значения значит показать часть значения, а
+				// перечня типов у неизвестного поля быть не может.
 				lines[i] = m[1] + m[2] + m[3] + `"` + hiddenPlaceholder + `"` + comma
 			}
 			continue
 		}
-		// Закрытый список несекретных имён wg0.conf: имя, которого в нём нет,
-		// маскируется. Проверяется ПОСЛЕ известных секретных имён — те
-		// маскируются всегда, независимо от содержимого этого списка.
-		if m := reWgKVLine.FindStringSubmatch(l); m != nil {
-			if !wgPublicNames[strings.ToLower(m[2])] {
-				lines[i] = m[1] + m[2] + m[3] + hiddenPlaceholder
-			}
+		// Только скобки, запятые и пробелы — структура JSON, значения нет.
+		if reTblStructuralLine.MatchString(l) {
+			continue
 		}
+		// Всё остальное внутри JSON — элемент массива, ключ с экранированной
+		// кавычкой, обрывок: мы этого не поняли, значит скрываем.
+		lines[i] = maskWholeLine(l)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// maskWholeLine скрывает содержимое строки целиком, сохраняя ведущий знак
+// "-"/"+" и отступ (чтобы структура диффа осталась читаемой) и завершающую
+// запятую (чтобы JSON не выглядел порванным).
+func maskWholeLine(l string) string {
+	m := reDiffLead.FindStringSubmatch(l)
+	if m == nil {
+		return l
+	}
+	comma := ""
+	if strings.HasSuffix(strings.TrimSpace(m[2]), ",") {
+		comma = ","
+	}
+	return m[1] + `"` + hiddenPlaceholder + `"` + comma
 }
 
 // lineDiff — простой построчный diff: общий префикс и общий суффикс строк
