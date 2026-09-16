@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -243,10 +246,103 @@ func TestTrustedClockUsesMonotonicReading(t *testing.T) {
 	if !containsMonotonicMarker(clock.localAt.String()) {
 		t.Fatalf("clock.localAt = %s — без монотонной компоненты (m=+/m=-), хотя time.Now() "+
 			"на платформе %s/%s её даёт.\n"+
-			"  Значит localAt где-то прошёл через арифметику или сериализацию, которая её стрипает,\n"+
-			"  и TrustedClock.Now() перестал быть защищённым от перевода системных часов.",
+			"  Значит localAt прошёл через арифметику или сериализацию, которая её стрипает,\n"+
+			"  и точка отсчёта TrustedClock перестала быть монотонной.",
 			clock.localAt.String(), runtime.GOOS, runtime.GOARCH)
 	}
+}
+
+// Что этот тест НЕ доказывает — названо здесь, потому что завышенное
+// достижение опаснее скромного.
+//
+// Тест выше сторожит ПОЛЕ localAt, а не КОНТРАКТ. Монотонность можно стереть
+// этажом ниже, уже внутри Now() — `time.Since(c.localAt.Round(0))` или счёт по
+// wall-clock, — и тест выше остаётся зелёным, хотя защита от перевода
+// системных часов снята полностью. Проверено прогоном: на подмене
+// `return c.onlineAt.Add(time.Since(c.localAt.Round(0)))` тест выше даёт PASS.
+//
+// Почему это не закрыто утверждением о поведении, а закрыто сторожем исходника.
+// Поведенческий различитель потребовал бы TrustedClock, у которого wall-часть
+// localAt сдвинута относительно монотонной: при монотонном счёте Now() дал бы
+// примерно onlineAt, при wall-счёте уехал бы на час. Такой time.Time публичным
+// API построить НЕЛЬЗЯ, и это проверено прогоном, а не рассуждением: Add
+// сдвигает ОБЕ части сразу (`m=+0.004` → `m=+3600.004`), а Round/Truncate/UTC/
+// Local монотонную компоненту стирают. Предложенное утверждение было
+// прогнано в обеих версиях — на чистом Now() и на подменённом — и дало
+// ОДИНАКОВЫЙ результат (уход на 1h0m0s), то есть не различает их вовсе.
+// Развести wall и монотонные часы можно только реальным переводом системных
+// часов, а в юнит-тесте этого нет.
+//
+// Поэтому контракт сторожится там, где он записан, — в исходнике, закрытым
+// списком допустимых тел Now(), тем же приёмом, что применён к меткам раннеров
+// и к условиям `if:` в internal/ciguard: перечислить все неверные способы
+// посчитать время нельзя, перечислить единственный верный — можно. Законное
+// изменение Now() от этого не запрещено, оно становится видимым в диффе
+// отдельной строкой с причиной.
+//
+// Граница этого сторожа, тоже без завышения: он читает текст файла. Он поймает
+// подмену арифметики в Now() и не поймает подмену, унесённую в другую функцию,
+// которую Now() вызывает.
+var allowedTrustedClockNowBodies = map[string]string{
+	"return c.onlineAt.Add(time.Since(c.localAt))": "монотонный счёт: time.Since по localAt, " +
+		"у которого монотонная компонента цела, поэтому перевод системных часов на результат не влияет",
+}
+
+func TestTrustedClockNowCountsFromMonotonicReading(t *testing.T) {
+	if len(allowedTrustedClockNowBodies) == 0 {
+		t.Fatalf("закрытый список allowedTrustedClockNowBodies пуст — тест перестал что-либо проверять")
+	}
+
+	src, err := os.ReadFile("onlinetime.go")
+	if err != nil {
+		t.Fatalf("не прочитать onlinetime.go: %v", err)
+	}
+
+	const head = "func (c TrustedClock) Now() time.Time {"
+	i := strings.Index(string(src), head)
+	if i < 0 {
+		t.Fatalf("в onlinetime.go не найден метод %q — тест перестал что-либо проверять "+
+			"(метод переименовали, сменили приёмник или перенесли в другой файл)", head)
+	}
+	rest := string(src)[i+len(head):]
+	j := strings.Index(rest, "\n}")
+	if j < 0 {
+		t.Fatalf("в onlinetime.go не найден конец тела %s — тест перестал что-либо проверять", head)
+	}
+
+	// Тело нормализуется: shell-комментариев тут нет, но есть Go-комментарии,
+	// отступы и переносы — они к смыслу не относятся.
+	var kept []string
+	for _, line := range strings.Split(rest[:j], "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	body := strings.Join(strings.Fields(strings.Join(kept, " ")), " ")
+
+	if why, ok := allowedTrustedClockNowBodies[body]; !ok {
+		t.Fatalf("тело TrustedClock.Now() изменилось и НЕ входит в закрытый список допустимых:\n"+
+			"  найдено:  %s\n"+
+			"  допустимо: %v\n"+
+			"  Здесь держится защита от перевода системных часов, и стереть её можно одной вставкой\n"+
+			"  (.Round(0), .UTC(), счёт по wall-clock) — тест, сторожащий только поле localAt, этого не видит.\n"+
+			"  Изменение законно? Внеси новое тело в allowedTrustedClockNowBodies отдельной строкой\n"+
+			"  с причиной — тогда оно видно в диффе, а не проходит молча.",
+			body, keysOf(allowedTrustedClockNowBodies))
+	} else {
+		t.Logf("тело Now() допущено списком: %s", why)
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func containsMonotonicMarker(s string) bool {
