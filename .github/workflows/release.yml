@@ -86,7 +86,7 @@ jobs:
         # Ниже нет глушителя кода возврата: отсутствие gcc обязано ронять job (св. 3).
         if: matrix.os == 'windows'
         run: |
-          echo "C:\msys64\mingw64\bin" >> "$GITHUB_PATH"
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
           export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
@@ -169,7 +169,7 @@ jobs:
       - name: Windows mingw (gcc для CGO GUI-сборки)
         if: matrix.os == 'windows'
         run: |
-          echo "C:\msys64\mingw64\bin" >> "$GITHUB_PATH"
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
           export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
@@ -263,15 +263,24 @@ jobs:
           merge-multiple: true
 
       - name: Проверка состава релиза
+        # SC2012/SC2010 (actionlint-раннер): парсинг вывода ls заменён на
+        # bash-глобы (shopt -s nullglob — пустой каталог даёт count=0, а не
+        # литеральную "*"); поведение то же самое (те же сообщения, тот же
+        # регистронезависимый поиск подстроки fakeserver/fakesrv).
         run: |
           set -euo pipefail
           cd dist
-          count="$(ls -1 | wc -l)"
+          shopt -s nullglob
+          files=(*)
+          count="${#files[@]}"
           test "$count" -eq 6 || { echo "СТОП: ожидалось 6 файлов в dist/, найдено $count" >&2; ls -la >&2; exit 1; }
           for f in amnezia-admin-linux-amd64 amnezia-admin-windows-amd64.exe amnezia-admin-macos-arm64 amnezia-admin-gui-linux-amd64 amnezia-admin-gui-windows-amd64.exe amnezia-admin-gui-macos-arm64; do
             test -f "$f" || { echo "СТОП: отсутствует ожидаемый файл $f" >&2; exit 1; }
           done
-          if ls -1 | grep -Ei 'fakeserver|fakesrv'; then
+          shopt -s nocaseglob
+          fake=(*fakeserver* *fakesrv*)
+          shopt -u nocaseglob
+          if [ "${#fake[@]}" -gt 0 ]; then
             echo "СТОП: код фейкового сервера просочился в состав релиза" >&2
             exit 1
           fi
