@@ -11,6 +11,11 @@
 //   amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //   amnezia-admin toggle -key vpn://... -name Vasya
 //   amnezia-admin rekey  -key vpn://... -name Vasya
+//
+// Флаг -dry-run (для add/del/rename/toggle/rekey) показывает diff wg0.conf и
+// clientsTable, которые получились бы после операции, ничего не записывая на
+// сервер:
+//   amnezia-admin add -key vpn://... -name Vasya -dry-run
 package main
 
 import (
@@ -18,6 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -118,6 +124,110 @@ func printContainers(containers []core.Container, withNotes bool) {
 			note = cDim(" (только просмотр, управление не поддерживается)")
 		}
 		fmt.Printf("  %s %s %s%s\n", cNum(strconv.Itoa(i+1)+"."), c.Proto, cDim("["+c.Name+"]"), note)
+	}
+}
+
+// printPlan печатает построчный diff по обоим файлам плана в формате
+// "--- <path> (было) / +++ <path> (станет)" — общая функция для -dry-run
+// (Е1) и её регресс-теста (Е4: TestDryRunFlagPrintsDiffAndWritesNothing),
+// который вызывает её напрямую на плане, собранном на fakesrv.
+func printPlan(w io.Writer, p *core.Plan) {
+	wgDiff, tblDiff := p.Diff()
+	dir := p.Container.Dir
+	printFileDiff(w, dir+"/wg0.conf", wgDiff)
+	printFileDiff(w, dir+"/clientsTable", tblDiff)
+}
+
+func printFileDiff(w io.Writer, path, diff string) {
+	fmt.Fprintf(w, "--- %s (было)\n+++ %s (станет)\n", path, path)
+	if diff == "" {
+		fmt.Fprintln(w, "(без изменений)")
+		return
+	}
+	fmt.Fprint(w, diff)
+}
+
+// runDryRun строит план для cmd (add/del/rename/toggle/rekey) и печатает его
+// diff через printPlan, ничего не записывая на сервер — тело -dry-run веток
+// main() (Е1), вынесенное в отдельную функцию (ревью BE-01, круг 2, Medium):
+// сама обвязка флага (разбор, пять веток, break после печати) раньше ничем
+// не стереглась, тест звал только printPlan напрямую. Для add/rekey конфиг
+// с приватным ключом (plan.result.Config) не печатается и не сохраняется —
+// план ещё не применён, конфиг с ним мог бы и не заработать.
+func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, newname string) error {
+	printAndDone := func(plan *core.Plan) error {
+		printPlan(w, plan)
+		fmt.Fprintln(w, "Ничего не записано (dry-run).")
+		return nil
+	}
+	switch cmd {
+	case "add":
+		plan, err := sess.PlanAddUser(cur, name)
+		if err != nil {
+			return err
+		}
+		return printAndDone(plan)
+	case "del":
+		// вне интерактивного списка номер строки ничего не значит —
+		// принимаем только имя или публичный ключ (см. core.ResolveNonNumeric)
+		clients, err := sess.LoadClients(cur)
+		if err != nil {
+			return err
+		}
+		idx, err := core.ResolveNonNumeric(clients, name)
+		if err != nil {
+			return err
+		}
+		plan, err := sess.PlanDelete(cur, clients[idx].ClientID)
+		if err != nil {
+			return err
+		}
+		return printAndDone(plan)
+	case "rename":
+		clients, err := sess.LoadClients(cur)
+		if err != nil {
+			return err
+		}
+		idx, err := core.ResolveNonNumeric(clients, name)
+		if err != nil {
+			return err
+		}
+		plan, err := sess.PlanRename(cur, clients[idx].ClientID, newname)
+		if err != nil {
+			return err
+		}
+		return printAndDone(plan)
+	case "toggle":
+		clients, err := sess.LoadClients(cur)
+		if err != nil {
+			return err
+		}
+		idx, err := core.ResolveNonNumeric(clients, name)
+		if err != nil {
+			return err
+		}
+		enable := clients[idx].Disabled()
+		plan, err := sess.PlanSetEnabled(cur, clients[idx].ClientID, enable)
+		if err != nil {
+			return err
+		}
+		return printAndDone(plan)
+	case "rekey":
+		clients, err := sess.LoadClients(cur)
+		if err != nil {
+			return err
+		}
+		idx, err := core.ResolveNonNumeric(clients, name)
+		if err != nil {
+			return err
+		}
+		plan, err := sess.PlanRekey(cur, clients[idx].ClientID)
+		if err != nil {
+			return err
+		}
+		return printAndDone(plan)
+	default:
+		return fmt.Errorf("-dry-run не поддержан для команды %q", cmd)
 	}
 }
 
@@ -391,6 +501,7 @@ func main() {
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
 	name := fs.String("name", "", "имя пользователя (для add/del/rename/toggle)")
 	newname := fs.String("newname", "", "новое имя (для rename)")
+	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	fs.Parse(os.Args[2:])
 
 	if *key == "" {
@@ -437,12 +548,20 @@ func main() {
 	case "list":
 		_, err = listUsers(sess, cur)
 	case "add":
+		if *dryRun {
+			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			break
+		}
 		u, e := sess.AddUser(cur, *name)
 		if e == nil {
 			e = saveUserConfig(u, cur.Proto)
 		}
 		err = e
 	case "del":
+		if *dryRun {
+			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			break
+		}
 		// вне интерактивного списка номер строки ничего не значит —
 		// принимаем только имя или публичный ключ (см. core.ResolveNonNumeric)
 		clients, e := sess.LoadClients(cur)
@@ -460,6 +579,10 @@ func main() {
 			fmt.Printf("Пользователь %q удалён.\n", *name)
 		}
 	case "rename":
+		if *dryRun {
+			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			break
+		}
 		// вне интерактивного списка номер строки ничего не значит —
 		// принимаем только имя или публичный ключ (см. core.ResolveNonNumeric)
 		clients, e := sess.LoadClients(cur)
@@ -477,6 +600,10 @@ func main() {
 			fmt.Printf("Пользователь %q переименован в %q.\n", *name, strings.TrimSpace(*newname))
 		}
 	case "toggle":
+		if *dryRun {
+			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			break
+		}
 		// вне интерактивного списка номер строки ничего не значит —
 		// принимаем только имя или публичный ключ (см. core.ResolveNonNumeric)
 		clients, e := sess.LoadClients(cur)
@@ -499,6 +626,10 @@ func main() {
 			}
 		}
 	case "rekey":
+		if *dryRun {
+			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			break
+		}
 		// вне интерактивного списка номер строки ничего не значит —
 		// принимаем только имя или публичный ключ (см. core.ResolveNonNumeric)
 		clients, e := sess.LoadClients(cur)

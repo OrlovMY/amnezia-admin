@@ -40,6 +40,13 @@ type ui struct {
 	protoSelect *widget.Select
 	selectedRow int
 
+	// Кнопки главного экрана — поля, чтобы setBusy(true/false) могла
+	// Disable()/Enable() их во время любой серверной операции (от нажатия до
+	// fyne.Do с результатом), включая refresh(): мьютекс в core защищает
+	// данные, но без блокировки кнопок повторный клик — это уже вторая
+	// операция поверх ещё не завершившейся первой (BE-01, ревью, Е2).
+	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
+
 	// сортировка таблицы пользователей по клику на заголовок колонки;
 	// primary — активная (со стрелкой в заголовке), secondary — tie-breaker
 	// от предыдущего primary. Персистентно (ui.json рядом с exe), глобально
@@ -590,6 +597,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	regenBtn := widget.NewButtonWithIcon("Перевыпустить", theme.MediaReplayIcon(), func() { u.regenerateSelected() })
 	delBtn := widget.NewButtonWithIcon("Удалить", theme.DeleteIcon(), func() { u.deleteSelected() })
 	addBtn.Importance = widget.HighImportance
+	u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn = refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn
 
 	top := container.NewBorder(nil, nil,
 		container.NewHBox(server, widget.NewLabel("Протокол:"), u.protoSelect),
@@ -850,17 +858,70 @@ func (u *ui) applySort() {
 	core.SortClientsMultiKey(u.clients, u.peerStats, u.sortPrimary, u.sortPrimaryDir, u.sortSecondary, u.sortSecondaryDir)
 }
 
+// setBusy блокирует (true) или разблокирует (false) все шесть кнопок главного
+// экрана и protoSelect на время серверной операции — от нажатия до fyne.Do с
+// результатом (BE-01, ревью, Е2). Мьютекс в core защищает данные сервера, но
+// не UI: без этой блокировки повторный клик, например, по "Удалить" запускает
+// вторую операцию поверх ещё не завершившейся первой — со уже устаревшим
+// selectedRow.
+func (u *ui) setBusy(busy bool) {
+	for _, b := range []*widget.Button{u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn} {
+		if b == nil {
+			continue
+		}
+		if busy {
+			b.Disable()
+		} else {
+			b.Enable()
+		}
+	}
+	if u.protoSelect == nil {
+		return
+	}
+	if busy {
+		u.protoSelect.Disable()
+	} else {
+		u.protoSelect.Enable()
+	}
+}
+
 // refresh перечитывает пользователей с сервера (в фоне).
 //
 // Снимок cur делается дважды: один раз здесь (для запроса к нужному
 // протоколу) и повторно сверяется с u.cur внутри fyne.Do — если пользователь
 // успел переключить протокол, пока запрос летел по сети, устаревший ответ
 // отбрасывается и не перерисовывает таблицу поверх уже актуальных данных.
+// setBusy(false) снимается безусловно при завершении КАЖДОГО запроса (в т.ч.
+// устаревшего) — если протокол переключили во время загрузки, второй
+// (актуальный) refresh() всё равно уже успел выставить busy=true заново
+// своим собственным вызовом в начале функции.
 func (u *ui) refresh() {
 	if u.table == nil || u.status == nil {
 		return // экран ещё строится
 	}
 	cur := u.cur
+	u.setBusy(true)
+
+	// LoadClients для контейнеров с Managed == false (протокол без
+	// поддерживаемого формата конфига) возвращает ошибку, а не пустой список
+	// (core.LoadClients рассчитан на управляемые WG/AmneziaWG-контейнеры) —
+	// как и CLI (listUsers), просто не дёргаем сеть и показываем пустую
+	// таблицу с пояснением вместо диалога с сырой ошибкой (ревью PR-1, BE-01,
+	// Medium). Текст статуса (UI-01, ревью, High): без слова "просмотр" —
+	// пустая таблица рядом с обещанием "просмотра" читается как "пользователей
+	// нет" (подмена "неизвестно" нулём), поэтому явно "список недоступен".
+	if !cur.Managed {
+		u.clients = nil
+		u.handshakes = nil
+		u.peerStats = nil
+		u.applySort()
+		u.table.Refresh()
+		u.table.ScrollToTop()
+		u.status.SetText(fmt.Sprintf("Протокол %s не поддерживается этой утилитой: список пользователей недоступен.", cur.Proto))
+		u.setBusy(false)
+		return
+	}
+
 	u.status.SetText("Загружаю список пользователей...")
 	goSafe(func() {
 		clients, err := u.sess.LoadClients(cur)
@@ -870,6 +931,14 @@ func (u *ui) refresh() {
 			stats = map[string]core.PeerStat{}
 		}
 		fyne.Do(func() {
+			// setBusy(false) — первым действием колбэка, ДО проверки на
+			// устаревший ответ (BE-01, ревью, Medium): раньше return по
+			// staleness уходил, не сняв блокировку, а корректность держалась
+			// на негласном допущении, что busy снимет какой-то ДРУГОЙ,
+			// более поздний вызов refresh() — хрупкая связь между двумя
+			// независимыми решениями. Каждый завершившийся запрос теперь
+			// освобождает СВОЮ заявку на занятость сам, безусловно.
+			defer u.setBusy(false)
 			if cur != u.cur {
 				return // протокол сменился ещё раз, пока шёл запрос — ответ устарел
 			}
@@ -889,13 +958,162 @@ func (u *ui) refresh() {
 			// таблица выглядит пустой, пока пользователь не проскроллит вручную.
 			u.table.Refresh()
 			u.table.ScrollToTop()
-			note := ""
-			if !cur.Managed {
-				note = " — только просмотр, управление для этого протокола не поддерживается"
-			}
-			u.status.SetText(fmt.Sprintf("Пользователей: %d%s · трафик и активность — с момента перезапуска сервера", len(clients), note))
+			u.status.SetText(fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients)))
 		})
 	})
+}
+
+// ---------- «Показать изменения» (Е2) ----------
+
+// diffOrNote — текст для diff-окна: пустой diff означает "файл не меняется"
+// (core.Plan.Diff, например wg0.conf при RenameUser) — печатать это явно,
+// иначе пустое поле рядом с непустым выглядит как будто что-то сломалось.
+func diffOrNote(diff string) string {
+	if diff == "" {
+		return "(без изменений)"
+	}
+	return diff
+}
+
+// newDiffGrid строит widget.TextGrid (моноширинный по устройству — UI-01,
+// ревью, High: widget.MultiLineEntry монoширинность не гарантировал) с
+// построчной раскраской: "+" — цвет успеха темы, "-" — цвет ошибки темы (оба
+// автоматически согласованы со светлой/тёмной темой в МОМЕНТ ПОСТРОЕНИЯ).
+// TextGrid, в отличие от Entry, read-only по своей природе — Disable() не
+// нужен (UI-01, ревью, Medium: единственное содержимое окна не должно
+// выглядеть приглушённым).
+//
+// Названное решение (UI-01, ревью круга 2, Low): theme.Color() вычисляется
+// ОДИН раз здесь, а не через подписку на смену темы — если пользователь
+// переключит тему ОС/приложения, пока diff-окно открыто, раскраска этого
+// открытого окна останется от прежней темы до его переоткрытия. Осознанно не
+// чиним: diff-окно — короткоживущее модальное окно (секунды-минуты между
+// «Показать изменения» и «Применить»/«Закрыть»), а подписка TextGrid на
+// fyne.Settings().AddChangeListener ради этого случая добавляет постоянно
+// живущий колбэк и его отписку по закрытии диалога — сложность несоразмерна
+// вероятности "открыл diff-окно и посреди этого переключил системную тему".
+func newDiffGrid(diff string) *widget.TextGrid {
+	grid := widget.NewTextGridFromString(diffOrNote(diff))
+	if diff == "" {
+		return grid
+	}
+	addStyle := &widget.CustomTextGridStyle{FGColor: theme.Color(theme.ColorNameSuccess)}
+	delStyle := &widget.CustomTextGridStyle{FGColor: theme.Color(theme.ColorNameError)}
+	for row := range grid.Rows {
+		switch {
+		case strings.HasPrefix(grid.RowText(row), "+"):
+			grid.SetRowStyle(row, addStyle)
+		case strings.HasPrefix(grid.RowText(row), "-"):
+			grid.SetRowStyle(row, delStyle)
+		}
+	}
+	return grid
+}
+
+// newPlanStatusLabel — надпись прогресса построения плана ВНУТРИ диалога
+// подтверждения (UX-01, ревью, Medium): пока «Показать изменения» строит
+// план в фоне, сам диалог подтверждения — модальное окно, и статус главного
+// экрана (u.status) им закрыт и не виден пользователю.
+func newPlanStatusLabel() *widget.Label {
+	l := widget.NewLabel("")
+	l.Wrapping = fyne.TextWrapWord
+	return l
+}
+
+// isCASRefusal распознаёт отказ CAS (core/txn.go: checkCAS/casCheckFile) по
+// тексту ошибки — core не заводит для него отдельного типа, а трогать core
+// за пределами разрешённой правки SEC-01 в этом круге нельзя. Обе формулировки
+// дословно из Г4 задания: расхождение контрольной суммы и невозможность её
+// проверить — в обоих случаях план построен по УЖЕ неактуальному чтению,
+// поэтому его нельзя молча повторно "Применить" — план устарел, а не
+// произошёл преходящий сбой вроде сети.
+func isCASRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "изменился с момента чтения") ||
+		strings.Contains(msg, "не удалось проверить контрольную сумму")
+}
+
+// showDiffWindow показывает окно с построчными diff'ами обоих файлов плана
+// и кнопкой «Применить» (дублирующая «Закрыть» кнопка — встроенный dismiss
+// диалога). «Применить» вызывает sess.Apply(plan) ТОГО ЖЕ плана, что был
+// построен Plan*-вызовом до открытия окна: CAS поймает, если сервер
+// изменился, пока окно было открыто — в этом случае (isCASRefusal) кнопку
+// «Применить» обратно не включаем (UX-01, ревью, High): план устарел, повтор
+// того же плана всегда провалится тем же образом, нужно закрыть окно и
+// начать заново. Для прочих ошибок (сеть, права и т.п.) повтор осмыслен —
+// кнопка включается снова. При успехе onApplied получает результат Apply
+// (nil для всех действий, кроме add/rekey) — вызывающий код сам решает, что
+// делать дальше (showConfigDialog, refresh, текст статуса), диалог
+// закрывается сам.
+func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.NewUser)) {
+	wgDiff, tblDiff := plan.Diff()
+	wgGrid := newDiffGrid(wgDiff)
+	tblGrid := newDiffGrid(tblDiff)
+
+	statusLabel := widget.NewLabel("")
+	statusLabel.Wrapping = fyne.TextWrapWord
+
+	var d dialog.Dialog
+	var applyBtn *widget.Button
+	applyBtn = widget.NewButtonWithIcon("Применить", theme.ConfirmIcon(), func() {
+		applyBtn.Disable()
+		u.setBusy(true)
+		statusLabel.Importance = widget.MediumImportance
+		statusLabel.SetText("Применяю...")
+		goSafe(func() {
+			nu, err := u.sess.Apply(plan)
+			fyne.Do(func() {
+				u.setBusy(false)
+				if err != nil {
+					if isCASRefusal(err) {
+						// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
+						// должно отличаться от "Применяю..." не только
+						// словами: DangerImportance == theme.ColorNameError.
+						statusLabel.Importance = widget.DangerImportance
+						statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
+						return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+					}
+					statusLabel.Importance = widget.MediumImportance
+					statusLabel.SetText("")
+					applyBtn.Enable()
+					dialog.ShowError(err, u.win)
+					return
+				}
+				d.Hide()
+				if onApplied != nil {
+					onApplied(nu)
+				}
+			})
+		})
+	})
+
+	// container.NewScroll — TextGrid не имеет собственной прокрутки (UI-01,
+	// ревью, High): без неё длинный diff обрезался без доступа к остатку, ни
+	// по вертикали, ни по горизонтали. Не редкий случай — lineDiff не
+	// минимален, и при rekey/удалении раннего peer'а в "изменившуюся"
+	// середину попадают все последующие блоки [Peer] (~4 строки на
+	// пользователя); на сервере с 20+ пользователями это сотни строк в
+	// панели высотой ~250px. container.NewScroll даёт прокрутку в обе
+	// стороны по умолчанию (ScrollBoth) — низ и правый край доступны.
+	content := container.NewBorder(
+		nil,
+		container.NewVBox(applyBtn, statusLabel),
+		nil, nil,
+		container.NewVSplit(
+			container.NewBorder(
+				widget.NewLabelWithStyle(plan.Container.Dir+"/wg0.conf", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				nil, nil, nil, container.NewScroll(wgGrid)),
+			container.NewBorder(
+				widget.NewLabelWithStyle(plan.Container.Dir+"/clientsTable", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				nil, nil, nil, container.NewScroll(tblGrid)),
+		),
+	)
+	d = dialog.NewCustom("Изменения перед применением: "+title, "Закрыть", content, u.win)
+	d.Resize(fyne.NewSize(700, 520))
+	d.Show()
 }
 
 // ---------- создание ----------
@@ -908,30 +1126,66 @@ func (u *ui) addDialog() {
 	}
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Иванов Иван")
-	items := []*widget.FormItem{widget.NewFormItem("Имя", entry)}
-	d := dialog.NewForm("Новый пользователь", "Создать", "Отмена", items, func(ok bool) {
-		if !ok || strings.TrimSpace(entry.Text) == "" {
+	form := widget.NewForm(widget.NewFormItem("Имя", entry))
+
+	var d dialog.Dialog
+	onCreated := func(nu *core.NewUser) {
+		u.status.SetText(fmt.Sprintf("Пользователь %q создан (IP %s).", nu.Name, nu.IP))
+		u.showConfigDialog(nu, "создан")
+		u.refresh()
+	}
+	create := func() {
+		name := strings.TrimSpace(entry.Text)
+		if name == "" {
 			return
 		}
-		name := strings.TrimSpace(entry.Text)
+		d.Hide()
+		u.setBusy(true)
 		u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
 		goSafe(func() {
 			nu, err := u.sess.AddUser(u.cur, name)
 			fyne.Do(func() {
 				if err != nil {
+					u.setBusy(false)
 					u.status.SetText("")
 					dialog.ShowError(err, u.win)
 					return
 				}
-				u.status.SetText(fmt.Sprintf("Пользователь %q создан (IP %s).", nu.Name, nu.IP))
-				u.showConfigDialog(nu, "создан")
-				u.refresh()
+				onCreated(nu)
 			})
 		})
-	}, u.win)
+	}
+	createBtn := widget.NewButtonWithIcon("Создать", theme.ConfirmIcon(), create)
+	createBtn.Importance = widget.HighImportance
+	planStatus := newPlanStatusLabel()
+	diffBtn := widget.NewButton("Показать изменения", func() {
+		name := strings.TrimSpace(entry.Text)
+		if name == "" {
+			return
+		}
+		u.setBusy(true)
+		planStatus.SetText("Считаю изменения...")
+		goSafe(func() {
+			plan, err := u.sess.PlanAddUser(u.cur, name)
+			fyne.Do(func() {
+				u.setBusy(false)
+				planStatus.SetText("")
+				if err != nil {
+					dialog.ShowError(err, u.win)
+					return
+				}
+				u.showDiffWindow(fmt.Sprintf("создание %q", name), plan, func(nu *core.NewUser) {
+					d.Hide()
+					onCreated(nu)
+				})
+			})
+		})
+	})
 	// единственное поле формы — Enter эквивалентен нажатию "Создать"
-	entry.OnSubmitted = func(string) { d.Submit() }
-	d.Resize(fyne.NewSize(420, 160))
+	entry.OnSubmitted = func(string) { create() }
+	content := container.NewVBox(form, container.NewHBox(createBtn, diffBtn), planStatus)
+	d = dialog.NewCustom("Новый пользователь", "Отмена", content, u.win)
+	d.Resize(fyne.NewSize(420, 200))
 	d.Show()
 }
 
@@ -1015,30 +1269,66 @@ func (u *ui) renameSelected() {
 	victim := u.clients[idx]
 	entry := widget.NewEntry()
 	entry.SetText(victim.Name())
-	items := []*widget.FormItem{widget.NewFormItem("Новое имя", entry)}
-	d := dialog.NewForm(fmt.Sprintf("Переименовать %q", victim.Name()), "Сохранить", "Отмена", items, func(ok bool) {
-		if !ok || strings.TrimSpace(entry.Text) == "" {
+	form := widget.NewForm(widget.NewFormItem("Новое имя", entry))
+
+	var d dialog.Dialog
+	onRenamed := func(newName string) {
+		u.selectedRow = -1
+		u.status.SetText(fmt.Sprintf("Пользователь %q переименован в %q.", victim.Name(), newName))
+		u.refresh()
+	}
+	save := func() {
+		newName := strings.TrimSpace(entry.Text)
+		if newName == "" {
 			return
 		}
-		newName := strings.TrimSpace(entry.Text)
+		d.Hide()
+		u.setBusy(true)
 		u.status.SetText(fmt.Sprintf("Переименовываю %q...", victim.Name()))
 		goSafe(func() {
 			err := u.sess.RenameUser(u.cur, victim.ClientID, newName)
 			fyne.Do(func() {
 				if err != nil {
+					u.setBusy(false)
 					u.status.SetText("")
 					dialog.ShowError(err, u.win)
 					return
 				}
-				u.selectedRow = -1
-				u.status.SetText(fmt.Sprintf("Пользователь %q переименован в %q.", victim.Name(), newName))
-				u.refresh()
+				onRenamed(newName)
 			})
 		})
-	}, u.win)
+	}
+	saveBtn := widget.NewButtonWithIcon("Сохранить", theme.ConfirmIcon(), save)
+	saveBtn.Importance = widget.HighImportance
+	planStatus := newPlanStatusLabel()
+	diffBtn := widget.NewButton("Показать изменения", func() {
+		newName := strings.TrimSpace(entry.Text)
+		if newName == "" {
+			return
+		}
+		u.setBusy(true)
+		planStatus.SetText("Считаю изменения...")
+		goSafe(func() {
+			plan, err := u.sess.PlanRename(u.cur, victim.ClientID, newName)
+			fyne.Do(func() {
+				u.setBusy(false)
+				planStatus.SetText("")
+				if err != nil {
+					dialog.ShowError(err, u.win)
+					return
+				}
+				u.showDiffWindow(fmt.Sprintf("переименование %q → %q", victim.Name(), newName), plan, func(_ *core.NewUser) {
+					d.Hide()
+					onRenamed(newName)
+				})
+			})
+		})
+	})
 	// единственное поле формы — Enter эквивалентен нажатию "Сохранить"
-	entry.OnSubmitted = func(string) { d.Submit() }
-	d.Resize(fyne.NewSize(420, 160))
+	entry.OnSubmitted = func(string) { save() }
+	content := container.NewVBox(form, container.NewHBox(saveBtn, diffBtn), planStatus)
+	d = dialog.NewCustom(fmt.Sprintf("Переименовать %q", victim.Name()), "Отмена", content, u.win)
+	d.Resize(fyne.NewSize(420, 200))
 	d.Show()
 }
 
@@ -1059,33 +1349,68 @@ func (u *ui) toggleSelected() {
 	enable := victim.Disabled()
 	title := "Отключить пользователя?"
 	verb := "Отключаю"
+	verbDone := "отключён"
+	noun := "отключение"
 	if enable {
 		title = "Включить пользователя?"
 		verb = "Включаю"
+		verbDone = "включён"
+		noun = "включение"
 	}
-	dialog.ShowConfirm(title, fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID), func(ok bool) {
-		if !ok {
-			return
-		}
+
+	var d dialog.Dialog
+	onToggled := func() {
+		u.selectedRow = -1
+		u.status.SetText(fmt.Sprintf("Пользователь %q %s.", victim.Name(), verbDone))
+		u.refresh()
+	}
+	apply := func() {
+		d.Hide()
+		u.setBusy(true)
 		u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
 		goSafe(func() {
 			err := u.sess.SetEnabled(u.cur, victim.ClientID, enable)
 			fyne.Do(func() {
 				if err != nil {
+					u.setBusy(false)
 					u.status.SetText("")
 					dialog.ShowError(err, u.win)
 					return
 				}
-				u.selectedRow = -1
-				if enable {
-					u.status.SetText(fmt.Sprintf("Пользователь %q включён.", victim.Name()))
-				} else {
-					u.status.SetText(fmt.Sprintf("Пользователь %q отключён.", victim.Name()))
-				}
-				u.refresh()
+				onToggled()
 			})
 		})
-	}, u.win)
+	}
+	okBtn := widget.NewButtonWithIcon("Да", theme.ConfirmIcon(), apply)
+	okBtn.Importance = widget.HighImportance
+	planStatus := newPlanStatusLabel()
+	diffBtn := widget.NewButton("Показать изменения", func() {
+		u.setBusy(true)
+		planStatus.SetText("Считаю изменения...")
+		goSafe(func() {
+			plan, err := u.sess.PlanSetEnabled(u.cur, victim.ClientID, enable)
+			fyne.Do(func() {
+				u.setBusy(false)
+				planStatus.SetText("")
+				if err != nil {
+					dialog.ShowError(err, u.win)
+					return
+				}
+				u.showDiffWindow(fmt.Sprintf("%s %q", noun, victim.Name()), plan, func(_ *core.NewUser) {
+					d.Hide()
+					onToggled()
+				})
+			})
+		})
+	})
+	content := container.NewVBox(
+		widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID)),
+		container.NewHBox(okBtn, diffBtn),
+		planStatus,
+	)
+	d = dialog.NewCustom(title, "Отмена", content, u.win)
+	d.Resize(fyne.NewSize(420, 200))
+	d.Show()
 }
 
 // ---------- перевыпуск конфига (re-key) ----------
@@ -1102,28 +1427,61 @@ func (u *ui) regenerateSelected() {
 		return
 	}
 	victim := u.clients[idx]
-	dialog.ShowConfirm("Перевыпустить конфиг?",
-		fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()),
-		func(ok bool) {
-			if !ok {
-				return
-			}
-			u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
-			goSafe(func() {
-				nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
-				fyne.Do(func() {
-					if err != nil {
-						u.status.SetText("")
-						dialog.ShowError(err, u.win)
-						return
-					}
-					u.selectedRow = -1
-					u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
-					u.showConfigDialog(nu, "перевыпущен")
-					u.refresh()
+
+	var d dialog.Dialog
+	onRegenerated := func(nu *core.NewUser) {
+		u.selectedRow = -1
+		u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
+		u.showConfigDialog(nu, "перевыпущен")
+		u.refresh()
+	}
+	apply := func() {
+		d.Hide()
+		u.setBusy(true)
+		u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
+		goSafe(func() {
+			nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
+			fyne.Do(func() {
+				if err != nil {
+					u.setBusy(false)
+					u.status.SetText("")
+					dialog.ShowError(err, u.win)
+					return
+				}
+				onRegenerated(nu)
+			})
+		})
+	}
+	okBtn := widget.NewButtonWithIcon("Перевыпустить", theme.ConfirmIcon(), apply)
+	okBtn.Importance = widget.HighImportance
+	planStatus := newPlanStatusLabel()
+	diffBtn := widget.NewButton("Показать изменения", func() {
+		u.setBusy(true)
+		planStatus.SetText("Считаю изменения...")
+		goSafe(func() {
+			plan, err := u.sess.PlanRekey(u.cur, victim.ClientID)
+			fyne.Do(func() {
+				u.setBusy(false)
+				planStatus.SetText("")
+				if err != nil {
+					dialog.ShowError(err, u.win)
+					return
+				}
+				u.showDiffWindow(fmt.Sprintf("перевыпуск конфига %q", victim.Name()), plan, func(nu *core.NewUser) {
+					d.Hide()
+					onRegenerated(nu)
 				})
 			})
-		}, u.win)
+		})
+	})
+	content := container.NewVBox(
+		widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name())),
+		container.NewHBox(okBtn, diffBtn),
+		planStatus,
+	)
+	d = dialog.NewCustom("Перевыпустить конфиг?", "Отмена", content, u.win)
+	d.Resize(fyne.NewSize(460, 200))
+	d.Show()
 }
 
 // ---------- удаление ----------
@@ -1146,23 +1504,58 @@ func (u *ui) deleteSelected() {
 	} else {
 		msg += "\nПодключений не было.\n"
 	}
-	dialog.ShowConfirm("Удалить пользователя?", msg, func(ok bool) {
-		if !ok {
-			return
-		}
+
+	var d dialog.Dialog
+	onDeleted := func() {
+		u.selectedRow = -1
+		u.status.SetText(fmt.Sprintf("Пользователь %q удалён.", victim.Name()))
+		u.refresh()
+	}
+	apply := func() {
+		d.Hide()
+		u.setBusy(true)
 		u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
 		goSafe(func() {
 			err := u.sess.DeleteByID(u.cur, victim.ClientID)
 			fyne.Do(func() {
 				if err != nil {
+					u.setBusy(false)
 					u.status.SetText("")
 					dialog.ShowError(err, u.win)
 					return
 				}
-				u.selectedRow = -1
-				u.status.SetText(fmt.Sprintf("Пользователь %q удалён.", victim.Name()))
-				u.refresh()
+				onDeleted()
 			})
 		})
-	}, u.win)
+	}
+	okBtn := widget.NewButtonWithIcon("Удалить", theme.DeleteIcon(), apply)
+	okBtn.Importance = widget.DangerImportance
+	planStatus := newPlanStatusLabel()
+	diffBtn := widget.NewButton("Показать изменения", func() {
+		u.setBusy(true)
+		planStatus.SetText("Считаю изменения...")
+		goSafe(func() {
+			plan, err := u.sess.PlanDelete(u.cur, victim.ClientID)
+			fyne.Do(func() {
+				u.setBusy(false)
+				planStatus.SetText("")
+				if err != nil {
+					dialog.ShowError(err, u.win)
+					return
+				}
+				u.showDiffWindow(fmt.Sprintf("удаление %q", victim.Name()), plan, func(_ *core.NewUser) {
+					d.Hide()
+					onDeleted()
+				})
+			})
+		})
+	})
+	content := container.NewVBox(
+		widget.NewLabel(msg),
+		container.NewHBox(okBtn, diffBtn),
+		planStatus,
+	)
+	d = dialog.NewCustom("Удалить пользователя?", "Отмена", content, u.win)
+	d.Resize(fyne.NewSize(460, 260))
+	d.Show()
 }
