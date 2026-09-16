@@ -131,6 +131,11 @@ func TestMaskFreeTextForms(t *testing.T) {
 		{"пустой вход", "", ""},
 		{"нет секретов — текст не трогается", "cat: /opt/amnezia/awg/wg0.conf: No such file", "cat: /opt/amnezia/awg/wg0.conf: No such file"},
 		{"имя без значения не ломает текст", "wg: invalid PresharedKey", "wg: invalid PresharedKey"},
+
+		// Ревью SEC-01, замечание 4 — три формы, которые не ловились.
+		{"апостроф как кавычка", "psk='" + fakeStderrSecret + "'", "psk='" + hiddenPlaceholder + "'"},
+		{"апостроф, имя wg0.conf", "PrivateKey='" + fakeStderrSecret + "'", "PrivateKey='" + hiddenPlaceholder + "'"},
+		{"экранированные кавычки", `sh: {\"psk\": \"` + fakeStderrSecret + `\"}`, `sh: {\"psk\": \"` + hiddenPlaceholder + `\"}`},
 	}
 	for _, c := range cases {
 		if got := maskFreeText(c.in); got != c.want {
@@ -145,4 +150,59 @@ func TestMaskFreeTextForms(t *testing.T) {
 	if short != long {
 		t.Errorf("длина секрета видна по выводу: %q против %q", short, long)
 	}
+}
+
+// TestMaskFreeTextPEM — ревью SEC-01, замечание 4, третья форма.
+//
+// В поле password лежит пароль root ЛИБО ПРИВАТНЫЙ SSH-КЛЮЧ, и ключ этот —
+// многострочный PEM (core/hostkey.go:144 отличает его по подстроке
+// "PRIVATE KEY"). Маскировка по парам «имя = значение» его тела не видит
+// вовсе: раньше скрывалась только строка "-----BEGIN", а тело оставалось.
+// Это хуже отсутствия защиты — создаёт ложное впечатление сработавшей.
+//
+// Заголовок BEGIN остаётся видимым намеренно: человек обязан видеть, что
+// сервер ругается на ключ, не видя самого ключа.
+func TestMaskFreeTextPEM(t *testing.T) {
+	// Заведомо фиктивное «тело ключа» — не ключ, а узнаваемый глазом литерал.
+	const body = "test-pem-body-AAAABBBB\ntest-pem-body-CCCCDDDD\ntest-pem-body-EEEEFFFF"
+
+	t.Run("целый блок: тело и END скрыты, BEGIN виден", func(t *testing.T) {
+		in := "ssh: не удалось разобрать ключ:\n-----BEGIN OPENSSH PRIVATE KEY-----\n" +
+			body + "\n-----END OPENSSH PRIVATE KEY-----\nпопробуйте ещё раз"
+		got := maskFreeText(in)
+		for _, frag := range strings.Split(body, "\n") {
+			if strings.Contains(got, frag) {
+				t.Errorf("тело PEM осталось в тексте (%q):\n%s", frag, got)
+			}
+		}
+		if strings.Contains(got, "-----END") {
+			t.Errorf("строка END не замаскирована — маскировать надо до END включительно:\n%s", got)
+		}
+		if !strings.Contains(got, "-----BEGIN OPENSSH PRIVATE KEY-----") {
+			t.Errorf("заголовок BEGIN пропал — человек не узнает, на что ругается сервер:\n%s", got)
+		}
+		if !strings.Contains(got, "попробуйте ещё раз") {
+			t.Errorf("маскировка съела диагностику после блока:\n%s", got)
+		}
+	})
+
+	t.Run("оборванный блок: BEGIN без END — скрыто до конца текста", func(t *testing.T) {
+		in := "ssh: ключ отвергнут:\n-----BEGIN RSA PRIVATE KEY-----\n" + body
+		got := maskFreeText(in)
+		for _, frag := range strings.Split(body, "\n") {
+			if strings.Contains(got, frag) {
+				t.Errorf("тело оборванного PEM осталось в тексте (%q):\n%s", frag, got)
+			}
+		}
+		if !strings.Contains(got, "-----BEGIN RSA PRIVATE KEY-----") {
+			t.Errorf("заголовок BEGIN пропал:\n%s", got)
+		}
+	})
+
+	t.Run("текст без PEM не трогается", func(t *testing.T) {
+		const in = "cat: /opt/amnezia/awg/wg0.conf: No such file or directory"
+		if got := maskFreeText(in); got != in {
+			t.Errorf("текст без PEM изменён.\n было: %s\nстало: %s", in, got)
+		}
+	})
 }
