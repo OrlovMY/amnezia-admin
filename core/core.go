@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -133,19 +132,6 @@ type Session struct {
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
 	// реентерабелен, повторный Lock из-под уже взятого — deadlock.
 	mu sync.Mutex
-}
-
-// Connect — ОБЁРТКА над ConnectWithHostKey БЕЗ Prompt (PR-4, часть А): любой
-// неизвестный сервер отвергается (ErrHostKeyUnknown), известный —
-// подключается молча, смена ключа — всегда отказ. Оставлена только ради
-// сборки cmd/cli и cmd/gui без правок в части А (там, где раньше вызывался
-// небезопасный Connect без проверки ключа хоста) — часть Б переводит эти
-// вызовы на ConnectWithHostKey с настоящим Prompt/OnChanged и удаляет эту
-// обёртку.
-func Connect(creds *ServerCreds) (*Session, error) {
-	return ConnectWithHostKey(creds, HostKeyPolicy{
-		KnownHostsPath: filepath.Join(DefaultVaultDir(), "known_hosts"),
-	})
 }
 
 func (s *Session) Close() {

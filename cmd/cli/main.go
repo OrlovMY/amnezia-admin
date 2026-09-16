@@ -31,6 +31,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -49,11 +50,14 @@ func pad(s string, n int) string {
 	return s
 }
 
-// listUsers печатает таблицу пользователей и возвращает отсортированный по
-// активности slice — тот же порядок, что показан в таблице (нумерация "#"
-// в выводе соответствует индексам этого slice), чтобы вызывающий код мог
-// резолвить номер строки без повторного LoadClients.
-func listUsers(s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
+// listUsers печатает таблицу пользователей в w и возвращает отсортированный
+// по активности slice — тот же порядок, что показан в таблице (нумерация
+// "#" в выводе соответствует индексам этого slice), чтобы вызывающий код мог
+// резолвить номер строки без повторного LoadClients. w — параметр (не
+// os.Stdout напрямую) начиная с PR-4 (Е3): interactive() передаёт os.Stdout,
+// run() — свой stdout io.Writer, чтобы TestNonTTYUnknownHostNeedsHostkey мог
+// перехватить вывод подкоманды list без чтения реального os.Stdout.
+func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
 	if !c.Managed {
 		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG и WireGuard)", c.Proto)
 	}
@@ -68,11 +72,11 @@ func listUsers(s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
 	core.SortByActivity(clients, stats)
 
 	if len(clients) == 0 {
-		fmt.Println("В clientsTable записей нет.")
+		fmt.Fprintln(w, "В clientsTable записей нет.")
 	} else {
-		fmt.Println()
-		fmt.Println(cHead(pad("#", 4) + pad("Имя", 34) + pad("Создан", 21) + pad("Активность", 18) + pad("Трафик ↓/↑", 24) + "Публичный ключ"))
-		fmt.Println(cDim(strings.Repeat("─", 4+34+21+18+24+44)))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
+		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
 		for i, cl := range clients {
 			created := cl.Created()
 			if r := []rune(created); len(r) > 19 {
@@ -97,21 +101,22 @@ func listUsers(s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
 			} else {
 				name = pad(name, 34)
 			}
-			fmt.Println(cNum(pad(strconv.Itoa(i+1), 4)) + name + cDim(pad(created, 21)) + hs + pad(traffic, 24) + cDim(cl.ClientID))
+			fmt.Fprintln(w, cNum(pad(strconv.Itoa(i+1), 4))+name+cDim(pad(created, 21))+hs+pad(traffic, 24)+cDim(cl.ClientID))
 		}
-		fmt.Println(cDim("Трафик и активность — с момента перезапуска сервера."))
+		fmt.Fprintln(w, cDim("Трафик и активность — с момента перезапуска сервера."))
 	}
 
 	if orphans := s.OrphanPeers(c, clients); len(orphans) > 0 {
-		fmt.Printf("\nPeers в wg0.conf без имени в clientsTable: %d\n", len(orphans))
+		fmt.Fprintf(w, "\nPeers в wg0.conf без имени в clientsTable: %d\n", len(orphans))
 		for _, o := range orphans {
-			fmt.Println("  ", o)
+			fmt.Fprintln(w, "  ", o)
 		}
 	}
 	return clients, nil
 }
 
-func saveUserConfig(u *core.NewUser, proto string) error {
+// saveUserConfig — см. listUsers про параметр w (Е3).
+func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 	if err := os.MkdirAll("Конфигурации", 0755); err != nil {
 		return err
 	}
@@ -120,10 +125,10 @@ func saveUserConfig(u *core.NewUser, proto string) error {
 		return err
 	}
 	abs, _ := filepath.Abs(fileName)
-	fmt.Println()
-	fmt.Println(cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
-	fmt.Println("Конфиг сохранён: " + cAccent(abs))
-	fmt.Println("Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
+	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
+	fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
 	return nil
 }
 
@@ -272,7 +277,12 @@ func interactive() {
 	}
 
 	fmt.Printf("Сервер: %s@%s:%s — подключаюсь...\n", creds.User, creds.Host, creds.Port)
-	sess, err := core.Connect(creds)
+	knownHostsPath := filepath.Join(core.DefaultVaultDir(), "known_hosts")
+	sess, err := core.ConnectWithHostKey(creds, core.HostKeyPolicy{
+		KnownHostsPath: knownHostsPath,
+		Prompt:         cliHostKeyPrompt(in, os.Stdout),
+		OnChanged:      cliHostKeyChanged(os.Stdout, knownHostsPath),
+	})
 	if err != nil {
 		fmt.Println(cErr("SSH не удался: ") + err.Error())
 		pause(in)
@@ -326,7 +336,7 @@ func interactive() {
 
 		switch ask("Выбор: ") {
 		case "1":
-			if _, err := listUsers(sess, cur); err != nil {
+			if _, err := listUsers(os.Stdout, sess, cur); err != nil {
 				printErr(err)
 			}
 		case "2":
@@ -336,7 +346,7 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			if err := saveUserConfig(u, cur.Proto); err != nil {
+			if err := saveUserConfig(os.Stdout, u, cur.Proto); err != nil {
 				printErr(err)
 			}
 		case "3":
@@ -347,7 +357,7 @@ func interactive() {
 			// listUsers возвращает список в том же (отсортированном) порядке,
 			// что и напечатанная таблица — номер строки резолвится по нему же,
 			// без повторного LoadClients (иначе порядок/индексы могут разъехаться).
-			clients, err := listUsers(sess, cur)
+			clients, err := listUsers(os.Stdout, sess, cur)
 			if err != nil {
 				printErr(err)
 				break
@@ -377,7 +387,7 @@ func interactive() {
 				printErr(fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", cur.Proto))
 				break
 			}
-			clients, err := listUsers(sess, cur)
+			clients, err := listUsers(os.Stdout, sess, cur)
 			if err != nil {
 				printErr(err)
 				break
@@ -406,7 +416,7 @@ func interactive() {
 				printErr(fmt.Errorf("управление пользователями для %s не поддерживается этой утилитой", cur.Proto))
 				break
 			}
-			clients, err := listUsers(sess, cur)
+			clients, err := listUsers(os.Stdout, sess, cur)
 			if err != nil {
 				printErr(err)
 				break
@@ -449,7 +459,7 @@ func interactive() {
 				printErr(fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", cur.Proto))
 				break
 			}
-			clients, err := listUsers(sess, cur)
+			clients, err := listUsers(os.Stdout, sess, cur)
 			if err != nil {
 				printErr(err)
 				break
@@ -474,7 +484,7 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			if err := saveUserConfig(u, cur.Proto); err != nil {
+			if err := saveUserConfig(os.Stdout, u, cur.Proto); err != nil {
 				printErr(err)
 			}
 		case "4":
@@ -503,46 +513,89 @@ func main() {
 		interactive()
 		return
 	}
-	cmd := os.Args[1]
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	knownHostsPath := filepath.Join(core.DefaultVaultDir(), "known_hosts")
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, knownHostsPath))
+}
+
+// run — точка входа CLI-подкоманд (Е3 задания PR-4, правка 4.15 PQ-01):
+// вынесена из main(), чтобы её можно было прогнать в тесте
+// (TestNonTTYUnknownHostNeedsHostkey — сценарий без TTY против fakesrv)
+// без os.Exit, который убил бы тестовый процесс. main() вызывает run() с
+// os.Args[1:]/os.Stdin/os.Stdout/os.Stderr и реальным known_hosts
+// (core.DefaultVaultDir()); все os.Exit(code) внутри веток switch заменены
+// на return code, а confirmOrExit/confirmSubcommand (PR-5) получают потоки
+// run() (stdin/stdout/stderr), а не os.Stdin/os.Stdout/os.Stderr напрямую —
+// тесты PR-5 (TestNonTTYWithoutYesExit2 и др.) это не трогает, они и раньше
+// звали confirmOrExit/confirmSubcommand напрямую со своими буферами.
+//
+// stdinIsTTY() по-прежнему проверяет РЕАЛЬНЫЙ os.Stdin (единственный
+// TTY-детектор пакета — confirm.go, PR-5, второй не заводим) — это НЕ то же
+// самое, что переданный сюда stdin io.Reader: последний источник для чтения
+// ответов на вопросы (в тестах — bytes.Buffer/strings.Reader), а
+// stdinIsTTY() решает, задавать ли вопрос вообще. В тестовом процессе
+// os.Stdin не терминал, поэтому stdinIsTTY() там всегда false — как и было
+// в TestNonTTYWithoutYesExit2 до этого рефакторинга.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPath string) int {
+	cmd := args[0]
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
 	name := fs.String("name", "", "имя пользователя (для add/del/rename/toggle)")
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
-	fs.Parse(os.Args[2:])
+	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
+	if err := fs.Parse(args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		// Код 1 — обычная ошибка (флаг ошибся, а не "не подтверждено");
+		// 2 занят решением PR-5 "нет терминала и нет -yes"/"y/n ответил
+		// нет" — смешивать эти два смысла нельзя (ревью PR-4-Б, круг 1,
+		// BE-01 Low: скрипт, различающий "неверные аргументы" от "человек
+		// сознательно отказался", не должен получать один и тот же код для
+		// обоих случаев).
+		return 1
+	}
 
 	if *key == "" {
-		fmt.Fprintln(os.Stderr, "Не задан ключ: -key vpn://... или переменная AMNEZIA_KEY")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "Не задан ключ: -key vpn://... или переменная AMNEZIA_KEY")
+		return 1
 	}
 	cfg, err := core.DecodeVpnKey(*key)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка декодирования ключа:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "Ошибка декодирования ключа:", err)
+		return 1
 	}
 	if cmd == "decode" {
 		pretty, _ := json.MarshalIndent(cfg, "", "  ")
-		fmt.Println(string(pretty))
-		return
+		fmt.Fprintln(stdout, string(pretty))
+		return 0
 	}
 
 	creds, err := core.CredsFromConfig(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "Ошибка:", err)
+		return 1
 	}
-	sess, err := core.Connect(creds)
+
+	isTTY := stdinIsTTY()
+	sess, err := core.ConnectWithHostKey(creds, hostKeyPolicyForCLI(stdin, stdout, stderr, isTTY, *hostkey, knownHostsPath))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "SSH:", err)
-		os.Exit(1)
+		if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {
+			fmt.Fprintln(stderr, "SSH:", err)
+			fmt.Fprintln(stderr, "Без терминала подключение к новому серверу требует явного отпечатка: -hostkey SHA256:...")
+			return 2
+		}
+		fmt.Fprintln(stderr, "SSH:", err)
+		return 1
 	}
 	defer sess.Close()
 
 	containers, err := sess.FindContainers()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "Ошибка:", err)
+		return 1
 	}
 	cur := &containers[0]
 	for i := range containers {
@@ -554,20 +607,20 @@ func main() {
 
 	switch cmd {
 	case "list":
-		_, err = listUsers(sess, cur)
+		_, err = listUsers(stdout, sess, cur)
 	case "add":
 		if *dryRun {
-			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
 		u, e := sess.AddUser(cur, *name)
 		if e == nil {
-			e = saveUserConfig(u, cur.Proto)
+			e = saveUserConfig(stdout, u, cur.Proto)
 		}
 		err = e
 	case "del":
 		if *dryRun {
-			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
 		// вне интерактивного списка номер строки ничего не значит —
@@ -582,16 +635,16 @@ func main() {
 			err = e
 			break
 		}
-		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "удалить"); !proceed {
-			os.Exit(code)
+		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "удалить"); !proceed {
+			return code
 		}
 		err = sess.DeleteByID(cur, clients[idx].ClientID)
 		if err == nil {
-			fmt.Printf("Пользователь %q удалён.\n", *name)
+			fmt.Fprintf(stdout, "Пользователь %q удалён.\n", *name)
 		}
 	case "rename":
 		if *dryRun {
-			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
 		// вне интерактивного списка номер строки ничего не значит —
@@ -608,11 +661,11 @@ func main() {
 		}
 		err = sess.RenameUser(cur, clients[idx].ClientID, *newname)
 		if err == nil {
-			fmt.Printf("Пользователь %q переименован в %q.\n", *name, strings.TrimSpace(*newname))
+			fmt.Fprintf(stdout, "Пользователь %q переименован в %q.\n", *name, strings.TrimSpace(*newname))
 		}
 	case "toggle":
 		if *dryRun {
-			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
 		// вне интерактивного списка номер строки ничего не значит —
@@ -628,20 +681,20 @@ func main() {
 			break
 		}
 		enable := clients[idx].Disabled()
-		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
-			os.Exit(code)
+		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
+			return code
 		}
 		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
 		if err == nil {
 			if enable {
-				fmt.Printf("Пользователь %q включён.\n", *name)
+				fmt.Fprintf(stdout, "Пользователь %q включён.\n", *name)
 			} else {
-				fmt.Printf("Пользователь %q отключён.\n", *name)
+				fmt.Fprintf(stdout, "Пользователь %q отключён.\n", *name)
 			}
 		}
 	case "rekey":
 		if *dryRun {
-			err = runDryRun(os.Stdout, sess, cur, cmd, *name, *newname)
+			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
 		// вне интерактивного списка номер строки ничего не значит —
@@ -656,19 +709,20 @@ func main() {
 			err = e
 			break
 		}
-		if proceed, code := confirmSubcommand(os.Stdin, os.Stdout, os.Stderr, stdinIsTTY(), *yes, cmd, clients[idx], sess, cur, "перевыпустить конфиг"); !proceed {
-			os.Exit(code)
+		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "перевыпустить конфиг"); !proceed {
+			return code
 		}
 		u, e := sess.RegenerateUser(cur, clients[idx].ClientID)
 		if e == nil {
-			e = saveUserConfig(u, cur.Proto)
+			e = saveUserConfig(stdout, u, cur.Proto)
 		}
 		err = e
 	default:
 		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey)", cmd)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "Ошибка:", err)
+		return 1
 	}
+	return 0
 }
