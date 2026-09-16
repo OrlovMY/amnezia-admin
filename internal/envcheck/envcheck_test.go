@@ -58,9 +58,34 @@ func env(pairs map[string]string) func(string) string {
 	return func(k string) string { return pairs[k] }
 }
 
+// allLibs — фактический состав зависимостей релизного GUI, снятый с бинаря
+// amnezia-admin-gui-linux-amd64 версии v0.1.0 разбором ELF (DT_NEEDED) и
+// поиском имён в теле бинаря. Это ДОКАЗАТЕЛЬСТВО, а не память модели.
+// libm.so.6 и libc.so.6 сюда не входят: они покрыты признаком «библиотека C»
+// и отдельно не проверяются.
 var allLibs = []string{
-	"libGL.so.1", "libEGL.so.1", "libX11.so.6",
-	"libXcursor.so.1", "libXi.so.6", "libXinerama.so.1",
+	// жёсткие зависимости (DT_NEEDED)
+	"libGL.so.1", "libX11.so.6",
+	// подгружаются на ходу (dlopen)
+	"libEGL.so.1", "libXcursor.so.1", "libXi.so.6", "libXinerama.so.1",
+	"libXrandr.so.2", "libXxf86vm.so.1", "libXrender.so.1",
+}
+
+// without — allLibs без перечисленных имён.
+func without(absent ...string) []string {
+	var present []string
+	for _, l := range allLibs {
+		skip := false
+		for _, a := range absent {
+			if a == l {
+				skip = true
+			}
+		}
+		if !skip {
+			present = append(present, l)
+		}
+	}
+	return present
 }
 
 // ldconfigOut — образец вывода `ldconfig -p`.
@@ -194,11 +219,12 @@ func TestMusl(t *testing.T) {
 
 // --- Библиотеки графики -------------------------------------------------
 
-// TestGraphicsAllPresent: ldconfig -p со всеми шестью → «все на месте».
+// TestGraphicsAllPresent: ldconfig -p со всем фактическим составом →
+// «все на месте».
 func TestGraphicsAllPresent(t *testing.T) {
 	f := linuxAllGood()
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	if !r.Graph.Known || len(r.Graph.Missing) != 0 {
+	if !r.Graph.Known || len(r.Graph.MissingHard) != 0 || len(r.Graph.MissingDlopen) != 0 {
 		t.Fatalf("Graph = %+v, хочу «все на месте»", r.Graph)
 	}
 	if got := verdict(r); got != textWillRun {
@@ -206,30 +232,84 @@ func TestGraphicsAllPresent(t *testing.T) {
 	}
 }
 
-// TestGraphicsMissing: список — только отсутствующие, в порядке Г3.
+// TestGraphicsMissing: списки — только отсутствующие, в порядке таблицы, и
+// разложены по классам: жёсткая зависимость (без неё процесс не стартует)
+// отдельно от подгружаемых на ходу.
 func TestGraphicsMissing(t *testing.T) {
 	cases := []struct {
-		name    string
-		present []string
-		want    []string
+		name       string
+		absent     []string
+		wantHard   []string
+		wantDlopen []string
 	}{
-		{"без libGL", []string{"libEGL.so.1", "libX11.so.6", "libXcursor.so.1", "libXi.so.6", "libXinerama.so.1"}, []string{"libGL.so.1"}},
-		{"без libXi и libXinerama", []string{"libGL.so.1", "libEGL.so.1", "libX11.so.6", "libXcursor.so.1"}, []string{"libXi.so.6", "libXinerama.so.1"}},
+		{"без libGL", []string{"libGL.so.1"}, []string{"libGL.so.1"}, nil},
+		{"без libXi и libXinerama", []string{"libXi.so.6", "libXinerama.so.1"}, nil, []string{"libXi.so.6", "libXinerama.so.1"}},
+		{"без libX11 и libXrender", []string{"libX11.so.6", "libXrender.so.1"}, []string{"libX11.so.6"}, []string{"libXrender.so.1"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeOS{out: map[string]string{
 				"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
-				"ldconfig -p":              ldconfigOut(c.present...),
+				"ldconfig -p":              ldconfigOut(without(c.absent...)...),
 			}}
 			r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
 			if !r.Graph.Known {
 				t.Fatalf("Graph.Known = false, хотя ldconfig отработал: %+v", r.Graph)
 			}
-			if strings.Join(r.Graph.Missing, ",") != strings.Join(c.want, ",") {
-				t.Fatalf("Missing = %v, хочу %v", r.Graph.Missing, c.want)
+			if strings.Join(r.Graph.MissingHard, ",") != strings.Join(c.wantHard, ",") {
+				t.Errorf("MissingHard = %v, хочу %v", r.Graph.MissingHard, c.wantHard)
+			}
+			if strings.Join(r.Graph.MissingDlopen, ",") != strings.Join(c.wantDlopen, ",") {
+				t.Errorf("MissingDlopen = %v, хочу %v", r.Graph.MissingDlopen, c.wantDlopen)
 			}
 		})
+	}
+}
+
+// TestDlopenLibMissing: нет libXrandr.so.2 — библиотеки, которую GUI
+// подгружает на ходу. Прежний список из шести имён её не знал и уверенно
+// говорил «Графический интерфейс запустится.» машине, где GUI может упасть.
+func TestDlopenLibMissing(t *testing.T) {
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              ldconfigOut(without("libXrandr.so.2")...),
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	want := "Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — libXrandr.so.2. Установите их: Debian/Ubuntu — `libxrandr2`; Fedora — `libXrandr`."
+	if got := verdict(r); got != want {
+		t.Fatalf("итог = %q, хочу %q", got, want)
+	}
+}
+
+// TestHardLibMissing: нет libGL.so.1 — жёсткой зависимости из DT_NEEDED. Без
+// неё процесс не стартует вообще, итог отрицательный и уверенный.
+func TestHardLibMissing(t *testing.T) {
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              ldconfigOut(without("libGL.so.1")...),
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	want := "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`."
+	if got := verdict(r); got != want {
+		t.Fatalf("итог = %q, хочу %q", got, want)
+	}
+}
+
+// TestLibcLibsNotChecked: libc.so.6 и libm.so.6 — тоже жёсткие зависимости
+// GUI, но отдельно не проверяются и в вывод не попадают: их наличие уже
+// определяется признаком «библиотека C».
+func TestLibcLibsNotChecked(t *testing.T) {
+	f := linuxAllGood() // в ldconfig-выводе нет ни libc.so.6, ни libm.so.6
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if got := verdict(r); got != textWillRun {
+		t.Fatalf("итог = %q, хочу %q", got, textWillRun)
+	}
+	var b bytes.Buffer
+	Report(r, &b)
+	for _, name := range []string{"libc.so.6", "libm.so.6"} {
+		if strings.Contains(b.String(), name) {
+			t.Errorf("%s попал в вывод:\n%s", name, b.String())
+		}
 	}
 }
 
@@ -246,7 +326,7 @@ func TestGraphicsLdconfigEmptyFallsBackToFiles(t *testing.T) {
 		files: files,
 	}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	if !r.Graph.Known || len(r.Graph.Missing) != 0 {
+	if !r.Graph.Known || len(r.Graph.MissingHard) != 0 || len(r.Graph.MissingDlopen) != 0 {
 		t.Fatalf("Graph = %+v, хочу «все на месте» по файлам", r.Graph)
 	}
 }
@@ -287,7 +367,7 @@ func TestGraphicsByFiles(t *testing.T) {
 				files: files,
 			}
 			r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-			if !r.Graph.Known || len(r.Graph.Missing) != 0 {
+			if !r.Graph.Known || len(r.Graph.MissingHard) != 0 || len(r.Graph.MissingDlopen) != 0 {
 				t.Fatalf("Graph = %+v, хочу «все на месте»", r.Graph)
 			}
 		})
@@ -429,15 +509,28 @@ func TestReportGolden(t *testing.T) {
 			"б) Linux, не хватает библиотек, сессии нет",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc:  Libc{Kind: "glibc", Version: "2.36"},
-				Graph: Graphics{Known: true, Missing: []string{"libGL.so.1", "libXi.so.6"}}, Sess: SessionNone},
+				Graph: Graphics{Known: true, MissingHard: []string{"libGL.so.1"}}, Sess: SessionNone},
 			"Проверка окружения\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.36\n" +
-				"Библиотеки графики: не хватает: libGL.so.1, libXi.so.6\n" +
+				"Библиотеки графики: не хватает: libGL.so.1\n" +
 				"Графическая сессия: нет\n" +
 				"Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере.\n" +
-				"Графический интерфейс не запустится: не хватает библиотек — libGL.so.1, libXi.so.6. Установите их: Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`; Fedora — `mesa-libGL libX11 libXcursor libXi libXinerama`.\n",
+				"Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`.\n",
+		},
+		{
+			"ж) Linux, не хватает подгружаемых на ходу библиотек",
+			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
+				Libc:  Libc{Kind: "glibc", Version: "2.36"},
+				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2", "libXrender.so.1"}}, Sess: SessionX11},
+			"Проверка окружения\n" +
+				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
+				"Архитектура: amd64\n" +
+				"Библиотека C: glibc 2.36\n" +
+				"Библиотеки графики: обязательные на месте, может не хватать: libXrandr.so.2, libXrender.so.1\n" +
+				"Графическая сессия: есть (X11)\n" +
+				"Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — libXrandr.so.2, libXrender.so.1. Установите их: Debian/Ubuntu — `libxrandr2 libxrender1`; Fedora — `libXrandr libXrender`.\n",
 		},
 		{
 			"в) Linux, musl",

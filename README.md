@@ -30,10 +30,15 @@
 - Linux **x86-64** с glibc 2.34 или новее — на Alpine (musl) графическая
   версия не работает, пользуйтесь консольной; под Linux arm64 графическая
   версия не собирается, там доступна только консольная;
-- шесть библиотек: `libGL.so.1`, `libEGL.so.1`, `libX11.so.6`,
-  `libXcursor.so.1`, `libXi.so.6`, `libXinerama.so.1`. Имена пакетов:
-  Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`;
-  Fedora — `mesa-libGL libX11 libXcursor libXi libXinerama`;
+- библиотеки. Без `libGL.so.1` и `libX11.so.6` программа не запустится
+  вовсе; `libEGL.so.1`, `libXcursor.so.1`, `libXi.so.6`,
+  `libXinerama.so.1`, `libXrandr.so.2`, `libXxf86vm.so.1` и
+  `libXrender.so.1` подгружаются на ходу — без них программа может упасть
+  уже при запуске. Имена пакетов:
+  Debian/Ubuntu — `libgl1 libx11-6 libegl1 libxcursor1 libxi6 libxinerama1
+  libxrandr2 libxxf86vm1 libxrender1`;
+  Fedora — `mesa-libGL libX11 mesa-libEGL libXcursor libXi libXinerama
+  libXrandr libXxf86vm libXrender`;
 - графическая сессия: по SSH графическая версия не запускается — её
   запускают на своём компьютере;
 - Windows 10 и новее (x86-64) либо macOS на Apple Silicon.

@@ -37,27 +37,98 @@ import (
 const (
 	textHeader      = "Проверка окружения"
 	textWillRun     = "Графический интерфейс запустится."
-	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`; Fedora — `mesa-libGL libX11 libXcursor libXi libXinerama`."
+	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`."
 	textMusl        = "Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде."
 	// Подстановка в textCannotCheck — перечень названий признаков через
 	// запятую; редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
-	textCannotCheck   = "Проверить не удалось: %s. Консольная версия работает независимо от этого."
-	textNoGUIPlatform = "Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде."
-	textSSHSession    = "Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере."
-	textUnknown       = "определить не удалось"
+	textCannotCheck = "Проверить не удалось: %s. Консольная версия работает независимо от этого."
+	// textMaybeMissingLibs — промежуточный итог: жёсткие зависимости на
+	// месте, но библиотек, которые GUI подгружает на ходу (dlopen), не
+	// видно. Уверенного «не запустится» здесь быть не может, «всё хорошо» —
+	// тоже. Редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
+	textMaybeMissingLibs = "Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`."
+	textNoGUIPlatform    = "Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде."
+	textSSHSession       = "Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере."
+	textUnknown          = "определить не удалось"
 )
 
-// requiredLibs — ровно шесть SONAME, которые нужны релизному GUI (снято
-// координатором с релизного бинаря v0.1.0). Порядок важен: в нём печатается
-// список нехватающих. OSMesa в обязательные не входит — программная
-// отрисовка не то, на что рассчитан релизный GUI.
-var requiredLibs = []string{
-	"libGL.so.1",
-	"libEGL.so.1",
-	"libX11.so.6",
-	"libXcursor.so.1",
-	"libXi.so.6",
-	"libXinerama.so.1",
+// Классы графических библиотек.
+const (
+	libHard    = iota // жёсткая зависимость (DT_NEEDED): без неё процесс не стартует
+	libDlopen         // подгружается на ходу (dlopen): таблица зависимостей её не показывает
+	libByLibcC        // жёсткая, но уже покрыта признаком «библиотека C»
+)
+
+// graphicsLibs — фактический состав зависимостей релизного GUI.
+//
+// ИСТОЧНИК — ДОКАЗАТЕЛЬСТВО, А НЕ ПАМЯТЬ МОДЕЛИ (в отличие от образцов
+// выводов ldd/ldconfig в тестах): список снят координатором с релизного
+// бинаря amnezia-admin-gui-linux-amd64 версии v0.1.0 разбором ELF
+// (debug/elf, таблица DT_NEEDED) и поиском имён библиотек в теле бинаря.
+// Замер: ELFCLASS64, EM_X86_64, загрузчик /lib64/ld-linux-x86-64.so.2;
+// DT_NEEDED всего четыре — libGL.so.1, libX11.so.6, libm.so.6, libc.so.6;
+// в теле присутствует dlopen и найдены имена libEGL.so.1, libXcursor.so.1,
+// libXi.so.6, libXinerama.so.1, libXrandr.so.2, libXxf86vm.so.1,
+// libXrender.so.1 (libwayland-client.so.0 и libXext.so.6 НЕ найдены).
+//
+// Прежний список из шести имён (libGL, libEGL, libX11, libXcursor, libXi,
+// libXinerama) был неверен: в нём не было libXrandr.so.2, libXxf86vm.so.1 и
+// libXrender.so.1, то есть проверка могла сказать «все на месте» машине, где
+// GUI упадёт. Порядок в таблице важен: в нём печатаются списки нехватающих.
+// OSMesa в состав не входит — программная отрисовка не то, на что рассчитан
+// релизный GUI.
+var graphicsLibs = []struct {
+	SOName string
+	Class  int
+	Debian string // имя пакета Debian/Ubuntu
+	Fedora string // имя пакета Fedora
+}{
+	{"libGL.so.1", libHard, "libgl1", "mesa-libGL"},
+	{"libX11.so.6", libHard, "libx11-6", "libX11"},
+	// libm.so.6 и libc.so.6 — тоже жёсткие зависимости, но отдельно не
+	// проверяются и в вывод не попадают: их наличие уже определяется
+	// признаком «библиотека C» (glibc/musl), и дублировать это в перечне
+	// графических библиотек пользователю незачем.
+	{"libm.so.6", libByLibcC, "", ""},
+	{"libc.so.6", libByLibcC, "", ""},
+	{"libEGL.so.1", libDlopen, "libegl1", "mesa-libEGL"},
+	{"libXcursor.so.1", libDlopen, "libxcursor1", "libXcursor"},
+	{"libXi.so.6", libDlopen, "libxi6", "libXi"},
+	{"libXinerama.so.1", libDlopen, "libxinerama1", "libXinerama"},
+	{"libXrandr.so.2", libDlopen, "libxrandr2", "libXrandr"},
+	{"libXxf86vm.so.1", libDlopen, "libxxf86vm1", "libXxf86vm"},
+	{"libXrender.so.1", libDlopen, "libxrender1", "libXrender"},
+}
+
+// libsOfClass — имена библиотек одного класса, в порядке таблицы.
+func libsOfClass(class int) []string {
+	var out []string
+	for _, l := range graphicsLibs {
+		if l.Class == class {
+			out = append(out, l.SOName)
+		}
+	}
+	return out
+}
+
+// packagesFor — имена пакетов для перечисленных SONAME (пустые пропускаются).
+func packagesFor(libs []string, fedora bool) string {
+	var out []string
+	for _, name := range libs {
+		for _, l := range graphicsLibs {
+			if l.SOName != name {
+				continue
+			}
+			pkg := l.Debian
+			if fedora {
+				pkg = l.Fedora
+			}
+			if pkg != "" {
+				out = append(out, pkg)
+			}
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // guiTargets — пары ОС+архитектура, под которые графическое приложение
@@ -98,9 +169,15 @@ type Libc struct {
 
 // Graphics — состояние признака «библиотеки графики». Known == false —
 // «определить не удалось», и это НЕ то же самое, что «не хватает всех».
+//
+// Два списка, потому что классы зависимостей разные: без жёсткой (DT_NEEDED)
+// процесс не стартует вообще — это уверенное «не запустится»; библиотеки,
+// подгружаемые на ходу (dlopen), таблица зависимостей не показывает, их
+// нехватка означает «может не запуститься», а не приговор.
 type Graphics struct {
-	Known   bool
-	Missing []string
+	Known         bool
+	MissingHard   []string
+	MissingDlopen []string
 }
 
 // Session — графическая сессия. «Нет» здесь — полноценное состояние, а не
@@ -267,9 +344,9 @@ var ldconfigLineRe = regexp.MustCompile(`(?m)^\s*\S+\.so\.\d+\s+\([^)]*\)\s*=>\s
 // известных каталогах. Провал обоих — «определить не удалось».
 func detectGraphics(d Deps, goarcH string) Graphics {
 	if out, err := d.Run("ldconfig", "-p"); err == nil && strings.TrimSpace(out) != "" && ldconfigLineRe.MatchString(out) {
-		return Graphics{Known: true, Missing: missingIn(func(lib string) bool {
+		return missingByClasses(func(lib string) bool {
 			return strings.Contains(out, lib)
-		})}
+		})
 	}
 
 	var dirs []string
@@ -279,18 +356,36 @@ func detectGraphics(d Deps, goarcH string) Graphics {
 		}
 	}
 	if len(dirs) == 0 {
-		// Ни списка, ни каталогов — мы просто не знаем. «Не хватает всех
-		// шести» отсюда не следует.
+		// Ни списка, ни каталогов — мы просто не знаем. «Не хватает всех»
+		// отсюда не следует.
 		return Graphics{}
 	}
-	return Graphics{Known: true, Missing: missingIn(func(lib string) bool {
+	return missingByClasses(func(lib string) bool {
 		for _, dir := range dirs {
 			if d.Exists(dir + "/" + lib) {
 				return true
 			}
 		}
 		return false
-	})}
+	})
+}
+
+// missingByClasses раскладывает ненайденные библиотеки по двум классам.
+// Класс libByLibcC (libc.so.6, libm.so.6) не проверяется вовсе: он покрыт
+// признаком «библиотека C».
+func missingByClasses(found func(lib string) bool) Graphics {
+	g := Graphics{Known: true}
+	for _, l := range graphicsLibs {
+		if l.Class == libByLibcC || found(l.SOName) {
+			continue
+		}
+		if l.Class == libHard {
+			g.MissingHard = append(g.MissingHard, l.SOName)
+		} else {
+			g.MissingDlopen = append(g.MissingDlopen, l.SOName)
+		}
+	}
+	return g
 }
 
 // libDirs — каталоги способа 2. Отсутствие каталога — не «нет библиотеки», а
@@ -301,16 +396,6 @@ func libDirs(goarcH string) []string {
 		triplet = "aarch64-linux-gnu"
 	}
 	return []string{"/usr/lib/" + triplet, "/usr/lib64", "/usr/lib"}
-}
-
-func missingIn(found func(lib string) bool) []string {
-	var missing []string
-	for _, lib := range requiredLibs {
-		if !found(lib) {
-			missing = append(missing, lib)
-		}
-	}
-	return missing
 }
 
 func detectSession(getenv func(string) string) Session {
@@ -342,8 +427,19 @@ func verdict(r Result) string {
 	if r.Libc.Kind == "musl" {
 		return textMusl
 	}
-	if r.Graph.Known && len(r.Graph.Missing) > 0 {
-		return fmt.Sprintf(textMissingLibs, strings.Join(r.Graph.Missing, ", "))
+	if r.Graph.Known && len(r.Graph.MissingHard) > 0 {
+		// Жёсткая зависимость: без неё динамический компоновщик убьёт
+		// процесс до первой строки Go-кода.
+		return fmt.Sprintf(textMissingLibs,
+			strings.Join(r.Graph.MissingHard, ", "),
+			packagesFor(r.Graph.MissingHard, false),
+			packagesFor(r.Graph.MissingHard, true))
+	}
+	if r.Graph.Known && len(r.Graph.MissingDlopen) > 0 {
+		return fmt.Sprintf(textMaybeMissingLibs,
+			strings.Join(r.Graph.MissingDlopen, ", "),
+			packagesFor(r.Graph.MissingDlopen, false),
+			packagesFor(r.Graph.MissingDlopen, true))
 	}
 	// Название ОС в итог не входит: это справочная строка, и нечитаемый
 	// /etc/os-release не повод объявлять проверку несостоявшейся.
@@ -399,10 +495,13 @@ func graphicsLine(g Graphics) string {
 	if !g.Known {
 		return textUnknown
 	}
-	if len(g.Missing) == 0 {
-		return "все на месте"
+	if len(g.MissingHard) > 0 {
+		return "не хватает: " + strings.Join(g.MissingHard, ", ")
 	}
-	return "не хватает: " + strings.Join(g.Missing, ", ")
+	if len(g.MissingDlopen) > 0 {
+		return "обязательные на месте, может не хватать: " + strings.Join(g.MissingDlopen, ", ")
+	}
+	return "все на месте"
 }
 
 func sessionLine(s Session) string {
