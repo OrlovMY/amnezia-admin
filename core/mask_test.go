@@ -15,6 +15,7 @@ package core
 // см. review-request.
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -166,5 +167,116 @@ func TestPlanDiffMasksSecrets(t *testing.T) {
 		if !strings.Contains(tblDiff, "<скрыто>") {
 			t.Errorf("disable: clientsTable diff не промаскирован (нет плейсхолдера \"<скрыто>\"): %q", tblDiff)
 		}
+	})
+}
+
+// ---------- TestDiffNoStrayBase64 (review PR-2, carryover 2) ----------
+//
+// TestPlanDiffMasksSecrets выше проверяет ровно три известных поля по
+// именам (PresharedKey/PrivateKey/psk) — она молчит, если появится НОВОЕ
+// секретное поле с тем же форматом значения (base64, 32 байта → 44 символа
+// с одним "="), которое ктo-то забудет добавить в reWgSecretLine/
+// reTblSecretLine (core/txn.go:maskSecrets). PR-3 расширяет userData
+// (userData.allowedIP уже не новость, но резерв IP делает clientsTable
+// предметом этого PR) — эта проверка ловит будущие поля автоматически, не
+// перечисляя их по имени: единственные base64-строки длины 44, которым
+// разрешено остаться в открытом виде в Diff(), — значения под ключами
+// PublicKey (wg0.conf) и "clientId" (clientsTable), потому что это не
+// секреты, а публичные идентификаторы.
+//
+// Тест не привязан к конкретному найденному на fe5e013 багу (на fe5e013 он
+// уже проходит — там нет ни одного нового секретного base64-поля, которое
+// он мог бы поймать) — это защита на будущее, а не регресс на
+// существующую дыру; прогон на fe5e013 задокументирован в отчёте.
+
+// b64Run44 — максимальный по возможности run символов base64-алфавита
+// (включая "="), затем фильтруется по длине 44 и ровно одному "=" в конце —
+// именно так выглядит base64.StdEncoding 32 случайных байт (genKey/genPSK).
+var b64Run44 = regexp.MustCompile(`[A-Za-z0-9+/=]+`)
+
+// assertNoStrayBase64 проверяет, что каждая base64-строка длины 44 в diff
+// встречается только на строке "PublicKey = …" (wg0.conf) или содержащей
+// "clientId" (clientsTable) — на любой другой строке такая строка обязана
+// быть секретом, который забыли замаскировать.
+func assertNoStrayBase64(t *testing.T, label, diff string) {
+	t.Helper()
+	for _, line := range strings.Split(diff, "\n") {
+		for _, run := range b64Run44.FindAllString(line, -1) {
+			if len(run) != 44 || strings.Count(run, "=") != 1 || !strings.HasSuffix(run, "=") {
+				continue
+			}
+			trimmed := strings.TrimSpace(line)
+			trimmed = strings.TrimPrefix(trimmed, "-")
+			trimmed = strings.TrimPrefix(trimmed, "+")
+			trimmed = strings.TrimSpace(trimmed)
+			allowed := strings.HasPrefix(trimmed, "PublicKey") || strings.Contains(trimmed, `"clientId"`)
+			if !allowed {
+				t.Errorf("%s: base64-строка длины 44 вне PublicKey/clientId не замаскирована: %q\nстрока diff: %q", label, run, line)
+			}
+		}
+	}
+}
+
+func TestDiffNoStrayBase64(t *testing.T) {
+	c := awgContainer()
+
+	t.Run("add", func(t *testing.T) {
+		srv := fakesrv.New()
+		sess := NewSessionWithRunner(srv, testCreds())
+		plan, err := sess.PlanAddUser(c, "Carol")
+		if err != nil {
+			t.Fatalf("PlanAddUser: %v", err)
+		}
+		wgDiff, tblDiff := plan.Diff()
+		assertNoStrayBase64(t, "add/wg0.conf", wgDiff)
+		assertNoStrayBase64(t, "add/clientsTable", tblDiff)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		srv := fakesrv.New()
+		sess := NewSessionWithRunner(srv, testCreds())
+		clients, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("LoadClients: %v", err)
+		}
+		plan, err := sess.PlanDelete(c, clients[0].ClientID)
+		if err != nil {
+			t.Fatalf("PlanDelete: %v", err)
+		}
+		wgDiff, tblDiff := plan.Diff()
+		assertNoStrayBase64(t, "delete/wg0.conf", wgDiff)
+		assertNoStrayBase64(t, "delete/clientsTable", tblDiff)
+	})
+
+	t.Run("rekey", func(t *testing.T) {
+		srv := fakesrv.New()
+		sess := NewSessionWithRunner(srv, testCreds())
+		clients, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("LoadClients: %v", err)
+		}
+		plan, err := sess.PlanRekey(c, clients[0].ClientID)
+		if err != nil {
+			t.Fatalf("PlanRekey: %v", err)
+		}
+		wgDiff, tblDiff := plan.Diff()
+		assertNoStrayBase64(t, "rekey/wg0.conf", wgDiff)
+		assertNoStrayBase64(t, "rekey/clientsTable", tblDiff)
+	})
+
+	t.Run("disable", func(t *testing.T) {
+		srv := fakesrv.New()
+		sess := NewSessionWithRunner(srv, testCreds())
+		clients, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("LoadClients: %v", err)
+		}
+		plan, err := sess.PlanSetEnabled(c, clients[0].ClientID, false)
+		if err != nil {
+			t.Fatalf("PlanSetEnabled(false): %v", err)
+		}
+		wgDiff, tblDiff := plan.Diff()
+		assertNoStrayBase64(t, "disable/wg0.conf", wgDiff)
+		assertNoStrayBase64(t, "disable/clientsTable", tblDiff)
 	})
 }

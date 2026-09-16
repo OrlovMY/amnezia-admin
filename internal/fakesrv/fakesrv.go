@@ -45,20 +45,16 @@ type Server struct {
 	// чтение файла: PR-2 пользуется этим же полем, а не заводит своё.
 	FailRead map[string]error
 
-	// FailWrite — путь → ошибка для записи (`cat > <path>.tmp && mv ...`).
-	// Симметричный FailRead хук на запись — нужен, чтобы в тесте отдельно
-	// провалить запись ОДНОГО конкретного файла при откате (restore должен
-	// всё равно попробовать записать второй — review changes-requested,
-	// Low, п.3).
-	FailWrite map[string]error
-
 	// FailWriteFrom — путь → номер по счёту вызова записи ИМЕННО ЭТОГО пути
 	// (счёт с 1), начиная с которого запись возвращает ошибку; более ранние
-	// вызовы по этому же пути — как обычно. В отличие от FailWrite (падает
-	// всегда), нужен, чтобы первая (apply-time) запись прошла, а вторая
-	// (restore-time) — упала (review changes-requested, круг 2, Medium:
-	// TestRestoreTriesBothFilesIndependently должен реально провоцировать
-	// разные исходы записи одного и того же пути на разных этапах).
+	// вызовы по этому же пути — как обычно. Нужен, чтобы первая (apply-time)
+	// запись прошла, а вторая (restore-time) — упала (review
+	// changes-requested, круг 2, Medium: TestRestoreTriesBothFilesIndependently
+	// должен реально провоцировать разные исходы записи одного и того же
+	// пути на разных этапах). Раньше рядом был безусловный хук FailWrite
+	// (падал всегда, вне зависимости от номера вызова) — удалён (review
+	// PR-2, carryover 3, 2026-09-14): последний пользователь переехал на
+	// FailWriteFrom, и поле осталось без единого вызывающего.
 	FailWriteFrom map[string]int
 
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
@@ -267,11 +263,6 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			s.writeCalls = map[string]int{}
 		}
 		s.writeCalls[path]++
-		if s.FailWrite != nil {
-			if err, ok := s.FailWrite[path]; ok {
-				return "", err
-			}
-		}
 		if n, ok := s.FailWriteFrom[path]; ok && n > 0 && s.writeCalls[path] >= n {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: write: имитированный отказ (вызов №%d по пути %s)", cmd, s.writeCalls[path], path)
 		}

@@ -18,9 +18,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -186,39 +186,6 @@ func findClient(clients []ClientEntry, clientID string) int {
 	return -1
 }
 
-// nextFreeIP выбирает подсеть и следующий свободный адрес — общая часть
-// AddUser и RegenerateUser (когда peer уже отсутствует в wg0.conf).
-func nextFreeIP(conf *wgConf) (string, error) {
-	subnet := ""
-	used := map[int]bool{}
-	if m := ipRe.FindStringSubmatch(conf.iface["Address"]); m != nil {
-		subnet = m[1]
-		n, _ := strconv.Atoi(m[2])
-		used[n] = true
-	}
-	for _, p := range conf.peers {
-		if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-			if subnet == "" {
-				subnet = m[1]
-			}
-			n, _ := strconv.Atoi(m[2])
-			used[n] = true
-		}
-	}
-	if subnet == "" {
-		subnet = "10.8.1"
-		used[1] = true
-	}
-	next := 2
-	for used[next] {
-		next++
-	}
-	if next > 254 {
-		return "", fmt.Errorf("свободных адресов в подсети %s.0/24 не осталось", subnet)
-	}
-	return fmt.Sprintf("%s.%d", subnet, next), nil
-}
-
 func peerPubKeysFromBytes(data []byte) map[string]bool {
 	conf := parseWgConf(string(data))
 	out := make(map[string]bool, len(conf.peers))
@@ -323,7 +290,9 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		listenPort = "51820"
 	}
 
-	clientIP, err := nextFreeIP(conf)
+	// allocateIP (Г1, core/ipalloc.go) — резерв отключённых учитывается через
+	// existing (уже прочитанные до этой точки записи clientsTable).
+	clientIP, err := allocateIP(conf, existing)
 	if err != nil {
 		return nil, err
 	}
@@ -441,6 +410,15 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	}
 	name := clients[idx].Name()
 
+	// Г3, решение владельца 14.09.2026 (инвариант I4): отключённого нельзя
+	// перевыпустить молча — rekeyClientInList стирает disabled/allowedIP, и
+	// отключённый пользователь включился бы без ведома администратора.
+	// Проверка — ДО чтения wg0.conf: отказ не должен зависеть от состояния
+	// сервера, раз решение принимается по одной лишь clientsTable.
+	if clients[idx].Disabled() {
+		return nil, fmt.Errorf("пользователь %q отключён — сначала включите его, затем перевыпускайте конфиг", name)
+	}
+
 	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
@@ -460,21 +438,26 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		listenPort = "51820"
 	}
 
-	// сохраняем прежний IP, если peer ещё в wg0.conf; иначе — свободный, как в AddUser
+	// IP всегда берётся из уже существующего блока peer'а (Г3) — ветка
+	// "иначе выделяем новый" удалена: активная по таблице запись без peer'а в
+	// wg0.conf — рассинхрон таблицы и конфига, а не повод выдать новый адрес
+	// (тот самый путь, которым живой пользователь тихо получал чужой IP).
 	clientIP := ""
+	found := false
 	for _, p := range conf.peers {
 		if p["PublicKey"] == clientID {
+			found = true
 			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
 				clientIP = fmt.Sprintf("%s.%s", m[1], m[2])
 			}
 			break
 		}
 	}
+	if !found {
+		return nil, fmt.Errorf("peer %q не найден в wg0.conf — данные рассинхронизированы, перевыпуск отменён", clientID)
+	}
 	if clientIP == "" {
-		clientIP, err = nextFreeIP(conf)
-		if err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("peer %q найден в wg0.conf, но AllowedIPs не удалось разобрать — перевыпуск отменён", clientID)
 	}
 
 	priv, pub, err := genKey()
@@ -676,6 +659,19 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
+	conf := parseWgConf(raw)
+
+	// Г2, решение владельца 14.09.2026: если резервный IP отключённого занял
+	// кто-то другой, пока он был отключён (новый пользователь, чужой
+	// rekey-в-конфликт и т.п.) — отказ с именем занявшего, а не тихая
+	// перезапись/дубль AllowedIPs. usedIPs уже включает собственный резерв
+	// включаемого (под его же ClientID) — это не конфликт, поэтому сравнение
+	// именно с ClientID субъекта, а не просто "адрес занят".
+	if owner, ok := usedIPs(conf, clients)[hostIP(allowedIP)]; ok && owner != clientID {
+		return nil, fmt.Errorf("IP %s занят пользователем %s — включить нельзя. Удалите или отключите его либо перевыпустите ему конфиг",
+			hostIP(allowedIP), ownerLabel(clients, owner))
+	}
+
 	block := buildPeerBlock(clientID, psk, allowedIP)
 	wgAfter := []byte(raw + block)
 
@@ -920,6 +916,38 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 
 // ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------
 
+// ErrCASMismatch — сентинел отказа CAS (review PR-2, carryover 1; текст
+// правлен по review-reply PR-3 круга 2, Medium). Сам errors.New(...) текст
+// НИКОГДА не попадает в возвращаемые ошибки — casError.Error() его не
+// печатает; сентинел существует только для errors.Is(err, ErrCASMismatch)
+// (через casError.Is). Первая версия этого сентинела дословно склеивалась в
+// текст через fmt.Errorf("...: %w", ErrCASMismatch, ...), из-за чего ветка
+// расхождения суммы дублировала фразу дважды, а ветка "нет sha256sum" лживо
+// утверждала "сервер изменился" там, где он не менялся — сервер тут ни при
+// чём, проверить просто не удалось. casError разрывает эту связь: текст
+// каждой ветки — свой, ErrCASMismatch — только тег для errors.Is.
+var ErrCASMismatch = errors.New("план построен по неактуальному чтению сервера")
+
+// casError — ошибка CAS. Error() печатает ТОЛЬКО msg (+cause, если он есть);
+// errors.Is(err, ErrCASMismatch) работает через Is(), а не через текст —
+// поэтому смена/уточнение msg в любой из веток ниже не может испортить
+// распознавание отказа в cmd/gui/main.go (isCASRefusal).
+type casError struct {
+	msg   string
+	cause error
+}
+
+func (e *casError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("%s: %v", e.msg, e.cause)
+	}
+	return e.msg
+}
+
+func (e *casError) Unwrap() error { return e.cause }
+
+func (e *casError) Is(target error) bool { return target == ErrCASMismatch }
+
 // checkCAS — шаг 1 Apply. Расхождение контрольной суммы или невозможность её
 // проверить (нет sha256sum на сервере, любой ненулевой код) — отказ ДО любой
 // записи. Для отсутствовавшей при планировании clientsTable проверяем не
@@ -931,10 +959,10 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 	if !p.tblExisted {
 		exists, err := s.probeClientsTable(c)
 		if err != nil {
-			return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+			return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
 		}
 		if exists {
-			return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")
+			return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")}
 		}
 		return nil
 	}
@@ -946,14 +974,14 @@ func (s *Session) checkCAS(c *Container, p *Plan) error {
 func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
 	out, err := s.docker(fmt.Sprintf("docker exec %s sha256sum %s", c.Name, path), nil)
 	if err != nil {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: %w", err)
+		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
 	}
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
-		return fmt.Errorf("не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum")
+		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum"}
 	}
 	if fields[0] != wantSHA {
-		return fmt.Errorf("файл %s изменился с момента чтения — обновите список и повторите", path)
+		return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", path)}
 	}
 	return nil
 }
