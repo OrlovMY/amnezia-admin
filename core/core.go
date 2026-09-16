@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -120,6 +121,12 @@ type Session struct {
 	Client *ssh.Client
 	Creds  *ServerCreds
 	r      Runner // транспорт команд; см. core/runner.go
+
+	// mu — мьютекс мутаций (I5, core/txn.go). Экспортированные Plan*/Apply
+	// берут его сами; AddUser/DeleteByID/... держат его один раз на весь
+	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
+	// реентерабелен, повторный Lock из-под уже взятого — deadlock.
+	mu sync.Mutex
 }
 
 func Connect(creds *ServerCreds) (*Session, error) {
@@ -297,25 +304,14 @@ func (e ClientEntry) Disabled() bool {
 // (поля Waitmsg не экспортированы) — текст в stdout одинаково даёт и
 // реальный сервер, и фейк.
 func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
-	probe, err := s.docker(fmt.Sprintf("docker exec %s sh -c 'test -f %s/clientsTable && echo yes || echo no'", c.Name, c.Dir), nil)
+	data, existed, err := s.readClientsTableRaw(c) // core/txn.go — общее чтение для LoadClients и Plan*
 	if err != nil {
-		return nil, fmt.Errorf("проверка наличия clientsTable: %w", err)
+		return nil, err
 	}
-	if strings.TrimSpace(probe) == "no" {
+	if !existed {
 		return []ClientEntry{}, nil // таблицы ещё нет — до первого пользователя это нормально
 	}
-	out, err := s.catIn(c, c.Dir+"/clientsTable")
-	if err != nil {
-		return nil, fmt.Errorf("чтение clientsTable: %w", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		return []ClientEntry{}, nil // пустой файл (например, после восстановления) — не ошибка
-	}
-	var list []ClientEntry
-	if err := json.Unmarshal([]byte(out), &list); err != nil {
-		return nil, fmt.Errorf("clientsTable повреждена: %w", err)
-	}
-	return list, nil
+	return parseClientsTable(data) // пустой файл (например, после восстановления) — пустой список, не ошибка
 }
 
 func (s *Session) saveClients(c *Container, list []ClientEntry) error {
@@ -646,111 +642,16 @@ type NewUser struct {
 
 // AddUser создаёт пользователя: peer в wg0.conf, запись в clientsTable, wg syncconf.
 // Возвращает клиентский конфиг; сохранение в файл — забота вызывающего.
+// Обёртка над planAddUserLocked → applyLocked (core/txn.go, PR-2): план и
+// применение делят один и тот же mu, взятый один раз на весь вызов.
 func (s *Session) AddUser(c *Container, name string) (*NewUser, error) {
-	if !c.Managed {
-		return nil, fmt.Errorf("создание пользователей для %s не поддерживается этой утилитой", c.Proto)
-	}
-	if err := ValidateName(name); err != nil {
-		return nil, err
-	}
-	name = strings.TrimSpace(name)
-	existing, err := s.LoadClients(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := s.planAddUserLocked(c, name)
 	if err != nil {
 		return nil, err
 	}
-	for _, cl := range existing {
-		if cl.Name() == name {
-			return nil, fmt.Errorf("пользователь с именем %q уже существует", name)
-		}
-	}
-	if err := s.backup(c); err != nil {
-		return nil, err
-	}
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
-	if err != nil {
-		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
-	}
-	conf := parseWgConf(raw)
-
-	serverPriv := conf.iface["PrivateKey"]
-	if serverPriv == "" {
-		return nil, fmt.Errorf("в wg0.conf нет PrivateKey сервера")
-	}
-	serverPub, err := pubFromPriv(serverPriv)
-	if err != nil {
-		return nil, err
-	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
-	}
-
-	// подсеть и следующий свободный IP
-	subnet := ""
-	used := map[int]bool{}
-	if m := ipRe.FindStringSubmatch(conf.iface["Address"]); m != nil {
-		subnet = m[1]
-		n, _ := strconv.Atoi(m[2])
-		used[n] = true
-	}
-	for _, p := range conf.peers {
-		if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-			if subnet == "" {
-				subnet = m[1]
-			}
-			n, _ := strconv.Atoi(m[2])
-			used[n] = true
-		}
-	}
-	if subnet == "" {
-		subnet = "10.8.1"
-		used[1] = true
-	}
-	next := 2
-	for used[next] {
-		next++
-	}
-	if next > 254 {
-		return nil, fmt.Errorf("свободных адресов в подсети %s.0/24 не осталось", subnet)
-	}
-	clientIP := fmt.Sprintf("%s.%d", subnet, next)
-
-	priv, pub, err := genKey()
-	if err != nil {
-		return nil, err
-	}
-	psk, err := genPSK()
-	if err != nil {
-		return nil, err
-	}
-
-	// 1) peer в wg0.conf — читаем текущий конфиг и пишем атомарно (read+writeIn),
-	// без "cat >>" (не атомарно и не защищено от гонок/обрыва на середине)
-	peerBlock := buildPeerBlock(pub, psk, clientIP+"/32")
-	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(raw+peerBlock)); err != nil {
-		return nil, fmt.Errorf("запись peer в wg0.conf: %w", err)
-	}
-
-	// 2) clientsTable
-	clients := append(existing, ClientEntry{
-		ClientID: pub,
-		UserData: map[string]any{
-			"clientName":   name,
-			"creationDate": time.Now().Format(time.RFC3339),
-		},
-	})
-	if err := s.saveClients(c, clients); err != nil {
-		return nil, fmt.Errorf("запись clientsTable: %w", err)
-	}
-
-	// 3) применить без разрыва соединений
-	if err := s.syncWg(c); err != nil {
-		return nil, fmt.Errorf("wg syncconf: %w (peer записан в конфиг, но не применён)", err)
-	}
-
-	// 4) клиентский конфиг
-	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
-	return &NewUser{Name: name, IP: clientIP, Config: config}, nil
+	return s.applyLocked(p)
 }
 
 // buildClientConfigText собирает текст готового клиентского .conf
@@ -795,46 +696,16 @@ func filterClientsByID(clients []ClientEntry, clientID string) ([]ClientEntry, b
 // ключу (ClientID). Номер строки в отрисованном списке — лишь презентационный
 // алиас и не годится в качестве ключа удаления (сортировка/гонки могут
 // сместить индексы), поэтому единственный вход — ClientID.
+// Обёртка над planDeleteLocked → applyLocked (core/txn.go, PR-2).
 func (s *Session) DeleteByID(c *Container, clientID string) error {
-	if !c.Managed {
-		return fmt.Errorf("удаление пользователей для %s не поддерживается этой утилитой", c.Proto)
-	}
-	if err := requireClientID(clientID); err != nil {
-		return err
-	}
-	clients, err := s.LoadClients(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := s.planDeleteLocked(c, clientID)
 	if err != nil {
 		return err
 	}
-	newClients, found := filterClientsByID(clients, clientID)
-	if !found {
-		return fmt.Errorf("клиент с ключом %q не найден", clientID)
-	}
-
-	if err := s.backup(c); err != nil {
-		return err
-	}
-
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
-	if err != nil {
-		return fmt.Errorf("чтение wg0.conf: %w", err)
-	}
-	newConf, err := removePeerFromConf(raw, clientID)
-	if err != nil {
-		return err
-	}
-	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConf)); err != nil {
-		return fmt.Errorf("запись wg0.conf: %w", err)
-	}
-
-	if err := s.saveClients(c, newClients); err != nil {
-		return fmt.Errorf("запись clientsTable: %w", err)
-	}
-
-	if err := s.syncWg(c); err != nil {
-		return fmt.Errorf("wg syncconf: %w", err)
-	}
-	return nil
+	_, err = s.applyLocked(p)
+	return err
 }
 
 // rekeyClientInList — чистая часть RegenerateUser: находит запись по старому
@@ -875,130 +746,15 @@ func rekeyClientInList(clients []ClientEntry, oldID, newID string) ([]ClientEntr
 // в принципе — единственный способ восстановить доступ при потере .conf это
 // re-key. СТАРЫЙ КОНФИГ ПОСЛЕ ЭТОГО ПЕРЕСТАЁТ РАБОТАТЬ (отзыв старого
 // доступа) — это ожидаемое поведение (by design), а не побочный эффект.
+// Обёртка над planRekeyLocked → applyLocked (core/txn.go, PR-2).
 func (s *Session) RegenerateUser(c *Container, clientID string) (*NewUser, error) {
-	if !c.Managed {
-		return nil, fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", c.Proto)
-	}
-	if err := requireClientID(clientID); err != nil {
-		return nil, err
-	}
-	clients, err := s.LoadClients(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := s.planRekeyLocked(c, clientID)
 	if err != nil {
 		return nil, err
 	}
-	var name string
-	found := false
-	for _, cl := range clients {
-		if cl.ClientID == clientID {
-			name = cl.Name()
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
-	}
-
-	if err := s.backup(c); err != nil {
-		return nil, err
-	}
-
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
-	if err != nil {
-		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
-	}
-	conf := parseWgConf(raw)
-
-	serverPriv := conf.iface["PrivateKey"]
-	if serverPriv == "" {
-		return nil, fmt.Errorf("в wg0.conf нет PrivateKey сервера")
-	}
-	serverPub, err := pubFromPriv(serverPriv)
-	if err != nil {
-		return nil, err
-	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
-	}
-
-	// сохраняем прежний IP, если peer ещё в wg0.conf (например, не был отключён);
-	// иначе (peer уже отсутствует — клиент был Disabled) выделяем свободный IP,
-	// как в AddUser
-	clientIP := ""
-	for _, p := range conf.peers {
-		if p["PublicKey"] == clientID {
-			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-				clientIP = fmt.Sprintf("%s.%s", m[1], m[2])
-			}
-			break
-		}
-	}
-	if clientIP == "" {
-		subnet := ""
-		used := map[int]bool{}
-		if m := ipRe.FindStringSubmatch(conf.iface["Address"]); m != nil {
-			subnet = m[1]
-			n, _ := strconv.Atoi(m[2])
-			used[n] = true
-		}
-		for _, p := range conf.peers {
-			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-				if subnet == "" {
-					subnet = m[1]
-				}
-				n, _ := strconv.Atoi(m[2])
-				used[n] = true
-			}
-		}
-		if subnet == "" {
-			subnet = "10.8.1"
-			used[1] = true
-		}
-		next := 2
-		for used[next] {
-			next++
-		}
-		if next > 254 {
-			return nil, fmt.Errorf("свободных адресов в подсети %s.0/24 не осталось", subnet)
-		}
-		clientIP = fmt.Sprintf("%s.%d", subnet, next)
-	}
-
-	priv, pub, err := genKey()
-	if err != nil {
-		return nil, err
-	}
-	psk, err := genPSK()
-	if err != nil {
-		return nil, err
-	}
-
-	// wg0.conf: убрать старый peer (если был) и добавить новый с тем же IP —
-	// порядок "сначала новый, потом старый" не нужен, это тот же пользователь
-	removedConf, err := removePeerFromConf(raw, clientID)
-	if err != nil {
-		return nil, err
-	}
-	newConfText := removedConf + buildPeerBlock(pub, psk, clientIP+"/32")
-	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConfText)); err != nil {
-		return nil, fmt.Errorf("запись wg0.conf: %w", err)
-	}
-
-	newClients, err := rekeyClientInList(clients, clientID, pub)
-	if err != nil {
-		return nil, err // не должно случиться — clientID уже найден выше
-	}
-	if err := s.saveClients(c, newClients); err != nil {
-		return nil, fmt.Errorf("запись clientsTable: %w", err)
-	}
-
-	if err := s.syncWg(c); err != nil {
-		return nil, fmt.Errorf("wg syncconf: %w", err)
-	}
-
-	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
-	return &NewUser{Name: name, IP: clientIP, Config: config}, nil
+	return s.applyLocked(p)
 }
 
 // renameClientInList — чистая часть RenameUser: находит клиента по ClientID,
@@ -1040,182 +796,33 @@ func renameClientInList(clients []ClientEntry, clientID, newName string) ([]Clie
 // RenameUser переименовывает клиента по ClientID (pubkey). wg0.conf не
 // трогается и wg syncconf не вызывается — ключи и IP не меняются, значит
 // соединение не рвётся.
+// Обёртка над planRenameLocked → applyLocked (core/txn.go, PR-2). wg0.conf
+// не трогается и wg syncconf не вызывается (Apply не пишет wg0.conf, когда
+// wgAfter==wgBefore) — ключи и IP не меняются, значит соединение не рвётся.
 func (s *Session) RenameUser(c *Container, clientID, newName string) error {
-	if !c.Managed {
-		return fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", c.Proto)
-	}
-	if err := requireClientID(clientID); err != nil {
-		return err
-	}
-	clients, err := s.LoadClients(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := s.planRenameLocked(c, clientID, newName)
 	if err != nil {
 		return err
 	}
-	newClients, err := renameClientInList(clients, clientID, newName)
-	if err != nil {
-		return err
-	}
-	if err := s.backup(c); err != nil {
-		return err
-	}
-	if err := s.saveClients(c, newClients); err != nil {
-		return fmt.Errorf("запись clientsTable: %w", err)
-	}
-	return nil
+	_, err = s.applyLocked(p)
+	return err
 }
 
 // SetEnabled временно отключает клиента (enabled=false) или включает обратно
-// (enabled=true) без удаления записи из clientsTable.
-//
-// Отключение: peer убирается из wg0.conf и рантайма (wg syncconf), а
-// PresharedKey и AllowedIPs сохраняются в UserData (["psk"], ["allowedIP"]),
-// чтобы включение могло восстановить точно тот же блок [Peer]. Флаг
-// UserData["disabled"]=true и UserData["disabledAt"] пишутся в clientsTable
-// после удаления peer из wg0.conf, но до syncconf — если syncconf упадёт,
-// запись уже помечена отключённой (безопасная сторона: пользователь считается
-// отключённым, даже если фактически ещё активен до следующего syncconf).
-//
-// Включение: блок [Peer] восстанавливается из сохранённых psk/allowedIP,
-// затем снимается флаг disabled и вызывается syncconf.
+// (enabled=true) без удаления записи из clientsTable. Обёртка над
+// planSetEnabledLocked → applyLocked (core/txn.go, PR-2); сама транзакция
+// (backup/CAS/запись/verify/restore) — в Apply, здесь только план.
 func (s *Session) SetEnabled(c *Container, clientID string, enabled bool) error {
-	if !c.Managed {
-		return fmt.Errorf("управление пользователями для %s не поддерживается этой утилитой", c.Proto)
-	}
-	if enabled {
-		return s.enableClient(c, clientID)
-	}
-	return s.disableClient(c, clientID)
-}
-
-func (s *Session) disableClient(c *Container, clientID string) error {
-	if err := requireClientID(clientID); err != nil {
-		return err
-	}
-	clients, err := s.LoadClients(c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := s.planSetEnabledLocked(c, clientID, enabled)
 	if err != nil {
 		return err
 	}
-	idx := -1
-	for i, cl := range clients {
-		if cl.ClientID == clientID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("клиент с ключом %q не найден", clientID)
-	}
-	if clients[idx].Disabled() {
-		return fmt.Errorf("пользователь %q уже отключён", clients[idx].Name())
-	}
-
-	if err := s.backup(c); err != nil {
-		return err
-	}
-
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
-	if err != nil {
-		return fmt.Errorf("чтение wg0.conf: %w", err)
-	}
-	conf := parseWgConf(raw)
-	var peer map[string]string
-	for _, p := range conf.peers {
-		if p["PublicKey"] == clientID {
-			peer = p
-			break
-		}
-	}
-	if peer == nil {
-		return fmt.Errorf("peer с ключом %q не найден в wg0.conf", clientID)
-	}
-
-	newConf, err := removePeerFromConf(raw, clientID)
-	if err != nil {
-		return err
-	}
-	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(newConf)); err != nil {
-		return fmt.Errorf("запись wg0.conf: %w", err)
-	}
-
-	newClients := make([]ClientEntry, len(clients))
-	copy(newClients, clients)
-	ud := make(map[string]any, len(newClients[idx].UserData)+4)
-	for k, v := range newClients[idx].UserData {
-		ud[k] = v
-	}
-	ud["disabled"] = true
-	ud["disabledAt"] = time.Now().Format(time.RFC3339)
-	ud["psk"] = peer["PresharedKey"]
-	ud["allowedIP"] = peer["AllowedIPs"]
-	newClients[idx].UserData = ud
-	if err := s.saveClients(c, newClients); err != nil {
-		return fmt.Errorf("запись clientsTable: %w", err)
-	}
-
-	if err := s.syncWg(c); err != nil {
-		return fmt.Errorf("wg syncconf: %w (пользователь уже помечен отключённым)", err)
-	}
-	return nil
-}
-
-func (s *Session) enableClient(c *Container, clientID string) error {
-	if err := requireClientID(clientID); err != nil {
-		return err
-	}
-	clients, err := s.LoadClients(c)
-	if err != nil {
-		return err
-	}
-	idx := -1
-	for i, cl := range clients {
-		if cl.ClientID == clientID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("клиент с ключом %q не найден", clientID)
-	}
-	if !clients[idx].Disabled() {
-		return fmt.Errorf("пользователь %q уже активен", clients[idx].Name())
-	}
-	psk := Str(clients[idx].UserData, "psk")
-	allowedIP := Str(clients[idx].UserData, "allowedIP")
-	if psk == "" || allowedIP == "" {
-		return fmt.Errorf("невозможно включить: параметры peer не сохранены, пересоздайте пользователя")
-	}
-
-	if err := s.backup(c); err != nil {
-		return err
-	}
-
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
-	if err != nil {
-		return fmt.Errorf("чтение wg0.conf: %w", err)
-	}
-	block := buildPeerBlock(clientID, psk, allowedIP)
-	if err := s.writeIn(c, c.Dir+"/wg0.conf", []byte(raw+block)); err != nil {
-		return fmt.Errorf("запись wg0.conf: %w", err)
-	}
-
-	newClients := make([]ClientEntry, len(clients))
-	copy(newClients, clients)
-	ud := make(map[string]any, len(newClients[idx].UserData))
-	for k, v := range newClients[idx].UserData {
-		if k == "disabled" || k == "disabledAt" || k == "psk" || k == "allowedIP" {
-			continue // peer восстановлен — лишняя копия psk/IP в clientsTable больше не нужна
-		}
-		ud[k] = v
-	}
-	newClients[idx].UserData = ud
-	if err := s.saveClients(c, newClients); err != nil {
-		return fmt.Errorf("запись clientsTable: %w", err)
-	}
-
-	if err := s.syncWg(c); err != nil {
-		return fmt.Errorf("wg syncconf: %w", err)
-	}
-	return nil
+	_, err = s.applyLocked(p)
+	return err
 }
 
 // SanitizeName убирает символы, запрещённые в именах файлов Windows,

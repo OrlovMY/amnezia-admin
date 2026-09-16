@@ -988,6 +988,8 @@ var cmdTemplates = []string{
 	"docker exec " + dyn + " bash -c 'wg syncconf wg0 <(wg-quick strip " + dyn + "/wg0.conf)'",
 	// core.go: LoadClients (Г3, новая команда этого PR)
 	"docker exec " + dyn + " sh -c 'test -f " + dyn + "/clientsTable && echo yes || echo no'",
+	// core/txn.go: casCheckFile (PR-2, Г4 — CAS по sha256sum, fail-safe, единственная новая команда PR-2)
+	"docker exec " + dyn + " sha256sum " + dyn,
 }
 
 func mustTemplateRegex(tmpl string) *regexp.Regexp {

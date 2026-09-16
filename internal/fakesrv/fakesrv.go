@@ -7,15 +7,18 @@
 //
 // Server разбирает РОВНО те серверные команды, что на 2026-09-14 шлёт core
 // (docker ps/exec, резервное копирование, wg syncconf/show, sudo-фолбэк,
-// test -f) — и только их. Любая другая команда возвращает ошибку "неизвестная
-// команда": это не удобство, а страж — если core когда-нибудь начнёт слать на
+// test -f, sha256sum — PR-2, CAS) — и только их. Любая другая команда
+// возвращает ошибку "неизвестная команда": это не удобство, а страж — если
+// core когда-нибудь начнёт слать на
 // сервер что-то новое или изменит текст существующей команды, тест на
 // fakesrv тут же упадёт, а не тихо отработает "как-нибудь".
 package fakesrv
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -42,9 +45,33 @@ type Server struct {
 	// чтение файла: PR-2 пользуется этим же полем, а не заводит своё.
 	FailRead map[string]error
 
+	// FailWrite — путь → ошибка для записи (`cat > <path>.tmp && mv ...`).
+	// Симметричный FailRead хук на запись — нужен, чтобы в тесте отдельно
+	// провалить запись ОДНОГО конкретного файла при откате (restore должен
+	// всё равно попробовать записать второй — review changes-requested,
+	// Low, п.3).
+	FailWrite map[string]error
+
+	// FailWriteFrom — путь → номер по счёту вызова записи ИМЕННО ЭТОГО пути
+	// (счёт с 1), начиная с которого запись возвращает ошибку; более ранние
+	// вызовы по этому же пути — как обычно. В отличие от FailWrite (падает
+	// всегда), нужен, чтобы первая (apply-time) запись прошла, а вторая
+	// (restore-time) — упала (review changes-requested, круг 2, Medium:
+	// TestRestoreTriesBothFilesIndependently должен реально провоцировать
+	// разные исходы записи одного и того же пути на разных этапах).
+	FailWriteFrom map[string]int
+
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
 	// (множество применённых peer'ов) не меняется.
 	FailSyncconf error
+
+	// FailSyncconfFrom — если > 0, `wg syncconf` начинает возвращать ошибку
+	// начиная с N-го по счёту вызова (счёт с 1) и до конца жизни Server;
+	// вызовы до этого — как обычно. Нужен, чтобы отличить в тесте "первый
+	// (apply-time) syncconf прошёл, второй (restore-time retry) — упал" (SEC-01,
+	// PR-2 changes-requested: restore обязан ПРОВЕРЯТЬ состояние, а не
+	// верить коду возврата повторного syncconf).
+	FailSyncconfFrom int
 
 	// DenyOnce — самая первая команда без префикса "sudo " будет отклонена
 	// ошибкой со словом "denied" (проверка sudo-фолбэка в Session.docker).
@@ -52,11 +79,24 @@ type Server struct {
 	// выполняются как обычно.
 	DenyOnce bool
 
-	mu           sync.Mutex
-	files        map[string][]byte
-	peers        map[string]bool // публичные ключи peer'ов, применённые последним syncconf
-	commands     []string
-	denyOnceUsed bool
+	// NoSha256 — если true, `sha256sum` вернёт ошибку "sh: sha256sum: not
+	// found" (PR-2, CAS, Г4): на сервере с неизвестным busybox команды может
+	// не быть, и это должно быть отказом без записи, а не паникой/успехом.
+	NoSha256 bool
+
+	// DropPeerOnSync — если задан, `wg syncconf` "применяется" без ошибки, но
+	// этот PublicKey исключается из результирующего рантайма (PR-2,
+	// TestVerifyMissingPeerRestores): имитирует случай, когда syncconf
+	// вернул код 0, но peer фактически не поднялся.
+	DropPeerOnSync string
+
+	mu            sync.Mutex
+	files         map[string][]byte
+	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
+	commands      []string
+	denyOnceUsed  bool
+	syncconfCalls int            // счётчик вызовов syncconf — для FailSyncconfFrom
+	writeCalls    map[string]int // счётчик вызовов записи по пути — для FailWriteFrom
 }
 
 // New создаёт Server с дефолтным состоянием: один контейнер amnezia-awg,
@@ -172,6 +212,8 @@ var (
 		`ls -1t (\S+)/backup/clientsTable\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
 	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c 'wg syncconf wg0 <\(wg-quick strip (\S+)/wg0\.conf\)'$`)
 	reWgShow   = regexp.MustCompile(`^docker exec (\S+) wg show wg0 dump$`)
+	// reSha256 — PR-2, Г4: единственная новая серверная команда этого PR (CAS).
+	reSha256 = regexp.MustCompile(`^docker exec (\S+) sha256sum (\S+)$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -221,6 +263,18 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		if m[3] != path || m[4] != path {
 			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 		}
+		if s.writeCalls == nil {
+			s.writeCalls = map[string]int{}
+		}
+		s.writeCalls[path]++
+		if s.FailWrite != nil {
+			if err, ok := s.FailWrite[path]; ok {
+				return "", err
+			}
+		}
+		if n, ok := s.FailWriteFrom[path]; ok && n > 0 && s.writeCalls[path] >= n {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: write: имитированный отказ (вызов №%d по пути %s)", cmd, s.writeCalls[path], path)
+		}
 		if s.files == nil {
 			s.files = map[string][]byte{}
 		}
@@ -260,15 +314,36 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	case reSyncconf.MatchString(cmd):
 		m := reSyncconf.FindStringSubmatch(cmd)
 		dir := m[2]
+		s.syncconfCalls++
 		if s.FailSyncconf != nil {
 			return "", s.FailSyncconf
+		}
+		if s.FailSyncconfFrom > 0 && s.syncconfCalls >= s.FailSyncconfFrom {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg syncconf: имитированный отказ (вызов №%d)", cmd, s.syncconfCalls)
 		}
 		wg0, ok := s.files[dir+"/wg0.conf"]
 		if !ok {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg-quick: %s/wg0.conf: No such file or directory", cmd, dir)
 		}
-		s.peers = peerKeysFromConf(string(wg0))
+		peers := peerKeysFromConf(string(wg0))
+		if s.DropPeerOnSync != "" {
+			delete(peers, s.DropPeerOnSync)
+		}
+		s.peers = peers
 		return "", nil
+
+	case reSha256.MatchString(cmd):
+		if s.NoSha256 {
+			return "", fmt.Errorf("команда %q: exit status 127; stderr: sh: sha256sum: not found", cmd)
+		}
+		m := reSha256.FindStringSubmatch(cmd)
+		path := m[2]
+		data, ok := s.files[path]
+		if !ok {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: sha256sum: %s: No such file or directory", cmd, path)
+		}
+		sum := sha256.Sum256(data)
+		return fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), path), nil
 
 	case reWgShow.MatchString(cmd):
 		var b strings.Builder
