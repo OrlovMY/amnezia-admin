@@ -1,6 +1,7 @@
-// Файл matrix_test.go — сторож против расхождения двух списков пар
-// «ОС / раннер»: матрицы job build в .github/workflows/release.yml и матрицы
-// job checks в .github/workflows/ci.yml.
+// Файл matrix_test.go — сторожа против расхождения того, что записано в двух
+// файлах сразу: матрицы пар «ОС / раннер» (job build в release.yml против job
+// checks в ci.yml) и версии actionlint (scripts/dev-tools.sh против
+// release.yml).
 //
 // Зачем: числа и списки, живущие в двух файлах, расходятся — в этом проекте
 // это уже дважды роняло релиз. Расхождение матриц означает, что на теге
@@ -14,31 +15,41 @@
 // самореферентен: ошибка в ci.yml, из-за которой workflow не стартует, унесла
 // бы сторож вместе с собой, а это ровно тот случай, ради которого сторож
 // заводится. Оба workflow-файла здесь только читаются.
+//
+// Разбор — настоящим YAML-разборщиком, а НЕ построчными регулярками (ревью,
+// З1). Построчный разбор давал ложно-зелёный: пара ключей os:/runner:,
+// встреченная где угодно внутри job — например в env: шага «Сборка», —
+// засчитывалась как элемент матрицы, и удаление macOS из настоящей матрицы
+// проходило молча. Обратная слепота того же класса: переменная окружения с
+// именем runner давала бы ложную тревогу. Оба случая лечатся тем, что путь к
+// данным задан структурой (jobs.<job>.strategy.matrix.include), а не тем, на
+// что похожа строка.
 package ciguard
 
 import (
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
-// Заголовок job — ключ на двух пробелах отступа: `  build:`, `  checks:`.
-var jobHeaderRe = regexp.MustCompile(`^ {2}([A-Za-z0-9_-]+):\s*$`)
+// workflow — ровно та часть схемы workflow-файла, которая нужна сторожу.
+// Остальное yaml.v3 молча пропускает.
+type workflow struct {
+	Jobs map[string]struct {
+		Strategy struct {
+			Matrix struct {
+				Include []map[string]string `yaml:"include"`
+			} `yaml:"matrix"`
+		} `yaml:"strategy"`
+	} `yaml:"jobs"`
+}
 
-// Строки матрицы. Отступ снят TrimSpace, поэтому ведущий `- ` у первой строки
-// элемента списка разбирается явно.
-var (
-	osRe     = regexp.MustCompile(`^(?:-\s+)?os:\s*([A-Za-z0-9._-]+)\s*$`)
-	runnerRe = regexp.MustCompile(`^(?:-\s+)?runner:\s*([A-Za-z0-9._-]+)\s*$`)
-)
-
-// pairsOf возвращает пары «ос/раннер» из матрицы указанного job. Разбор
-// построчный и через strings.TrimSpace — на атрибут `.github/**/*.yml text
-// eol=lf` сторож не опирается: лишний `\r` не должен превращать сторож в
-// зелёный.
-func pairsOf(t *testing.T, path, job string) []string {
+// matrixPairsOf возвращает пары «ос/раннер» из jobs.<job>.strategy.matrix.include
+// указанного файла — и ниоткуда больше.
+func matrixPairsOf(t *testing.T, path, job string) []string {
 	t.Helper()
 
 	data, err := os.ReadFile(path)
@@ -46,44 +57,34 @@ func pairsOf(t *testing.T, path, job string) []string {
 		t.Fatalf("не прочитать %s: %v", path, err)
 	}
 
-	var (
-		pairs     []string
-		inJob     bool
-		pendingOS string
-	)
-	for _, raw := range strings.Split(string(data), "\n") {
-		if m := jobHeaderRe.FindStringSubmatch(strings.TrimRight(raw, "\r")); m != nil {
-			// Начался следующий job — разбор нужного закончен.
-			if inJob && m[1] != job {
-				break
-			}
-			inJob = m[1] == job
-			continue
-		}
-		if !inJob {
-			continue
-		}
+	var wf workflow
+	if err := yaml.Unmarshal(data, &wf); err != nil {
+		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+	}
 
-		line := strings.TrimSpace(raw)
-		if strings.HasPrefix(line, "#") {
+	j, ok := wf.Jobs[job]
+	if !ok {
+		names := make([]string, 0, len(wf.Jobs))
+		for name := range wf.Jobs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		t.Fatalf("в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
+	}
+
+	var pairs []string
+	for i, entry := range j.Strategy.Matrix.Include {
+		osName, hasOS := entry["os"]
+		runner, hasRunner := entry["runner"]
+		if !hasOS || !hasRunner {
+			t.Errorf("в %s (job %s) элемент матрицы №%d не содержит пары os/runner: %v", path, job, i+1, entry)
 			continue
 		}
-		if m := osRe.FindStringSubmatch(line); m != nil {
-			pendingOS = m[1]
-			continue
-		}
-		if m := runnerRe.FindStringSubmatch(line); m != nil {
-			if pendingOS == "" {
-				t.Errorf("в %s (job %s) раннер %q встретился без предшествующей строки os:", path, job, m[1])
-				continue
-			}
-			pairs = append(pairs, pendingOS+"/"+m[1])
-			pendingOS = ""
-		}
+		pairs = append(pairs, osName+"/"+runner)
 	}
 
 	// Сравнение пустого с пустым зелёным быть не имеет права: если разбор
-	// перестал находить пары (переименовали ключ, перенесли строку, сменили
+	// перестал находить пары (переименовали ключ, перенесли матрицу, сменили
 	// форму записи), сторож обязан покраснеть, а не отрапортовать совпадение.
 	if len(pairs) == 0 {
 		t.Fatalf("в %s не найдено ни одной пары os/runner — тест перестал что-либо проверять", path)
@@ -93,13 +94,8 @@ func pairsOf(t *testing.T, path, job string) []string {
 }
 
 func TestCIMatrixMatchesReleaseBuild(t *testing.T) {
-	const (
-		releaseYML = "../../.github/workflows/release.yml"
-		ciYML      = "../../.github/workflows/ci.yml"
-	)
-
-	inRelease := pairsOf(t, releaseYML, "build")
-	inCI := pairsOf(t, ciYML, "checks")
+	inRelease := matrixPairsOf(t, releaseYML, "build")
+	inCI := matrixPairsOf(t, ciYML, "checks")
 
 	if strings.Join(inRelease, " ") != strings.Join(inCI, " ") {
 		t.Fatalf("матрицы ОС разошлись — на теге исполнится то, чего не видел ни один PR:\n"+
