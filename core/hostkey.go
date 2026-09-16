@@ -162,21 +162,10 @@ func ConnectWithHostKey(creds *ServerCreds, pol HostKeyPolicy) (*Session, error)
 
 	var acceptedFp string
 	conf := &ssh.ClientConfig{
-		User: creds.User,
-		Auth: auths,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			fp := ssh.FingerprintSHA256(key)
-			addr := knownhosts.Normalize(hostname)
-			accepted, err := checkHostKey(pol, addr, remote, fp, key)
-			if err != nil {
-				return err
-			}
-			if accepted {
-				acceptedFp = fp
-			}
-			return nil
-		},
-		Timeout: 15 * time.Second,
+		User:            creds.User,
+		Auth:            auths,
+		HostKeyCallback: hostKeyCallback(pol, &acceptedFp),
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(creds.Host, creds.Port), conf)
@@ -186,12 +175,54 @@ func ConnectWithHostKey(creds *ServerCreds, pol HostKeyPolicy) (*Session, error)
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: acceptedFp}, nil
 }
 
+// hostKeyCallback строит ssh.HostKeyCallback по политике pol — ЕДИНСТВЕННОЕ
+// место, где собирается этот колбэк (используется и в ConnectWithHostKey, и
+// в тестах через настоящее рукопожатие ssh.NewClientConn — см.
+// hostkey_port22_test.go, TestHostKeyCallbackPort22*): вынесено отдельной
+// функцией по правке ревью (changes-requested, Medium, QA-01, круг 1) —
+// прежний тест на checkHostKey напрямую не заметил бы порчу СБОРКИ конфига
+// (например checkHostKey(pol, addr, addr, …) вместо (pol, addr, hostname,
+// …)) — сторож должен стоять на месте настоящей поломки, не только внутри
+// checkHostKey.
+//
+// acceptedFp — куда записать SHA256-отпечаток ПРИНЯТОГО ключа (для
+// Session.HostKeyFingerprint); пишется только когда pol реально приняла
+// ключ (accepted == true), как и раньше.
+func hostKeyCallback(pol HostKeyPolicy, acceptedFp *string) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		fp := ssh.FingerprintSHA256(key)
+		addr := knownhosts.Normalize(hostname)
+		// hostname (НЕ addr) идёт в lookupKnownHost/cb: x/crypto/ssh/
+		// knownhosts требует host:port (net.SplitHostPort внутри), а
+		// Normalize для порта 22 (SSH по умолчанию) порт как раз убирает —
+		// knownhosts.Normalize("host:22") == "host". Раньше сюда шёл addr, и
+		// на порту 22 knownhosts-колбэк падал с "missing port in address"
+		// вместо (не)нахождения строки known_hosts: после первого удачного
+		// TOFU (файла ещё не было — NotExist трактуется как «неизвестен»,
+		// путь не доходил до cb) второе и все последующие подключения к тому
+		// же серверу на 22 порту получали эту ошибку. addr (нормализованный,
+		// без порта для 22) остаётся для записи строки known_hosts, текстов
+		// ошибок и сравнения в ForgetHostKey — там формат не меняется.
+		accepted, err := checkHostKey(pol, addr, hostname, remote, fp, key)
+		if err != nil {
+			return err
+		}
+		if accepted {
+			*acceptedFp = fp
+		}
+		return nil
+	}
+}
+
 // checkHostKey реализует порядок из Г1 задания PR-4. addr — уже нормализован
-// (knownhosts.Normalize) адрес, под которым ищется/пишется запись
-// known_hosts; remote — фактический адрес соединения (нужен только
-// knownhosts-у для внутренней проверки, приоритет всегда у addr).
-func checkHostKey(pol HostKeyPolicy, addr string, remote net.Addr, fp string, key ssh.PublicKey) (accepted bool, err error) {
-	keyErr, err := lookupKnownHost(pol.KnownHostsPath, addr, remote, key)
+// (knownhosts.Normalize) адрес: под ним ищется/пишется запись known_hosts
+// (appendKnownHost) и он же идёт в тексты ошибок/ExpectedFingerprint;
+// lookupAddr — ИСХОДНЫЙ hostname из HostKeyCallback (обязательно с портом,
+// как его требует cb из knownhosts.New — см. lookupKnownHost) для самой
+// сверки; remote — фактический адрес соединения (нужен только knownhosts-у
+// для внутренней проверки, приоритет всегда у lookupAddr).
+func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, fp string, key ssh.PublicKey) (accepted bool, err error) {
+	keyErr, err := lookupKnownHost(pol.KnownHostsPath, lookupAddr, remote, key)
 	if err != nil {
 		return false, err
 	}
@@ -243,7 +274,12 @@ func checkHostKey(pol HostKeyPolicy, addr string, remote net.Addr, fp string, ke
 }
 
 // lookupKnownHost проверяет ключ key против known_hosts по пути path для
-// адреса addr. Возвращает:
+// адреса addr. addr ОБЯЗАН быть в форме host:port (или [ipv6]:port) — именно
+// так его требует callback из knownhosts.New (внутри — net.SplitHostPort);
+// для этого сюда передаётся исходный hostname из HostKeyCallback, а НЕ
+// knownhosts.Normalize(hostname) — Normalize снимает порт 22, и голый хост
+// без порта cb отклоняет с "missing port in address" вместо поиска строки
+// (см. ConnectWithHostKey). Возвращает:
 //   - (nil, nil)      — ключ найден и совпал (принят);
 //   - (keyErr, nil)    — либо записи нет (keyErr.Want пуст), либо запись есть,
 //     но ключ другой (keyErr.Want непуст) — знквает вызывающий;
