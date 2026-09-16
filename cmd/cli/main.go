@@ -12,6 +12,11 @@
 //   amnezia-admin toggle -key vpn://... -name Vasya
 //   amnezia-admin rekey  -key vpn://... -name Vasya
 //   amnezia-admin version
+//   amnezia-admin check
+//
+// Подкоманда check печатает признаки окружения (ОС, архитектура, библиотека
+// C, библиотеки графики, графическая сессия) и говорит заранее, запустится
+// ли графическая версия; ключ, сеть и права администратора ей не нужны.
 //
 // Флаг -dry-run (для add/del/rename/toggle/rekey) показывает diff wg0.conf и
 // clientsTable, которые получились бы после операции, ничего не записывая на
@@ -27,6 +32,9 @@
 //
 // Коды возврата: 0 — успех; 1 — ошибка; 2 — отказ из-за отсутствия
 // подтверждения (нет терминала и нет -yes, либо явный отказ "n" у терминала).
+// Подкоманда check возвращает 0 всегда — в том числе когда графическая
+// версия не запустится и когда что-то определить не удалось: это факт об
+// окружении, а не ошибка утилиты.
 package main
 
 import (
@@ -42,6 +50,7 @@ import (
 	"strings"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/envcheck"
 	"amnezia-admin/internal/version"
 )
 
@@ -545,6 +554,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	// печати номера версии. Лишние аргументы игнорируются (П19).
 	if cmd == "version" || cmd == "-version" || cmd == "--version" {
 		fmt.Fprintln(stdout, "amnezia-admin "+version.String())
+		return 0
+	}
+
+	// check — по тем же причинам здесь же: проверка окружения, требующая
+	// административного ключа, бессмысленна, а ниже run() требует -key.
+	// Код всегда 0: «графический интерфейс не запустится» — не ошибка
+	// утилиты, а факт об окружении, и коды 1/2 остаются договором со
+	// скриптами (PR-4-Б, PR-5). Лишние аргументы игнорируются — как у
+	// version.
+	if cmd == "check" {
+		envcheck.Report(envcheck.Detect(envcheck.OSDeps()), stdout)
 		return 0
 	}
 
