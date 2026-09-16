@@ -1,87 +1,291 @@
 name: release
+
 on:
   push:
     tags:
       - "v*"
+  # Намеренно нет workflow_dispatch: ручной запуск на ветке собрал бы релиз
+  # не из тега, а происхождение тега (ниже) на этот случай не рассчитано.
+
+permissions:
+  contents: read
+
+# На Windows-раннере shell по умолчанию — pwsh, где `test`, `${VAR:0:7}`,
+# `export` не работают; все run: ниже написаны для bash.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: build ${{ matrix.os }}
+  test:
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-2025
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      # README actions/checkout на закреплённом SHA (см. ссылку у "Происхождение
+      # тега" ниже) гарантирует только "fetch all history for all branches and
+      # tags" при fetch-depth: 0 — не гарантирует, что при checkout тега
+      # появится именно локальная remote-tracking ссылка refs/remotes/origin/main.
+      # Решение ядра (SEC-01, 15.09 13:45, ответ на PARK-вопрос): голое
+      # `git fetch origin main` тоже не годится — оно обновляет origin/main
+      # только при подходящем remote.origin.fetch, то есть снова зависит от
+      # конфигурации checkout. Явный refspec создаёт ссылку независимо от
+      # конфигурации; вторая строка — внятный отказ вместо загадочной ошибки
+      # merge-base, если она всё же не появилась.
+      - name: Гарантировать origin/main для merge-base
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
+
+      - name: Происхождение тега
+        # Дословно повторяется в test/build/release (композитный action не
+        # заводим ради четырёх строк — лишний непинованный файл сложнее, чем
+        # копия). Требование "тег — предок origin/main" и семвер — решения
+        # ядра 15.09 (п.2, п.3); origin/main — https://github.com/actions/checkout/blob/34e114876b0b11c390a56381ad16ebd13914f8d5/README.md#L7
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
+          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Linux GUI deps
+        # go vet ./... ниже разбирает и cmd/gui (Fyne/glfw/GL) — без этих
+        # заголовков он не соберёт даже типы.
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev
+          gcc --version
+
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH —
+        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md
+        # ("MSYS2 is pre-installed on image but not added to PATH").
+        # Ниже нет глушителя кода возврата: отсутствие gcc обязано ронять job (св. 3).
+        if: matrix.os == 'windows'
+        run: |
+          echo "C:\msys64\mingw64\bin" >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
+      - name: actionlint
+        # Разрешено ядром (В2 п.3) как `go run` без установки в систему;
+        # версия закреплена явно, без @latest.
+        if: matrix.os == 'linux'
+        # dependabot.yml НЕ передаём: actionlint принимает любой переданный
+        # файл за workflow и на dependabot.yml даёт 4 ложные ошибки
+        # ("jobs"/"on" section is missing, unexpected key version/updates) —
+        # test был бы красным на каждом теге (QA-01, ревью round1).
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Закреплённые метки на 15.09.2026 — https://github.com/actions/runner-images#available-images
+          # (то, на что сейчас резолвятся *-latest); архитектура macOS-метки
+          # macos-26 — arm64 (см. Image Definitions macos-26-arm64-Readme.md).
           - os: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            arch: amd64
           - os: windows
-            runner: windows-latest
+            runner: windows-2025
+            arch: amd64
           - os: macos
-            runner: macos-latest
+            runner: macos-26
+            arch: arm64
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Гарантировать origin/main для merge-base
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
+
+      - name: Происхождение тега
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
+          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
+
+      - name: Версия образа раннера
+        # Закреплённая метка фиксирует ОС, но не версию образа — образ
+        # обновляется еженедельно (П6); ImageOS/ImageVersion — стандартные
+        # переменные окружения хостед-раннеров GitHub, попадают в лог до
+        # setup-go, чтобы был виден исходный (не пиновый) тулчейн образа.
+        run: |
+          echo "$ImageOS $ImageVersion"
+          go version
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.26.3"
+          go-version-file: go.mod
+
       - name: Linux GUI deps
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
-      - name: Windows mingw (gcc for CGO GUI build)
-        # windows-latest уже содержит mingw-w64 (MSYS2) в образе рантайма, но
-        # не добавляет его в PATH по умолчанию — см.
-        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-        # ("MSYS2 ... Note: MSYS2 is pre-installed on image but not added to PATH")
-        # и images/windows/scripts/build/Install-Msys2.ps1 в actions/runner-images,
-        # который ставит gcc через pacman именно в C:\msys64\mingw64\bin.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev
+          gcc --version
+
+      - name: Windows mingw (gcc для CGO GUI-сборки)
         if: matrix.os == 'windows'
-        shell: bash
         run: |
           echo "C:\msys64\mingw64\bin" >> "$GITHUB_PATH"
           export PATH="/c/msys64/mingw64/bin:$PATH"
-          which gcc || echo "no gcc"
-          gcc --version || true
-      - name: Build (Linux)
-        if: matrix.os == 'linux'
+          gcc --version
+
+      - name: Сборка
+        run: bash scripts/build-release.sh ${{ matrix.os }}
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+
+      - name: Проверка версии — CLI (точное равенство)
         run: |
-          mkdir -p dist
-          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-linux-amd64 ./cmd/cli
-          CGO_ENABLED=1 go build -ldflags "-s -w" -o dist/amnezia-admin-gui-linux-amd64 ./cmd/gui
-      - name: Build (macOS)
-        if: matrix.os == 'macos'
+          set -euo pipefail
+          case "${{ matrix.os }}" in
+            linux) bin="dist/amnezia-admin-linux-amd64" ;;
+            windows) bin="dist/amnezia-admin-windows-amd64.exe" ;;
+            macos) bin="dist/amnezia-admin-macos-arm64" ;;
+          esac
+          out="$("./$bin" version)"
+          expected="amnezia-admin $GITHUB_REF_NAME (${GITHUB_SHA:0:7})"
+          test "$out" = "$expected" || { echo "СТОП: версия CLI '$out' != '$expected'" >&2; exit 1; }
+
+      - name: Проверка версии — GUI
+        # HR-D 15.09 12:20: runtime/debug.BuildSettings пишет закрытый список
+        # ключей (-trimpath, vcs.*, ...) — произвольные -X там никогда не
+        # появляются, `go version -m` НЕ показывает встроенную -ldflags -X
+        # версию. GUI не печатает версию в stdout (нет дисплея в CI) — версия
+        # проверяется как буквальная строка внутри бинаря (она используется в
+        # заголовке окна и в тексте экрана подключения, cmd/gui/main.go, и не
+        # вырезается -s -w — это данные программы, не отладочные символы).
+        #
+        # SEC-01 (ревью round1, Medium): один только grep по строке версии —
+        # ложный PASS. С Go 1.24+ `go build` САМ вшивает в buildinfo версию
+        # модуля из git-тега на HEAD, даже без -ldflags -X — при регрессии
+        # "-X не передан" grep всё равно нашёл бы тег (взятый Go из git, а не
+        # из нашего -X), а сам бинарь при этом печатал бы "dev (unknown)".
+        # scripts/build-release.sh теперь собирает с -buildvcs=false — тогда
+        # при отсутствии -X модуль в buildinfo помечен "(devel)" без версии;
+        # проверка ниже требует ОБА признака: строка тега в теле бинаря И
+        # "mod amnezia-admin (devel)" в go version -m (доказывает, что тег
+        # пришёл не от авто-vcs-стемпинга Go, а от нашего -X). Происхождение
+        # коммита не теряется — он отдельно вшит -X Commit и виден в
+        # аттестации SHA256SUMS.
         run: |
-          mkdir -p dist
-          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-macos-arm64 ./cmd/cli
-          CGO_ENABLED=1 go build -ldflags "-s -w" -o dist/amnezia-admin-gui-macos-arm64 ./cmd/gui
-      - name: Build (Windows)
-        if: matrix.os == 'windows'
-        shell: bash
-        run: |
-          mkdir -p dist
-          CGO_ENABLED=0 go build -ldflags "-s -w" -o dist/amnezia-admin-windows-amd64.exe ./cmd/cli
-          CGO_ENABLED=1 go build -ldflags "-s -w -H windowsgui" -o dist/amnezia-admin-gui-windows-amd64.exe ./cmd/gui
-      - name: Test
-        run: go test ./core/
+          set -euo pipefail
+          case "${{ matrix.os }}" in
+            linux) bin="dist/amnezia-admin-gui-linux-amd64" ;;
+            windows) bin="dist/amnezia-admin-gui-windows-amd64.exe" ;;
+            macos) bin="dist/amnezia-admin-gui-macos-arm64" ;;
+          esac
+          grep -aF -- "$GITHUB_REF_NAME" "$bin" >/dev/null || { echo "СТОП: версия $GITHUB_REF_NAME не найдена в теле $bin" >&2; exit 1; }
+          go version -m "$bin" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: -trimpath=true не подтверждён в $bin" >&2; exit 1; }
+          go version -m "$bin" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: версия в $bin могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.os }}
           path: dist/*
+
   release:
     name: publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Гарантировать origin/main для merge-base
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify -q origin/main >/dev/null || { echo "СТОП: нет origin/main после fetch" >&2; exit 1; }
+
+      - name: Происхождение тега
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
+          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          path: artifacts
-      - name: Collect
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Проверка состава релиза
         run: |
-          mkdir -p dist
-          find artifacts -type f -exec cp {} dist/ \;
-          ls -la dist
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+          set -euo pipefail
+          cd dist
+          count="$(ls -1 | wc -l)"
+          test "$count" -eq 6 || { echo "СТОП: ожидалось 6 файлов в dist/, найдено $count" >&2; ls -la >&2; exit 1; }
+          for f in amnezia-admin-linux-amd64 amnezia-admin-windows-amd64.exe amnezia-admin-macos-arm64 amnezia-admin-gui-linux-amd64 amnezia-admin-gui-windows-amd64.exe amnezia-admin-gui-macos-arm64; do
+            test -f "$f" || { echo "СТОП: отсутствует ожидаемый файл $f" >&2; exit 1; }
+          done
+          if ls -1 | grep -Ei 'fakeserver|fakesrv'; then
+            echo "СТОП: код фейкового сервера просочился в состав релиза" >&2
+            exit 1
+          fi
+
+      - name: Контрольные суммы
+        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/amnezia-admin-*
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
