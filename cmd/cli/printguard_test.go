@@ -17,26 +17,34 @@ package main
 // тем, что сегодня обе точки зовут printConfig. «Сегодня зовут» — это не
 // защита, а совпадение.
 //
-// ПРИЁМ ТОТ ЖЕ, ЧТО В core/stderrguard_test.go: перечисляем ДОПУСТИМОЕ. Любое
-// кодирование в JSON внутри cmd/cli допускается ровно в одной функции —
+// ПРИЁМ ТОТ ЖЕ, ЧТО В core/stderrguard_test.go: перечисляем ДОПУСТИМОЕ.
+// Кодирование в JSON внутри cmd/cli допускается ровно в одной функции —
 // printConfig, — и ровно с одним аргументом: redactConfig(...). Правило
-// намеренно шире предмета: оно ловит не «печать конфига», а ЛЮБОЕ
-// JSON-кодирование в пакете. Понадобится когда-нибудь законное второе —
-// его придётся внести в allowedJSONFuncs видимой строкой диффа, и это
+// намеренно шире предмета: оно ловит не «печать конфига», а всякое
+// кодирование через encoding/json в пакете. Понадобится когда-нибудь
+// законное второе — его придётся внести видимой строкой диффа, и это
 // свойство, а не неудобство.
 //
-// ГРАНИЦА СТОРОЖА — здесь, в коде, а не в отчёте.
-// Сторож НЕ ВИДИТ:
-//   - печати конфига не через encoding/json — fmt.Printf("%v", cfg),
-//     fmt.Println(cfg), шаблон text/template, ручная склейка строк;
-//   - передачи cfg в другой пакет, который напечатает его сам;
-//   - кодирования через сторонний JSON-пакет;
-//   - потока данных: он не проверяет, что в redactConfig пришёл именно тот
-//     cfg, который собирались печатать.
+// Имя пакета берётся ИЗ ИМПОРТОВ ФАЙЛА, а не сравнивается с литералом
+// "json": иначе `import js "encoding/json"` обходил сторож целиком (ревью
+// SEC-01, Новое-1). Отдельными правилами запрещены точечный импорт
+// encoding/json (делает вызовы безымянными) и любой сторонний пакет
+// кодирования JSON (сторож знает только encoding/json).
 //
-// Он сканирует ТОЛЬКО каталог cmd/cli. Сегодня конфиг больше нигде не
-// печатается, но это граница сторожа, а не граница продукта: точка печати,
-// заведённая в другом пакете, им не ловится.
+// ГРАНИЦА СТОРОЖА — здесь, в коде, а не в отчёте. Сторож НЕ ВИДИТ:
+//  1. печати конфига НЕ через encoding/json — fmt.Printf("%v", cfg),
+//     fmt.Println(cfg), шаблон text/template, ручная склейка строк;
+//  2. передачи cfg в другой пакет, который напечатает его сам;
+//  3. кодирования через сторонний JSON-пакет — сам факт его импорта теперь
+//     запрещён отдельной проверкой, но если пакет уже импортирован под
+//     видом не-JSON имени пути, сторож его не узнает;
+//  4. потока данных: он не проверяет, что в redactConfig пришёл именно тот
+//     cfg, который собирались печатать;
+//  5. КОДИРОВАНИЯ ЗА ПРЕДЕЛАМИ cmd/cli. Сторож сканирует только этот
+//     каталог. В частности, ВТОРАЯ ТОЧКА ПЕЧАТИ, ЗАВЕДЁННАЯ В cmd/gui, НЕ
+//     БУДЕТ ПОЙМАНА НИЧЕМ (ревью SEC-01, под запись): cmd/gui в этот PR не
+//     входит, и сторожа там нет. Это граница сторожа, а не граница
+//     продукта.
 
 import (
 	"go/ast"
@@ -44,9 +52,62 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// jsonImportPath — единственный допустимый в cmd/cli пакет кодирования JSON.
+const jsonImportPath = "encoding/json"
+
+// jsonNamesIn возвращает имена, под которыми в файле импортирован
+// encoding/json (обычно одно — "json", но может быть алиас), и список
+// нарушений импорта.
+//
+// Имя берётся ИЗ ИМПОРТОВ, а не сравнивается с литералом "json" (ревью
+// SEC-01, Новое-1). Прежняя редакция ловила вызовы, у которых получатель
+// записан буквально как json, и `import js "encoding/json"` её не задевал:
+// пароль печатался открытым, набор оставался зелёным. Это прямо
+// противоречило объявленной области «ловит ЛЮБОЕ JSON-кодирование в
+// пакете», а расхождение между объявленной областью сторожа и настоящей
+// опаснее узкой области, честно названной.
+func jsonNamesIn(f *ast.File) (names map[string]bool, problems []string) {
+	names = map[string]bool{}
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			problems = append(problems, "не разобран путь импорта "+imp.Path.Value)
+			continue
+		}
+		local := ""
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
+		if path == jsonImportPath {
+			switch local {
+			case ".":
+				// Точечный импорт делает вызовы безымянными (Marshal(...)),
+				// и сторож их не разбирает. Запрещаем прямо, а не
+				// умалчиваем.
+				problems = append(problems, "точечный импорт "+jsonImportPath+
+					" запрещён: сторож не разбирает безымянные вызовы Marshal/Encode")
+			case "_":
+				// Импорт ради побочного эффекта — вызовов нет.
+			case "":
+				names["json"] = true
+			default:
+				names[local] = true
+			}
+			continue
+		}
+		// Сторонний пакет кодирования JSON обошёл бы сторож целиком.
+		if strings.Contains(strings.ToLower(path), "json") {
+			problems = append(problems, "сторонний пакет кодирования JSON запрещён в cmd/cli: "+path+
+				" — сторож знает только "+jsonImportPath)
+		}
+	}
+	return names, problems
+}
 
 // printConfigFuncName — единственная функция, которой разрешено кодировать
 // в JSON, и redactConfigFuncName — единственный допустимый аргумент.
@@ -68,8 +129,9 @@ type jsonSite struct {
 // collectJSONSites разбирает .go-файлы пакета (кроме _test.go) и собирает все
 // места кодирования в JSON: json.Marshal, json.MarshalIndent, json.NewEncoder
 // и вызовы .Encode на переменной, полученной из json.NewEncoder.
-func collectJSONSites(t *testing.T, dir string) []jsonSite {
+func collectJSONSites(t *testing.T, dir string) ([]jsonSite, []string) {
 	t.Helper()
+	var importProblems []string
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -91,18 +153,23 @@ func collectJSONSites(t *testing.T, dir string) []jsonSite {
 		}
 		scanned++
 
+		jsonNames, probs := jsonNamesIn(f)
+		for _, p := range probs {
+			importProblems = append(importProblems, name+": "+p)
+		}
+
 		ast.Inspect(f, func(n ast.Node) bool {
 			fn, ok := n.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				return true
 			}
-			encoders := encoderVarsIn(fn)
+			encoders := encoderVarsIn(fn, jsonNames)
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				expr, hasArg := jsonEncodeCall(call, encoders)
+				expr, hasArg := jsonEncodeCall(call, encoders, jsonNames)
 				if expr == "" {
 					return true
 				}
@@ -124,11 +191,11 @@ func collectJSONSites(t *testing.T, dir string) []jsonSite {
 	if scanned == 0 {
 		t.Fatalf("в %q не разобрано ни одного не-тестового .go-файла — сторож перестал что-либо проверять", dir)
 	}
-	return sites
+	return sites, importProblems
 }
 
-// encoderVarsIn собирает имена переменных, полученных из json.NewEncoder.
-func encoderVarsIn(fn *ast.FuncDecl) map[string]bool {
+// encoderVarsIn собирает имена переменных, полученных из <json>.NewEncoder.
+func encoderVarsIn(fn *ast.FuncDecl, jsonNames map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	ast.Inspect(fn, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
@@ -136,7 +203,7 @@ func encoderVarsIn(fn *ast.FuncDecl) map[string]bool {
 			return true
 		}
 		for i, v := range as.Rhs {
-			if i >= len(as.Lhs) || !isPkgCall(v, "json", "NewEncoder") {
+			if i >= len(as.Lhs) || !isPkgCall(v, jsonNames, "NewEncoder") {
 				continue
 			}
 			if id, ok := as.Lhs[i].(*ast.Ident); ok {
@@ -150,7 +217,7 @@ func encoderVarsIn(fn *ast.FuncDecl) map[string]bool {
 
 // jsonEncodeCall — вызов кодирования в JSON; возвращает его запись и признак
 // «у вызова есть аргумент-значение».
-func jsonEncodeCall(call *ast.CallExpr, encoders map[string]bool) (string, bool) {
+func jsonEncodeCall(call *ast.CallExpr, encoders, jsonNames map[string]bool) (string, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return "", false
@@ -159,12 +226,12 @@ func jsonEncodeCall(call *ast.CallExpr, encoders map[string]bool) (string, bool)
 	if !ok {
 		return "", false
 	}
-	if recv.Name == "json" {
+	if jsonNames[recv.Name] {
 		switch sel.Sel.Name {
 		case "Marshal", "MarshalIndent":
-			return "json." + sel.Sel.Name, true
+			return recv.Name + "." + sel.Sel.Name, true
 		case "NewEncoder":
-			return "json.NewEncoder", false
+			return recv.Name + ".NewEncoder", false
 		}
 		return "", false
 	}
@@ -174,7 +241,7 @@ func jsonEncodeCall(call *ast.CallExpr, encoders map[string]bool) (string, bool)
 	return "", false
 }
 
-func isPkgCall(e ast.Expr, pkg, fn string) bool {
+func isPkgCall(e ast.Expr, pkgNames map[string]bool, fn string) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -184,7 +251,7 @@ func isPkgCall(e ast.Expr, pkg, fn string) bool {
 		return false
 	}
 	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == pkg
+	return ok && pkgNames[id.Name]
 }
 
 func isCallTo(e ast.Expr, fn string) bool {
@@ -207,7 +274,11 @@ func isCallTo(e ast.Expr, fn string) bool {
 func TestConfigPrintSinglePoint(t *testing.T) {
 	const dir = "."
 
-	sites := collectJSONSites(t, dir)
+	sites, importProblems := collectJSONSites(t, dir)
+
+	for _, p := range importProblems {
+		t.Errorf("нарушение правила импорта JSON в cmd/cli: %s", p)
+	}
 
 	if len(sites) == 0 {
 		t.Fatalf("в пакете cmd/cli не найдено ни одного места кодирования в JSON — "+
@@ -251,4 +322,70 @@ func TestConfigPrintSinglePoint(t *testing.T) {
 		t.Errorf("в %s не найдено ни одного кодирования значения, пропущенного через %s — "+
 			"проверять нечего", printConfigFuncName, redactConfigFuncName)
 	}
+}
+
+// TestJSONImportPolicy — две ветви правила импорта (ревью SEC-01, Новое-1).
+//
+// Почему разбором синтетического исходника, а не подменой в main.go:
+// компилирующейся подмены для них не бывает. Сторонний пакет требует новой
+// зависимости (запрещено заданием, В3 п. 5, и сети у исполнителя нет), а
+// второй `. "encoding/json"` рядом с обычным даёт переобъявление — ошибка
+// компиляции, которая по разделу Д падением не считается. Поэтому предмет
+// проверки здесь — сама функция jsonNamesIn, а вход ей даётся такой, каким
+// его увидел бы сторож на настоящем файле.
+func TestJSONImportPolicy(t *testing.T) {
+	parse := func(t *testing.T, src string) *ast.File {
+		t.Helper()
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		return f
+	}
+
+	t.Run("алиас распознаётся как имя пакета json", func(t *testing.T) {
+		names, probs := jsonNamesIn(parse(t, `package main
+import js "encoding/json"
+`))
+		if !names["js"] {
+			t.Errorf("алиас js не распознан: %v", names)
+		}
+		if names["json"] {
+			t.Errorf("имя json не импортировано, но распознано: %v", names)
+		}
+		if len(probs) != 0 {
+			t.Errorf("алиас — не нарушение: %v", probs)
+		}
+	})
+
+	t.Run("точечный импорт encoding/json запрещён", func(t *testing.T) {
+		_, probs := jsonNamesIn(parse(t, `package main
+import . "encoding/json"
+`))
+		if len(probs) == 0 {
+			t.Error("точечный импорт encoding/json не помечен нарушением — сторож не разбирает безымянные вызовы, и это обход")
+		}
+	})
+
+	t.Run("сторонний пакет кодирования JSON запрещён", func(t *testing.T) {
+		_, probs := jsonNamesIn(parse(t, `package main
+import jsoniter "github.com/json-iterator/go"
+`))
+		if len(probs) == 0 {
+			t.Error("сторонний пакет кодирования JSON не помечен нарушением — сторож знает только encoding/json")
+		}
+	})
+
+	t.Run("обычные импорты нарушением не считаются", func(t *testing.T) {
+		_, probs := jsonNamesIn(parse(t, `package main
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+`))
+		if len(probs) != 0 {
+			t.Errorf("ложное нарушение на обычных импортах: %v", probs)
+		}
+	})
 }
