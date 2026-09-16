@@ -77,108 +77,189 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Второй сторож того же предмета: вызов обязан быть в КАЖДОМ файле, который
-// таблица ожиданий требует, — и обязан быть ИСПОЛНЯЕМЫМ.
+// Второй сторож того же предмета: вызов actionlint обязан существовать ИМЕННО
+// ТЕМ ШАГОМ, которым он обязан быть, и этот шаг обязан исполняться.
 //
-// В чём обход первого сторожа, дословно по механизму. Условие `found == 0`
-// выше не требует ничего ПРО КОНКРЕТНЫЙ ФАЙЛ: «найден хотя бы один литерал, и
-// все найденные совпадают». Убрать пин из release.yml и закрепить версию
-// литералом в ci.yml — found == 1, все найденные совпадают, тест зелёный. При
-// этом на теге actionlint либо не запускается вовсе, либо запускается в форме,
-// которую сторож не видит, — и ни одна проверка этого не покажет. Два шага,
-// каждый по отдельности выглядит безобидно. Проверено прогоном до починки:
-// давало PASS.
+// Обход первого сторожа, дословно по механизму. Условие `found == 0` выше не
+// требует ничего ПРО КОНКРЕТНЫЙ ФАЙЛ: «найден хотя бы один литерал, и все
+// найденные совпадают». Убрать пин из release.yml и закрепить версию литералом
+// в ci.yml — found == 1, все найденные совпадают, тест зелёный, а на теге
+// actionlint не запускается. Проверено прогоном до починки: PASS.
 //
-// Второй обход того же класса, дешевле первого: оставить строку с пином, но
-// сделать её НЕИСПОЛНЯЕМОЙ — перенести в YAML-комментарий или оставить шаг под
-// `if: false`. Поиск регулярным выражением по сырому тексту засчитал бы такой
-// пин как присутствующий. Поэтому здесь разбор YAML и счёт только внутри
-// строк `run:` исполняемых шагов. Смысл сторожа в одной фразе, и обе стороны
-// названы нарочно: сторож обязан НЕ ВИДЕТЬ того, что не исполняется, ровно так
-// же, как обязан ВИДЕТЬ то, что исполняется.
+// Тот же дефект живёт на каждом следующем этаже, и это главный урок здесь:
+// требование, привязанное к ФАЙЛУ, ничего не говорит про ШАГ. В ci.yml вызовов
+// два — канарейка (проверяет, что shellcheck вправду подключён, и гоняет
+// actionlint на собственном временном файле) и настоящий разбор обоих
+// workflow. Требование «в ci.yml не менее одного вызова» удовлетворяется одной
+// канарейкой, поэтому удаление НАСТОЯЩЕГО разбора проходило зелёным. Поэтому
+// таблица ниже — таблица ТРЕБУЕМЫХ ШАГОВ, а не счётчик вхождений в файл:
+// каждая строка называет, что обязано стоять в одном теле `run:` вместе с
+// вызовом.
 //
-// Отключённым считается только заведомо ложное условие (`false`,
-// `${{ false }}`), и на уровне job — тоже: шаг внутри отключённого job считается
-// отсутствующим, этаж, на котором стоит условие, значения не имеет.
-// Содержательное условие отключением НЕ является: шаг actionlint в release.yml
-// несёт `if: matrix.os == 'linux'` и обязан засчитываться.
+// Чем шаг может быть обеззублен, не исчезнув из файла (всё это — правдоподобные
+// однострочные правки, каждая предъявлена покрасневшей):
+//   - строка с вызовом перенесена в YAML-комментарий;
+//   - строка с вызовом закомментирована внутри самого `run:` (shell-комментарий);
+//   - шаг стоит под `if:` с условием, которое никогда не истинно;
+//   - то же условие стоит этажом выше, на job;
+//   - шаг или job помечен `continue-on-error: true` — тогда он исполняется, но
+//     его падение ничего не роняет, то есть проверка есть и не проверяет ничего.
+//
+// Презумпция по `if:` ИНВЕРТИРОВАНА, и это существенно. Сторож не пытается
+// вычислить, ложно ли условие: `matrix.os == 'nonexistent'`,
+// `${{ false || false }}`, `github.repository == 'nobody/nothing'` — заведомо
+// ложны, но опознать их перечислением лжи нельзя, список лжи бесконечен.
+// Поэтому список конечен с другой стороны: сторож знает ЗАКРЫТЫЙ СПИСОК
+// допустимых условий, и любое другое условие на шаге с вызовом (или на его
+// job) роняет тест с требованием внести условие в таблицу явной строкой. Тот
+// же приём уже применён в runnerarch_test.go к меткам раннеров: метка, которой
+// нет в таблице, роняет тест, а не пропускается. Законное изменение условия от
+// этого не становится невозможным — оно становится ВИДИМЫМ В ДИФФЕ.
+//
+// ГРАНИЦА, достигнутая на самом деле, и она уже, чем хочется. Сторож НЕ ВИДИТ
+// YAML-КОММЕНТАРИЯ (разбор идёт YAML-разборщиком) и НЕ ВИДИТ SHELL-КОММЕНТАРИЯ
+// внутри `run:` (строки, у которых первый непробельный символ — `#`,
+// отбрасываются). Но ВЫЗОВ ВНУТРИ СТРОКОВОГО ЛИТЕРАЛА ОТЛИЧИТЬ НЕ МОЖЕТ:
+// `echo "... /cmd/actionlint@v1.7.12 ..."` в чужом шаге для него неотличим от
+// настоящего вызова — для этого нужен разбор shell, а не поиск по тексту.
+// Требование совместного вхождения путей workflow (поле mustContain) делает
+// такую подделку заметно дороже, но не невозможной. Прежняя формулировка
+// «сторож обязан не видеть того, что не исполняется» была обещанием сверх
+// сделанного и заменена на эту — на то, что достигнуто.
 //
 // Про A6, чтобы починка не стала препятствием. PR-A6 удаляет слабый actionlint
-// из release.yml — это ЗАКОННОЕ изменение. После него таблица ожиданий
-// правится в том же PR A6, одной видимой строкой: «release.yml — ноль пинов,
-// потому что шаг удалён, проверку несёт ci.yml». Разница между обходом и
-// законным изменением ровно одна: обход молчит, законное изменение правит
-// таблицу и видно в диффе. Эта фраза и есть смысл таблицы ниже.
+// из release.yml — это ЗАКОННОЕ изменение. После него строка требования
+// удаляется в том же PR A6, видимой строкой: «release.yml — вызова больше нет,
+// шаг удалён, проверку несёт ci.yml». Разница между обходом и законным
+// изменением ровно одна: обход молчит, законное изменение правит таблицу и
+// видно в диффе. Эта фраза и есть смысл таблицы.
 // ---------------------------------------------------------------------------
 
 // Вызов через единый источник версии: `@${ACTIONLINT_VERSION}`.
 var actionlintVarRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@\$\{ACTIONLINT_VERSION\}`)
 
-// actionlintExpectation — сколько вызовов какого вида файл обязан содержать в
-// исполняемых шагах.
-type actionlintExpectation struct {
-	path       string
-	minLiteral int    // вызовов с литеральным пином @vX.Y.Z
-	minVarRef  int    // вызовов через @${ACTIONLINT_VERSION}
-	why        string // чем эта строка обоснована и что правит её законно
+// Любой вызов actionlint, в какой бы форме версия ни стояла. Нужен, чтобы
+// отличить «шага нет вовсе» от «шаг есть, но переписан», — сообщение обязано
+// называть настоящую причину.
+var actionlintAnyRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@`)
+
+// allowedActionlintGates — ЗАКРЫТЫЙ СПИСОК условий `if:`, при которых шаг с
+// вызовом actionlint (или его job) считается исполняемым. Ключ — условие в
+// нормализованном виде (снят `${{ }}`, схлопнуты пробелы).
+//
+// Список закрыт намеренно: перечислить все заведомо ложные условия нельзя, их
+// бесконечно много, — а перечислить допустимые можно, их на этой базе одно.
+// Значение строки — причина, по которой условие допущено; она печатается в
+// сообщении об ошибке, чтобы правящий видел, во что вписывается.
+var allowedActionlintGates = map[string]string{
+	"": "условия нет — шаг исполняется всегда",
+	"matrix.os == 'linux'": "release.yml, job test: actionlint гоняется один раз из трёх ОС матрицы — " +
+		"разбор workflow от ОС не зависит, гонять его трижды незачем. Условие сужает, но не отключает",
 }
 
-// Таблица ожиданий заведена ПО ФАКТУ базы, а не по общей формуле «в каждом
-// файле не менее одного литерального пина»: в ci.yml литерального пина нет и
-// быть не должно — он был бы вторым источником версии, то есть ровно тем
+// actionlintRequirement — один ТРЕБУЕМЫЙ ШАГ: вызов такой-то формы, в одном
+// теле `run:` вместе с перечисленным.
+type actionlintRequirement struct {
+	path        string
+	what        string         // как называть требование в сообщении
+	call        *regexp.Regexp // форма вызова
+	mustContain []string       // что обязано стоять в том же теле run:
+	why         string         // чем строка обоснована и что правит её законно
+}
+
+// Таблица требуемых шагов заведена ПО ФАКТУ базы, а не по общей формуле «в
+// каждом файле не менее одного литерального пина»: в ci.yml литерального пина
+// нет и быть не должно — он был бы вторым источником версии, то есть ровно тем
 // дефектом, ради которого заведён этот пакет.
-var actionlintExpectations = []actionlintExpectation{
+var actionlintRequirements = []actionlintRequirement{
 	{
-		path:       releaseYML,
-		minLiteral: 1,
-		minVarRef:  0,
+		path:        releaseYML,
+		what:        "разбор release.yml на теге (версия литералом)",
+		call:        actionlintPinRe,
+		mustContain: []string{".github/workflows/release.yml"},
 		why: "release.yml не подключает scripts/dev-tools.sh и потому держит версию литералом; " +
-			"ноль литералов здесь означает, что на теге actionlint не запускается. " +
-			"Строка правится законно в A6, где шаг удаляют целиком — тогда minLiteral становится 0 " +
-			"с записью «проверку несёт ci.yml», и это видно в диффе",
+			"нет этого шага — на теге actionlint не запускается вовсе. " +
+			"Строка удаляется законно в A6, где шаг убирают целиком, с записью «проверку несёт ci.yml»",
 	},
 	{
-		path:       ciYML,
-		minLiteral: 0,
-		minVarRef:  1,
-		why: "ci.yml версию не хардкодит, а берёт из $ACTIONLINT_VERSION, который кладёт в окружение " +
-			"сам scripts/dev-tools.sh — литеральный пин здесь был бы вторым источником версии. " +
-			"Но и молчать про ci.yml нельзя: без требования minVarRef удаление actionlint из ci.yml " +
-			"прошло бы зелёным",
+		path:        ciYML,
+		what:        "канарейка: actionlint вправду применяет shellcheck к bash внутри run:",
+		call:        actionlintVarRe,
+		mustContain: []string{"-shellcheck", "canary"},
+		why: "молчащий actionlint без shellcheck этот проект уже проходил; канарейка гоняет линтер " +
+			"на собственном временном файле с заведомой ошибкой SC2086 и роняет job, если её не поймали",
+	},
+	{
+		path:        ciYML,
+		what:        "настоящий разбор ОБОИХ workflow на PR",
+		call:        actionlintVarRe,
+		mustContain: []string{".github/workflows/release.yml", ".github/workflows/ci.yml"},
+		why: "это и есть проверка, ради которой всё остальное. Требование привязано к ШАГУ, а не к файлу, " +
+			"именно потому, что счёт по файлу удовлетворялся одной канарейкой — и удаление настоящего " +
+			"разбора проходило зелёным",
 	},
 }
 
 // wfSteps — ровно та часть схемы workflow-файла, которая нужна этому сторожу.
-// If берётся как interface{}: `if: false` — это YAML-булево, в строку оно не
-// разбирается, и сторож упал бы на разборе вместо того, чтобы засчитать шаг
-// отключённым.
+// If и ContinueOnError берутся как interface{}: `if: false` и
+// `continue-on-error: true` — YAML-булевы, в строку они не разбираются, и
+// сторож упал бы на разборе вместо того, чтобы засчитать шаг отключённым.
 type wfSteps struct {
 	Jobs map[string]struct {
-		If    interface{} `yaml:"if"`
-		Steps []struct {
-			If  interface{} `yaml:"if"`
-			Run string      `yaml:"run"`
+		If              interface{} `yaml:"if"`
+		ContinueOnError interface{} `yaml:"continue-on-error"`
+		Steps           []struct {
+			If              interface{} `yaml:"if"`
+			ContinueOnError interface{} `yaml:"continue-on-error"`
+			Run             string      `yaml:"run"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 
-// disabledByIf — условие, заведомо ложное при любом входе. Содержательное
-// условие (`matrix.os == 'linux'`) отключением не считается: сторож судит о
-// том, что заведомо не исполнится, а не о том, что исполнится не всегда.
-func disabledByIf(v interface{}) bool {
+// normalizeGate снимает `${{ }}` и схлопывает пробелы, чтобы условие
+// сравнивалось с таблицей по смыслу записи, а не по форматированию.
+func normalizeGate(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if strings.HasPrefix(s, "${{") && strings.HasSuffix(s, "}}") {
+		s = strings.TrimSuffix(strings.TrimPrefix(s, "${{"), "}}")
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func isTrue(v interface{}) bool {
 	if v == nil {
 		return false
 	}
-	s := strings.TrimSpace(fmt.Sprint(v))
-	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "${{"), "}}"))
-	return strings.EqualFold(s, "false")
+	return strings.EqualFold(normalizeGate(v), "true")
 }
 
-// executableRuns возвращает тела `run:` тех шагов, которые на этой базе
-// исполнятся, и отдельно — тела шагов, отключённых условием if. Второе нужно
-// не для счёта, а для того, чтобы сообщение об ошибке называло настоящую
-// причину, а не «не нашли».
-func executableRuns(t *testing.T, path string) (live, disabled []string) {
+// stripShellComments выбрасывает строки тела `run:`, у которых первый
+// непробельный символ — `#`. Без этого закомментированный внутри скрипта вызов
+// засчитывался как исполняемый: YAML-разбор видит тело шага целиком и про shell
+// ничего не знает.
+func stripShellComments(run string) string {
+	var kept []string
+	for _, line := range strings.Split(run, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// runStep — один шаг с телом `run:` и приговор о том, исполняется ли он.
+type runStep struct {
+	job    string
+	body   string // тело run: без shell-комментариев
+	live   bool
+	reason string // почему не live — дословно идёт в сообщение
+}
+
+func runStepsOf(t *testing.T, path string) []runStep {
 	t.Helper()
 
 	data, err := os.ReadFile(path)
@@ -194,76 +275,106 @@ func executableRuns(t *testing.T, path string) (live, disabled []string) {
 		t.Fatalf("в %s не найдено ни одного job — тест перестал что-либо проверять", path)
 	}
 
-	steps := 0
-	for _, job := range wf.Jobs {
-		jobOff := disabledByIf(job.If)
+	var out []runStep
+	total := 0
+	for jobName, job := range wf.Jobs {
+		jobGate := normalizeGate(job.If)
+		_, jobGateOK := allowedActionlintGates[jobGate]
+		jobCOE := isTrue(job.ContinueOnError)
+
 		for _, step := range job.Steps {
-			steps++
+			total++
 			if step.Run == "" {
 				continue
 			}
-			if jobOff || disabledByIf(step.If) {
-				disabled = append(disabled, step.Run)
-				continue
+			stepGate := normalizeGate(step.If)
+			_, stepGateOK := allowedActionlintGates[stepGate]
+
+			s := runStep{job: jobName, body: stripShellComments(step.Run), live: true}
+			switch {
+			case jobCOE:
+				s.live, s.reason = false, fmt.Sprintf("job %s помечен continue-on-error: true — шаг исполняется, "+
+					"но его падение ничего не роняет, то есть проверка есть и не проверяет ничего", jobName)
+			case isTrue(step.ContinueOnError):
+				s.live, s.reason = false, "шаг помечен continue-on-error: true — он исполняется, "+
+					"но его падение ничего не роняет, то есть проверка есть и не проверяет ничего"
+			case !jobGateOK:
+				s.live, s.reason = false, fmt.Sprintf("job %s стоит под условием if: %q, которого НЕТ в закрытом "+
+					"списке allowedActionlintGates — сторож не берётся считать такой шаг исполняемым.\n"+
+					"      Условие законно? Внеси его в allowedActionlintGates отдельной строкой с причиной — "+
+					"тогда это видно в диффе", jobName, jobGate)
+			case !stepGateOK:
+				s.live, s.reason = false, fmt.Sprintf("шаг стоит под условием if: %q, которого НЕТ в закрытом "+
+					"списке allowedActionlintGates — сторож не берётся считать такой шаг исполняемым.\n"+
+					"      Условие законно? Внеси его в allowedActionlintGates отдельной строкой с причиной — "+
+					"тогда это видно в диффе", stepGate)
 			}
-			live = append(live, step.Run)
+			out = append(out, s)
 		}
 	}
-	if steps == 0 {
+	if total == 0 {
 		t.Fatalf("в %s не найдено ни одного шага — тест перестал что-либо проверять", path)
 	}
-	return live, disabled
+	return out
 }
 
-func countIn(re *regexp.Regexp, bodies []string) int {
-	n := 0
-	for _, b := range bodies {
-		n += len(re.FindAllString(b, -1))
+func containsAll(body string, subs []string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(body, sub) {
+			return false
+		}
 	}
-	return n
+	return true
+}
+
+// matches — удовлетворяет ли тело шага требованию: вызов нужной формы И всё,
+// что обязано стоять с ним в одном теле run:.
+func (r actionlintRequirement) matches(body string) bool {
+	return r.call.MatchString(body) && containsAll(body, r.mustContain)
 }
 
 func TestActionlintPinnedInEveryExpectedFile(t *testing.T) {
-	if len(actionlintExpectations) == 0 {
-		t.Fatalf("таблица ожиданий actionlintExpectations пуста — тест перестал что-либо проверять")
+	if len(actionlintRequirements) == 0 {
+		t.Fatalf("таблица требуемых шагов actionlintRequirements пуста — тест перестал что-либо проверять")
+	}
+	if len(allowedActionlintGates) == 0 {
+		t.Fatalf("закрытый список allowedActionlintGates пуст — тест перестал что-либо проверять")
 	}
 
-	for _, exp := range actionlintExpectations {
-		live, disabled := executableRuns(t, exp.path)
-
-		gotLiteral := countIn(actionlintPinRe, live)
-		if gotLiteral < exp.minLiteral {
-			inDisabled := countIn(actionlintPinRe, disabled)
-			inRaw := len(actionlintPinRe.FindAllString(readFile(t, exp.path), -1))
-			switch {
-			case inDisabled > 0:
-				t.Errorf("в %s вызов actionlint найден, но шаг (или его job) отключён условием if — "+
-					"сторож считает его отсутствующим.\n  Требуется не менее %d в исполняемых run:, найдено %d.\n  %s",
-					exp.path, exp.minLiteral, gotLiteral, exp.why)
-			case inRaw > 0:
-				t.Errorf("в %s вызов %s/cmd/actionlint@vX.Y.Z присутствует в тексте (%d), но НЕ в исполняемом run: "+
-					"(перенесён в комментарий или в неисполняемое место) — сторож считает его отсутствующим.\n"+
-					"  Требуется не менее %d, найдено %d.\n  %s",
-					exp.path, actionlintM, inRaw, exp.minLiteral, gotLiteral, exp.why)
-			default:
-				t.Errorf("в %s не найдено ни одного вызова %s/cmd/actionlint@vX.Y.Z, хотя таблица ожиданий его требует "+
-					"(не менее %d, найдено %d) — либо вызов убрали, либо переписали так, что сторож его не видит.\n  %s",
-					exp.path, actionlintM, exp.minLiteral, gotLiteral, exp.why)
-			}
+	steps := map[string][]runStep{}
+	for _, req := range actionlintRequirements {
+		if _, done := steps[req.path]; !done {
+			steps[req.path] = runStepsOf(t, req.path)
 		}
 
-		gotVar := countIn(actionlintVarRe, live)
-		if gotVar < exp.minVarRef {
-			inDisabled := countIn(actionlintVarRe, disabled)
-			if inDisabled > 0 {
-				t.Errorf("в %s вызов actionlint через ${ACTIONLINT_VERSION} найден, но шаг (или его job) отключён "+
-					"условием if — сторож считает его отсутствующим.\n  Требуется не менее %d, найдено %d.\n  %s",
-					exp.path, exp.minVarRef, gotVar, exp.why)
+		var blocked []string
+		satisfied := false
+		for _, s := range steps[req.path] {
+			if !req.matches(s.body) {
 				continue
 			}
-			t.Errorf("в %s не найдено ни одного вызова %s/cmd/actionlint@${ACTIONLINT_VERSION} в исполняемом run:, "+
-				"хотя таблица ожиданий его требует (не менее %d, найдено %d).\n  %s",
-				exp.path, actionlintM, exp.minVarRef, gotVar, exp.why)
+			if s.live {
+				satisfied = true
+				break
+			}
+			blocked = append(blocked, "    "+s.reason)
+		}
+		if satisfied {
+			continue
+		}
+
+		switch {
+		case len(blocked) > 0:
+			t.Errorf("в %s шаг «%s» найден, но обеззублен — сторож считает его отсутствующим:\n%s\n  %s",
+				req.path, req.what, strings.Join(blocked, "\n"), req.why)
+		case actionlintAnyRe.MatchString(readFile(t, req.path)):
+			t.Errorf("в %s нет исполняемого шага «%s»: вызовы actionlint в файле есть, но ни один не стоит "+
+				"в одном теле run: вместе с %v — шаг удалён, переписан или перенесён в комментарий.\n  %s",
+				req.path, req.what, req.mustContain, req.why)
+		default:
+			t.Errorf("в %s не найдено ни одного вызова %s/cmd/actionlint@ — шаг «%s» исчез целиком, "+
+				"и тест по этой строке перестал что-либо проверять.\n  %s",
+				req.path, actionlintM, req.what, req.why)
 		}
 	}
 }
