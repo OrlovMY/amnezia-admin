@@ -50,6 +50,7 @@ ldflags="-s -w -X amnezia-admin/internal/version.Version=${VERSION} -X amnezia-a
 case "$os" in
 linux)
 	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-linux-amd64 ./cmd/cli
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-linux-arm64 ./cmd/cli
 	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-gui-linux-amd64 ./cmd/gui
 	;;
 windows)
@@ -58,6 +59,7 @@ windows)
 	;;
 macos)
 	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-macos-arm64 ./cmd/cli
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-macos-amd64 ./cmd/cli
 	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/amnezia-admin-gui-macos-arm64 ./cmd/gui
 	;;
 esac

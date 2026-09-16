@@ -188,16 +188,73 @@ jobs:
           COMMIT: ${{ github.sha }}
 
       - name: Проверка версии — CLI (точное равенство)
+        # Таблица «бинарь → метод» на каждую ОС матрицы (задание BUILD-MATRIX,
+        # Г3). Два метода, и второй — узкое исключение, а не новый порядок:
+        #   run   — раннер этой job исполняет бинарь: запуск + посимвольное
+        #           сравнение вывода. Все три нативные цели остаются на нём.
+        #   norun — кросс-собранная цель, которую раннер физически исполнить
+        #           не может: linux/arm64 на ubuntu-24.04 (amd64) даёт
+        #           "exec format error", а darwin/amd64 на macos-26 (arm64)
+        #           запустится лишь при наличии Rosetta 2, которого образ
+        #           раннера не гарантирует. Такая цель проверяется четырьмя
+        #           признаками ниже — через `go version -m` и `grep -aF`,
+        #           без `file` (его наличия на раннере никто не обещает).
+        # Перевод любой существующей цели с run на norun — решение ядра, а не
+        # правка на месте. После прохода таблица сверяется с фактическим
+        # содержимым dist/: два независимых списка одного множества расходятся
+        # молча, и расхождение обнаруживает не CI, а пользователь.
         run: |
           set -euo pipefail
           case "${{ matrix.os }}" in
-            linux) bin="dist/amnezia-admin-linux-amd64" ;;
-            windows) bin="dist/amnezia-admin-windows-amd64.exe" ;;
-            macos) bin="dist/amnezia-admin-macos-arm64" ;;
+            linux)
+              table=("amnezia-admin-linux-amd64|run||" "amnezia-admin-linux-arm64|norun|linux|arm64")
+              ;;
+            windows)
+              table=("amnezia-admin-windows-amd64.exe|run||")
+              ;;
+            macos)
+              table=("amnezia-admin-macos-arm64|run||" "amnezia-admin-macos-amd64|norun|darwin|amd64")
+              ;;
           esac
-          out="$("./$bin" version)"
           expected="amnezia-admin $GITHUB_REF_NAME (${GITHUB_SHA:0:7})"
-          test "$out" = "$expected" || { echo "СТОП: версия CLI '$out' != '$expected'" >&2; exit 1; }
+          covered=""
+          for row in "${table[@]}"; do
+            IFS='|' read -r name method goos goarch <<< "$row"
+            bin="dist/$name"
+            covered="$covered $name"
+            test -f "$bin" || { echo "СТОП: нет ожидаемого CLI-бинаря $bin" >&2; exit 1; }
+            if [ "$method" = run ]; then
+              out="$("./$bin" version)"
+              test "$out" = "$expected" || { echo "СТОП: версия CLI '$out' != '$expected' ($name)" >&2; exit 1; }
+              continue
+            fi
+            # Признак 1 — тег в теле бинаря.
+            grep -aF -- "$GITHUB_REF_NAME" "$bin" >/dev/null || { echo "СТОП: признак 1 — тег $GITHUB_REF_NAME не найден в теле $name" >&2; exit 1; }
+            # Признак 2 — полный коммит в теле бинаря: без него -X ...Commit
+            # потерян и бинарь печатает "(unknown)", чего не заметила бы ни
+            # одна другая проверка.
+            grep -aF -- "$GITHUB_SHA" "$bin" >/dev/null || { echo "СТОП: признак 2 — коммит $GITHUB_SHA не найден в теле $name (-X Commit потерян)" >&2; exit 1; }
+            # Признак 3 — -trimpath=true и "(devel)": тег пришёл от нашего -X,
+            # а не от авто-vcs-стемпинга Go (то же обоснование, что у GUI).
+            info="$(go version -m "$bin")"
+            printf '%s\n' "$info" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: признак 3 — -trimpath=true не подтверждён в $name" >&2; exit 1; }
+            printf '%s\n' "$info" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: признак 3 — версия в $name могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
+            # Признак 4 — точное равенство ожидаемой паре GOOS/GOARCH, а не
+            # поиск подстроки по имени файла.
+            printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOOS=${goos}\$" || { echo "СТОП: признак 4 — в $name нет GOOS=$goos" >&2; exit 1; }
+            printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOARCH=${goarch}\$" || { echo "СТОП: признак 4 — в $name нет GOARCH=$goarch" >&2; exit 1; }
+          done
+          shopt -s nullglob
+          for p in dist/amnezia-admin-*; do
+            f="${p#dist/}"
+            case "$f" in
+              amnezia-admin-gui-*) continue ;;
+            esac
+            case " $covered " in
+              *" $f "*) ;;
+              *) echo "СТОП: CLI-бинарь $f не покрыт проверкой версии" >&2; exit 1 ;;
+            esac
+          done
 
       - name: Проверка версии — GUI
         # HR-D 15.09 12:20: runtime/debug.BuildSettings пишет закрытый список
@@ -281,8 +338,8 @@ jobs:
           shopt -s nullglob
           files=(*)
           count="${#files[@]}"
-          test "$count" -eq 6 || { echo "СТОП: ожидалось 6 файлов в dist/, найдено $count" >&2; ls -la >&2; exit 1; }
-          for f in amnezia-admin-linux-amd64 amnezia-admin-windows-amd64.exe amnezia-admin-macos-arm64 amnezia-admin-gui-linux-amd64 amnezia-admin-gui-windows-amd64.exe amnezia-admin-gui-macos-arm64; do
+          test "$count" -eq 8 || { echo "СТОП: ожидалось 8 файлов в dist/, найдено $count" >&2; ls -la >&2; exit 1; }
+          for f in amnezia-admin-linux-amd64 amnezia-admin-linux-arm64 amnezia-admin-windows-amd64.exe amnezia-admin-macos-amd64 amnezia-admin-macos-arm64 amnezia-admin-gui-linux-amd64 amnezia-admin-gui-windows-amd64.exe amnezia-admin-gui-macos-arm64; do
             test -f "$f" || { echo "СТОП: отсутствует ожидаемый файл $f" >&2; exit 1; }
           done
           shopt -s nocaseglob

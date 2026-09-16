@@ -39,6 +39,26 @@ go build -trimpath \
 
 Без `-ldflags` бинарь печатает `dev (unknown)`. Проверка — `amnezia-admin version`.
 
+### Платформы готовых сборок
+
+Консольная версия (`amnezia-admin`) собирается для пяти платформ:
+
+- Linux x86-64
+- Linux arm64
+- Windows x86-64
+- macOS Apple Silicon
+- macOS Intel
+
+Графическая версия (`amnezia-admin-gui`) — для трёх:
+
+- Linux x86-64
+- Windows x86-64
+- macOS Apple Silicon
+
+Графической версии под Linux arm64 и под Intel-мак нет: GUI требует CGO,
+то есть C-компилятора и системных заголовков под целевую платформу, — а
+консольная версия статическая и кросс-собирается без них.
+
 Выпуск релиза — [RELEASING.md](RELEASING.md) (выполняет владелец).
 
 ## Использование

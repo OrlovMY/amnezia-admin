@@ -190,15 +190,23 @@ GitHub (Actions → вкладка репозитория).
 
 1. Задания `test` → `build` → `release` — все зелёные, в этом порядке.
 2. Релиз на странице Releases помечен **Pre-release**.
-3. У релиза ровно **семь** ассетов: 6 бинарей
-   (`amnezia-admin-linux-amd64`, `amnezia-admin-windows-amd64.exe`,
-   `amnezia-admin-macos-arm64` и три `amnezia-admin-gui-*` с теми же
-   тремя суффиксами) + `SHA256SUMS`.
-4. Скачать все семь в пустой каталог и проверить:
+3. У релиза ровно **девять** ассетов: 8 бинарей + `SHA256SUMS`.
+   Пять консольных:
+   - `amnezia-admin-linux-amd64`
+   - `amnezia-admin-linux-arm64`
+   - `amnezia-admin-windows-amd64.exe`
+   - `amnezia-admin-macos-amd64`
+   - `amnezia-admin-macos-arm64`
+
+   Три графических:
+   - `amnezia-admin-gui-linux-amd64`
+   - `amnezia-admin-gui-windows-amd64.exe`
+   - `amnezia-admin-gui-macos-arm64`
+4. Скачать все девять в пустой каталог и проверить:
    ```sh
    sha256sum -c SHA256SUMS
    ```
-   Ожидается шесть строк `OK`.
+   Ожидается восемь строк `OK`.
 5. Версия в CLI-бинаре:
    ```sh
    amnezia-admin-windows-amd64.exe version
@@ -213,6 +221,10 @@ GitHub (Actions → вкладка репозитория).
    ```sh
    git rev-parse --short=7 v0.1.0-rc.1^{commit}
    ```
+   Версия проверяется на том бинаре, который подходит вашей машине:
+   запустить все восемь негде — у вас нет ни Linux-arm64, ни Intel-мака,
+   и это нормально. Остальные семь проверяет CI: нативные — запуском,
+   кросс-собранные — по телу бинаря (шаг «Проверка версии — CLI»).
 6. Заголовок окна GUI (`amnezia-admin-gui-windows-amd64.exe`) содержит
    `v0.1.0-rc.1` — откройте программу и посмотрите на заголовок окна и
    на экран подключения (версия напечатана и там, и там). Сделайте
