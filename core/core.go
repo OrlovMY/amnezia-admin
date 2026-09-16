@@ -196,10 +196,17 @@ func (s *Session) FindContainers() ([]Container, error) {
 			// поэтому не управляем; раньше здесь угадывался Managed=true по
 			// префиксу имени, из-за чего awg2 читался как "пустой сервер"
 			// (аудит-2026-09-14, Backlog).
+			//
+			// Proto — голый суффикс, БЕЗ пометки "(не поддерживается...)":
+			// такая пометка ранее жила здесь и дублировалась GUI (":836",
+			// "+= "(просмотр)""), из-за чего строка протокола рисковала нести
+			// два разных суффикса. Единственное место подписи "только
+			// просмотр" — internal/guiview.ProtoLabel (FIX-VIEW, решение
+			// ядра Э1, 15.09).
 			found = append(found, Container{
 				Name:    n,
 				Dir:     "/opt/amnezia/" + suffix,
-				Proto:   suffix + " (не поддерживается: другой формат конфига)",
+				Proto:   suffix,
 				Managed: false,
 			})
 		}
@@ -284,6 +291,27 @@ func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
 		return []ClientEntry{}, nil // таблицы ещё нет — до первого пользователя это нормально
 	}
 	return parseClientsTable(data) // пустой файл (например, после восстановления) — пустой список, не ошибка
+}
+
+// LoadClientsView — то же чтение clientsTable, что и LoadClients
+// (readClientsTableRaw+parseClientsTable), но БЕЗ проверки Managed и с
+// сохранением признака "файл существовал" (existed) — GUI (internal/guiview)
+// различает по нему три состояния для непроверяемых протоколов (XRay, DNS и
+// т.п.): "файла нет" (existed=false, err=nil), "не удалось прочитать/разобрать"
+// (err!=nil) и "список есть" (existed=true, err=nil). LoadClients не подходит
+// для этого: она намеренно схлопывает "файла нет" в пустой список без
+// признака существования (FIX-VIEW, задание Д1).
+//
+func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed bool, err error) {
+	data, existed, err := s.readClientsTableRaw(c)
+	if err != nil {
+		return nil, existed, err
+	}
+	if !existed {
+		return nil, false, nil
+	}
+	clients, err = parseClientsTable(data)
+	return clients, true, err
 }
 
 func (s *Session) saveClients(c *Container, list []ClientEntry) error {
