@@ -392,7 +392,7 @@ func TestReportGolden(t *testing.T) {
 		{
 			"б) Linux, не хватает библиотек, сессии нет",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
-				Libc: Libc{Kind: "glibc", Version: "2.36"},
+				Libc:  Libc{Kind: "glibc", Version: "2.36"},
 				Graph: Graphics{Known: true, Missing: []string{"libGL.so.1", "libXi.so.6"}}, Sess: SessionNone},
 			"Проверка окружения\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
