@@ -146,18 +146,26 @@ jobs:
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
-      - name: Версия образа раннера
-        # Закреплённая метка фиксирует ОС, но не версию образа — образ
-        # обновляется еженедельно (П6); ImageOS/ImageVersion — стандартные
-        # переменные окружения хостед-раннеров GitHub, попадают в лог до
-        # setup-go, чтобы был виден исходный (не пиновый) тулчейн образа.
-        run: |
-          echo "$ImageOS $ImageVersion"
-          go version
-
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+
+      - name: Версия образа раннера
+        # Закреплённая метка фиксирует ОС, но не версию образа — образ
+        # обновляется еженедельно (П6); ImageOS/ImageVersion — стандартные
+        # переменные окружения хостед-раннеров GitHub.
+        # HR-D 16.09 (run 35053112015, build/macos): раньше шаг стоял ДО
+        # setup-go, чтобы показать исходный (не пиновый) тулчейн образа —
+        # но macos-26 не имеет предустановленного go (в отличие от
+        # ubuntu-24.04/windows-2025), поэтому `go version` там падал
+        # "command not found" ДО того, как setup-go вообще успевал его
+        # поставить. Перенесено ПОСЛЕ setup-go: теперь показывает версию
+        # go, которая реально используется для сборки (пиновую, из
+        # go.mod), и работает одинаково на всех трёх ОС матрицы.
+        # ImageOS/ImageVersion от порядка не зависят — печатаются как были.
+        run: |
+          echo "$ImageOS $ImageVersion"
+          go version
 
       - name: Linux GUI deps
         if: matrix.os == 'linux'
