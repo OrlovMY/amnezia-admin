@@ -243,6 +243,11 @@ jobs:
             # поиск подстроки по имени файла.
             printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOOS=${goos}\$" || { echo "СТОП: признак 4 — в $name нет GOOS=$goos" >&2; exit 1; }
             printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOARCH=${goarch}\$" || { echo "СТОП: признак 4 — в $name нет GOARCH=$goarch" >&2; exit 1; }
+            # Признак 5 (ревью, Low-2) — это действительно CLI, а не GUI:
+            # признаки 1–4 одинаково зелены на GUI-бинаре, положенном под
+            # именем кросс-цели (тег, коммит, -trimpath, (devel) и пара
+            # GOOS/GOARCH у него те же). Главный пакет их различает.
+            printf '%s\n' "$info" | grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' || { echo "СТОП: признак 5 — $name собран не из ./cmd/cli (нет 'path amnezia-admin/cmd/cli')" >&2; exit 1; }
           done
           shopt -s nullglob
           for p in dist/amnezia-admin-*; do
@@ -287,6 +292,19 @@ jobs:
           grep -aF -- "$GITHUB_REF_NAME" "$bin" >/dev/null || { echo "СТОП: версия $GITHUB_REF_NAME не найдена в теле $bin" >&2; exit 1; }
           go version -m "$bin" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: -trimpath=true не подтверждён в $bin" >&2; exit 1; }
           go version -m "$bin" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: версия в $bin могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
+          # Сторож покрытия — симметрично CLI-шагу (ревью, Low-1). Сейчас
+          # GUI-цель на job ровно одна, и case выше её покрывает; но стоит
+          # позже добавить GUI-цель и забыть строку case — бинарь уехал бы в
+          # релиз непроверенным, и ни одна проверка бы не покраснела.
+          covered="${bin#dist/}"
+          shopt -s nullglob
+          for p in dist/amnezia-admin-gui-*; do
+            f="${p#dist/}"
+            case " $covered " in
+              *" $f "*) ;;
+              *) echo "СТОП: GUI-бинарь $f не покрыт проверкой версии" >&2; exit 1 ;;
+            esac
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
