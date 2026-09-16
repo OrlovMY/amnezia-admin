@@ -520,6 +520,31 @@ func TestReportGolden(t *testing.T) {
 				"Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`.\n",
 		},
 		{
+			"з) Linux, всё на месте, но графической сессии нет (по SSH)",
+			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
+				Libc: Libc{Kind: "glibc", Version: "2.36"}, Graph: Graphics{Known: true}, Sess: SessionNone},
+			"Проверка окружения\n" +
+				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
+				"Архитектура: amd64\n" +
+				"Библиотека C: glibc 2.36\n" +
+				"Библиотеки графики: все на месте\n" +
+				"Графическая сессия: нет\n" +
+				"Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере.\n" +
+				"Графический интерфейс запустится на компьютере с графическим рабочим столом; здесь графической сессии нет, поэтому запускать его нужно не отсюда.\n",
+		},
+		{
+			"и) Linux, glibc старее порога",
+			Result{GOOS: "linux", GOARCH: "amd64", OSName: "CentOS Linux 7 (Core)",
+				Libc: Libc{Kind: "glibc", Version: "2.17"}, Graph: Graphics{Known: true}, Sess: SessionX11},
+			"Проверка окружения\n" +
+				"ОС: CentOS Linux 7 (Core)\n" +
+				"Архитектура: amd64\n" +
+				"Библиотека C: glibc 2.17\n" +
+				"Библиотеки графики: все на месте\n" +
+				"Графическая сессия: есть (X11)\n" +
+				"Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости.\n",
+		},
+		{
 			"ж) Linux, не хватает подгружаемых на ходу библиотек",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc:  Libc{Kind: "glibc", Version: "2.36"},
@@ -626,5 +651,193 @@ func TestOSNameUnknown(t *testing.T) {
 	// влияет. Всё остальное в порядке — значит «запустится».
 	if got := verdict(r); got != textWillRun {
 		t.Fatalf("итог = %q, хочу %q: нечитаемый /etc/os-release на итог влиять не должен", got, textWillRun)
+	}
+}
+
+// --- Ревью: порог glibc, признак glibc, разбор ldconfig, запасной путь ----
+
+// TestGlibcTooOld (К1): версия glibc старее порога — уверенное «не
+// запустится», даже когда все библиотеки на месте. Порог 2.34 снят замером
+// по релизному бинарю (разбор .dynstr), это доказательство, а не README.
+func TestGlibcTooOld(t *testing.T) {
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.17\n",
+		"ldconfig -p":              ldconfigOut(allLibs...),
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	want := "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости."
+	if got := verdict(r); got != want {
+		t.Fatalf("итог = %q, хочу %q", got, want)
+	}
+}
+
+// TestGlibcVersionCompareIsNumeric (К1): сравнение покомпонентное, не
+// строковое. «2.9» меньше «2.34», хотя как строка — больше.
+func TestGlibcVersionCompareIsNumeric(t *testing.T) {
+	cases := []struct {
+		ver string
+		old bool // старее порога
+	}{
+		{"2.9", true},
+		{"2.17", true},
+		{"2.33", true},
+		{"2.34", false},
+		{"2.36", false},
+		{"2.40", false},
+		{"3.0", false},
+	}
+	for _, c := range cases {
+		t.Run(c.ver, func(t *testing.T) {
+			f := &fakeOS{out: map[string]string{
+				"getconf GNU_LIBC_VERSION": "glibc " + c.ver + "\n",
+				"ldconfig -p":              ldconfigOut(allLibs...),
+			}}
+			r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+			tooOld := strings.HasPrefix(verdict(r), "Графический интерфейс не запустится: система старее")
+			if tooOld != c.old {
+				t.Fatalf("glibc %s: итог = %q", c.ver, verdict(r))
+			}
+		})
+	}
+}
+
+// TestLddNeedsGlibcMarker (К2): строка `ldd --version` обязана содержать
+// «glibc» или «GNU libc». Любая другая программа с номером версии в выводе
+// не превращается в «glibc <число>».
+func TestLddNeedsGlibcMarker(t *testing.T) {
+	f := &fakeOS{out: map[string]string{
+		"ldd --version": "some other tool 1.2.3\n",
+		"ldconfig -p":   ldconfigOut(allLibs...),
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if r.Libc.Kind != "" {
+		t.Fatalf("Libc = %+v, хочу «определить не удалось»", r.Libc)
+	}
+}
+
+// TestMuslRejectedByWholeOutput (К2): «musl» отвергается по ВСЕМУ выводу, а
+// не по первой непустой строке. Иначе вывод, где номер версии идёт первым,
+// объявил бы Alpine системой с glibc, и проверка загрузчика уже не
+// выполнилась бы.
+func TestMuslRejectedByWholeOutput(t *testing.T) {
+	f := &fakeOS{
+		out: map[string]string{
+			"ldd --version": "Version 1.2.5\nmusl libc (x86_64)\nDynamic Program Loader\n",
+			"ldconfig -p":   ldconfigOut(allLibs...),
+		},
+		files: map[string]bool{"/lib/ld-musl-x86_64.so.1": true},
+	}
+	r := detect(f.deps(), "linux", "amd64", env(nil))
+	if r.Libc.Kind != "musl" {
+		t.Fatalf("Libc = %+v, хочу musl", r.Libc)
+	}
+	if got := verdict(r); got != textMusl {
+		t.Fatalf("итог = %q, хочу %q", got, textMusl)
+	}
+}
+
+// TestLdconfigNameMatchedExactly (В3): имя сопоставляется по полю SONAME
+// строки, а не подстрокой по всему тексту. Имя, встреченное внутри чужого
+// пути, наличием библиотеки не считается.
+func TestLdconfigNameMatchedExactly(t *testing.T) {
+	out := ldconfigOut(without("libXrandr.so.2")...)
+	out += "\tlibQt5Gui.so.5 (libc6,x86-64) => /opt/libXrandr.so.2/libQt5Gui.so.5\n"
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              out,
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if strings.Join(r.Graph.MissingDlopen, ",") != "libXrandr.so.2" {
+		t.Fatalf("MissingDlopen = %v, хочу [libXrandr.so.2]: имя из чужого пути не должно засчитываться", r.Graph.MissingDlopen)
+	}
+}
+
+// TestLdconfigArchMatters (В4): для цели x86-64 годятся только 64-битные
+// записи. Кэш, где те же имена лежат только как i386, — это «не хватает», а
+// не «всё на месте».
+func TestLdconfigArchMatters(t *testing.T) {
+	out := "9 libs found in cache\n"
+	for _, l := range allLibs {
+		out += "\t" + l + " (libc6) => /usr/lib/i386-linux-gnu/" + l + "\n"
+	}
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              out,
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if !r.Graph.Known {
+		t.Fatalf("Graph = %+v: строки формата разобраны, значит способ 1 удался", r.Graph)
+	}
+	if len(r.Graph.MissingHard) != 2 {
+		t.Fatalf("MissingHard = %v, хочу обе жёсткие: 32-битные записи для нашей цели не годятся", r.Graph.MissingHard)
+	}
+}
+
+// TestLdconfigArm64Arch (В4): на arm64 годятся записи AArch64.
+func TestLdconfigArm64Arch(t *testing.T) {
+	out := "9 libs found in cache\n"
+	for _, l := range allLibs {
+		out += "\t" + l + " (libc6,AArch64) => /usr/lib/aarch64-linux-gnu/" + l + "\n"
+	}
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              out,
+	}}
+	// linux/arm64 GUI не собирается, поэтому смотрим на признак, а не на итог.
+	g := detectGraphics(f.deps(), "arm64")
+	if !g.Known || len(g.MissingHard) != 0 || len(g.MissingDlopen) != 0 {
+		t.Fatalf("Graph = %+v, хочу «все на месте»", g)
+	}
+}
+
+// TestDirsWithoutAnyLib (В5): каталог существует, но ни одной искомой
+// библиотеки в нём нет — «определить не удалось», а не «нет всех». Иначе на
+// нестандартной раскладке (NixOS, Guix, свой префикс) исправной машине
+// велят ставить пакеты.
+func TestDirsWithoutAnyLib(t *testing.T) {
+	f := &fakeOS{
+		out:   map[string]string{"getconf GNU_LIBC_VERSION": "glibc 2.36\n"},
+		files: map[string]bool{"/usr/lib": true, "/usr/lib64": true},
+	}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if r.Graph.Known {
+		t.Fatalf("Graph = %+v, хочу «определить не удалось»", r.Graph)
+	}
+}
+
+// TestDirsWithSomeLibs (В5): если хоть что-то из искомого в каталогах есть,
+// каталоги авторитетны, и ненайденное — действительно ненайденное.
+func TestDirsWithSomeLibs(t *testing.T) {
+	files := map[string]bool{"/usr/lib64": true}
+	for _, l := range without("libXrandr.so.2") {
+		files["/usr/lib64/"+l] = true
+	}
+	f := &fakeOS{
+		out:   map[string]string{"getconf GNU_LIBC_VERSION": "glibc 2.36\n"},
+		files: files,
+	}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if !r.Graph.Known || strings.Join(r.Graph.MissingDlopen, ",") != "libXrandr.so.2" {
+		t.Fatalf("Graph = %+v, хочу «не хватает libXrandr.so.2»", r.Graph)
+	}
+}
+
+// TestNoSessionVerdict (З10): «Графическая сессия: нет» и «Графический
+// интерфейс запустится.» в одном выводе противоречат друг другу.
+func TestNoSessionVerdict(t *testing.T) {
+	f := linuxAllGood()
+	r := detect(f.deps(), "linux", "amd64", env(nil))
+	if got := verdict(r); got != textWillRunNoSession {
+		t.Fatalf("итог = %q, хочу %q", got, textWillRunNoSession)
+	}
+}
+
+// TestPrettyNameWithSpaces (З11): PRETTY_NAME = "X" с пробелами вокруг «=».
+func TestPrettyNameWithSpaces(t *testing.T) {
+	f := linuxAllGood()
+	f.out["cat /etc/os-release"] = "NAME = \"Debian GNU/Linux\"\nPRETTY_NAME = \"Debian GNU/Linux 12 (bookworm)\"\n"
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if r.OSName != "Debian GNU/Linux 12 (bookworm)" {
+		t.Fatalf("OSName = %q", r.OSName)
 	}
 }

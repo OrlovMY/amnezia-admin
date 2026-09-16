@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +40,14 @@ const (
 	textWillRun     = "Графический интерфейс запустится."
 	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`."
 	textMusl        = "Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде."
+	// textOldGlibc — система старее, чем нужно графической версии. Редакция
+	// ожидает подтверждения UI-01 (см. .ask, п. 1в).
+	textOldGlibc = "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc %s или новее, здесь glibc %s). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости."
+	// textWillRunNoSession — всё в порядке, но графической сессии здесь нет.
+	// Говорить просто «запустится» рядом со строкой «Графическая сессия: нет»
+	// нельзя: это противоречие. Редакция ожидает подтверждения UI-01
+	// (см. .ask, п. 1г).
+	textWillRunNoSession = "Графический интерфейс запустится на компьютере с графическим рабочим столом; здесь графической сессии нет, поэтому запускать его нужно не отсюда."
 	// Подстановка в textCannotCheck — перечень названий признаков через
 	// запятую; редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
 	textCannotCheck = "Проверить не удалось: %s. Консольная версия работает независимо от этого."
@@ -100,15 +109,38 @@ var graphicsLibs = []struct {
 	{"libXrender.so.1", libDlopen, "libxrender1", "libXrender"},
 }
 
-// libsOfClass — имена библиотек одного класса, в порядке таблицы.
-func libsOfClass(class int) []string {
-	var out []string
-	for _, l := range graphicsLibs {
-		if l.Class == class {
-			out = append(out, l.SOName)
+// glibcMin — минимальная версия glibc, с которой запускается релизный GUI.
+//
+// ИСТОЧНИК — ДОКАЗАТЕЛЬСТВО, А НЕ README И НЕ ПАМЯТЬ МОДЕЛИ: замер
+// координатора по тому же релизному бинарю v0.1.0 (разбор .dynstr, версии
+// символов). Найденные версии: GLIBC_2.2.5, 2.3.2, 2.3.4, 2.4, 2.7, 2.9,
+// 2.14, 2.17, 2.27, 2.32, 2.34 — максимум GLIBC_2.34. На glibc старее
+// процесс падает с «GLIBC_2.34 not found». Консольная версия статическая,
+// внешних зависимостей у неё ноль (тот же замер), поэтому она работает и
+// там, где GUI не запустится.
+const glibcMin = "2.34"
+
+// cmpVersion сравнивает версии покомпонентно и численно: «2.9» меньше
+// «2.34», хотя как строки они сравниваются наоборот. Возвращает -1, 0 или 1;
+// нечисловой компонент считается нулём.
+func cmpVersion(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		x, y := 0, 0
+		if i < len(as) {
+			x, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			y, _ = strconv.Atoi(bs[i])
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
 		}
 	}
-	return out
+	return 0
 }
 
 // packagesFor — имена пакетов для перечисленных SONAME (пустые пропускаются).
@@ -264,12 +296,13 @@ func detectOSName(d Deps) string {
 		return ""
 	}
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "PRETTY_NAME=") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "PRETTY_NAME" {
 			continue
 		}
-		v := strings.TrimPrefix(line, "PRETTY_NAME=")
-		v = strings.Trim(v, "\"'")
+		// Пробелы вокруг «=» в os-release встречаются; кавычки бывают и
+		// двойные, и одинарные.
+		v := strings.Trim(strings.TrimSpace(value), "\"'")
 		if v != "" {
 			return v
 		}
@@ -313,17 +346,29 @@ func parseGetconf(out string) string {
 	return fields[1]
 }
 
-// parseLddVersion берёт номер версии из первой непустой строки
-// `ldd --version`. Строка без номера версии — неудача способа, а не «musl»
-// и не «нет». Строка с упоминанием musl тоже отвергается: ldd из musl
-// печатает собственный номер версии, и принять его за glibc нельзя.
+// parseLddVersion берёт номер версии из вывода `ldd --version`.
+//
+// Два жёстких условия, без которых способ врёт:
+//  1. «musl» отвергается по ВСЕМУ выводу, а не по первой непустой строке:
+//     ldd из musl печатает собственный номер версии, и если номер стоит
+//     первой строкой, наивный разбор объявит Alpine системой с glibc — до
+//     проверки загрузчика /lib/ld-musl-* дело тогда уже не дойдёт;
+//  2. строка обязана содержать «glibc» или «GNU libc», иначе любая другая
+//     программа с номером версии в выводе превратится в «glibc <число>».
+//
+// Любое из условий не выполнено — неудача способа, то есть «определить не
+// удалось»; ни «нет», ни «musl» отсюда не следует.
 func parseLddVersion(out string) string {
+	if strings.Contains(strings.ToLower(out), "musl") {
+		return ""
+	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if strings.Contains(strings.ToLower(line), "musl") {
+		low := strings.ToLower(line)
+		if !strings.Contains(low, "glibc") && !strings.Contains(low, "gnu libc") {
 			return ""
 		}
 		m := versionRe.FindAllString(line, -1)
@@ -335,18 +380,53 @@ func parseLddVersion(out string) string {
 	return ""
 }
 
-// ldconfigLineRe — строка вида `имя.so.N (…) => /путь`. Если в выводе нет ни
-// одной такой строки, способ 1 считается неудавшимся (вывод нераспознан), и
-// «нет библиотек» из него не следует.
-var ldconfigLineRe = regexp.MustCompile(`(?m)^\s*\S+\.so\.\d+\s+\([^)]*\)\s*=>\s*/`)
+// ldconfigLineRe — строка вида `имя.so.N (флаги) => /путь`. Имя и флаги —
+// отдельными группами: имя сравнивается точно (поиск подстрокой по всему
+// тексту засчитал бы имя, встреченное внутри чужого пути), а по флагам
+// определяется разрядность записи. Если в выводе нет ни одной такой строки,
+// способ 1 считается неудавшимся, и «нет библиотек» из него не следует.
+var ldconfigLineRe = regexp.MustCompile(`(?m)^\s*(\S+\.so\.\d+)\s+\(([^)]*)\)\s*=>\s*(/\S*)\s*$`)
+
+// archMatches: годится ли запись ldconfig для нашей цели. У 64-битной записи
+// на x86-64 в поле флагов стоит «x86-64», на arm64 — «AArch64». Записи i386
+// нашему бинарю не годятся, поэтому кэш, где лежат только они, — это «не
+// хватает», а не «всё на месте».
+func archMatches(flags, goarcH string) bool {
+	f := strings.ToLower(flags)
+	switch goarcH {
+	case "amd64":
+		return strings.Contains(f, "x86-64")
+	case "arm64":
+		return strings.Contains(f, "aarch64")
+	default:
+		return true
+	}
+}
+
+// ldconfigLibs — имена библиотек нужной разрядности из вывода `ldconfig -p`.
+// Второе значение говорит, удался ли разбор вообще (нашлась ли хоть одна
+// строка ожидаемого формата).
+func ldconfigLibs(out, goarcH string) (map[string]bool, bool) {
+	ms := ldconfigLineRe.FindAllStringSubmatch(out, -1)
+	if len(ms) == 0 {
+		return nil, false
+	}
+	set := make(map[string]bool, len(ms))
+	for _, m := range ms {
+		if archMatches(m[2], goarcH) {
+			set[m[1]] = true
+		}
+	}
+	return set, true
+}
 
 // detectGraphics: способ 1 — ldconfig -p, способ 2 — наличие файлов в
 // известных каталогах. Провал обоих — «определить не удалось».
 func detectGraphics(d Deps, goarcH string) Graphics {
-	if out, err := d.Run("ldconfig", "-p"); err == nil && strings.TrimSpace(out) != "" && ldconfigLineRe.MatchString(out) {
-		return missingByClasses(func(lib string) bool {
-			return strings.Contains(out, lib)
-		})
+	if out, err := d.Run("ldconfig", "-p"); err == nil && strings.TrimSpace(out) != "" {
+		if set, ok := ldconfigLibs(out, goarcH); ok {
+			return missingByClasses(func(lib string) bool { return set[lib] })
+		}
 	}
 
 	var dirs []string
@@ -360,14 +440,26 @@ func detectGraphics(d Deps, goarcH string) Graphics {
 		// отсюда не следует.
 		return Graphics{}
 	}
-	return missingByClasses(func(lib string) bool {
+	found := map[string]bool{}
+	for _, l := range graphicsLibs {
+		if l.Class == libByLibcC {
+			continue
+		}
 		for _, dir := range dirs {
-			if d.Exists(dir + "/" + lib) {
-				return true
+			if d.Exists(dir + "/" + l.SOName) {
+				found[l.SOName] = true
+				break
 			}
 		}
-		return false
-	})
+	}
+	if len(found) == 0 {
+		// Существование каталога не делает его содержимое авторитетным. Не
+		// нашлось НИ ОДНОЙ искомой библиотеки — перед нами скорее
+		// нестандартная раскладка (NixOS, Guix, свой префикс), чем машина
+		// без графики: «определить не удалось», а не «нет всех».
+		return Graphics{}
+	}
+	return missingByClasses(func(lib string) bool { return found[lib] })
 }
 
 // missingByClasses раскладывает ненайденные библиотеки по двум классам.
@@ -427,6 +519,12 @@ func verdict(r Result) string {
 	if r.Libc.Kind == "musl" {
 		return textMusl
 	}
+	if r.Libc.Kind == "glibc" && cmpVersion(r.Libc.Version, glibcMin) < 0 {
+		// Система старее, чем нужно графической версии: на такой glibc
+		// процесс падает с «GLIBC_2.34 not found» — снова до первой строки
+		// Go-кода, как и при отсутствии libGL.
+		return fmt.Sprintf(textOldGlibc, glibcMin, r.Libc.Version)
+	}
 	if r.Graph.Known && len(r.Graph.MissingHard) > 0 {
 		// Жёсткая зависимость: без неё динамический компоновщик убьёт
 		// процесс до первой строки Go-кода.
@@ -452,6 +550,12 @@ func verdict(r Result) string {
 	}
 	if len(unknown) > 0 {
 		return fmt.Sprintf(textCannotCheck, strings.Join(unknown, ", "))
+	}
+	if r.Sess == SessionNone {
+		// «Графическая сессия: нет» и «Графический интерфейс запустится.» в
+		// одном выводе противоречат друг другу: здесь он как раз не
+		// запустится — запускать его нужно с графического рабочего стола.
+		return textWillRunNoSession
 	}
 	return textWillRun
 }
