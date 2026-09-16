@@ -301,7 +301,6 @@ func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
 // (err!=nil) и "список есть" (existed=true, err=nil). LoadClients не подходит
 // для этого: она намеренно схлопывает "файла нет" в пустой список без
 // признака существования (FIX-VIEW, задание Д1).
-//
 func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed bool, err error) {
 	data, existed, err := s.readClientsTableRaw(c)
 	if err != nil {

@@ -9,11 +9,11 @@ import "sort"
 type SortColumn int
 
 const (
-	SortNone     SortColumn = iota
-	SortByName              // "Имя" — алфавит
-	SortByCreated           // "Создан" — дата создания (RFC3339, сравнивается как строка)
-	SortByActivityCol       // "Активность" — LastHandshake
-	SortByTraffic           // "Трафик" — RxBytes (см. комментарий к compareByColumn)
+	SortNone          SortColumn = iota
+	SortByName                   // "Имя" — алфавит
+	SortByCreated                // "Создан" — дата создания (RFC3339, сравнивается как строка)
+	SortByActivityCol            // "Активность" — LastHandshake
+	SortByTraffic                // "Трафик" — RxBytes (см. комментарий к compareByColumn)
 )
 
 // SortDir — направление сортировки

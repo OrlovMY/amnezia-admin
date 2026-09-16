@@ -985,4 +985,3 @@ func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
 	}
 	return nil
 }
-
