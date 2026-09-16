@@ -275,7 +275,7 @@ func TestDlopenLibMissing(t *testing.T) {
 		"ldconfig -p":              ldconfigOut(without("libXrandr.so.2")...),
 	}}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	want := "Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — libXrandr.so.2. Установите их: Debian/Ubuntu — `libxrandr2`; Fedora — `libXrandr`."
+	want := "Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — libXrandr.so.2. Установите их, так надёжнее: Debian/Ubuntu — `libxrandr2`; Fedora — `libXrandr`."
 	if got := verdict(r); got != want {
 		t.Fatalf("итог = %q, хочу %q", got, want)
 	}
@@ -289,7 +289,7 @@ func TestHardLibMissing(t *testing.T) {
 		"ldconfig -p":              ldconfigOut(without("libGL.so.1")...),
 	}}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	want := "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`."
+	want := "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. После установки выполните проверку ещё раз."
 	if got := verdict(r); got != want {
 		t.Fatalf("итог = %q, хочу %q", got, want)
 	}
@@ -497,7 +497,7 @@ func TestReportGolden(t *testing.T) {
 			"а) Linux, всё на месте",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc: Libc{Kind: "glibc", Version: "2.36"}, Graph: Graphics{Known: true}, Sess: SessionX11},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.36\n" +
@@ -510,82 +510,81 @@ func TestReportGolden(t *testing.T) {
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc:  Libc{Kind: "glibc", Version: "2.36"},
 				Graph: Graphics{Known: true, MissingHard: []string{"libGL.so.1"}}, Sess: SessionNone},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.36\n" +
 				"Библиотеки графики: не хватает: libGL.so.1\n" +
 				"Графическая сессия: нет\n" +
-				"Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере.\n" +
-				"Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`.\n",
+				"Это нормально, если вы работаете по SSH: графическую версию запускают на своём компьютере.\n" +
+				"Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. После установки выполните проверку ещё раз.\n",
 		},
 		{
 			"з) Linux, всё на месте, но графической сессии нет (по SSH)",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc: Libc{Kind: "glibc", Version: "2.36"}, Graph: Graphics{Known: true}, Sess: SessionNone},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.36\n" +
 				"Библиотеки графики: все на месте\n" +
 				"Графическая сессия: нет\n" +
-				"Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере.\n" +
-				"Графический интерфейс запустится на компьютере с графическим рабочим столом; здесь графической сессии нет, поэтому запускать его нужно не отсюда.\n",
+				"Всё необходимое на месте: графический интерфейс запустится — но запускать его нужно на своём компьютере, с графическим рабочим столом, а не отсюда.\n",
 		},
 		{
 			"и) Linux, glibc старее порога",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "CentOS Linux 7 (Core)",
 				Libc: Libc{Kind: "glibc", Version: "2.17"}, Graph: Graphics{Known: true}, Sess: SessionX11},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: CentOS Linux 7 (Core)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.17\n" +
 				"Библиотеки графики: все на месте\n" +
 				"Графическая сессия: есть (X11)\n" +
-				"Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости.\n",
+				"Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде.\n",
 		},
 		{
 			"ж) Linux, не хватает подгружаемых на ходу библиотек",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Debian GNU/Linux 12 (bookworm)",
 				Libc:  Libc{Kind: "glibc", Version: "2.36"},
 				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2", "libXrender.so.1"}}, Sess: SessionX11},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: glibc 2.36\n" +
-				"Библиотеки графики: обязательные на месте, может не хватать: libXrandr.so.2, libXrender.so.1\n" +
+				"Библиотеки графики: главные на месте, остальных не видно: libXrandr.so.2, libXrender.so.1\n" +
 				"Графическая сессия: есть (X11)\n" +
-				"Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — libXrandr.so.2, libXrender.so.1. Установите их: Debian/Ubuntu — `libxrandr2 libxrender1`; Fedora — `libXrandr libXrender`.\n",
+				"Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — libXrandr.so.2, libXrender.so.1. Установите их, так надёжнее: Debian/Ubuntu — `libxrandr2 libxrender1`; Fedora — `libXrandr libXrender`.\n",
 		},
 		{
 			"в) Linux, musl",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Alpine Linux v3.20",
 				Libc: Libc{Kind: "musl"}, Graph: Graphics{Known: false}, Sess: SessionNone},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Alpine Linux v3.20\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: musl\n" +
 				"Библиотеки графики: определить не удалось\n" +
 				"Графическая сессия: нет\n" +
-				"Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере.\n" +
+				"Это нормально, если вы работаете по SSH: графическую версию запускают на своём компьютере.\n" +
 				"Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде.\n",
 		},
 		{
 			"г) Linux, определить не удалось",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
 				Libc: Libc{}, Graph: Graphics{Known: false}, Sess: SessionWayland},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Void Linux\n" +
 				"Архитектура: amd64\n" +
 				"Библиотека C: определить не удалось\n" +
 				"Библиотеки графики: определить не удалось\n" +
 				"Графическая сессия: есть (Wayland)\n" +
-				"Проверить не удалось: библиотека C, библиотеки графики. Консольная версия работает независимо от этого.\n",
+				"Проверить не удалось: какая в системе библиотека C и какие установлены библиотеки графики. Попробуйте просто запустить графическую версию — если она не откроется, пользуйтесь консольной: она работает независимо от этого.\n",
 		},
 		{
 			"д1) не-Linux, GUI собирается",
 			Result{GOOS: "windows", GOARCH: "amd64", OSName: "Windows"},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Windows\n" +
 				"Архитектура: amd64\n" +
 				"Графический интерфейс запустится.\n",
@@ -593,18 +592,18 @@ func TestReportGolden(t *testing.T) {
 		{
 			"е) Linux, под который GUI не собирается (linux/arm64)",
 			Result{GOOS: "linux", GOARCH: "arm64", OSName: "Debian GNU/Linux 12 (bookworm)"},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
 				"Архитектура: arm64\n" +
-				"Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде.\n",
+				"Графической версии для этой системы нет. Пользуйтесь консольной версией — она работает везде.\n",
 		},
 		{
 			"д2) не-Linux, GUI не собирается",
 			Result{GOOS: "darwin", GOARCH: "amd64", OSName: "macOS"},
-			"Проверка окружения\n" +
+			"Проверка компьютера\n" +
 				"ОС: macOS\n" +
 				"Архитектура: amd64\n" +
-				"Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде.\n",
+				"Графической версии для этой системы нет. Пользуйтесь консольной версией — она работает везде.\n",
 		},
 	}
 	for _, c := range cases {
@@ -665,7 +664,7 @@ func TestGlibcTooOld(t *testing.T) {
 		"ldconfig -p":              ldconfigOut(allLibs...),
 	}}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	want := "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости."
+	want := "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc 2.34 или новее, здесь glibc 2.17). Пользуйтесь консольной версией — она работает везде."
 	if got := verdict(r); got != want {
 		t.Fatalf("итог = %q, хочу %q", got, want)
 	}
@@ -752,9 +751,10 @@ func TestLdconfigNameMatchedExactly(t *testing.T) {
 	}
 }
 
-// TestLdconfigArchMatters (В4): для цели x86-64 годятся только 64-битные
-// записи. Кэш, где те же имена лежат только как i386, — это «не хватает», а
-// не «всё на месте».
+// TestLdconfigArchMatters (В4 + З14): для цели x86-64 годятся только
+// 64-битные записи. Если после отбора по разрядности не осталось НИ ОДНОЙ
+// записи — разбор ничего не дал, и это «определить не удалось», а не
+// уверенное «не хватает» (симметрично В5: пустой результат не приговор).
 func TestLdconfigArchMatters(t *testing.T) {
 	out := "9 libs found in cache\n"
 	for _, l := range allLibs {
@@ -765,11 +765,70 @@ func TestLdconfigArchMatters(t *testing.T) {
 		"ldconfig -p":              out,
 	}}
 	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
-	if !r.Graph.Known {
-		t.Fatalf("Graph = %+v: строки формата разобраны, значит способ 1 удался", r.Graph)
+	if r.Graph.Known {
+		t.Fatalf("Graph = %+v, хочу «определить не удалось»: ни одной записи нашей разрядности", r.Graph)
 	}
-	if len(r.Graph.MissingHard) != 2 {
-		t.Fatalf("MissingHard = %v, хочу обе жёсткие: 32-битные записи для нашей цели не годятся", r.Graph.MissingHard)
+}
+
+// TestLdconfigArchMattersWithOther64 (В4): если 64-битные записи в кэше
+// есть, но наших библиотек среди них нет, — это уже «не хватает», а не
+// «определить не удалось»: кэш прочитан и авторитетен.
+func TestLdconfigArchMattersWithOther64(t *testing.T) {
+	out := "10 libs found in cache\n\tlibfoo.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libfoo.so.1\n"
+	for _, l := range allLibs {
+		out += "\t" + l + " (libc6) => /usr/lib/i386-linux-gnu/" + l + "\n"
+	}
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36\n",
+		"ldconfig -p":              out,
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if !r.Graph.Known || len(r.Graph.MissingHard) != 2 {
+		t.Fatalf("Graph = %+v, хочу «не хватает» обеих жёстких: 32-битные записи нам не годятся", r.Graph)
+	}
+}
+
+// TestGetconfVersionWithSuffix (З13): дистрибутивный суффикс в выводе
+// getconf («glibc 2.36-9») не должен превращаться в приговор. 2.36 новее
+// порога, и машина исправна.
+func TestGetconfVersionWithSuffix(t *testing.T) {
+	f := &fakeOS{out: map[string]string{
+		"getconf GNU_LIBC_VERSION": "glibc 2.36-9\n",
+		"ldconfig -p":              ldconfigOut(allLibs...),
+	}}
+	r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+	if r.Libc.Version != "2.36" {
+		t.Errorf("Libc.Version = %q, хочу 2.36", r.Libc.Version)
+	}
+	if got := verdict(r); got != textWillRun {
+		t.Fatalf("итог = %q, хочу %q", got, textWillRun)
+	}
+}
+
+// TestUnparsableGlibcVersion (З13): если номер версии разобрать не удалось,
+// сравнение с порогом невозможно — «определить не удалось», а не «старее
+// порога» и не «новее». Зеркальное применение правила Г4.
+func TestUnparsableGlibcVersion(t *testing.T) {
+	r := Result{
+		GOOS: "linux", GOARCH: "amd64", OSName: "Своя сборка",
+		Libc:  Libc{Kind: "glibc", Version: "неизвестно"},
+		Graph: Graphics{Known: true},
+		Sess:  SessionX11,
+	}
+	got := verdict(r)
+	if !strings.HasPrefix(got, "Проверить не удалось:") {
+		t.Fatalf("итог = %q, хочу «Проверить не удалось: …»", got)
+	}
+}
+
+// TestUnknownArchNotPraised (З15): неизвестная архитектура не должна давать
+// «все на месте». Сегодня такой цели нет, но как только её добавят, ловушка
+// сработает молча.
+func TestUnknownArchNotPraised(t *testing.T) {
+	f := &fakeOS{out: map[string]string{"ldconfig -p": ldconfigOut(allLibs...)}}
+	g := detectGraphics(f.deps(), "riscv64")
+	if g.Known {
+		t.Fatalf("Graph = %+v, хочу «определить не удалось» для неизвестной архитектуры", g)
 	}
 }
 

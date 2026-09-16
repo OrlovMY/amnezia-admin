@@ -39,7 +39,7 @@ func TestGUITargetsMatchBuildScript(t *testing.T) {
 		}
 		m := guiBuildRe.FindStringSubmatch(line)
 		if m == nil {
-			t.Errorf("строка собирает ./cmd/gui, но имя выходного файла не разобрано: %s", strings.TrimSpace(line))
+			t.Errorf("не удалось разобрать имя выходного файла в строке сборки ./cmd/gui — сверить цели с таблицей по ней нельзя (возможно, строку перенесли): %s", strings.TrimSpace(line))
 			continue
 		}
 		gooS, ok := goosOf[m[1]]

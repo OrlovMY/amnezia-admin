@@ -36,28 +36,28 @@ import (
 // Тексты для человека — дословно из задания (UI-01): не пересказывать и не
 // «улучшать». Любая правка этих строк — правка эталонов теста дословности.
 const (
-	textHeader      = "Проверка окружения"
+	textHeader      = "Проверка компьютера"
 	textWillRun     = "Графический интерфейс запустится."
-	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`."
+	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`. После установки выполните проверку ещё раз."
 	textMusl        = "Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде."
 	// textOldGlibc — система старее, чем нужно графической версии. Редакция
 	// ожидает подтверждения UI-01 (см. .ask, п. 1в).
-	textOldGlibc = "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc %s или новее, здесь glibc %s). Пользуйтесь консольной версией — она работает везде: у неё нет ни одной внешней зависимости."
+	textOldGlibc = "Графический интерфейс не запустится: система старее, чем нужно графической версии (нужна glibc %s или новее, здесь glibc %s). Пользуйтесь консольной версией — она работает везде."
 	// textWillRunNoSession — всё в порядке, но графической сессии здесь нет.
 	// Говорить просто «запустится» рядом со строкой «Графическая сессия: нет»
 	// нельзя: это противоречие. Редакция ожидает подтверждения UI-01
 	// (см. .ask, п. 1г).
-	textWillRunNoSession = "Графический интерфейс запустится на компьютере с графическим рабочим столом; здесь графической сессии нет, поэтому запускать его нужно не отсюда."
+	textWillRunNoSession = "Всё необходимое на месте: графический интерфейс запустится — но запускать его нужно на своём компьютере, с графическим рабочим столом, а не отсюда."
 	// Подстановка в textCannotCheck — перечень названий признаков через
 	// запятую; редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
-	textCannotCheck = "Проверить не удалось: %s. Консольная версия работает независимо от этого."
+	textCannotCheck = "Проверить не удалось: %s. Попробуйте просто запустить графическую версию — если она не откроется, пользуйтесь консольной: она работает независимо от этого."
 	// textMaybeMissingLibs — промежуточный итог: жёсткие зависимости на
 	// месте, но библиотек, которые GUI подгружает на ходу (dlopen), не
 	// видно. Уверенного «не запустится» здесь быть не может, «всё хорошо» —
 	// тоже. Редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
-	textMaybeMissingLibs = "Графический интерфейс может не запуститься: обязательные библиотеки на месте, но не хватает — %s. Установите их: Debian/Ubuntu — `%s`; Fedora — `%s`."
-	textNoGUIPlatform    = "Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде."
-	textSSHSession       = "Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере."
+	textMaybeMissingLibs = "Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — %s. Установите их, так надёжнее: Debian/Ubuntu — `%s`; Fedora — `%s`."
+	textNoGUIPlatform    = "Графической версии для этой системы нет. Пользуйтесь консольной версией — она работает везде."
+	textSSHSession       = "Это нормально, если вы работаете по SSH: графическую версию запускают на своём компьютере."
 	textUnknown          = "определить не удалось"
 )
 
@@ -71,14 +71,20 @@ const (
 // graphicsLibs — фактический состав зависимостей релизного GUI.
 //
 // ИСТОЧНИК — ДОКАЗАТЕЛЬСТВО, А НЕ ПАМЯТЬ МОДЕЛИ (в отличие от образцов
-// выводов ldd/ldconfig в тестах): список снят координатором с релизного
-// бинаря amnezia-admin-gui-linux-amd64 версии v0.1.0 разбором ELF
-// (debug/elf, таблица DT_NEEDED) и поиском имён библиотек в теле бинаря.
-// Замер: ELFCLASS64, EM_X86_64, загрузчик /lib64/ld-linux-x86-64.so.2;
-// DT_NEEDED всего четыре — libGL.so.1, libX11.so.6, libm.so.6, libc.so.6;
-// в теле присутствует dlopen и найдены имена libEGL.so.1, libXcursor.so.1,
-// libXi.so.6, libXinerama.so.1, libXrandr.so.2, libXxf86vm.so.1,
-// libXrender.so.1 (libwayland-client.so.0 и libXext.so.6 НЕ найдены).
+// выводов ldd/ldconfig в тестах). Замер координатора, целиком:
+//
+//	Релизный amnezia-admin-gui-linux-amd64 (v0.1.0), разбор debug/elf:
+//	  класс ELFCLASS64, машина EM_X86_64, тип ET_EXEC,
+//	  загрузчик /lib64/ld-linux-x86-64.so.2
+//	  DT_NEEDED, всего 4: libGL.so.1, libX11.so.6, libm.so.6, libc.so.6
+//	  имена в теле (dlopen присутствует): libEGL.so.1, libXcursor.so.1,
+//	    libXi.so.6, libXinerama.so.1, libXrandr.so.2, libXxf86vm.so.1,
+//	    libXrender.so.1
+//	  НЕ найдены: libwayland-client.so.0, libXext.so.6
+//	  версии символов в .dynstr: GLIBC_2.2.5 2.3.2 2.3.4 2.4 2.7 2.9 2.14
+//	    2.17 2.27 2.32 2.34 → максимум GLIBC_2.34
+//	Релизный amnezia-admin-linux-amd64 (v0.1.0): DT_NEEDED пуст — 0
+//	  зависимостей, бинарь статический.
 //
 // Прежний список из шести имён (libGL, libEGL, libX11, libXcursor, libXi,
 // libXinerama) был неверен: в нём не было libXrandr.so.2, libXxf86vm.so.1 и
@@ -111,36 +117,43 @@ var graphicsLibs = []struct {
 
 // glibcMin — минимальная версия glibc, с которой запускается релизный GUI.
 //
-// ИСТОЧНИК — ДОКАЗАТЕЛЬСТВО, А НЕ README И НЕ ПАМЯТЬ МОДЕЛИ: замер
-// координатора по тому же релизному бинарю v0.1.0 (разбор .dynstr, версии
-// символов). Найденные версии: GLIBC_2.2.5, 2.3.2, 2.3.4, 2.4, 2.7, 2.9,
-// 2.14, 2.17, 2.27, 2.32, 2.34 — максимум GLIBC_2.34. На glibc старее
-// процесс падает с «GLIBC_2.34 not found». Консольная версия статическая,
-// внешних зависимостей у неё ноль (тот же замер), поэтому она работает и
+// ИСТОЧНИК — ДОКАЗАТЕЛЬСТВО, А НЕ README И НЕ ПАМЯТЬ МОДЕЛИ: тот же замер
+// координатора по релизному бинарю v0.1.0, что приведён целиком у
+// graphicsLibs (версии символов в .dynstr, максимум GLIBC_2.34). На glibc
+// старее процесс падает с «GLIBC_2.34 not found». Консольная версия
+// статическая, её DT_NEEDED пуст — ноль зависимостей, поэтому она работает и
 // там, где GUI не запустится.
 const glibcMin = "2.34"
 
 // cmpVersion сравнивает версии покомпонентно и численно: «2.9» меньше
-// «2.34», хотя как строки они сравниваются наоборот. Возвращает -1, 0 или 1;
-// нечисловой компонент считается нулём.
-func cmpVersion(a, b string) int {
+// «2.34», хотя как строки они сравниваются наоборот. Второе значение — удалось
+// ли сравнение вообще: нечисловой компонент НЕ считается нулём, иначе
+// неразобранная версия молча превращалась бы в «очень старую» и давала
+// приговор исправной машине. Не разобралось — «определить не удалось»
+// (то же правило Г4, только про версию).
+func cmpVersion(a, b string) (int, bool) {
 	as, bs := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(as) || i < len(bs); i++ {
 		x, y := 0, 0
+		var err error
 		if i < len(as) {
-			x, _ = strconv.Atoi(as[i])
+			if x, err = strconv.Atoi(as[i]); err != nil {
+				return 0, false
+			}
 		}
 		if i < len(bs) {
-			y, _ = strconv.Atoi(bs[i])
+			if y, err = strconv.Atoi(bs[i]); err != nil {
+				return 0, false
+			}
 		}
 		if x != y {
 			if x < y {
-				return -1
+				return -1, true
 			}
-			return 1
+			return 1, true
 		}
 	}
-	return 0
+	return 0, true
 }
 
 // packagesFor — имена пакетов для перечисленных SONAME (пустые пропускаются).
@@ -334,16 +347,16 @@ func detectLibc(d Deps) Libc {
 	return Libc{}
 }
 
-// parseGetconf разбирает вывод вида "glibc 2.39".
+// parseGetconf разбирает вывод вида "glibc 2.39". Номер версии вынимается
+// регуляркой, как и на пути через ldd: у дистрибутивов встречается суффикс
+// ("glibc 2.36-9"), и принимать его за часть номера нельзя — сравнение с
+// порогом тогда объявляет исправную машину слишком старой.
 func parseGetconf(out string) string {
 	fields := strings.Fields(out)
 	if len(fields) < 2 || !strings.EqualFold(fields[0], "glibc") {
 		return ""
 	}
-	if !versionRe.MatchString(fields[1]) {
-		return ""
-	}
-	return fields[1]
+	return versionRe.FindString(fields[1])
 }
 
 // parseLddVersion берёт номер версии из вывода `ldd --version`.
@@ -387,20 +400,30 @@ func parseLddVersion(out string) string {
 // способ 1 считается неудавшимся, и «нет библиотек» из него не следует.
 var ldconfigLineRe = regexp.MustCompile(`(?m)^\s*(\S+\.so\.\d+)\s+\(([^)]*)\)\s*=>\s*(/\S*)\s*$`)
 
-// archMatches: годится ли запись ldconfig для нашей цели. У 64-битной записи
-// на x86-64 в поле флагов стоит «x86-64», на arm64 — «AArch64». Записи i386
-// нашему бинарю не годятся, поэтому кэш, где лежат только они, — это «не
-// хватает», а не «всё на месте».
-func archMatches(flags, goarcH string) bool {
-	f := strings.ToLower(flags)
+// archToken — признак разрядности в поле флагов ldconfig для нашей цели. У
+// 64-битной записи на x86-64 там стоит «x86-64», на arm64 — «AArch64».
+// Второе значение — знаем ли мы такой признак вообще, и «не знаем» НЕ значит
+// «подходит любая запись»: сегодня других целей нет, но как только в таблицу
+// целей добавят новую Linux-архитектуру, ответ «true по умолчанию» начнёт
+// молча хвалить окружение, которого никто не проверял.
+func archToken(goarcH string) (string, bool) {
 	switch goarcH {
 	case "amd64":
-		return strings.Contains(f, "x86-64")
+		return "x86-64", true
 	case "arm64":
-		return strings.Contains(f, "aarch64")
+		return "aarch64", true
 	default:
-		return true
+		return "", false
 	}
+}
+
+// archMatches: годится ли запись ldconfig для нашей цели.
+func archMatches(flags, goarcH string) bool {
+	tok, ok := archToken(goarcH)
+	if !ok {
+		return false
+	}
+	return strings.Contains(strings.ToLower(flags), tok)
 }
 
 // ldconfigLibs — имена библиотек нужной разрядности из вывода `ldconfig -p`.
@@ -417,12 +440,23 @@ func ldconfigLibs(out, goarcH string) (map[string]bool, bool) {
 			set[m[1]] = true
 		}
 	}
+	if len(set) == 0 {
+		// Строки формата нашлись, но ни одной записи нашей разрядности:
+		// разбор фактически ничего не дал. «Не хватает всех» отсюда не
+		// следует — это «определить не удалось», как и в запасном способе.
+		return nil, false
+	}
 	return set, true
 }
 
 // detectGraphics: способ 1 — ldconfig -p, способ 2 — наличие файлов в
 // известных каталогах. Провал обоих — «определить не удалось».
 func detectGraphics(d Deps, goarcH string) Graphics {
+	if _, ok := archToken(goarcH); !ok {
+		// Архитектура, для которой мы не знаем ни признака разрядности, ни
+		// раскладки каталогов: честное «определить не удалось».
+		return Graphics{}
+	}
 	if out, err := d.Run("ldconfig", "-p"); err == nil && strings.TrimSpace(out) != "" {
 		if set, ok := ldconfigLibs(out, goarcH); ok {
 			return missingByClasses(func(lib string) bool { return set[lib] })
@@ -519,11 +553,19 @@ func verdict(r Result) string {
 	if r.Libc.Kind == "musl" {
 		return textMusl
 	}
-	if r.Libc.Kind == "glibc" && cmpVersion(r.Libc.Version, glibcMin) < 0 {
-		// Система старее, чем нужно графической версии: на такой glibc
-		// процесс падает с «GLIBC_2.34 not found» — снова до первой строки
-		// Go-кода, как и при отсутствии libGL.
-		return fmt.Sprintf(textOldGlibc, glibcMin, r.Libc.Version)
+	// Версия glibc: сравнение с порогом либо удалось, либо нет — и «нет»
+	// значит «определить не удалось», а не приговор.
+	libcVersionUnknown := false
+	if r.Libc.Kind == "glibc" {
+		switch c, ok := cmpVersion(r.Libc.Version, glibcMin); {
+		case !ok:
+			libcVersionUnknown = true
+		case c < 0:
+			// Система старее, чем нужно графической версии: на такой glibc
+			// процесс падает с «GLIBC_2.34 not found» — снова до первой
+			// строки Go-кода, как и при отсутствии libGL.
+			return fmt.Sprintf(textOldGlibc, glibcMin, r.Libc.Version)
+		}
 	}
 	if r.Graph.Known && len(r.Graph.MissingHard) > 0 {
 		// Жёсткая зависимость: без неё динамический компоновщик убьёт
@@ -542,14 +584,15 @@ func verdict(r Result) string {
 	// Название ОС в итог не входит: это справочная строка, и нечитаемый
 	// /etc/os-release не повод объявлять проверку несостоявшейся.
 	var unknown []string
-	if r.Libc.Kind == "" {
-		unknown = append(unknown, "библиотека C")
+	if r.Libc.Kind == "" || libcVersionUnknown {
+		unknown = append(unknown, "какая в системе библиотека C")
 	}
 	if !r.Graph.Known {
-		unknown = append(unknown, "библиотеки графики")
+		unknown = append(unknown, "какие установлены библиотеки графики")
 	}
 	if len(unknown) > 0 {
-		return fmt.Sprintf(textCannotCheck, strings.Join(unknown, ", "))
+		// Элементов максимум два, поэтому союз, а не запятая.
+		return fmt.Sprintf(textCannotCheck, strings.Join(unknown, " и "))
 	}
 	if r.Sess == SessionNone {
 		// «Графическая сессия: нет» и «Графический интерфейс запустится.» в
@@ -566,15 +609,18 @@ func Report(r Result, w io.Writer) {
 	fmt.Fprintln(w, textHeader)
 	fmt.Fprintln(w, "ОС: "+orUnknown(r.OSName))
 	fmt.Fprintln(w, "Архитектура: "+orUnknown(r.GOARCH))
+	v := verdict(r)
 	if r.GOOS == "linux" && isGUITarget(r.GOOS, r.GOARCH) {
 		fmt.Fprintln(w, "Библиотека C: "+libcLine(r.Libc))
 		fmt.Fprintln(w, "Библиотеки графики: "+graphicsLine(r.Graph))
 		fmt.Fprintln(w, "Графическая сессия: "+sessionLine(r.Sess))
-		if r.Sess == SessionNone {
+		// Пояснение про SSH не печатается, когда итог и так о том же: три
+		// высказывания об одном подряд — перебор (решение UI-01).
+		if r.Sess == SessionNone && v != textWillRunNoSession {
 			fmt.Fprintln(w, textSSHSession)
 		}
 	}
-	fmt.Fprintln(w, verdict(r))
+	fmt.Fprintln(w, v)
 }
 
 func orUnknown(s string) string {
@@ -603,7 +649,7 @@ func graphicsLine(g Graphics) string {
 		return "не хватает: " + strings.Join(g.MissingHard, ", ")
 	}
 	if len(g.MissingDlopen) > 0 {
-		return "обязательные на месте, может не хватать: " + strings.Join(g.MissingDlopen, ", ")
+		return "главные на месте, остальных не видно: " + strings.Join(g.MissingDlopen, ", ")
 	}
 	return "все на месте"
 }

@@ -31,7 +31,7 @@ func TestRunCheckNoKey(t *testing.T) {
 			if errOut.String() != "" {
 				t.Errorf("stderr не пуст (значит сработала проверка ключа): %q", errOut.String())
 			}
-			if !strings.HasPrefix(out.String(), "Проверка окружения\n") {
+			if !strings.HasPrefix(out.String(), "Проверка компьютера\n") {
 				t.Errorf("stdout не начинается заголовком отчёта:\n%s", out.String())
 			}
 			if _, err := os.Stat(knownHostsPath); err == nil {
@@ -44,7 +44,7 @@ func TestRunCheckNoKey(t *testing.T) {
 			// задания. На прочих платформах состав строк зависит от машины и
 			// проверяется тестом дословности в internal/envcheck.
 			if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
-				want := "Проверка окружения\nОС: Windows\nАрхитектура: amd64\nГрафический интерфейс запустится.\n"
+				want := "Проверка компьютера\nОС: Windows\nАрхитектура: amd64\nГрафический интерфейс запустится.\n"
 				if out.String() != want {
 					t.Errorf("stdout = %q, хочу %q", out.String(), want)
 				}
