@@ -343,6 +343,42 @@ func TestMuslBeatsMissingLibs(t *testing.T) {
 	}
 }
 
+// TestLinuxArm64NoGUI: правило общее, а не про Intel-мак. Графический
+// интерфейс обещается ТОЛЬКО для пары ОС+архитектура, под которую бинарь
+// действительно собирается. linux/arm64 в релизе нет — даже когда с glibc и
+// библиотеками всё в порядке, «запустится» говорить нельзя.
+func TestLinuxArm64NoGUI(t *testing.T) {
+	f := linuxAllGood()
+	r := detect(f.deps(), "linux", "arm64", env(map[string]string{"DISPLAY": ":0"}))
+	if got := verdict(r); got != textNoGUIPlatform {
+		t.Fatalf("итог = %q, хочу %q", got, textNoGUIPlatform)
+	}
+}
+
+// TestGUITargets: список целей GUI — одна таблица в коде; для каждой цели
+// «запустится», для соседних пар — «не собираем».
+func TestGUITargets(t *testing.T) {
+	cases := []struct {
+		goos, goarch string
+		want         bool
+	}{
+		{"linux", "amd64", true},
+		{"darwin", "arm64", true},
+		{"windows", "amd64", true},
+		{"linux", "arm64", false},
+		{"darwin", "amd64", false},
+		{"windows", "arm64", false},
+		{"freebsd", "amd64", false},
+	}
+	for _, c := range cases {
+		t.Run(c.goos+"/"+c.goarch, func(t *testing.T) {
+			if got := isGUITarget(c.goos, c.goarch); got != c.want {
+				t.Fatalf("isGUITarget(%q, %q) = %v, хочу %v", c.goos, c.goarch, got, c.want)
+			}
+		})
+	}
+}
+
 // TestNonLinuxVerdict (П2): итог выбирается по паре ОС+архитектура и
 // сверяется с фактическим составом релиза. На Intel-маке графической версии
 // нет — обещать её нельзя.
@@ -437,6 +473,14 @@ func TestReportGolden(t *testing.T) {
 				"Графический интерфейс запустится.\n",
 		},
 		{
+			"е) Linux, под который GUI не собирается (linux/arm64)",
+			Result{GOOS: "linux", GOARCH: "arm64", OSName: "Debian GNU/Linux 12 (bookworm)"},
+			"Проверка окружения\n" +
+				"ОС: Debian GNU/Linux 12 (bookworm)\n" +
+				"Архитектура: arm64\n" +
+				"Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде.\n",
+		},
+		{
 			"д2) не-Linux, GUI не собирается",
 			Result{GOOS: "darwin", GOARCH: "amd64", OSName: "macOS"},
 			"Проверка окружения\n" +
@@ -484,5 +528,10 @@ func TestOSNameUnknown(t *testing.T) {
 	Report(r, &b)
 	if !strings.Contains(b.String(), "ОС: определить не удалось\n") {
 		t.Fatalf("нет строки «ОС: определить не удалось»:\n%s", b.String())
+	}
+	// Решение координатора: название ОС — справочная строка, на итог она не
+	// влияет. Всё остальное в порядке — значит «запустится».
+	if got := verdict(r); got != textWillRun {
+		t.Fatalf("итог = %q, хочу %q: нечитаемый /etc/os-release на итог влиять не должен", got, textWillRun)
 	}
 }

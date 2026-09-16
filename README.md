@@ -27,8 +27,9 @@
 
 **Графической версии (GUI)** нужна не любая система:
 
-- Linux с glibc 2.34 или новее — на Alpine (musl) графическая версия не
-  работает, пользуйтесь консольной;
+- Linux **x86-64** с glibc 2.34 или новее — на Alpine (musl) графическая
+  версия не работает, пользуйтесь консольной; под Linux arm64 графическая
+  версия не собирается, там доступна только консольная;
 - шесть библиотек: `libGL.so.1`, `libEGL.so.1`, `libX11.so.6`,
   `libXcursor.so.1`, `libXi.so.6`, `libXinerama.so.1`. Имена пакетов:
   Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`;

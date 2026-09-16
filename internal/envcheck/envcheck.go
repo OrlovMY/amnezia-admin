@@ -35,10 +35,12 @@ import (
 // Тексты для человека — дословно из задания (UI-01): не пересказывать и не
 // «улучшать». Любая правка этих строк — правка эталонов теста дословности.
 const (
-	textHeader        = "Проверка окружения"
-	textWillRun       = "Графический интерфейс запустится."
-	textMissingLibs   = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`; Fedora — `mesa-libGL libX11 libXcursor libXi libXinerama`."
-	textMusl          = "Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде."
+	textHeader      = "Проверка окружения"
+	textWillRun     = "Графический интерфейс запустится."
+	textMissingLibs = "Графический интерфейс не запустится: не хватает библиотек — %s. Установите их: Debian/Ubuntu — `libgl1 libx11-6 libxcursor1 libxi6 libxinerama1`; Fedora — `mesa-libGL libX11 libXcursor libXi libXinerama`."
+	textMusl        = "Графический интерфейс не запустится: система на musl (Alpine). Пользуйтесь консольной версией — она работает везде."
+	// Подстановка в textCannotCheck — перечень названий признаков через
+	// запятую; редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
 	textCannotCheck   = "Проверить не удалось: %s. Консольная версия работает независимо от этого."
 	textNoGUIPlatform = "Графической версии для этой платформы нет. Пользуйтесь консольной версией — она работает везде."
 	textSSHSession    = "Графическая сессия не найдена — так и должно быть при работе по SSH; графическую версию запускают на своём компьютере."
@@ -57,6 +59,22 @@ var requiredLibs = []string{
 	"libXi.so.6",
 	"libXinerama.so.1",
 }
+
+// guiTargets — пары ОС+архитектура, под которые графическое приложение
+// действительно собирается и попадает в релиз (scripts/build-release.sh).
+// Одна таблица на весь пакет: добавится цель — правится одно место.
+//
+// Правило, ради которого таблица существует: check обещает графический
+// интерфейс ТОЛЬКО для пары из этого списка. Для любой другой пары —
+// формулировка «графической версии для этой платформы нет»: утилита не
+// имеет права обещать бинарь, которого в релизе не существует.
+var guiTargets = map[string]bool{
+	"linux/amd64":   true,
+	"darwin/arm64":  true,
+	"windows/amd64": true,
+}
+
+func isGUITarget(gooS, goarcH string) bool { return guiTargets[gooS+"/"+goarcH] }
 
 // muslLoaders — загрузчики musl; их наличие и есть признак Alpine.
 var muslLoaders = []string{
@@ -136,6 +154,12 @@ func detect(d Deps, gooS, goarcH string, getenv func(string) string) Result {
 		return r
 	}
 	r.OSName = detectOSName(d)
+	if !isGUITarget(gooS, goarcH) {
+		// Linux, под который графическое приложение не собирается
+		// (linux/arm64): признаки glibc и библиотек здесь ничего не решают —
+		// бинаря нет в любом случае, и разбирать окружение незачем.
+		return r
+	}
 	r.Libc = detectLibc(d)
 	r.Graph = detectGraphics(d, goarcH)
 	r.Sess = detectSession(getenv)
@@ -306,15 +330,14 @@ func detectSession(getenv func(string) string) Session {
 // удалось», «определить не удалось» — последний. Отсутствие графической
 // сессии на выбор итога не влияет: по SSH её нет закономерно.
 func verdict(r Result) string {
-	if r.GOOS != "linux" {
-		// Итог сверяется с фактическим составом релиза, а не с «это не
-		// Linux»: GUI собирается только под linux, windows/amd64 и
-		// darwin/arm64, и обещать бинарь, которого в релизе нет (Intel-мак),
-		// утилита не имеет права.
-		if (r.GOOS == "windows" && r.GOARCH == "amd64") || (r.GOOS == "darwin" && r.GOARCH == "arm64") {
-			return textWillRun
-		}
+	// Итог сверяется с фактическим составом релиза, а не с «это Linux или
+	// нет»: пары вне guiTargets (linux/arm64, Intel-мак и любая другая)
+	// получают одну и ту же формулировку — бинаря под них не существует.
+	if !isGUITarget(r.GOOS, r.GOARCH) {
 		return textNoGUIPlatform
+	}
+	if r.GOOS != "linux" {
+		return textWillRun
 	}
 	if r.Libc.Kind == "musl" {
 		return textMusl
@@ -322,10 +345,9 @@ func verdict(r Result) string {
 	if r.Graph.Known && len(r.Graph.Missing) > 0 {
 		return fmt.Sprintf(textMissingLibs, strings.Join(r.Graph.Missing, ", "))
 	}
+	// Название ОС в итог не входит: это справочная строка, и нечитаемый
+	// /etc/os-release не повод объявлять проверку несостоявшейся.
 	var unknown []string
-	if r.OSName == "" {
-		unknown = append(unknown, "ОС")
-	}
 	if r.Libc.Kind == "" {
 		unknown = append(unknown, "библиотека C")
 	}
@@ -344,7 +366,7 @@ func Report(r Result, w io.Writer) {
 	fmt.Fprintln(w, textHeader)
 	fmt.Fprintln(w, "ОС: "+orUnknown(r.OSName))
 	fmt.Fprintln(w, "Архитектура: "+orUnknown(r.GOARCH))
-	if r.GOOS == "linux" {
+	if r.GOOS == "linux" && isGUITarget(r.GOOS, r.GOARCH) {
 		fmt.Fprintln(w, "Библиотека C: "+libcLine(r.Libc))
 		fmt.Fprintln(w, "Библиотеки графики: "+graphicsLine(r.Graph))
 		fmt.Fprintln(w, "Графическая сессия: "+sessionLine(r.Sess))
