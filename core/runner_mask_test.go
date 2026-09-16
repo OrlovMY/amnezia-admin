@@ -145,11 +145,59 @@ func TestMaskFreeTextForms(t *testing.T) {
 
 	// Длина секрета не сохраняется: разные по длине значения дают один и тот
 	// же вывод.
-	short := maskFreeText("PresharedKey = ABC")
-	long := maskFreeText("PresharedKey = " + strings.Repeat("Z", 44))
+	short := maskFreeText(`PresharedKey = "ABC"`)
+	long := maskFreeText(`PresharedKey = "` + strings.Repeat("Z", 44) + `"`)
 	if short != long {
 		t.Errorf("длина секрета видна по выводу: %q против %q", short, long)
 	}
+}
+
+// TestMaskFreeTextKeepsDiagnostics — ревью SEC-01, потеря диагностики «а».
+//
+// Разделитель ":" без кавычек стоит в любом сообщении вида «Unable to parse
+// PresharedKey: No such file», и маскировка по одному лишь разделителю
+// съедала первое слово: «…PresharedKey: <скрыто> such file». Это ложное
+// «здесь был секрет» там, где секрета не было, — П-НЕЗНАНИЕ наизнанку.
+//
+// Подмена «маскировать любое слово после разделителя» → FAIL.
+func TestMaskFreeTextKeepsDiagnostics(t *testing.T) {
+	t.Run("сообщение без секрета остаётся нетронутым", func(t *testing.T) {
+		for _, in := range []string{
+			"Unable to parse PresharedKey: No such file",
+			"wg: PrivateKey: permission denied",
+			"wg: psk: invalid",
+			"cat: /opt/amnezia/awg/wg0.conf: No such file or directory",
+			"PresharedKey: /opt/amnezia/awg/wg0.conf",
+		} {
+			if got := maskFreeText(in); got != in {
+				t.Errorf("сообщение без секрета изменено — ложное «здесь был секрет».\n было: %s\nстало: %s", in, got)
+			}
+		}
+	})
+
+	t.Run("настоящий секрет без кавычек всё равно скрыт", func(t *testing.T) {
+		for _, secret := range []string{
+			"cFNLc2VjcmV0VkFMVUUxMjM0NTY3ODkwYWJjZGVmZ2hpag=",
+			strings.Repeat("A", 43) + "=",
+			fakeStderrSecret,
+		} {
+			in := "wg: PresharedKey: " + secret
+			got := maskFreeText(in)
+			if strings.Contains(got, secret) {
+				t.Errorf("секрет без кавычек не замаскирован: %s", got)
+			}
+		}
+	})
+
+	// Ревью SEC-01, Новое-4: обратная косая обрывала маскировку.
+	t.Run("ключ, вклеенный в путь с обратной косой", func(t *testing.T) {
+		const secret = "cFNLsecretVALUE1234567890abcdefghij"
+		in := `psk=C:\keys\` + secret
+		got := maskFreeText(in)
+		if strings.Contains(got, secret) {
+			t.Errorf("ключ внутри пути с обратной косой не замаскирован: %s", got)
+		}
+	})
 }
 
 // TestMaskFreeTextPEM — ревью SEC-01, замечание 4, третья форма.
@@ -196,6 +244,43 @@ func TestMaskFreeTextPEM(t *testing.T) {
 		}
 		if !strings.Contains(got, "-----BEGIN RSA PRIVATE KEY-----") {
 			t.Errorf("заголовок BEGIN пропал:\n%s", got)
+		}
+	})
+
+	// Ревью SEC-01, Новое-3: порядок операций. Целый блок первым, оборванный
+	// вторым — END первого засчитывался за END второго, и тело второго ключа
+	// выходило открытым.
+	t.Run("целый блок, затем оборванный: тело второго тоже скрыто", func(t *testing.T) {
+		const second = "test-pem-second-GGGGHHHH"
+		in := "-----BEGIN OPENSSH PRIVATE KEY-----\n" + body +
+			"\n-----END OPENSSH PRIVATE KEY-----\nnext: -----BEGIN RSA PRIVATE KEY-----\n" + second
+		got := maskFreeText(in)
+		if strings.Contains(got, second) {
+			t.Errorf("тело ВТОРОГО (оборванного) ключа осталось открытым:\n%s", got)
+		}
+		for _, frag := range strings.Split(body, "\n") {
+			if strings.Contains(got, frag) {
+				t.Errorf("тело первого блока осталось в тексте (%q):\n%s", frag, got)
+			}
+		}
+	})
+
+	// Ревью SEC-01, потеря диагностики «б»: обрыв обязан быть виден, иначе
+	// человек не отличит «сервер замолчал» от «мы обрезали».
+	t.Run("обрыв помечается, а не происходит молча", func(t *testing.T) {
+		in := "ssh: ключ отвергнут:\n-----BEGIN RSA PRIVATE KEY-----\n" + body
+		got := maskFreeText(in)
+		if !strings.Contains(got, truncatedNote) {
+			t.Errorf("обрезка не помечена — потеря диагностики невидима:\n%s", got)
+		}
+	})
+
+	t.Run("целый блок обрезкой НЕ помечается", func(t *testing.T) {
+		in := "-----BEGIN OPENSSH PRIVATE KEY-----\n" + body +
+			"\n-----END OPENSSH PRIVATE KEY-----\nпопробуйте ещё раз"
+		got := maskFreeText(in)
+		if strings.Contains(got, truncatedNote) {
+			t.Errorf("целый блок помечен как обрезанный — ложное сообщение о потере:\n%s", got)
 		}
 	})
 
