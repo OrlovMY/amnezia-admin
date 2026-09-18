@@ -94,6 +94,74 @@ func TestDeleteCardAsksServerOnOpen(t *testing.T) {
 	}
 }
 
+// TestDeleteCardPassesServerError — ОШИБКА ЗАПРОСА ДОЕЗЖАЕТ ДО КАРТОЧКИ.
+// Без этой проверки обход стоит одной клавиши и выглядит безобидно: прямой
+// вызов на месте, DeleteCardActivity вызвана, а третьим аргументом передан
+// nil — и отказ сервера снова печатается как «Подключений не было». Сверка
+// идёт по AST: третий аргумент обязан быть ровно тем именем, которому
+// присвоена ошибка вызова GetHandshakes в этой же функции.
+func TestDeleteCardPassesServerError(t *testing.T) {
+	_, file, _ := readGUIMain(t)
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Body != nil && d.Name.Name == deleteHandlerName {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет метода %s", guiMainPath, deleteHandlerName)
+	}
+
+	// Имя, которому присвоена ошибка вызова GetHandshakes.
+	errName := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || len(as.Lhs) != 2 {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "GetHandshakes" {
+			return true
+		}
+		if id, ok := as.Lhs[1].(*ast.Ident); ok {
+			errName = id.Name
+		}
+		return true
+	})
+	if errName == "" || errName == "_" {
+		t.Fatalf("%s: ошибка вызова GetHandshakes не сохраняется (получатель %q) — "+
+			"отказ сервера отброшен в самом месте, ради которого написан PR", deleteHandlerName, errName)
+	}
+
+	// И она же передана третьим аргументом в DeleteCardActivity.
+	passed := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "DeleteCardActivity" || len(call.Args) != 3 {
+			return true
+		}
+		if id, ok := call.Args[2].(*ast.Ident); ok && id.Name == errName {
+			passed = true
+		}
+		return true
+	})
+	if !passed {
+		t.Errorf("%s: в guiview.DeleteCardActivity передана не ошибка запроса (ожидалось %q третьим "+
+			"аргументом) — прямой вызов есть, но отказ сервера снова печатается как «Подключений не было»: "+
+			"третье состояние, сведённое к «нет»", deleteHandlerName, errName)
+	}
+}
+
 // TestDeleteConfirmDisabledUntilAnswer — кнопка подтверждения недоступна,
 // пока не пришёл ответ сервера. Иначе появляется окно, где подтвердить можно
 // раньше ответа, — то же «уверенно при отсутствии данных», только в другом
