@@ -38,7 +38,26 @@ func (r sshRunner) Run(cmd string, stdin []byte) (string, error) {
 	sess.Stderr = &errb
 	err = sess.Run(cmd)
 	if err != nil {
-		return out.String(), fmt.Errorf("команда %q: %w; stderr: %s", cmd, err, errb.String())
+		// НАЗНАЧЕННАЯ ТОЧКА МАСКИРОВКИ (A2, Г2). Это единственное место, через
+		// которое проходят все ошибки выполнения команд на сервере: и текст
+		// команды, и весь stderr сервера попадают отсюда на экран CLI и в
+		// диалог GUI. wg-утилиты при неузнанной строке печатают её целиком,
+		// включая "PresharedKey = …", — поэтому маскируются ОБЕ подстановки,
+		// до попадания в fmt.Errorf.
+		//
+		// Маскировка стоит здесь, а не у вызывающих: поставленная выше по
+		// течению, она оставила бы обход; поставленная у каждого вызывающего —
+		// рассыпалась бы при первой правке. Сторож TestStderrCaptureSinglePoint
+		// (core/stderrguard_test.go) требует, чтобы такое место было ровно
+		// одно и лежало именно здесь.
+		//
+		// maskFreeText, а НЕ maskSecrets: у maskSecrets обе регулярки
+		// привязаны к ^([-+]\s*) — строке диффа, — и на stderr она вернула бы
+		// вход без единого изменения (молчаливый no-op). См. core/txn.go.
+		//
+		// Форма сообщения не менялась — меняется только содержимое подстановок.
+		return out.String(), fmt.Errorf("команда %q: %w; stderr: %s",
+			maskFreeText(cmd), err, maskFreeText(errb.String()))
 	}
 	return out.String(), nil
 }
