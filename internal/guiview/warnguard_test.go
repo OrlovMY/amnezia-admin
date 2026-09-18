@@ -152,7 +152,12 @@ func TestGUICallsWarningInEveryHandler(t *testing.T) {
 		t.Fatalf("сторож Г5 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет метода %s — "+
 			"предупреждение показывать нечем", guiMainPath, warnHelperName)
 	}
-	for _, need := range []string{"guiview.WarnDecision", "guiview.WarningText", "guiview.AfterWarned"} {
+	// WarningTitle и WarningBody, а не WarningText: заголовок диалога и его
+	// тело — разные виджеты Fyne, одной строкой их не показать. Что эти две
+	// части в сумме и есть эталонный текст, доказывает TestWarningTextGolden
+	// (сравнение склейки), поэтому проверка "текст пришёл из guiview целиком"
+	// остаётся полной.
+	for _, need := range []string{"guiview.WarnDecision", "guiview.WarningTitle", "guiview.WarningBody", "guiview.AfterWarned"} {
 		if !strings.Contains(helper, need) {
 			t.Errorf("%s не вызывает %s — решение о показе или текст взялись не из guiview", warnHelperName, need)
 		}
