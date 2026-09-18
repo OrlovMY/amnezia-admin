@@ -1363,33 +1363,43 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	var d dialog.Dialog
 	var applyBtn *widget.Button
 	applyBtn = widget.NewButtonWithIcon("Применить", theme.ConfirmIcon(), func() {
-		applyBtn.Disable()
-		u.setBusy(true)
-		statusLabel.Importance = widget.MediumImportance
-		statusLabel.SetText("Применяю...")
-		goSafe(func() {
-			nu, err := u.sess.Apply(plan)
-			fyne.Do(func() {
-				u.setBusy(false)
-				if err != nil {
-					if isCASRefusal(err) {
-						// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
-						// должно отличаться от "Применяю..." не только
-						// словами: DangerImportance == theme.ColorNameError.
-						statusLabel.Importance = widget.DangerImportance
-						statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
-						return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+		// A3а, ШЕСТАЯ точка записи: предупреждение о гонке непосредственно
+		// перед sess.Apply. Окно изменений общее для всех пяти операций, и
+		// путь "сначала посмотреть, что изменится, потом применить" —
+		// единственный, которым идёт самый осторожный человек. Без этого
+		// вызова именно он писал бы на сервер без предупреждения.
+		// При "Отмена" окно изменений остаётся открытым, кнопка "Применить"
+		// не Disable()-ится (её Disable стоит ВНУТРИ) — человек возвращается
+		// к тому же плану и закрывает окно сам кнопкой "Закрыть".
+		u.confirmRaceWarning(guiview.OpApplyPlan, func() {
+			applyBtn.Disable()
+			u.setBusy(true)
+			statusLabel.Importance = widget.MediumImportance
+			statusLabel.SetText("Применяю...")
+			goSafe(func() {
+				nu, err := u.sess.Apply(plan)
+				fyne.Do(func() {
+					u.setBusy(false)
+					if err != nil {
+						if isCASRefusal(err) {
+							// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
+							// должно отличаться от "Применяю..." не только
+							// словами: DangerImportance == theme.ColorNameError.
+							statusLabel.Importance = widget.DangerImportance
+							statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
+							return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+						}
+						statusLabel.Importance = widget.MediumImportance
+						statusLabel.SetText("")
+						applyBtn.Enable()
+						dialog.ShowError(err, u.win)
+						return
 					}
-					statusLabel.Importance = widget.MediumImportance
-					statusLabel.SetText("")
-					applyBtn.Enable()
-					dialog.ShowError(err, u.win)
-					return
-				}
-				d.Hide()
-				if onApplied != nil {
-					onApplied(nu)
-				}
+					d.Hide()
+					if onApplied != nil {
+						onApplied(nu)
+					}
+				})
 			})
 		})
 	})

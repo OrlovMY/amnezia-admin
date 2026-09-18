@@ -89,7 +89,7 @@ func TestOpChangesServer(t *testing.T) {
 			t.Errorf("%v: ChangesServer() = true, хотя операция только смотрит", op)
 		}
 	}
-	for _, op := range []Op{OpAddUser, OpRenameUser, OpToggleUser, OpRekeyUser, OpDeleteUser} {
+	for _, op := range []Op{OpAddUser, OpRenameUser, OpToggleUser, OpRekeyUser, OpDeleteUser, OpApplyPlan} {
 		if !op.ChangesServer() {
 			t.Errorf("%v: ChangesServer() = false, хотя операция меняет сервер", op)
 		}
@@ -143,6 +143,25 @@ func TestWarnDecision(t *testing.T) {
 		{"изменение: включение/выключение, первое за запуск", OpToggleUser, WarnOncePerRun, freshRun, srv, true},
 		{"изменение: перевыпуск конфига, первое за запуск", OpRekeyUser, WarnOncePerRun, freshRun, srv, true},
 		{"изменение: удаление, первое за запуск", OpDeleteUser, WarnOncePerRun, freshRun, srv, true},
+
+		// ШЕСТАЯ точка записи — "Применить" в окне изменений. Два сценария
+		// частоты, названные прямо, потому что перепутать их легко:
+		//
+		// (1) человек пошёл СРАЗУ в "Показать изменения" (кнопка есть в
+		// каждой форме) и применяет план первым действием за запуск —
+		// предупреждения он ещё не видел, и оно ОБЯЗАНО быть. Без этой
+		// строки самый осторожный человек остался бы без предупреждения
+		// вовсе;
+		//
+		// (2) человек прошёл путь "кнопка операции → предупреждение →
+		// показать изменения → применить" — предупреждение уже показано в
+		// этом сеансе, и второй раз подряд оно не показывается.
+		{"шестая точка: применение плана первым действием за запуск (сразу в «Показать изменения»)",
+			OpApplyPlan, WarnOncePerRun, freshRun, srv, true},
+		{"шестая точка: применение плана после уже показанного предупреждения в этом сеансе",
+			OpApplyPlan, WarnOncePerRun, warnedHere, srv, false},
+		{"шестая точка: применение плана на другом сервере", OpApplyPlan, WarnOncePerRun, warnedThere, srv, true},
+		{"шестая точка: применение плана, режим «каждый раз»", OpApplyPlan, WarnEveryTime, warnedHere, srv, true},
 
 		// Второе изменение в том же сеансе и том же сервере → молчать.
 		{"второе изменение в сеансе: создание", OpAddUser, WarnOncePerRun, warnedHere, srv, false},
