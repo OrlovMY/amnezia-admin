@@ -36,10 +36,26 @@ package main
 //     УЖЕ есть законное widget.NewLabel(fmt.Sprintf("Сервер: %s@%s",
 //     u.sess.Creds.User, u.sess.Creds.Host)) — тот же держатель, то же
 //     форматирование, другая функция.
-//  2. ЦЕПОЧКА ПРИСВАИВАНИЙ В ПРЕДЕЛАХ ФУНКЦИИ — закрывает ЛОКАЛЬНЫЙ обход
+//  2. ПЕРЕНОС ДЕРЖАТЕЛЯ В ЛОКАЛЬНОЕ ИМЯ — закрывает ЛОКАЛЬНЫЙ обход
 //     (p := cfg["password"]; print(p)). Она не ловит и не может ловить путь
 //     через поле структуры: u.sess присвоено в одной функции, а раскрывается
 //     в другой, и никакой цепочки в пределах второй функции нет.
+//
+// КАК ОБЕ НОГИ ОБХОДИЛИ В КРУГЕ 2 И ЧЕМУ ЭТО УЧИТ (ревью SEC-01). Обе дыры
+// были ОДНОГО ВИДА: мы описали, что сторож ловит, в терминах ЯЗЫКОВОЙ
+// КОНСТРУКЦИИ («присваивание», «вызов»), а обходились они ДРУГОЙ
+// конструкцией с тем же смыслом, ценой одной клавиши:
+//   - нога 2 разбирала только ast.AssignStmt → `var c = u.sess.Creds`
+//     (ast.ValueSpec) и `for _, c := range …` (ast.RangeStmt) проходили
+//     зелёными, делая ровно то же самое;
+//   - вывод искался только среди ast.CallExpr → `lbl.Text = key` и
+//     `&widget.Entry{Text: key}` показывали ключ на экране, не будучи
+//     вызовом; `f.WriteString(key)` писал его в файл мимо os.WriteFile.
+// Это тот же дефект, что у признаков «ветка else» и «будущее время»:
+// правило описывает ФОРМУ последнего примера, а не свойство класса.
+// ПОЭТОМУ К КАЖДОЙ ЗАПИСИ ЭТОЙ ШАПКИ ЗАДАЁТСЯ ВОПРОС: «А ЕСЛИ ТО ЖЕ САМОЕ
+// НАПИСАТЬ ИНАЧЕ?» Где ответ «пройдёт» — это либо починка, либо строка
+// границы ниже, но не умолчание.
 //
 // ВХОД БЫВАЕТ НЕВИДИМЫМ. Первая редакция этого сторожа охраняла вход, который
 // видно на экране, — поле ввода keyEntry. Но ключ попадает в программу и
@@ -86,7 +102,17 @@ package main
 //     названо поимённо: os.Getenv/os.LookupEnv (envVarsIn) — невидимый вход
 //     ключа, ради которого пришлось пробить эту границу в одном месте;
 //  5. потока через несколько функций без поля структуры: значение, переданное
-//     параметром в третью функцию и напечатанное там под другим именем;
+//     параметром в третью функцию и напечатанное там под другим именем.
+//     ЖИВОЙ ПРИМЕР В ЭТОМ ФАЙЛЕ, предъявленный прогоном (ревью SEC-01):
+//     u.connectFail(btn, info, kk) с держателем kk проходит ЗЕЛЁНЫМ —
+//     connectFail не в перечне точек вывода, а печать (info.SetText) стоит
+//     внутри неё. Расширять перечень на все методы ui значило бы краснеть на
+//     каждом законном вызове; это цена, а не недосмотр, и она названа здесь;
+//  5а. СБОРКИ ЗНАЧЕНИЯ ЧЕРЕЗ ВЫЗОВ — следствие п. 4, но названо отдельно,
+//     потому что из трёх известных форм она самая правдоподобная:
+//     parts = append(parts, u.sess.Creds.Password) + strings.Join(parts, " ")
+//     и печать результата. Держатель исчезает в возвращаемом значении
+//     strings.Join, и ни одна нога его там не видит;
 //  6. КЛИЕНТСКОГО конфига (core.NewUser.Config). Он охраной НЕ ПОКРЫТ и
 //     покрыт быть не должен: в нём приватный ключ и PSK клиента, и он
 //     печатается ЗАКОННО И НАМЕРЕННО — диалог "Конфиг готов", QR-код,
@@ -162,9 +188,48 @@ var keyEnvNames = map[string]bool{
 }
 
 // keyInputFields — поля ввода, В КОТОРЫХ ключ живёт по своему назначению.
-// Запись ключа в собственное поле ввода — не раскрытие (см. isSink).
 var keyInputFields = map[string]bool{
 	"keyEntry": true,
+}
+
+// widgetTextFields — поля виджетов, запись в которые есть вывод на экран.
+// Присваивание в них и композитный литерал с ними — не вызовы, и прежний
+// обход по ast.CallExpr их не видел (ревью SEC-01, круг 2).
+var widgetTextFields = map[string]bool{
+	"Text":        true,
+	"Title":       true,
+	"PlaceHolder": true,
+}
+
+// allowedKeyRoundTrip — ЕДИНСТВЕННОЕ исключение для поля ввода ключа, и оно
+// сужено ПО ЗНАЧЕНИЮ, а не по получателю.
+//
+// РЕГРЕСС, ИЗ-ЗА КОТОРОГО ЭТО ПЕРЕПИСАНО (ревью SEC-01, круг 2). В круге 1б
+// исключение стояло в isSink и было устроено ПО ПОЛУЧАТЕЛЮ: «SetText у
+// keyEntry — не вывод». Значит в поле ввода можно было положить ЧТО УГОДНО:
+// keyEntry.SetText(u.sess.Creds.Password) проходил ЗЕЛЁНЫМ и выводил пароль
+// root в видимое поле на экране. На предыдущей ревизии эта подмена краснела —
+// то есть правка, закрывшая девятый корень, открыла восьмую дыру.
+// Теперь разрешено ровно одно: вернуть в поле ввода ТО ЖЕ САМОЕ значение,
+// которое им и является, — строку ключа (key, keyEntry.Text или значение,
+// прочитанное из переменной окружения с ключом). Всё прочее, включая пароль,
+// краснеет.
+// Проверяется ТРОЙКА, а не пара: получатель — поле ввода ключа, вызов —
+// SetText, значение — сама строка ключа. Ослабь любую из трёх, и исключение
+// снова станет дырой.
+func allowedKeyRoundTrip(sink, recv, holder string, envVars map[string]bool) bool {
+	if sink != ".SetText" || !keyInputFields[recv] {
+		return false
+	}
+	switch holder {
+	case "key", "keyEntry.Text":
+		return true
+	}
+	// Значение из os.Getenv, признанное ключом (envVarsIn), — это та же
+	// строка ключа, просто пришедшая невидимым входом. Локальные имена,
+	// заражённые ЦЕПОЧКОЙ (c := u.sess.Creds), сюда НЕ попадают: в envVars
+	// только имена, прочитанные из окружения.
+	return envVars[holder]
 }
 
 // keyEnvNameHint — страховка на случай новой переменной, которую забудут
@@ -220,21 +285,16 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 		}
 	case *ast.SelectorExpr:
 		name := fun.Sel.Name
-		// ИСКЛЮЧЕНИЕ, перечисленное поимённо: keyEntry.SetText(<ключ>) — это
-		// заполнение САМОГО ПОЛЯ ВВОДА ключа, то есть возврат значения туда,
-		// откуда оно и приходит (:125-126 подставляет ключ из AMNEZIA_KEY в
-		// поле, куда его иначе вставляет человек). Новым раскрытием это не
-		// является. Всё остальное с тем же значением — включая
-		// keyEntry.SetPlaceHolder, подпись, заголовок и любой другой виджет —
-		// запрещено: это уже вынос ключа за пределы его собственного поля.
-		if name == "SetText" {
-			if recv, ok := fun.X.(*ast.Ident); ok && keyInputFields[recv.Name] {
-				return ""
-			}
-		}
 		// Методы-приёмники текста: у любого получателя.
 		switch name {
 		case "SetText", "SetTitle", "SetPlaceHolder", "SetContent":
+			return "." + name
+		}
+		// Запись в файл или поток мимо os.WriteFile (ревью SEC-01, круг 2):
+		// f, _ := os.Create(…); f.WriteString(key) уходил в файл, а сторож
+		// знал только os.WriteFile.
+		switch name {
+		case "Write", "WriteString":
 			return "." + name
 		}
 		pkg, ok := fun.X.(*ast.Ident)
@@ -245,7 +305,7 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 			return pkg.Name + "." + name
 		}
 		switch pkg.Name {
-		case "fmt", "log":
+		case "fmt", "log", "io":
 			return pkg.Name + "." + name
 		case "os":
 			if name == "WriteFile" {
@@ -481,47 +541,80 @@ func envVarsIn(fn ast.Node) map[string]bool {
 	return out
 }
 
-// taintedIn — ВТОРАЯ НОГА: цепочка присваиваний в пределах функции. Ловит
-// локальный обход (p := cfg["password"]; c := u.sess.Creds). Заражение НЕ
-// идёт через вызов функции — см. п. 4 границы в шапке.
+// unwrapSrc снимает обёртки, не меняющие держателя: (x), *x, &x, x[i].
+func unwrapSrc(e ast.Expr) ast.Expr {
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.UnaryExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		default:
+			return e
+		}
+	}
+}
+
+// taintedIn — ВТОРАЯ НОГА: перенос держателя в локальное имя, В ЛЮБОЙ ФОРМЕ
+// ЗАПИСИ. Ловит локальный обход (p := cfg["password"]; c := u.sess.Creds).
+//
+// ПОЧЕМУ «В ЛЮБОЙ ФОРМЕ ЗАПИСИ» НАПИСАНО ТАК НАСТОЙЧИВО (ревью SEC-01,
+// круг 2). Прежняя редакция разбирала только ast.AssignStmt, то есть только
+// запись через `:=` и `=`. Обход — одна клавиша: `var c = u.sess.Creds`
+// (ast.ValueSpec) проходил ЗЕЛЁНЫМ, делая то же самое. Это тот же дефект,
+// что нашли у признаков «ветка else» и «будущее время»: правило описывало
+// ФОРМУ последнего примера, а не свойство класса. Поэтому здесь разбираются
+// все три формы, которыми значение попадает в новое имя: присваивание,
+// объявление переменной и переменная цикла range. При добавлении новой
+// формы вопрос задаётся тот же: «а если то же самое написать иначе?»
 func taintedIn(fn ast.Node) map[string]bool {
 	tainted := envVarsIn(fn) // невидимый вход — тоже держатель, с первого круга
+
+	// carry помечает имя lhs, если значение src — держатель.
+	carry := func(lhs ast.Expr, src ast.Expr) {
+		src = unwrapSrc(src)
+		switch src.(type) {
+		case *ast.Ident, *ast.SelectorExpr:
+		default:
+			return // вызов, литерал, композит — не перенос имени
+		}
+		if classify(src, tainted) != verdictForbidden {
+			return
+		}
+		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+			tainted[id.Name] = true
+		}
+	}
+
 	// Несколько проходов: c := u.sess.Creds; p := c — второе видно только
 	// после первого.
-	for round := 0; round < 4; round++ {
+	for round := 0; round < 5; round++ {
 		before := len(tainted)
 		ast.Inspect(fn, func(n ast.Node) bool {
-			as, ok := n.(*ast.AssignStmt)
-			if !ok || len(as.Lhs) != len(as.Rhs) {
-				return true
-			}
-			for i, rhs := range as.Rhs {
-				src := rhs
-				for {
-					switch x := src.(type) {
-					case *ast.ParenExpr:
-						src = x.X
-					case *ast.StarExpr:
-						src = x.X
-					case *ast.UnaryExpr:
-						src = x.X
-					case *ast.IndexExpr:
-						src = x.X
-					default:
-						goto done
+			switch x := n.(type) {
+			case *ast.AssignStmt: // c := u.sess.Creds  /  c = u.sess.Creds
+				if len(x.Lhs) != len(x.Rhs) {
+					return true
+				}
+				for i, rhs := range x.Rhs {
+					carry(x.Lhs[i], rhs)
+				}
+			case *ast.ValueSpec: // var c = u.sess.Creds  /  var c T = …
+				if len(x.Names) != len(x.Values) {
+					return true
+				}
+				for i, v := range x.Values {
+					carry(x.Names[i], v)
+				}
+			case *ast.RangeStmt: // for _, c := range []*ServerCreds{u.sess.Creds}
+				if classifySubtree(x.X, tainted) && x.Value != nil {
+					if id, ok := x.Value.(*ast.Ident); ok && id.Name != "_" {
+						tainted[id.Name] = true
 					}
-				}
-			done:
-				switch src.(type) {
-				case *ast.Ident, *ast.SelectorExpr:
-				default:
-					continue // вызов, литерал, композит — не цепочка
-				}
-				if classify(src, tainted) != verdictForbidden {
-					continue
-				}
-				if id, ok := as.Lhs[i].(*ast.Ident); ok && id.Name != "_" {
-					tainted[id.Name] = true
 				}
 			}
 			return true
@@ -531,6 +624,12 @@ func taintedIn(fn ast.Node) map[string]bool {
 		}
 	}
 	return tainted
+}
+
+// classifySubtree — есть ли в поддереве хоть один запрещённый держатель.
+// Нужен для range: держатель прячется внутри литерала-среза.
+func classifySubtree(e ast.Expr, tainted map[string]bool) bool {
+	return len(findHolders(e, tainted)) > 0
 }
 
 // ---------- 5. Импорты ----------
@@ -622,27 +721,64 @@ func scanPackage(t *testing.T) (encs []encSite, holders []holderSite, importProb
 			// обход только по объявленным функциям пропустил бы почти весь
 			// файл.
 			tainted := taintedIn(fn)
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					if pkg, ok := sel.X.(*ast.Ident); ok && jsonNames[pkg.Name] && jsonMethods[sel.Sel.Name] {
-						pos := fset.Position(call.Pos())
-						encs = append(encs, encSite{fn: fn.Name.Name, file: filepath.Base(pos.Filename),
-							line: pos.Line, method: sel.Sel.Name, expr: pkg.Name + "." + sel.Sel.Name})
-					}
-				}
-				sink := isSink(call, jsonNames)
-				if sink == "" {
-					return true
-				}
-				for _, arg := range call.Args {
+			envVars := envVarsIn(fn)
+			report := func(n ast.Node, sink, recv string, args []ast.Expr) {
+				for _, arg := range args {
 					for _, h := range findHolders(arg, tainted) {
-						pos := fset.Position(call.Pos())
+						if allowedKeyRoundTrip(sink, recv, h, envVars) {
+							continue
+						}
+						pos := fset.Position(n.Pos())
 						holders = append(holders, holderSite{fn: fn.Name.Name,
 							file: filepath.Base(pos.Filename), line: pos.Line, sink: sink, expr: h})
+					}
+				}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+						if pkg, ok := sel.X.(*ast.Ident); ok && jsonNames[pkg.Name] && jsonMethods[sel.Sel.Name] {
+							pos := fset.Position(x.Pos())
+							encs = append(encs, encSite{fn: fn.Name.Name, file: filepath.Base(pos.Filename),
+								line: pos.Line, method: sel.Sel.Name, expr: pkg.Name + "." + sel.Sel.Name})
+						}
+					}
+					if sink := isSink(x, jsonNames); sink != "" {
+						recv := ""
+						if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+							if id, ok := sel.X.(*ast.Ident); ok {
+								recv = id.Name
+							}
+						}
+						report(x, sink, recv, x.Args)
+					}
+				case *ast.AssignStmt:
+					// ПРИСВАИВАНИЕ В ПОЛЕ ВИДЖЕТА — не вызов, а вывод (ревью
+					// SEC-01, круг 2): lbl.Text = key показывает ключ на
+					// экране ровно так же, как lbl.SetText(key), но прежний
+					// обход смотрел только ast.CallExpr и проходил зелёным.
+					for i, lhs := range x.Lhs {
+						sel, ok := lhs.(*ast.SelectorExpr)
+						if !ok || !widgetTextFields[sel.Sel.Name] || i >= len(x.Rhs) {
+							continue
+						}
+						report(x, "присваивание ."+sel.Sel.Name, "", []ast.Expr{x.Rhs[i]})
+					}
+				case *ast.CompositeLit:
+					// КОМПОЗИТНЫЙ ЛИТЕРАЛ — по той же причине:
+					// &widget.Entry{Text: key} выводит ключ и вызовом не
+					// является.
+					for _, el := range x.Elts {
+						kv, ok := el.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						k, ok := kv.Key.(*ast.Ident)
+						if !ok || !widgetTextFields[k.Name] {
+							continue
+						}
+						report(x, "литерал с полем "+k.Name, "", []ast.Expr{kv.Value})
 					}
 				}
 				return true
@@ -793,6 +929,48 @@ func f() {
 		if taintedIn(f)["err"] {
 			t.Error("err помечен держателем — сторож покраснеет на каждом законном err.Error(); " +
 				"это ровно тот случай, когда сторожа ослабляют первым же действием")
+		}
+	})
+
+	t.Run("перенос держателя в любой форме записи", func(t *testing.T) {
+		// Ревью SEC-01, круг 2: прежняя редакция знала только `:=`/`=`.
+		for _, src := range []struct{ name, code string }{
+			{"присваивание", "c := u.sess.Creds"},
+			{"объявление var", "var c = u.sess.Creds"},
+			{"var с типом", "var c *core.ServerCreds = u.sess.Creds"},
+			{"range по срезу держателей", "for _, c := range []*core.ServerCreds{u.sess.Creds} { _ = c }"},
+		} {
+			t.Run(src.name, func(t *testing.T) {
+				f, err := parser.ParseFile(token.NewFileSet(), "x.go",
+					"package main\nfunc f() {\n"+src.code+"\n_ = c\n}", 0)
+				if err != nil {
+					t.Fatalf("разбор образца: %v", err)
+				}
+				if !taintedIn(f)["c"] {
+					t.Errorf("держатель, перенесённый записью %q, не помечен — "+
+						"обход одной клавишей: та же конструкция, другая форма записи", src.code)
+				}
+			})
+		}
+	})
+
+	t.Run("исключение для поля ввода ключа сужено по значению", func(t *testing.T) {
+		env := map[string]bool{"k": true}
+		if !allowedKeyRoundTrip(".SetText", "keyEntry", "key", env) {
+			t.Error("возврат самой строки ключа в своё поле ввода должен быть разрешён")
+		}
+		if !allowedKeyRoundTrip(".SetText", "keyEntry", "k", env) {
+			t.Error("ключ из окружения в своё поле ввода должен быть разрешён")
+		}
+		if allowedKeyRoundTrip(".SetText", "keyEntry", "u.sess.Creds.Password", env) {
+			t.Error("РЕГРЕСС круга 1б: пароль root в поле ввода ключа разрешён — " +
+				"исключение снова построено по получателю, а не по значению")
+		}
+		if allowedKeyRoundTrip(".SetText", "statusLabel", "key", env) {
+			t.Error("ключ разрешён в ЧУЖОЙ виджет — проверяется тройка (получатель, вызов, значение)")
+		}
+		if allowedKeyRoundTrip(".SetPlaceHolder", "keyEntry", "key", env) {
+			t.Error("ключ разрешён в подсказку поля — исключение только для SetText")
 		}
 	})
 
