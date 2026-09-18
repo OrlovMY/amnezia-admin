@@ -77,13 +77,30 @@ func TestMaskSecretsIsCaseInsensitive(t *testing.T) {
 // видно в диффе. Подмена «маскировать только известные секретные имена» →
 // FAIL.
 func TestMaskSecretsClosedListOfPublicNames(t *testing.T) {
-	t.Run("неизвестное имя — значение скрыто, имя видно", func(t *testing.T) {
+	// Ревью SEC-01, B2: скрывается ВСЯ строка, включая «имя». Прежняя
+	// редакция прятала только хвост после "=", и у значения, оканчивающегося
+	// на "==", «именем» оказывался сам секрет — скрыт был один символ.
+	t.Run("неизвестное имя — скрыта вся строка, включая имя", func(t *testing.T) {
 		got := maskSecrets("+SecretBlob = " + fakeCasePSK)
 		if strings.Contains(got, fakeCasePSK) {
 			t.Errorf("строка с неизвестным именем ключа не замаскирована: %s", got)
 		}
-		if got != "+SecretBlob = "+hiddenPlaceholder {
-			t.Errorf("имя ключа или структура строки не сохранены: %s", got)
+		if strings.Contains(got, "SecretBlob") {
+			t.Errorf("неизвестное имя осталось открытым — а «имя» может само быть секретом: %s", got)
+		}
+		if got != `+"`+hiddenPlaceholder+`"` {
+			t.Errorf("непонятая строка замаскирована не целиком: %q", got)
+		}
+	})
+
+	// Та самая форма, на которой прежняя редакция скрывала один символ.
+	t.Run("голая строка base64 с «==» скрыта целиком", func(t *testing.T) {
+		for _, in := range []string{"+MDEyMzQ1Njc4OWFiY2RlZg==", "+" + fakeCasePSK + "="} {
+			body := strings.TrimPrefix(in, "+")
+			got := maskSecrets(in)
+			if strings.Contains(got, strings.TrimSuffix(body, "=")) {
+				t.Errorf("ключ напечатан целиком, скрыт только хвост — защита-видимость: %s", got)
+			}
 		}
 	})
 
@@ -139,23 +156,50 @@ func TestMaskSecretsClosedListOfPublicNames(t *testing.T) {
 //
 // Подмена «снять закрытый список для clientsTable» → FAIL.
 func TestMaskSecretsClosedListForClientsTable(t *testing.T) {
-	t.Run("неизвестное имя — значение скрыто, имя видно", func(t *testing.T) {
+	// Ревью SEC-01, B2: скрывается вся строка, включая имя поля.
+	t.Run("неизвестное имя — скрыта вся строка, включая имя", func(t *testing.T) {
 		in := `-            "clientPrivKey": "` + fakeCasePSK + `",`
-		want := `-            "clientPrivKey": "` + hiddenPlaceholder + `",`
+		want := `-            "` + hiddenPlaceholder + `",`
 		got := maskTableSecrets(in)
 		if strings.Contains(got, fakeCasePSK) {
 			t.Errorf("поле userData с неизвестным именем не замаскировано: %s", got)
 		}
+		if strings.Contains(got, "clientPrivKey") {
+			t.Errorf("неизвестное имя поля осталось открытым: %s", got)
+		}
 		if got != want {
-			t.Errorf("имя поля или структура строки не сохранены.\n хочу: %s\nполучил: %s", want, got)
+			t.Errorf("отступ или завершающая запятая не сохранены.\n хочу: %q\nполучил: %q", want, got)
 		}
 	})
 
 	t.Run("значение без запятой на последней строке объекта", func(t *testing.T) {
 		in := `+            "clientPrivKey": "` + fakeCasePSK + `"`
-		want := `+            "clientPrivKey": "` + hiddenPlaceholder + `"`
+		want := `+            "` + hiddenPlaceholder + `"`
 		if got := maskTableSecrets(in); got != want {
-			t.Errorf("\n хочу: %s\nполучил: %s", want, got)
+			t.Errorf("\n хочу: %q\nполучил: %q", want, got)
+		}
+	})
+
+	// Ревью SEC-01, B1: userData ВЫВЕДЕН из закрытого списка. Довод
+	// «контейнер, своего значения не несёт» был утверждением о ФОРМЕ
+	// значения, а код сверяет только ИМЯ — и все три формы со значением
+	// текли.
+	t.Run("userData со значением: все три формы скрыты", func(t *testing.T) {
+		for _, in := range []string{
+			`-        "userData": {"psk": "` + fakeCasePSK + `"},`,
+			`-        "userData": "` + fakeCasePSK + `",`,
+			`-        "userData": ["` + fakeCasePSK + `"],`,
+		} {
+			if got := maskTableSecrets(in); strings.Contains(got, fakeCasePSK) {
+				t.Errorf("userData со значением напечатан открытым: %s", got)
+			}
+		}
+	})
+
+	t.Run("userData как открывающая скобка остаётся открытым", func(t *testing.T) {
+		const in = `+        "userData": {`
+		if got := maskTableSecrets(in); got != in {
+			t.Errorf("строка открывающей скобки изменена — удаление userData из списка не должно было её задеть.\n было: %q\nстало: %q", in, got)
 		}
 	})
 
@@ -270,14 +314,20 @@ func TestPlanDiffMasksUnknownClientsTableKey(t *testing.T) {
 	}
 	_, tblDiff := plan.Diff()
 
-	if !strings.Contains(tblDiff, "clientPrivKey") {
+	// Непустота проверяется по НЕмаскированному диффу: после правки B2 имя
+	// неизвестного поля в маскированном не видно, и искать его там значило бы
+	// сделать тест непадающим.
+	if !strings.Contains(lineDiff(plan.tblBefore, plan.tblAfter), "clientPrivKey") {
 		t.Fatalf("строка clientPrivKey не попала в diff — тест перестал что-либо проверять:\n%s", tblDiff)
 	}
 	if strings.Contains(tblDiff, fakeCasePSK) {
 		t.Errorf("Plan.Diff() показал значение поля userData открытым:\n%s", tblDiff)
 	}
-	if !strings.Contains(tblDiff, `"clientPrivKey": "`+hiddenPlaceholder+`"`) {
-		t.Errorf("имя поля пропало из diff — теряется диагностика:\n%s", tblDiff)
+	if strings.Contains(tblDiff, "clientPrivKey") {
+		t.Errorf("неизвестное имя поля осталось открытым (ревью SEC-01, B2):\n%s", tblDiff)
+	}
+	if !strings.Contains(tblDiff, hiddenPlaceholder) {
+		t.Errorf("в diff нет ни одного плейсхолдера — маскировка не сработала:\n%s", tblDiff)
 	}
 }
 
@@ -294,8 +344,9 @@ func TestMaskSecretsNameWithDot(t *testing.T) {
 		if strings.Contains(got, fakeCasePSK) {
 			t.Errorf("строка с именем %q не замаскирована: %s", name, got)
 		}
-		if got != "+"+name+" = "+hiddenPlaceholder {
-			t.Errorf("имя или структура строки не сохранены для %q: %s", name, got)
+		// Ревью SEC-01, B2: скрывается вся строка, имя тоже.
+		if got != `+"`+hiddenPlaceholder+`"` {
+			t.Errorf("непонятая строка с именем %q замаскирована не целиком: %q", name, got)
 		}
 	}
 }
@@ -337,14 +388,20 @@ func TestPlanDiffMasksUnknownWgKey(t *testing.T) {
 	}
 	wgDiff, _ := plan.Diff()
 
-	if !strings.Contains(wgDiff, "SecretBlob") {
+	// Непустота проверяется по НЕмаскированному диффу: после правки B2 имя
+	// неизвестного поля в маскированном не видно, и искать его там значило бы
+	// сделать тест непадающим.
+	if !strings.Contains(lineDiff(plan.wgBefore, plan.wgAfter), "SecretBlob") {
 		t.Fatalf("строка SecretBlob не попала в diff — тест перестал что-либо проверять:\n%s", wgDiff)
 	}
 	if strings.Contains(wgDiff, fakeCasePSK) {
 		t.Errorf("Plan.Diff() показал значение неизвестного поля открытым:\n%s", wgDiff)
 	}
-	if !strings.Contains(wgDiff, "SecretBlob = "+hiddenPlaceholder) {
-		t.Errorf("имя неизвестного поля пропало из diff — теряется диагностика:\n%s", wgDiff)
+	if strings.Contains(wgDiff, "SecretBlob") {
+		t.Errorf("неизвестное имя осталось открытым (ревью SEC-01, B2):\n%s", wgDiff)
+	}
+	if !strings.Contains(wgDiff, hiddenPlaceholder) {
+		t.Errorf("в diff нет ни одного плейсхолдера — маскировка не сработала:\n%s", wgDiff)
 	}
 }
 

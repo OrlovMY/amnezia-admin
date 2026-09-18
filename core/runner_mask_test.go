@@ -291,3 +291,122 @@ func TestMaskFreeTextPEM(t *testing.T) {
 		}
 	})
 }
+
+// TestMaskFreeTextPassword — ревью SEC-01, V1.
+//
+// «Единый список» уже разошёлся: имена секретов живут в двух местах
+// (secretKeyNames здесь и configDeniedKeys в cmd/cli), и слова password в
+// core-половине не было. Прогон «sshpass: password=Qw3rty!Sup3rSecret»
+// проходил открытым. Сегодня не эксплуатируется — creds.Password уходит
+// только в ssh.Password/KeyboardInteractive/ParsePrivateKey и ни в один
+// текст команды, — но это отсутствующий слой: первая же команда вида
+// `echo … | sudo -S` или `sshpass -p` напечаталась бы открытой и тихо.
+//
+// У пароля алфавит произвольный, поэтому признак «похоже на base64» для него
+// заменён на «длина от 8 и есть небуквенный символ»: слова диагностики
+// (permission, denied, required) — чистые буквы и не маскируются.
+func TestMaskFreeTextPassword(t *testing.T) {
+	const pw = "Qw3rty!Sup3rSecret"
+
+	t.Run("пароль в тексте команды скрыт", func(t *testing.T) {
+		for _, in := range []string{
+			"sshpass: password=" + pw,
+			`echo "password=` + pw + `" | sudo -S`,
+			"passwd=" + pw,
+			"PASSWORD = " + pw,
+		} {
+			got := maskFreeText(in)
+			if strings.Contains(got, pw) {
+				t.Errorf("пароль напечатан открытым: %s", got)
+			}
+		}
+	})
+
+	t.Run("слова диагностики не съедаются", func(t *testing.T) {
+		for _, in := range []string{
+			"wg: password: permission denied",
+			"password: required",
+			"passwd: No",
+			"sudo: password required",
+		} {
+			if got := maskFreeText(in); got != in {
+				t.Errorf("сообщение без пароля изменено.\n было: %s\nстало: %s", in, got)
+			}
+		}
+	})
+}
+
+// TestMaskFreeTextPEMTruncatedHead — ревью SEC-01, V2.
+//
+// END без BEGIN выше: stderr обрезан СПЕРЕДИ (кольцевой буфер, tail, обрезка
+// чужой утилитой) — те же условия, ради которых заведена ветка обрыва с
+// конца. Тело ключа выходило открытым перед строкой END.
+func TestMaskFreeTextPEMTruncatedHead(t *testing.T) {
+	const body = "test-pem-head-AAAABBBB\ntest-pem-head-CCCCDDDD"
+
+	t.Run("тело перед END скрыто, END и хвост видны", func(t *testing.T) {
+		in := body + "\n-----END RSA PRIVATE KEY-----\nошибка входа"
+		got := maskFreeText(in)
+		for _, frag := range strings.Split(body, "\n") {
+			if strings.Contains(got, frag) {
+				t.Errorf("тело обрезанного спереди ключа осталось открытым (%q):\n%s", frag, got)
+			}
+		}
+		if !strings.Contains(got, "-----END RSA PRIVATE KEY-----") {
+			t.Errorf("строка END пропала — человек не узнает, на что ругается сервер:\n%s", got)
+		}
+		if !strings.Contains(got, "ошибка входа") {
+			t.Errorf("маскировка съела диагностику после END:\n%s", got)
+		}
+		if !strings.Contains(got, truncatedNoteHead) {
+			t.Errorf("обрезка спереди не помечена — потеря диагностики невидима:\n%s", got)
+		}
+	})
+
+	t.Run("целый блок этой веткой не задет", func(t *testing.T) {
+		in := "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----"
+		got := maskFreeText(in)
+		if strings.Contains(got, truncatedNoteHead) {
+			t.Errorf("целый блок помечен как обрезанный спереди — ложное сообщение:\n%s", got)
+		}
+		if !strings.Contains(got, "-----BEGIN RSA PRIVATE KEY-----") {
+			t.Errorf("заголовок BEGIN пропал:\n%s", got)
+		}
+	})
+}
+
+// TestMaskFreeTextNoFalseTruncation — ревью SEC-01, M1.
+//
+// BEGIN в самом конце текста ничего за собой не имеет, и пометка об обрезке
+// утверждала бы факт, которого не было, — тот же класс «незнание выдано за
+// знание», только наизнанку.
+func TestMaskFreeTextNoFalseTruncation(t *testing.T) {
+	got := maskFreeText("ssh: ошибка\n-----BEGIN RSA PRIVATE KEY-----")
+	if strings.Contains(got, truncatedNote) {
+		t.Errorf("пометка об обрезке поставлена там, где ничего не обрезано:\n%s", got)
+	}
+	if !strings.Contains(got, "-----BEGIN RSA PRIVATE KEY-----") {
+		t.Errorf("заголовок BEGIN пропал:\n%s", got)
+	}
+	if !strings.Contains(got, "ssh: ошибка") {
+		t.Errorf("диагностика до заголовка съедена:\n%s", got)
+	}
+}
+
+// TestMaskFreeTextQuotedValueWithComma — ревью SEC-01, M2.
+//
+// Внутри кавычек и запятая, и пробел — часть значения. Прежняя редакция
+// маскировала только до первой запятой, и хвост ключа оставался открытым.
+func TestMaskFreeTextQuotedValueWithComma(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"запятые внутри кавычек", `{"psk": "AAAA,BBBB,CCCC-secret-1234567890"}`, `{"psk": "` + hiddenPlaceholder + `"}`},
+		{"пробелы внутри кавычек", `psk = "AAAA BBBB CCCC secret"`, `psk = "` + hiddenPlaceholder + `"`},
+		{"апостроф и запятая", `psk='AAAA,BBBB,secret'`, `psk='` + hiddenPlaceholder + `'`},
+		{"точка с запятой внутри кавычек", `PrivateKey: "AAAA;BBBB;secret"`, `PrivateKey: "` + hiddenPlaceholder + `"`},
+	}
+	for _, c := range cases {
+		if got := maskFreeText(c.in); got != c.want {
+			t.Errorf("%s: maskFreeText(%q)\n хочу: %q\nполучил: %q", c.name, c.in, c.want, got)
+		}
+	}
+}
