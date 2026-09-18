@@ -57,6 +57,26 @@ package main
 // НАПИСАТЬ ИНАЧЕ?» Где ответ «пройдёт» — это либо починка, либо строка
 // границы ниже, но не умолчание.
 //
+// ЧТО ОБОШЛИ В КРУГЕ 3 И ЧЕМУ ЭТО УЧИТ (ревью SEC-01). Три обхода, и все три
+// одного корня — ПЕРЕЧЕНЬ, СОСТАВЛЕННЫЙ ПО ПАМЯТИ, А НЕ ВЫВЕДЕННЫЙ:
+//   - исключение для поля ввода ключа проверяло значение ПО ИМЕНИ, а имя
+//     назначает автор правки: key := u.sess.Creds.Password; keyEntry.SetText(key)
+//     удовлетворял всем трём условиям исключения и показывал пароль root на
+//     экране. Закрыто четвёртым условием — reboundNames;
+//   - точки вывода перечислялись четырьмя именами методов и тремя полями,
+//     встреченными в коде: cd.SetSubTitle(key), &widget.Card{Subtitle: key} и
+//     fyne.NewNotification("k", key) проходили зелёными. Закрыто не дописью
+//     трёх имён, а РАЗБОРОМ САМОГО ПАКЕТА ВИДЖЕТОВ (см. widgetTextFields и
+//     isSink): перечень получен обходом go/ast по исходникам fyne и сведён к
+//     признаку (префиксы Set*/Append*), чтобы следующая версия fyne закрылась
+//     сама;
+//   - перенос имени шёл только из Ident и SelectorExpr, и КОНТЕЙНЕР терял
+//     заражение: map/срез/структура с ключом внутри и склейка в имя. Закрыто в
+//     carry.
+// ОБЩЕЕ ПРАВИЛО, ради которого это записано: если защита перечисляет ИМЕНА,
+// спрашивать надо не «какого имени не хватает» (их всегда не хватает), а
+// «ЧЕМ ЭТИ ИМЕНА ПОРОЖДАЮТСЯ» — и выводить перечень оттуда.
+//
 // ВХОД БЫВАЕТ НЕВИДИМЫМ. Первая редакция этого сторожа охраняла вход, который
 // видно на экране, — поле ввода keyEntry. Но ключ попадает в программу и
 // МИМО экрана: os.Getenv("AMNEZIA_KEY") (:125) читает его из окружения и
@@ -113,6 +133,17 @@ package main
 //     parts = append(parts, u.sess.Creds.Password) + strings.Join(parts, " ")
 //     и печать результата. Держатель исчезает в возвращаемом значении
 //     strings.Join, и ни одна нога его там не видит;
+//  5б. ПЕРЕПРИСВОЕНИЯ ИМЕНИ ЗА ГРАНИЦЕЙ ФУНКЦИИ. Четвёртое условие исключения
+//     для поля ввода (reboundNames) смотрит ТОЛЬКО В ТУ ЖЕ ФУНКЦИЮ. Если
+//     параметр с именем key приходит в функцию уже содержащим не ключ, а
+//     пароль, исключение сработает. Это частный случай п. 5 (поток через
+//     несколько функций), но назван отдельно, потому что относится к
+//     ЕДИНСТВЕННОМУ послаблению сторожа;
+//  5в. ТОЧЕК ВЫВОДА ЗА ПРЕДЕЛАМИ РАЗОБРАННЫХ ПАКЕТОВ. Перечень выведен
+//     разбором fyne.io/fyne/v2@v2.7.4 (widget, canvas, dialog, корневой fyne)
+//     и признаками Set*/Append*. Виджет из СТОРОННЕГО пакета, принимающий
+//     текст методом без такого префикса, сторож не увидит; обновление fyne —
+//     повод перегнать разбор заново, автоматически это не происходит;
 //  6. КЛИЕНТСКОГО конфига (core.NewUser.Config). Он охраной НЕ ПОКРЫТ и
 //     покрыт быть не должен: в нём приватный ключ и PSK клиента, и он
 //     печатается ЗАКОННО И НАМЕРЕННО — диалог "Конфиг готов", QR-код,
@@ -195,10 +226,38 @@ var keyInputFields = map[string]bool{
 // widgetTextFields — поля виджетов, запись в которые есть вывод на экран.
 // Присваивание в них и композитный литерал с ними — не вызовы, и прежний
 // обход по ast.CallExpr их не видел (ревью SEC-01, круг 2).
+//
+// ОТКУДА ВЗЯТ ЭТОТ ПЕРЕЧЕНЬ — И ПОЧЕМУ НЕ ИЗ ГОЛОВЫ (ревью SEC-01, круг 3).
+// Первая редакция перечисляла три поля — Text/Title/PlaceHolder, — то есть те,
+// что встретились в коде. SEC-01 обошёл его полем Subtitle виджета Card ценой
+// одного слова. Дописать Subtitle значило бы повторить ошибку: перечень имён
+// всегда неполон, если имена придумывают, а не ВЫВОДЯТ. Поэтому перечень
+// получен РАЗБОРОМ САМОГО ПАКЕТА ВИДЖЕТОВ: экспортированные поля типа string
+// у экспортированных структур fyne.io/fyne/v2@v2.7.4 в пакетах widget, canvas,
+// dialog и в корневом fyne (обход go/ast по исходникам модуля):
+//
+//	widget:  Text (Button Check Entry FormItem Hyperlink HyperlinkSegment
+//	         Label TextSegment), Title (AccordionItem Card ImageSegment),
+//	         Subtitle (Card), PlaceHolder (Entry Select), Selected (RadioGroup
+//	         Select), CancelText/SubmitText (Form), HintText (FormItem)
+//	canvas:  Text (Text)
+//	fyne:    Title/Content (Notification — уведомление ОС), Label (Menu,
+//	         MenuItem)
+//
+// Отброшены как не текст на экране: AppMetadata.{ID,Name,Version},
+// Image.File, StaticResource.StaticName. Обновление fyne — повод перегнать
+// разбор заново; новое поле вносится сюда видимой строкой диффа.
 var widgetTextFields = map[string]bool{
 	"Text":        true,
 	"Title":       true,
+	"Subtitle":    true,
 	"PlaceHolder": true,
+	"Content":     true,
+	"Selected":    true,
+	"CancelText":  true,
+	"SubmitText":  true,
+	"HintText":    true,
+	"Label":       true,
 }
 
 // allowedKeyRoundTrip — ЕДИНСТВЕННОЕ исключение для поля ввода ключа, и оно
@@ -214,11 +273,32 @@ var widgetTextFields = map[string]bool{
 // которое им и является, — строку ключа (key, keyEntry.Text или значение,
 // прочитанное из переменной окружения с ключом). Всё прочее, включая пароль,
 // краснеет.
-// Проверяется ТРОЙКА, а не пара: получатель — поле ввода ключа, вызов —
-// SetText, значение — сама строка ключа. Ослабь любую из трёх, и исключение
-// снова станет дырой.
-func allowedKeyRoundTrip(sink, recv, holder string, envVars map[string]bool) bool {
+// Проверяется ЧЕТВЁРКА: получатель — поле ввода ключа, вызов — SetText,
+// значение — сама строка ключа, И ЭТО ИМЯ НЕ ПЕРЕПРИСВОЕНО ЧУЖИМ ЗНАЧЕНИЕМ
+// внутри функции. Ослабь любое из четырёх, и исключение снова станет дырой.
+//
+// ЧЕТВЁРТОЕ УСЛОВИЕ И ЗАЧЕМ ОНО (ревью SEC-01, круг 3). Три условия
+// удовлетворялись одновременно — СЕКРЕТОМ. Прогон SEC-01:
+//
+//	key := u.sess.Creds.Password
+//	keyEntry.SetText(key)          → ЗЕЛЁНО, а на экране пароль root
+//
+// Получатель — keyEntry, вызов — SetText, «значение» — имя key: все три
+// выполнены, потому что значение проверялось ПО ИМЕНИ, а имя назначает автор
+// правки. В этом продукте так пишут естественно: в Password лежит либо пароль,
+// либо приватный ключ, и назвать его key — не диверсия, а описка.
+// Поэтому имя больше не принимается на веру: reboundNames называет имена,
+// которым внутри этой функции присвоили ЧТО-ТО, КРОМЕ строки ключа, и для них
+// исключение не действует. Заметьте, что перечисленная в шапке обратная
+// сторона при этом сохранена: keyEntry.Text = …Password (присваивание) и
+// key := u.sess.Creds + Sprint краснеют по-прежнему.
+func allowedKeyRoundTrip(sink, recv, holder string, envVars, rebound map[string]bool) bool {
 	if sink != ".SetText" || !keyInputFields[recv] {
+		return false
+	}
+	if rebound[holder] {
+		// Имя присвоено внутри функции не строкой ключа: смотреть надо на
+		// значение, а не на то, как автор его назвал.
 		return false
 	}
 	switch holder {
@@ -286,8 +366,25 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 	case *ast.SelectorExpr:
 		name := fun.Sel.Name
 		// Методы-приёмники текста: у любого получателя.
-		switch name {
-		case "SetText", "SetTitle", "SetPlaceHolder", "SetContent":
+		//
+		// ПОЧЕМУ ЗДЕСЬ ПРИЗНАК, А НЕ ЧЕТЫРЕ ИМЕНИ (ревью SEC-01, круг 3).
+		// Прежняя редакция перечисляла SetText/SetTitle/SetPlaceHolder/
+		// SetContent — имена, встреченные в коде, — и обходилась методом
+		// cd.SetSubTitle(key) виджета Card: то же действие, другое имя.
+		// Перечень имён, придуманный по памяти, неполон всегда. Разбор
+		// исходников fyne.io/fyne/v2@v2.7.4 (go/ast по widget, canvas, dialog
+		// и корневому fyne: экспортированные методы с параметром string) даёт
+		// ровно два способа, которыми виджет принимает текст:
+		//   Set*    — SetText, SetTitle, SetSubTitle, SetPlaceHolder/
+		//             SetPlaceholder, SetContent, SetSelected, SetURLFromString,
+		//             SetConfirmText, SetDismissText, SetFileName, SetTitleText;
+		//   Append* — Append (CheckGroup, Entry, Form, RadioGroup, TextGrid),
+		//             AppendMarkdown (RichText).
+		// Поэтому проверяется ПРЕФИКС, а не имя: новый Set-метод в следующей
+		// версии fyne закроется сам. Вне обоих признаков остался единственный
+		// метод — ParseMarkdown, — он назван отдельно.
+		if strings.HasPrefix(name, "Set") || strings.HasPrefix(name, "Append") ||
+			name == "ParseMarkdown" || name == "SendNotification" {
 			return "." + name
 		}
 		// Запись в файл или поток мимо os.WriteFile (ревью SEC-01, круг 2):
@@ -318,6 +415,18 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 		case "widget", "canvas":
 			if strings.HasPrefix(name, "New") {
 				return pkg.Name + "." + name
+			}
+		// КОРНЕВОЙ ПАКЕТ fyne — точка вывода, которой в прежнем перечне не
+		// было вовсе (ревью SEC-01, круг 3):
+		// fyne.CurrentApp().SendNotification(fyne.NewNotification("k", key))
+		// показывает текст УВЕДОМЛЕНИЕМ ОПЕРАЦИОННОЙ СИСТЕМЫ — мимо окна
+		// программы и мимо всех виджетов. Разбор исходников даёт здесь
+		// конструкторы New* (NewNotification, NewMenu, NewMenuItem,
+		// NewStaticResource, LoadResourceFromURLString) и журнал LogError.
+		case "fyne":
+			if strings.HasPrefix(name, "New") || strings.HasPrefix(name, "Log") ||
+				strings.HasPrefix(name, "LoadResource") {
+				return "fyne." + name
 			}
 		case "dialog":
 			if strings.HasPrefix(name, "Show") || strings.HasPrefix(name, "New") {
@@ -444,6 +553,117 @@ func findHolders(e ast.Expr, tainted map[string]bool) []string {
 		return true
 	}
 	ast.Inspect(e, walk)
+	return found
+}
+
+// isKeySourceExpr — является ли выражение САМОЙ СТРОКОЙ КЛЮЧА: имя key,
+// keyEntry.Text, поле .Key записи хранилища, значение из переменной окружения
+// с ключом, либо любое из перечисленного, обёрнутое вызовом (в коде это
+// strings.TrimSpace(keyEntry.Text)). Всё прочее ключом не считается — в том
+// числе .Password, даже если ему дали имя key.
+func isKeySourceExpr(e ast.Expr, envVars map[string]bool) bool {
+	e = unwrapSrc(e)
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name == "key" || envVars[x.Name]
+	case *ast.SelectorExpr:
+		root, path, rootIsIdent := selectorPath(x)
+		if rootIsIdent && keyInputFields[root] && path == ".Text" {
+			return true
+		}
+		return strings.HasSuffix(path, ".Key")
+	case *ast.CallExpr:
+		// Невидимый вход: k := os.Getenv("AMNEZIA_KEY") — это сама строка
+		// ключа, просто пришедшая мимо экрана. Без этой ветки живой код
+		// connectScreenWithStatus покраснел бы (проверено прогоном).
+		if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" &&
+				(sel.Sel.Name == "Getenv" || sel.Sel.Name == "LookupEnv") && len(x.Args) > 0 {
+				if lit, ok := x.Args[0].(*ast.BasicLit); ok {
+					if name, err := strconv.Unquote(lit.Value); err == nil &&
+						(keyEnvNames[name] || keyEnvNameHint(name)) {
+						return true
+					}
+				}
+			}
+		}
+		// strings.TrimSpace(keyEntry.Text), string(b) — обёртка, не смена
+		// предмета. Ключом считаем, только если ключ есть среди аргументов.
+		for _, a := range x.Args {
+			if isKeySourceExpr(a, envVars) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reboundNames — имена, которым внутри функции присвоили значение, НЕ
+// являющееся строкой ключа. Для таких имён исключение allowedKeyRoundTrip не
+// действует: проверка значения идёт по имени, а имя назначает автор правки.
+// Достаточно ОДНОГО такого присваивания в функции — это намеренно строго:
+// ложное срабатывание чинится переименованием переменной, пропуск секрета —
+// заново настроенным сервером.
+func reboundNames(fn ast.Node, envVars map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	mark := func(lhs, rhs ast.Expr) {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || id.Name == "_" {
+			return
+		}
+		if !isKeySourceExpr(rhs, envVars) {
+			out[id.Name] = true
+		}
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			if len(x.Lhs) != len(x.Rhs) {
+				return true
+			}
+			for i, rhs := range x.Rhs {
+				mark(x.Lhs[i], rhs)
+			}
+		case *ast.ValueSpec:
+			if len(x.Names) != len(x.Values) {
+				return true
+			}
+			for i, v := range x.Values {
+				mark(x.Names[i], v)
+			}
+		case *ast.RangeStmt:
+			if x.Value != nil {
+				mark(x.Value, x.X)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// holdersNoCall — поиск держателей, НЕ СПУСКАЮЩИЙСЯ В ВЫЗОВ. Нужен carry для
+// контейнера и склейки: внутри них заражение переносится, но если там стоит
+// вызов, его результат держателем не считается (граница, п. 4 и 5а шапки).
+func holdersNoCall(e ast.Expr, tainted map[string]bool) []string {
+	var found []string
+	ast.Inspect(e, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr, *ast.FuncLit:
+			return false
+		case *ast.SelectorExpr:
+			if classify(x, tainted) == verdictForbidden {
+				root, path, _ := selectorPath(x)
+				found = append(found, root+path)
+			}
+			return false
+		case *ast.Ident:
+			if classify(x, tainted) == verdictForbidden {
+				found = append(found, x.Name)
+			}
+			return false
+		}
+		return true
+	})
 	return found
 }
 
@@ -575,15 +795,45 @@ func taintedIn(fn ast.Node) map[string]bool {
 	tainted := envVarsIn(fn) // невидимый вход — тоже держатель, с первого круга
 
 	// carry помечает имя lhs, если значение src — держатель.
+	//
+	// ПОЧЕМУ СЮДА ДОБАВЛЕНЫ КОНТЕЙНЕР И СКЛЕЙКА (ревью SEC-01, круг 3).
+	// Прежняя редакция переносила имя только из Ident и SelectorExpr, и
+	// составное выражение теряло заражение целиком. Четыре обхода ценой одной
+	// строки, все синтаксически безупречные:
+	//   m := map[string]string{"k": key};  info.SetText(m["k"])
+	//   s := []string{key};                info.SetText(s[0])
+	//   box := struct{ S string }{S: key}; info.SetText(box.S)
+	//   var kk = "ключ- " + key            (склейка В ИМЯ; прямая склейка
+	//                                      в аргументе печати уже краснела)
+	// Это тот же дефект, что закрывали в круге 2 у формы записи: правило
+	// описывало ФОРМУ выражения, а не его смысл — «значение держателя
+	// оказалось под новым именем». Контейнер и склейка ничего не вычисляют,
+	// они только ПЕРЕУПАКОВЫВАЮТ; вынуть обратно можно тем же селектором или
+	// индексом, а findHolders уже умеет спускаться в оба.
+	//
+	// ЧЕМ КОНТЕЙНЕР ОТЛИЧАЕТСЯ ОТ ВЫЗОВА, который ОСТАЛСЯ в границе (п. 4
+	// шапки). Вызов — это чужой код: что он вернёт, сторож не знает, и
+	// sess, err := core.ConnectWithHostKey(creds, …) пометил бы err, а за ним
+	// покраснело бы каждое законное err.Error(). Контейнер и склейка — не
+	// чужой код, а та же память под другим именем, видимая в этой же строке.
+	// Поэтому источник разбирается holdersNoCall — поиском, который В ВЫЗОВ НЕ
+	// СПУСКАЕТСЯ: strings.Join(parts, " ") не заразит имя и здесь (п. 5а
+	// границы остаётся в силе — это цена, а не недосмотр).
 	carry := func(lhs ast.Expr, src ast.Expr) {
 		src = unwrapSrc(src)
 		switch src.(type) {
 		case *ast.Ident, *ast.SelectorExpr:
+			if classify(src, tainted) != verdictForbidden {
+				return
+			}
+		case *ast.CompositeLit, *ast.BinaryExpr:
+			// Контейнер (map/slice/struct) и склейка строк: держатель внутри
+			// них никуда не делся, он лишь переупакован.
+			if len(holdersNoCall(src, tainted)) == 0 {
+				return
+			}
 		default:
-			return // вызов, литерал, композит — не перенос имени
-		}
-		if classify(src, tainted) != verdictForbidden {
-			return
+			return // вызов и литерал — не перенос имени (границы п. 4, 5а)
 		}
 		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
 			tainted[id.Name] = true
@@ -722,10 +972,11 @@ func scanPackage(t *testing.T) (encs []encSite, holders []holderSite, importProb
 			// файл.
 			tainted := taintedIn(fn)
 			envVars := envVarsIn(fn)
+			rebound := reboundNames(fn, envVars)
 			report := func(n ast.Node, sink, recv string, args []ast.Expr) {
 				for _, arg := range args {
 					for _, h := range findHolders(arg, tainted) {
-						if allowedKeyRoundTrip(sink, recv, h, envVars) {
+						if allowedKeyRoundTrip(sink, recv, h, envVars, rebound) {
 							continue
 						}
 						pos := fset.Position(n.Pos())
@@ -956,21 +1207,101 @@ func f() {
 
 	t.Run("исключение для поля ввода ключа сужено по значению", func(t *testing.T) {
 		env := map[string]bool{"k": true}
-		if !allowedKeyRoundTrip(".SetText", "keyEntry", "key", env) {
+		noReb := map[string]bool{}
+		if !allowedKeyRoundTrip(".SetText", "keyEntry", "key", env, noReb) {
 			t.Error("возврат самой строки ключа в своё поле ввода должен быть разрешён")
 		}
-		if !allowedKeyRoundTrip(".SetText", "keyEntry", "k", env) {
+		if !allowedKeyRoundTrip(".SetText", "keyEntry", "k", env, noReb) {
 			t.Error("ключ из окружения в своё поле ввода должен быть разрешён")
 		}
-		if allowedKeyRoundTrip(".SetText", "keyEntry", "u.sess.Creds.Password", env) {
+		if allowedKeyRoundTrip(".SetText", "keyEntry", "u.sess.Creds.Password", env, noReb) {
 			t.Error("РЕГРЕСС круга 1б: пароль root в поле ввода ключа разрешён — " +
 				"исключение снова построено по получателю, а не по значению")
 		}
-		if allowedKeyRoundTrip(".SetText", "statusLabel", "key", env) {
+		if allowedKeyRoundTrip(".SetText", "statusLabel", "key", env, noReb) {
 			t.Error("ключ разрешён в ЧУЖОЙ виджет — проверяется тройка (получатель, вызов, значение)")
 		}
-		if allowedKeyRoundTrip(".SetPlaceHolder", "keyEntry", "key", env) {
+		if allowedKeyRoundTrip(".SetPlaceHolder", "keyEntry", "key", env, noReb) {
 			t.Error("ключ разрешён в подсказку поля — исключение только для SetText")
+		}
+		if allowedKeyRoundTrip(".SetText", "keyEntry", "key", env, map[string]bool{"key": true}) {
+			t.Error("РЕГРЕСС круга 2: имя key, переприсвоенное чужим значением, всё ещё " +
+				"пользуется исключением — значение проверяется по имени, а имя назначает автор правки")
+		}
+	})
+
+	t.Run("имя key, присвоенное паролем, теряет исключение", func(t *testing.T) {
+		// Прогон SEC-01, круг 3: все три прежних условия исключения
+		// выполнены, а на экране пароль root.
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	key := u.sess.Creds.Password
+	keyEntry.SetText(key)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		fd := f.Decls[0].(*ast.FuncDecl)
+		if !reboundNames(fd, envVarsIn(fd))["key"] {
+			t.Error("имя key, которому присвоили .Password, не помечено переприсвоенным — " +
+				"исключение для поля ввода снова удовлетворимо секретом")
+		}
+	})
+
+	t.Run("законный ключ исключения не теряет", func(t *testing.T) {
+		// Обратная сторона той же правки: имя key, присвоенное самой строкой
+		// ключа (в коде — через strings.TrimSpace), краснеть не должно.
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	key := strings.TrimSpace(keyEntry.Text)
+	keyEntry.SetText(key)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		fd := f.Decls[0].(*ast.FuncDecl)
+		if reboundNames(fd, envVarsIn(fd))["key"] {
+			t.Error("key := strings.TrimSpace(keyEntry.Text) помечен переприсвоенным — " +
+				"сторож покраснеет на живом коде подключения")
+		}
+	})
+
+	t.Run("перенос держателя через контейнер и склейку", func(t *testing.T) {
+		// Ревью SEC-01, круг 3: составное выражение теряло заражение.
+		for _, src := range []struct{ name, code, want string }{
+			{"map", `m := map[string]string{"k": key}`, "m"},
+			{"срез", `s := []string{key}`, "s"},
+			{"структура", `box := struct{ S string }{S: key}`, "box"},
+			{"склейка в имя", `kk := "ключ- " + key`, "kk"},
+			{"var со склейкой", `var kk = "ключ- " + key`, "kk"},
+		} {
+			t.Run(src.name, func(t *testing.T) {
+				f, err := parser.ParseFile(token.NewFileSet(), "x.go",
+					"package main\nfunc f() {\n"+src.code+"\n}", 0)
+				if err != nil {
+					t.Fatalf("разбор образца: %v", err)
+				}
+				if !taintedIn(f)[src.want] {
+					t.Errorf("держатель, переупакованный записью %q, не помечен — "+
+						"контейнер и склейка ничего не вычисляют, они только переупаковывают", src.code)
+				}
+			})
+		}
+	})
+
+	t.Run("склейка с вызовом заражения не переносит", func(t *testing.T) {
+		// Граница п. 4 и 5а шапки остаётся в силе: результат вызова
+		// держателем не считается, иначе покраснеет законный err.Error().
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	msg := "ошибка: " + err.Error()
+	_ = msg
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		if taintedIn(f)["msg"] {
+			t.Error("склейка с результатом вызова заразила имя — сторож покраснеет на честном коде")
 		}
 	})
 
