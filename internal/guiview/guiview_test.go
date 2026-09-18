@@ -101,7 +101,10 @@ func TestViewState(t *testing.T) {
 			v := ViewState(c, nil, false, readErr)
 			var want string
 			if spec.managed {
-				want = "Ошибка: " + readErr.Error()
+				// A1, место № 4: было "Ошибка: <текст>" — таблица молча
+				// сохраняла прежние данные. Стало: то же плюс указание, что
+				// на экране данные прошлого чтения (StaleShown — stale_test.go).
+				want = "Ошибка: " + readErr.Error() + " · показаны данные прошлого чтения."
 			} else {
 				want = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", spec.proto, readErr.Error())
 			}
@@ -114,7 +117,7 @@ func TestViewState(t *testing.T) {
 			v := ViewState(c, nil, true, parseErr)
 			var want string
 			if spec.managed {
-				want = "Ошибка: " + parseErr.Error()
+				want = "Ошибка: " + parseErr.Error() + " · показаны данные прошлого чтения."
 			} else {
 				want = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", spec.proto, parseErr.Error())
 			}
