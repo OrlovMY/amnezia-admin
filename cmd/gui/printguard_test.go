@@ -144,6 +144,23 @@ package main
 //     и признаками Set*/Append*. Виджет из СТОРОННЕГО пакета, принимающий
 //     текст методом без такого префикса, сторож не увидит; обновление fyne —
 //     повод перегнать разбор заново, автоматически это не происходит;
+//  5г. ДЕРЖАТЕЛЯ, СТОЯЩЕГО КЛЮЧОМ ОТОБРАЖЕНИЯ, при обходе range (предъявлено
+//     прогоном SEC-01, круг 4): m := map[string]int{key: 1}; for kk := range m
+//     — заражение самого m ловится (контейнер), но имя kk из обхода
+//     держателем не становится, потому что классификация ключа по подтипу
+//     элемента без типов недоступна. В reboundNames обе переменные range уже
+//     разбираются, в taintedIn — только Value. Правдоподобность низкая,
+//     починки не требуется, но путь назван;
+//  5д. ПЕРЕДАЧИ ЧЕРЕЗ КАНАЛ (предъявлено прогоном SEC-01, круг 4):
+//     ch <- key … info.SetText(<-ch). Канал — не имя и не поле, заражение
+//     через него не переносится ни одной из ног;
+//  5е. ВЫВОДА НЕ НА ЭКРАН И НЕ В ФАЙЛ — АРГУМЕНТОВ ПРОЦЕССА:
+//     exec.Command(…, key) показывает ключ в списке процессов всей машине.
+//     Сегодня в cmd/gui пакета os/exec нет вовсе, поэтому это ГРАНИЦА, а не
+//     дефект. Записано прямо, потому что формула «в файл, в журнал, на экран»
+//     из шапки — НЕ ПОЛНЫЙ список способов выпустить строку из программы:
+//     туда же буфер обмена, сетевой запрос, переменная окружения дочернего
+//     процесса;
 //  6. КЛИЕНТСКОГО конфига (core.NewUser.Config). Он охраной НЕ ПОКРЫТ и
 //     покрыт быть не должен: в нём приватный ключ и PSK клиента, и он
 //     печатается ЗАКОННО И НАМЕРЕННО — диалог "Конфиг готов", QR-код,
@@ -381,10 +398,20 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 		//   Append* — Append (CheckGroup, Entry, Form, RadioGroup, TextGrid),
 		//             AppendMarkdown (RichText).
 		// Поэтому проверяется ПРЕФИКС, а не имя: новый Set-метод в следующей
-		// версии fyne закроется сам. Вне обоих признаков остался единственный
-		// метод — ParseMarkdown, — он назван отдельно.
+		// версии fyne закроется сам. Вне обоих признаков остались два метода,
+		// и оба названы поимённо:
+		//   ParseMarkdown  (RichText);
+		//   PushWithTitle  (container.Navigation) — ВТОРОЙ АРГУМЕНТ СТАНОВИТСЯ
+		//     ЗАГОЛОВКОМ ЭКРАНА. Найден SEC-01 (круг 4) разбором container и
+		//     предъявлен прогоном: nav.PushWithTitle(widget.NewLabel("y"), key)
+		//     проходил ЗЕЛЁНЫМ. Именно ИМЯ, а не пакет: сам пакет container
+		//     точкой вывода не объявлен и объявлен быть не может —
+		//     container.NewVBox(keyEntry) размещает поле ввода на экране, а не
+		//     печатает его содержимое, и сторож, краснеющий на этом, был бы
+		//     ослаблен первым же действием.
 		if strings.HasPrefix(name, "Set") || strings.HasPrefix(name, "Append") ||
-			name == "ParseMarkdown" || name == "SendNotification" {
+			name == "ParseMarkdown" || name == "SendNotification" ||
+			name == "PushWithTitle" {
 			return "." + name
 		}
 		// Запись в файл или поток мимо os.WriteFile (ревью SEC-01, круг 2):
@@ -427,6 +454,20 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 			if strings.HasPrefix(name, "New") || strings.HasPrefix(name, "Log") ||
 				strings.HasPrefix(name, "LoadResource") {
 				return "fyne." + name
+			}
+		// ПАКЕТ container — ТОЧКОЙ ВЫВОДА ЦЕЛИКОМ НЕ ОБЪЯВЛЕН И БЫТЬ НЕ МОЖЕТ:
+		// раскладка принимает готовые CanvasObject'ы, и container.NewVBox(
+		// keyEntry) — размещение поля ввода на экране, а не печать его
+		// содержимого; сторож, краснеющий на этом, ослабляют первым же
+		// действием. Поэтому здесь ИМЕНА, и они не придуманы, а получены тем
+		// же разбором container@2.7.4: ровно четыре конструктора берут string
+		// (заголовок вкладки, окна, экрана навигации). Методы того же пакета
+		// (SetTitle, SetCurrentTitle) уже закрыты признаком Set*, поля
+		// TabItem.Text и Navigation.Title — перечнем widgetTextFields.
+		case "container":
+			switch name {
+			case "NewInnerWindow", "NewNavigationWithTitle", "NewTabItem", "NewTabItemWithIcon":
+				return "container." + name
 			}
 		case "dialog":
 			if strings.HasPrefix(name, "Show") || strings.HasPrefix(name, "New") {
@@ -615,23 +656,67 @@ func reboundNames(fn ast.Node, envVars map[string]bool) map[string]bool {
 			out[id.Name] = true
 		}
 	}
+	// FAIL-CLOSED НА МНОГОЗНАЧНОМ ПРИСВАИВАНИИ (ревью SEC-01, круг 4).
+	// Прежняя редакция при len(Lhs) != len(Rhs) не помечала НИЧЕГО, то есть
+	// самая частая форма записи в Go — key, _ := f() — четвёртым условием не
+	// виделась вовсе, и подмена
+	//     key, _ := <функция, возвращающая пароль>
+	//     keyEntry.SetText(key)
+	// проходила ЗЕЛЁНОЙ с паролем в видимом поле. Это было единственное место,
+	// где код обещал больше, чем делает.
+	// Теперь все левые имена такого присваивания считаются переприсвоенными:
+	// какое из них что получило, сторож без типов не знает, а цена
+	// несимметрична — ложное срабатывание чинится переименованием переменной,
+	// пропуск секрета — заново настроенным сервером.
+	// ПОЧЕМУ ТОЧНО ТАК ЖЕ НЕ СДЕЛАНО В carry: там fail-closed означал бы
+	// ЗАРАЗИТЬ имена, и sess, err := core.ConnectWithHostKey(creds, …) пометил
+	// бы err, а за ним покраснело бы каждое законное err.Error(). Здесь же
+	// пометка ничего не красит сама — она лишь ОТНИМАЕТ послабление у
+	// единственного исключения. Направление ошибки противоположное, поэтому и
+	// решение разное.
+	markAllLhs := func(lhs []ast.Expr) {
+		for _, l := range lhs {
+			if id, ok := l.(*ast.Ident); ok && id.Name != "_" {
+				out[id.Name] = true
+			}
+		}
+	}
 	ast.Inspect(fn, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.AssignStmt:
 			if len(x.Lhs) != len(x.Rhs) {
+				markAllLhs(x.Lhs)
 				return true
 			}
 			for i, rhs := range x.Rhs {
 				mark(x.Lhs[i], rhs)
 			}
 		case *ast.ValueSpec:
-			if len(x.Names) != len(x.Values) {
+			if len(x.Values) == 0 {
+				// var key string — объявление без значения ничего не
+				// присваивает, это не переприсваивание. Разбирается тот же
+				// случай, что и у AssignStmt, только с одной оговоркой: иначе
+				// любое `var key string` навсегда отняло бы послабление у
+				// законного кода, не внеся никакой защиты.
+				return true
+			}
+			if len(x.Names) != len(x.Values) { // var a, b = f()
+				names := make([]ast.Expr, 0, len(x.Names))
+				for _, nm := range x.Names {
+					names = append(names, nm)
+				}
+				markAllLhs(names)
 				return true
 			}
 			for i, v := range x.Values {
 				mark(x.Names[i], v)
 			}
 		case *ast.RangeStmt:
+			// И Key, и Value: держатель бывает КЛЮЧОМ отображения
+			// (см. границу, п. 5г).
+			if x.Key != nil {
+				mark(x.Key, x.X)
+			}
 			if x.Value != nil {
 				mark(x.Value, x.X)
 			}
@@ -1245,6 +1330,41 @@ func f() {
 		if !reboundNames(fd, envVarsIn(fd))["key"] {
 			t.Error("имя key, которому присвоили .Password, не помечено переприсвоенным — " +
 				"исключение для поля ввода снова удовлетворимо секретом")
+		}
+	})
+
+	t.Run("многозначное присваивание отнимает исключение", func(t *testing.T) {
+		// Ревью SEC-01, круг 4: при len(Lhs) != len(Rhs) не помечалось ничего,
+		// то есть самая частая форма записи в Go четвёртым условием не
+		// виделась вовсе.
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	key, _ := u.currentPassword()
+	keyEntry.SetText(key)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		fd := f.Decls[0].(*ast.FuncDecl)
+		if !reboundNames(fd, envVarsIn(fd))["key"] {
+			t.Error("имя key из многозначного присваивания не помечено переприсвоенным — " +
+				"четвёртое условие исключения не срабатывает на самой частой форме записи в Go")
+		}
+	})
+
+	t.Run("объявление без значения переприсваиванием не считается", func(t *testing.T) {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	var key string
+	key = strings.TrimSpace(keyEntry.Text)
+	keyEntry.SetText(key)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		fd := f.Decls[0].(*ast.FuncDecl)
+		if reboundNames(fd, envVarsIn(fd))["key"] {
+			t.Error("var key string отнял послабление у законного кода, не внеся защиты")
 		}
 	})
 
