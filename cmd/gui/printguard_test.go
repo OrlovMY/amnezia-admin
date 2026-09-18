@@ -41,6 +41,21 @@ package main
 //     через поле структуры: u.sess присвоено в одной функции, а раскрывается
 //     в другой, и никакой цепочки в пределах второй функции нет.
 //
+// ВХОД БЫВАЕТ НЕВИДИМЫМ. Первая редакция этого сторожа охраняла вход, который
+// видно на экране, — поле ввода keyEntry. Но ключ попадает в программу и
+// МИМО экрана: os.Getenv("AMNEZIA_KEY") (:125) читает его из окружения и
+// кладёт в то же поле ввода. Этого корня не было ни в одном из трёх
+// перечней, составленных до работы, — все трое взяли за вход то, что видно.
+// Предъявлено прогоном: правдоподобная строка
+// keyEntry.SetPlaceHolder("ключ из окружения: " + k) проходила сторож
+// ЗЕЛЁНОЙ, потому что заражение намеренно не идёт через возвращаемое
+// значение функции (п. 4 границы ниже), а имя k не совпадает ни с одним
+// охраняемым. Ключ vpn://… — весь конфиг целиком, то есть утечка шире всех
+// прочих. Закрыто keyEnvNames + envVarsIn (строка 9 таблицы покраснений).
+// ОБЩЕЕ ПРАВИЛО, ради которого это записано: корень трассировки — не «поле
+// ввода», а ЛЮБОЕ место, где значение появляется в пакете, включая
+// окружение, файл и аргумент командной строки.
+//
 // САМЫЙ БОГАТЫЙ ДЕРЖАТЕЛЬ — САМА СТРОКА КЛЮЧА. В строке vpn://… лежит ВЕСЬ
 // конфиг целиком, то есть надмножество всего, что охраняется ниже по
 // течению: напечатав её, утекает не пароль, а всё сразу. Она живёт
@@ -67,7 +82,9 @@ package main
 //     функции (x := f(cfg) не делает x держателем). Это сделано намеренно:
 //     иначе sess, err := core.ConnectWithHostKey(creds, …) пометил бы и err,
 //     и каждое законное err.Error() покраснело бы — сторож, краснеющий на
-//     честном коде, ослабляют первым же действием;
+//     честном коде, ослабляют первым же действием. ИСКЛЮЧЕНИЕ ровно одно и
+//     названо поимённо: os.Getenv/os.LookupEnv (envVarsIn) — невидимый вход
+//     ключа, ради которого пришлось пробить эту границу в одном месте;
 //  5. потока через несколько функций без поля структуры: значение, переданное
 //     параметром в третью функцию и напечатанное там под другим именем;
 //  6. КЛИЕНТСКОГО конфига (core.NewUser.Config). Он охраной НЕ ПОКРЫТ и
@@ -134,6 +151,31 @@ var holderRoots = map[string]bool{
 	"payload":  true,
 }
 
+// keyEnvNames — переменные окружения, из которых приходит КЛЮЧ. Перечислены
+// поимённо, как и всё остальное допустимое/охраняемое в этом стороже: новая
+// вносится видимой строкой диффа. Чтение ЛЮБОЙ другой переменной окружения
+// держателем не считается и краснеть не должно — в cmd/cli есть законный
+// os.Getenv("NO_COLOR"), и сторож, краснеющий на таком, ослабляют первым же
+// действием (это уже случалось в круге 1 на замыканиях-обработчиках).
+var keyEnvNames = map[string]bool{
+	"AMNEZIA_KEY": true,
+}
+
+// keyInputFields — поля ввода, В КОТОРЫХ ключ живёт по своему назначению.
+// Запись ключа в собственное поле ввода — не раскрытие (см. isSink).
+var keyInputFields = map[string]bool{
+	"keyEntry": true,
+}
+
+// keyEnvNameHint — страховка на случай новой переменной, которую забудут
+// внести в keyEnvNames: имя, содержащее KEY или VPN, считается несущим ключ.
+// Ложное срабатывание чинится строкой в перечне, пропуск секрета — заново
+// настроенным сервером; цена несимметрична.
+func keyEnvNameHint(name string) bool {
+	up := strings.ToUpper(name)
+	return strings.Contains(up, "KEY") || strings.Contains(up, "VPN")
+}
+
 // holderFields — поля, путь через которые делает выражение держателем, где бы
 // это выражение ни начиналось: u.sess.Creds, vc.payload.Key, x.Password.
 var holderFields = map[string]bool{
@@ -178,6 +220,18 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 		}
 	case *ast.SelectorExpr:
 		name := fun.Sel.Name
+		// ИСКЛЮЧЕНИЕ, перечисленное поимённо: keyEntry.SetText(<ключ>) — это
+		// заполнение САМОГО ПОЛЯ ВВОДА ключа, то есть возврат значения туда,
+		// откуда оно и приходит (:125-126 подставляет ключ из AMNEZIA_KEY в
+		// поле, куда его иначе вставляет человек). Новым раскрытием это не
+		// является. Всё остальное с тем же значением — включая
+		// keyEntry.SetPlaceHolder, подпись, заголовок и любой другой виджет —
+		// запрещено: это уже вынос ключа за пределы его собственного поля.
+		if name == "SetText" {
+			if recv, ok := fun.X.(*ast.Ident); ok && keyInputFields[recv.Name] {
+				return ""
+			}
+		}
 		// Методы-приёмники текста: у любого получателя.
 		switch name {
 		case "SetText", "SetTitle", "SetPlaceHolder", "SetContent":
@@ -333,11 +387,105 @@ func findHolders(e ast.Expr, tainted map[string]bool) []string {
 	return found
 }
 
+// envVarsIn — ТРЕТЬЯ НОГА: невидимый вход. Возвращает локальные имена,
+// получившие значение из os.Getenv/os.LookupEnv, которое несёт ключ. Несущим
+// ключ чтение считается по ДВУМ независимым признакам, потому что одного
+// мало:
+//  1. ПО ИМЕНИ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ — keyEnvNames (поимённо) либо подсказка
+//     keyEnvNameHint (KEY/VPN в имени);
+//  2. ПО НАЗНАЧЕНИЮ — прочитанное значение уходит в держатель: присваивается
+//     имени-держателю (key = k) или подаётся в текст поля ввода ключа
+//     (keyEntry.SetText(k)). Это ловит переменную, названную как угодно
+//     ("AMN_CONN", "ADMIN_STRING"), — имя обмануть легко, назначение нет.
+func envVarsIn(fn ast.Node) map[string]bool {
+	candidates := map[string]bool{} // имя → прочитано из окружения
+	byName := map[string]bool{}     // и само имя переменной окружения выдаёт ключ
+
+	ast.Inspect(fn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range as.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "os" ||
+				(sel.Sel.Name != "Getenv" && sel.Sel.Name != "LookupEnv") {
+				continue
+			}
+			if i >= len(as.Lhs) {
+				continue
+			}
+			id, ok := as.Lhs[i].(*ast.Ident)
+			if !ok || id.Name == "_" {
+				continue
+			}
+			candidates[id.Name] = true
+			if len(call.Args) > 0 {
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+					if envName, err := strconv.Unquote(lit.Value); err == nil &&
+						(keyEnvNames[envName] || keyEnvNameHint(envName)) {
+						byName[id.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	if len(candidates) == 0 {
+		return byName
+	}
+
+	// Признак 2: значение уходит в держатель.
+	out := byName
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, rhs := range x.Rhs {
+				id, ok := rhs.(*ast.Ident)
+				if !ok || !candidates[id.Name] || i >= len(x.Lhs) {
+					continue
+				}
+				if lhs, ok := x.Lhs[i].(*ast.Ident); ok && holderRoots[lhs.Name] {
+					out[id.Name] = true
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := x.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "SetText" {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok || !holderRoots[recv.Name] {
+				return true
+			}
+			for _, a := range x.Args {
+				ast.Inspect(a, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok && candidates[id.Name] {
+						out[id.Name] = true
+					}
+					return true
+				})
+			}
+		}
+		return true
+	})
+	return out
+}
+
 // taintedIn — ВТОРАЯ НОГА: цепочка присваиваний в пределах функции. Ловит
 // локальный обход (p := cfg["password"]; c := u.sess.Creds). Заражение НЕ
 // идёт через вызов функции — см. п. 4 границы в шапке.
 func taintedIn(fn ast.Node) map[string]bool {
-	tainted := map[string]bool{}
+	tainted := envVarsIn(fn) // невидимый вход — тоже держатель, с первого круга
 	// Несколько проходов: c := u.sess.Creds; p := c — второе видно только
 	// после первого.
 	for round := 0; round < 4; round++ {
@@ -645,6 +793,55 @@ func f() {
 		if taintedIn(f)["err"] {
 			t.Error("err помечен держателем — сторож покраснеет на каждом законном err.Error(); " +
 				"это ровно тот случай, когда сторожа ослабляют первым же действием")
+		}
+	})
+
+	t.Run("невидимый вход: ключ из окружения — держатель", func(t *testing.T) {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	if k := os.Getenv("AMNEZIA_KEY"); k != "" {
+		keyEntry.SetText(k)
+	}
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		if !taintedIn(f)["k"] {
+			t.Error("значение из os.Getenv(\"AMNEZIA_KEY\") не помечено держателем — " +
+				"в нём ключ vpn://… целиком, то есть весь конфиг сразу")
+		}
+	})
+
+	t.Run("невидимый вход по назначению, а не по имени переменной", func(t *testing.T) {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	v := os.Getenv("AMN_CONN")
+	keyEntry.SetText(v)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		if !taintedIn(f)["v"] {
+			t.Error("значение из окружения, уходящее в поле ввода ключа, не помечено держателем — " +
+				"имя переменной окружения обмануть легко, назначение нет")
+		}
+	})
+
+	t.Run("законное чтение окружения держателем не считается", func(t *testing.T) {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", `package main
+func f() {
+	if os.Getenv("NO_COLOR") != "" {
+		return
+	}
+	n := os.Getenv("NO_COLOR")
+	fmt.Println(n)
+}`, 0)
+		if err != nil {
+			t.Fatalf("разбор образца: %v", err)
+		}
+		if taintedIn(f)["n"] {
+			t.Error("NO_COLOR помечен держателем — сторож покраснеет на законном коде " +
+				"(такой os.Getenv есть в cmd/cli), и его ослабят первым же действием")
 		}
 	})
 
