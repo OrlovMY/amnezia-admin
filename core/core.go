@@ -366,12 +366,27 @@ func (s *Session) GetPeerStats(c *Container) (map[string]PeerStat, error) {
 }
 
 // GetHandshakes возвращает время последнего handshake по каждому публичному ключу
-// ("—" — подключений не было); обёртка над GetPeerStats для обратной совместимости
-func (s *Session) GetHandshakes(c *Container) map[string]string {
+// ("—" — подключений не было); обёртка над GetPeerStats.
+//
+// ТРЕТЬЕ СОСТОЯНИЕ ВЫРАЖЕНО СИГНАТУРОЙ (задание A1, место № 1). Прежняя
+// сигнатура — map[string]string без error — состояний различала два:
+// «подключался» и «не подключался». Отказ сервера превращался в ПУСТУЮ
+// КАРТУ, то есть в «ни один клиент не подключался», и до диалога удаления
+// информация «данных нет» не доезжала ни в каком виде. Починить это в месте
+// печати невозможно — там уже нечего различать; уничтожать признак незнания
+// на пути к выводу нельзя, даже глубоко внутри.
+//
+// При ошибке карта возвращается nil, а не пустой: непустая карта рядом с
+// ошибкой провоцирует вызывающего прочитать её и снова счесть пустоту
+// ответом.
+//
+// Серверная команда не изменилась: это правка формы возврата в Go,
+// `docker exec … wg show wg0 dump` остаётся дословно (TestServerCommandsUnchanged).
+func (s *Session) GetHandshakes(c *Container) (map[string]string, error) {
 	handshakes := map[string]string{}
 	stats, err := s.GetPeerStats(c)
 	if err != nil {
-		return handshakes
+		return nil, err
 	}
 	for pub, st := range stats {
 		if st.LastHandshake.IsZero() {
@@ -380,7 +395,7 @@ func (s *Session) GetHandshakes(c *Container) map[string]string {
 			handshakes[pub] = st.LastHandshake.Format("2006-01-02 15:04")
 		}
 	}
-	return handshakes
+	return handshakes, nil
 }
 
 // HumanBytes форматирует размер в человекочитаемый вид (десятичные единицы, 1000)
