@@ -49,6 +49,15 @@ type ui struct {
 	// трафика в таблице пишет "—" вместо "?"/"0 B" при !canManage.
 	canManage bool
 
+	// warnSess, warnFreq — предупреждение о гонке при одновременной работе
+	// (A3а). Состояние сеанса хранится ЗДЕСЬ, а не в guiview: пакет решений
+	// без Fyne обязан оставаться чистым, иначе его таблица начнёт зависеть от
+	// порядка прогонов. warnFreq — режим частоты; ответ владельца 18.09.2026
+	// — "один раз за запуск", и смена его решения стоит правки этой одной
+	// строки в main(), а не переделки конструкции.
+	warnSess guiview.WarnSession
+	warnFreq guiview.WarnFrequency
+
 	// Кнопки главного экрана — поля, чтобы setBusy(true/false) могла
 	// Disable()/Enable() их во время любой серверной операции (от нажатия до
 	// fyne.Do с результатом), включая refresh(): мьютекс в core защищает
@@ -72,7 +81,9 @@ func main() {
 	w := a.NewWindow("Amnezia Admin " + version.String())
 	w.Resize(fyne.NewSize(980, 620))
 
-	u := &ui{win: w, selectedRow: -1}
+	// warnFreq: выбор владельца от 18.09.2026 — "один раз за запуск"
+	// (сброс при смене сервера). Второй режим — guiview.WarnEveryTime.
+	u := &ui{win: w, selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
 	u.sortPrimary, u.sortPrimaryDir, u.sortSecondary, u.sortSecondaryDir = loadSortState()
 	w.SetContent(u.connectScreen())
 	w.ShowAndRun()
@@ -1352,33 +1363,43 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	var d dialog.Dialog
 	var applyBtn *widget.Button
 	applyBtn = widget.NewButtonWithIcon("Применить", theme.ConfirmIcon(), func() {
-		applyBtn.Disable()
-		u.setBusy(true)
-		statusLabel.Importance = widget.MediumImportance
-		statusLabel.SetText("Применяю...")
-		goSafe(func() {
-			nu, err := u.sess.Apply(plan)
-			fyne.Do(func() {
-				u.setBusy(false)
-				if err != nil {
-					if isCASRefusal(err) {
-						// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
-						// должно отличаться от "Применяю..." не только
-						// словами: DangerImportance == theme.ColorNameError.
-						statusLabel.Importance = widget.DangerImportance
-						statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
-						return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+		// A3а, ШЕСТАЯ точка записи: предупреждение о гонке непосредственно
+		// перед sess.Apply. Окно изменений общее для всех пяти операций, и
+		// путь "сначала посмотреть, что изменится, потом применить" —
+		// единственный, которым идёт самый осторожный человек. Без этого
+		// вызова именно он писал бы на сервер без предупреждения.
+		// При "Отмена" окно изменений остаётся открытым, кнопка "Применить"
+		// не Disable()-ится (её Disable стоит ВНУТРИ) — человек возвращается
+		// к тому же плану и закрывает окно сам кнопкой "Закрыть".
+		u.confirmRaceWarning(guiview.OpApplyPlan, func() {
+			applyBtn.Disable()
+			u.setBusy(true)
+			statusLabel.Importance = widget.MediumImportance
+			statusLabel.SetText("Применяю...")
+			goSafe(func() {
+				nu, err := u.sess.Apply(plan)
+				fyne.Do(func() {
+					u.setBusy(false)
+					if err != nil {
+						if isCASRefusal(err) {
+							// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
+							// должно отличаться от "Применяю..." не только
+							// словами: DangerImportance == theme.ColorNameError.
+							statusLabel.Importance = widget.DangerImportance
+							statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
+							return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+						}
+						statusLabel.Importance = widget.MediumImportance
+						statusLabel.SetText("")
+						applyBtn.Enable()
+						dialog.ShowError(err, u.win)
+						return
 					}
-					statusLabel.Importance = widget.MediumImportance
-					statusLabel.SetText("")
-					applyBtn.Enable()
-					dialog.ShowError(err, u.win)
-					return
-				}
-				d.Hide()
-				if onApplied != nil {
-					onApplied(nu)
-				}
+					d.Hide()
+					if onApplied != nil {
+						onApplied(nu)
+					}
+				})
 			})
 		})
 	})
@@ -1409,6 +1430,79 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	d.Show()
 }
 
+// ---------- предупреждение о гонке при одновременной работе (A3а) ----------
+
+// warnServerID — то, что для предупреждения считается "сервером": отпечаток
+// ключа хоста текущего соединения. Он уникален для сервера и уже показывается
+// человеку в диалогах доверия ключу, то есть секретом не является; здесь он
+// только сравнивается и никуда не печатается. При переподключении к другому
+// серверу отпечаток другой — предупреждение показывается снова.
+// Два следствия этого выбора, записанные явно, чтобы их потом не "починили"
+// как дефекты (наблюдения UX-01, 19.09.2026):
+//
+//  1. СМЕНА КОНТЕЙНЕРА/ПРОТОКОЛА на том же сервере предупреждения НЕ
+//     повторяет — отпечаток тот же. Это ВЕРНО и сделано намеренно: гонка
+//     живёт на сервере (один SSH, одни файлы), а не на контейнере, и второе
+//     предупреждение при переключении протокола было бы шумом.
+//  2. ОТКЛЮЧИТЬСЯ И ПОДКЛЮЧИТЬСЯ К ТОМУ ЖЕ СЕРВЕРУ заново без перезапуска
+//     программы — предупреждения не будет: warnSess живёт на ui и переживает
+//     экран подключения. Решение владельца "один раз за запуск" соблюдено
+//     дословно; это единственное место, где "запуск" и "сеанс работы с
+//     сервером" расходятся. Менять — только решением владельца.
+func (u *ui) warnServerID() string {
+	if u.sess == nil {
+		return ""
+	}
+	return u.sess.HostKeyFingerprint
+}
+
+// confirmRaceWarning — предупреждение о гонке перед необратимой операцией op:
+// вызывает do ТОЛЬКО если человек согласился продолжить.
+//
+// Почему вызов стоит в обработчике кнопки, а не при открытии формы: у каждой
+// операции две точки, обе называются "перед операцией", и при частоте "один
+// раз за запуск" показ на открытии формы отделил бы предупреждение от записи
+// минутой заполнения полей — человек нажал бы "Создать", и в момент, когда
+// данные уходят на сервер, он был бы уже не предупреждён и в этот запуск не
+// был бы. Реальное действие — запись, а не открытие окна.
+//
+// "Отмена": do не вызывается, core не трогается, на сервере и локально не
+// меняется ничего, и ФОРМА ОПЕРАЦИИ ОСТАЁТСЯ ОТКРЫТОЙ — человек возвращается
+// к тому, что заполнял, и закрывает её сам, если захочет. Закрывать за
+// человека заполненную форму — потеря его работы, а предупреждение заведено
+// ровно ради того, чтобы работу не терять.
+//
+// Ни текста, ни подписей кнопок здесь нет намеренно: всё приходит из
+// internal/guiview, потому что в cmd/gui нет ни одного теста и запуск GUI
+// требует дисплея — литерал здесь был бы строкой, которую не видит ни одна
+// проверка. За этим следит сторож internal/guiview/warnguard_test.go.
+func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
+	server := u.warnServerID()
+	if !guiview.WarnDecision(op, u.warnFreq, u.warnSess, server) {
+		do()
+		return
+	}
+
+	body := widget.NewLabel(guiview.WarningBody())
+	body.Wrapping = fyne.TextWrapWord
+
+	var d dialog.Dialog
+	contBtn := widget.NewButtonWithIcon(guiview.WarnContinueLabel(), theme.ConfirmIcon(), func() {
+		// Сеанс отмечается только здесь, на "Продолжить": человек, который
+		// прочитал и отказался, при следующей попытке увидит предупреждение
+		// снова — он до записи так и не дошёл.
+		u.warnSess = guiview.AfterWarned(server)
+		d.Hide()
+		do()
+	})
+	contBtn.Importance = widget.HighImportance
+
+	content := container.NewVBox(body, container.NewHBox(contBtn))
+	d = dialog.NewCustom(guiview.WarningTitle(), guiview.WarnCancelLabel(), content, u.win)
+	d.Resize(fyne.NewSize(560, 300))
+	d.Show()
+}
+
 // ---------- создание ----------
 
 func (u *ui) addDialog() {
@@ -1432,19 +1526,23 @@ func (u *ui) addDialog() {
 		if name == "" {
 			return
 		}
-		d.Hide()
-		u.setBusy(true)
-		u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
-		goSafe(func() {
-			nu, err := u.sess.AddUser(u.cur, name)
-			fyne.Do(func() {
-				if err != nil {
-					u.setBusy(false)
-					u.status.SetText("")
-					dialog.ShowError(err, u.win)
-					return
-				}
-				onCreated(nu)
+		// A3а: предупреждение о гонке непосредственно перед записью на
+		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
+		u.confirmRaceWarning(guiview.OpAddUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
+			goSafe(func() {
+				nu, err := u.sess.AddUser(u.cur, name)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					onCreated(nu)
+				})
 			})
 		})
 	}
@@ -1575,19 +1673,23 @@ func (u *ui) renameSelected() {
 		if newName == "" {
 			return
 		}
-		d.Hide()
-		u.setBusy(true)
-		u.status.SetText(fmt.Sprintf("Переименовываю %q...", victim.Name()))
-		goSafe(func() {
-			err := u.sess.RenameUser(u.cur, victim.ClientID, newName)
-			fyne.Do(func() {
-				if err != nil {
-					u.setBusy(false)
-					u.status.SetText("")
-					dialog.ShowError(err, u.win)
-					return
-				}
-				onRenamed(newName)
+		// A3а: предупреждение о гонке непосредственно перед записью на
+		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
+		u.confirmRaceWarning(guiview.OpRenameUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Переименовываю %q...", victim.Name()))
+			goSafe(func() {
+				err := u.sess.RenameUser(u.cur, victim.ClientID, newName)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					onRenamed(newName)
+				})
 			})
 		})
 	}
@@ -1658,19 +1760,23 @@ func (u *ui) toggleSelected() {
 		u.refresh()
 	}
 	apply := func() {
-		d.Hide()
-		u.setBusy(true)
-		u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
-		goSafe(func() {
-			err := u.sess.SetEnabled(u.cur, victim.ClientID, enable)
-			fyne.Do(func() {
-				if err != nil {
-					u.setBusy(false)
-					u.status.SetText("")
-					dialog.ShowError(err, u.win)
-					return
-				}
-				onToggled()
+		// A3а: предупреждение о гонке непосредственно перед записью на
+		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
+		u.confirmRaceWarning(guiview.OpToggleUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
+			goSafe(func() {
+				err := u.sess.SetEnabled(u.cur, victim.ClientID, enable)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					onToggled()
+				})
 			})
 		})
 	}
@@ -1729,19 +1835,23 @@ func (u *ui) regenerateSelected() {
 		u.refresh()
 	}
 	apply := func() {
-		d.Hide()
-		u.setBusy(true)
-		u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
-		goSafe(func() {
-			nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
-			fyne.Do(func() {
-				if err != nil {
-					u.setBusy(false)
-					u.status.SetText("")
-					dialog.ShowError(err, u.win)
-					return
-				}
-				onRegenerated(nu)
+		// A3а: предупреждение о гонке непосредственно перед записью на
+		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
+		u.confirmRaceWarning(guiview.OpRekeyUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
+			goSafe(func() {
+				nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					onRegenerated(nu)
+				})
 			})
 		})
 	}
@@ -1805,19 +1915,23 @@ func (u *ui) deleteSelected() {
 		u.refresh()
 	}
 	apply := func() {
-		d.Hide()
-		u.setBusy(true)
-		u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
-		goSafe(func() {
-			err := u.sess.DeleteByID(u.cur, victim.ClientID)
-			fyne.Do(func() {
-				if err != nil {
-					u.setBusy(false)
-					u.status.SetText("")
-					dialog.ShowError(err, u.win)
-					return
-				}
-				onDeleted()
+		// A3а: предупреждение о гонке непосредственно перед записью на
+		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
+		u.confirmRaceWarning(guiview.OpDeleteUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
+			goSafe(func() {
+				err := u.sess.DeleteByID(u.cur, victim.ClientID)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					onDeleted()
+				})
 			})
 		})
 	}
