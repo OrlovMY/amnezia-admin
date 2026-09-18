@@ -410,3 +410,169 @@ func TestMaskFreeTextQuotedValueWithComma(t *testing.T) {
 		}
 	}
 }
+
+// TestMaskFreeTextPEMAllBoundaries — ревью SEC-01, четвёртый круг, N1 и N2.
+//
+// Один корень: maskPEM завершалась на ПЕРВОЙ найденной границе. Цикл по
+// BEGIN стоял раньше ветки END-без-BEGIN и делал return на первом оборванном
+// с конца заголовке, а передняя ветка искала только первый END.
+func TestMaskFreeTextPEMAllBoundaries(t *testing.T) {
+	// N1: обрыв с двух сторон. Передний осиротевший ключ выходил ОТКРЫТЫМ, и
+	// вывод утверждал, что обрезка была только с конца.
+	t.Run("обрыв с двух сторон: закрыты оба конца", func(t *testing.T) {
+		const front, tail = "front-KEY-AAAABBBB", "tail-KEY-CCCCDDDD"
+		in := front + "\n-----END RSA PRIVATE KEY-----\nmiddle\n-----BEGIN RSA PRIVATE KEY-----\n" + tail
+		got := maskFreeText(in)
+		if strings.Contains(got, front) {
+			t.Errorf("передний осиротевший ключ остался открытым:\n%s", got)
+		}
+		if strings.Contains(got, tail) {
+			t.Errorf("задний осиротевший ключ остался открытым:\n%s", got)
+		}
+		if !strings.Contains(got, truncatedNoteHead) {
+			t.Errorf("обрезка спереди не помечена — человек решит, что начало цело:\n%s", got)
+		}
+		if !strings.Contains(got, truncatedNote) {
+			t.Errorf("обрезка с конца не помечена:\n%s", got)
+		}
+	})
+
+	// N2: два осиротевших END — второй корпус выходил открытым.
+	t.Run("два осиротевших END: закрыты оба корпуса", func(t *testing.T) {
+		const c1, c2 = "corpus1-AAAABBBB", "corpus2-CCCCDDDD"
+		in := c1 + "\n-----END A KEY-----\n" + c2 + "\n-----END B KEY-----\nrest"
+		got := maskFreeText(in)
+		if strings.Contains(got, c1) {
+			t.Errorf("первый корпус остался открытым:\n%s", got)
+		}
+		if strings.Contains(got, c2) {
+			t.Errorf("второй корпус остался открытым:\n%s", got)
+		}
+		if !strings.Contains(got, "-----END A KEY-----") || !strings.Contains(got, "-----END B KEY-----") {
+			t.Errorf("строки END пропали — теряется диагностика:\n%s", got)
+		}
+		if !strings.Contains(got, "rest") {
+			t.Errorf("хвост после последнего END съеден:\n%s", got)
+		}
+	})
+
+	t.Run("три осиротевших END подряд", func(t *testing.T) {
+		bodies := []string{"c1-AAAABBBB", "c2-CCCCDDDD", "c3-EEEEFFFF"}
+		in := bodies[0] + "\n-----END A-----\n" + bodies[1] + "\n-----END B-----\n" + bodies[2] + "\n-----END C-----"
+		got := maskFreeText(in)
+		for _, b := range bodies {
+			if strings.Contains(got, b) {
+				t.Errorf("корпус %q остался открытым:\n%s", b, got)
+			}
+		}
+	})
+
+	t.Run("целый блок по-прежнему не задет лишними ветками", func(t *testing.T) {
+		in := "-----BEGIN X KEY-----\nbody-AAAABBBB\n-----END X KEY-----\nпопробуйте ещё раз"
+		got := maskFreeText(in)
+		if strings.Contains(got, "body-AAAABBBB") {
+			t.Errorf("тело целого блока открыто:\n%s", got)
+		}
+		if strings.Contains(got, truncatedNote) || strings.Contains(got, truncatedNoteHead) {
+			t.Errorf("целый блок помечен как обрезанный — ложное сообщение о потере:\n%s", got)
+		}
+		if !strings.Contains(got, "попробуйте ещё раз") {
+			t.Errorf("диагностика после блока съедена:\n%s", got)
+		}
+	})
+}
+
+// TestMaskFreeTextEmptyValueNotMasked — ревью SEC-01, N4.
+//
+// `psk: ""` означает «ключ пуст». Подмена на `psk: "<скрыто>"` читается как
+// «ключ есть, мы его спрятали» — то самое различение «пусто / скрыто», на
+// котором стоит печать конфига, только в обратную сторону.
+func TestMaskFreeTextEmptyValueNotMasked(t *testing.T) {
+	for _, in := range []string{
+		`wg: bad psk: ""`,
+		`PresharedKey = ""`,
+		`psk=''`,
+		`{"psk": ""}`,
+	} {
+		if got := maskFreeText(in); got != in {
+			t.Errorf("пустое значение замаскировано — «пусто» стало неотличимо от «скрыто».\n было: %s\nстало: %s", in, got)
+		}
+	}
+
+	// Различение обязано сохраняться: пусто и скрыто дают РАЗНЫЙ вывод.
+	empty := maskFreeText(`psk: ""`)
+	hidden := maskFreeText(`psk: "` + fakeStderrSecret + `"`)
+	if empty == hidden {
+		t.Errorf("«пусто» и «скрыто» неразличимы: %q против %q", empty, hidden)
+	}
+}
+
+// TestMaskFreeTextPEMFooterAtStart — ревью SEC-01, N5 (зеркало M1).
+//
+// END в самом начале текста: скрывать нечего, а плейсхолдер сообщал о
+// скрытом содержимом, которого не было.
+func TestMaskFreeTextPEMFooterAtStart(t *testing.T) {
+	for _, in := range []string{
+		"-----END X KEY-----\nrest",
+		"\n-----END X KEY-----\nrest",
+		"-----END X KEY-----",
+	} {
+		got := maskFreeText(in)
+		if strings.Contains(got, hiddenPlaceholder) {
+			t.Errorf("плейсхолдер поставлен там, где скрывать было нечего.\n было: %q\nстало: %q", in, got)
+		}
+		if strings.Contains(got, truncatedNoteHead) {
+			t.Errorf("пометка об обрезке поставлена там, где ничего не обрезано: %q", got)
+		}
+		if got != in {
+			t.Errorf("текст без содержимого перед END изменён.\n было: %q\nстало: %q", in, got)
+		}
+	}
+}
+
+// TestMaskFreeTextPasswordKeepsPaths — ревью SEC-01, N3 (решение ядра).
+//
+// Признак «пароль» (длина ≥8 и небуквенный символ) съедал путь и URL,
+// стоящие после имени. Первый случай особенно плох: скрывалось само слово
+// «password», а путь оставался. Третье воспроизведение довода «ложное
+// „здесь был секрет“» — теперь на признаке пароля.
+//
+// Решение ядра: «/» и «:» внутри значения снимают признак пароля.
+func TestMaskFreeTextPasswordKeepsPaths(t *testing.T) {
+	t.Run("путь и URL после имени пароля не съедаются", func(t *testing.T) {
+		for _, in := range []string{
+			"passwd: password: /etc/shadow: Permission denied",
+			"password: file:///etc/shadow not readable",
+			"password: /run/secrets/pw not found",
+			"passwd: http://host:8080/x unreachable",
+		} {
+			if got := maskFreeText(in); got != in {
+				t.Errorf("сообщение без пароля изменено — ложное «здесь был секрет».\n было: %s\nстало: %s", in, got)
+			}
+		}
+	})
+
+	// Признак НЕ убран: без него откатывается V1.
+	t.Run("пароль без «/» и «:» по-прежнему скрыт", func(t *testing.T) {
+		for _, in := range []string{
+			"sshpass: password=Qw3rty!Sup3rSecret",
+			`echo "password=Qw3rty!Sup3rSecret" | sudo -S`,
+			"passwd=Qw3rty!Sup3rSecret",
+		} {
+			if got := maskFreeText(in); strings.Contains(got, "Qw3rty!Sup3rSecret") {
+				t.Errorf("пароль напечатан открытым: %s", got)
+			}
+		}
+	})
+
+	// Граница 10: пароль с «/» или «:» без кавычек проходит — но В КАВЫЧКАХ
+	// маскируется, потому что кавычки уже говорят, что это значение.
+	t.Run("пароль с «/» или «:» в кавычках всё же скрыт", func(t *testing.T) {
+		const pw = "Qw3/rty:Sup3r"
+		for _, in := range []string{`password="` + pw + `"`, `passwd='` + pw + `'`} {
+			if got := maskFreeText(in); strings.Contains(got, pw) {
+				t.Errorf("закавыченный пароль с «/» или «:» напечатан открытым: %s", got)
+			}
+		}
+	})
+}
