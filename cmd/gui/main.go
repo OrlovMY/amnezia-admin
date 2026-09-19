@@ -1932,7 +1932,11 @@ func (u *ui) deleteSelected() {
 			u.setBusy(true)
 			u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
 			goSafe(func() {
-				err := u.sess.DeleteByID(u.cur, victim.ClientID)
+				// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
+				// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
+				// снимка (см. refresh()) была применена к соседним двум
+				// вызовам и пропущена ровно у необратимого (ревью BE-01).
+				err := u.sess.DeleteByID(cur, victim.ClientID)
 				fyne.Do(func() {
 					if err != nil {
 						u.setBusy(false)

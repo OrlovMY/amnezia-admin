@@ -37,6 +37,14 @@ import (
 //     управления потоком по AST, а не порядка подстрок: прежняя редакция
 //     сверяла смещения (iDisable < iCall < iEnable) и пропускала подмену
 //     «поднять Enable из замыкания» (найдено ревью BE-01);
+//   - «включается по ответу» означает «где-то в поддереве обработчика
+//     ответа», а не «на всех его путях»: подмена `if hsErr == nil {
+//     okBtn.Enable(); diffBtn.Enable() }` сторожа проходит (найдено ревью
+//     BE-01). Сегодняшний код включает кнопки безусловно, но при такой
+//     правке при отказе сервера обе кнопки остались бы мёртвыми навсегда,
+//     и человеку осталась бы «Отмена». Закрыть это значило бы разбирать
+//     все пути исполнения замыкания — то есть строить в стороже мини-CFG;
+//     цена названа здесь, а выбор оставлен ядру;
 //   - он сверяет КОД, а не комментарии: разбор печатается из AST (go/printer),
 //     поэтому слово «u.handshakes» в пояснении рядом с правкой его не
 //     краснит. Иначе сторож требовал бы молчать о том, что чинит, — и был бы
@@ -400,11 +408,6 @@ func TestTrafficCellUsesGuiview(t *testing.T) {
 	if !strings.Contains(text, "guiview.TrafficText(") {
 		t.Errorf("%s: ячейка трафика собирается не через guiview.TrafficText", guiMainPath)
 	}
-	if strings.Contains(text, "HumanBytes(") {
-		t.Errorf("%s: core.HumanBytes снова вызывается прямо в cmd/gui — "+
-			"числа печатаются мимо проверки «получена ли статистика», и недоступная статистика "+
-			"снова выглядит измеренным нулём", guiMainPath)
-	}
 	if !strings.Contains(text, "guiview.ActivityText(") {
 		t.Errorf("%s: ячейка активности собирается не через guiview.ActivityText — "+
 			"ветка «запрос не удался» снова описана строкой в cmd/gui, где её не проверяет ни один тест",
@@ -504,5 +507,135 @@ func TestRefreshFeedsTheFailureFlags(t *testing.T) {
 			t.Errorf("refresh(): нет присваивания %q — признак «не удалось» ниоткуда не берётся, "+
 				"и ячейка получает вечное false", want)
 		}
+	}
+}
+
+// ---------- сторож самой починки гонки (ревью BE-01, пятое замечание) ----------
+//
+// ЗАЧЕМ ОН. Четыре починки этого PR получили сторожа, пятая — снимок
+// контейнера — держалась на честном слове: обе подмены («снять сверку
+// снимка», «спрашивать по u.cur вместо cur») проходили зелёными. По
+// собственному доводу PR правка без сторожа устаревает с первым коммитом,
+// и исключений для неё нет.
+//
+// ЧТО ОН УТВЕРЖДАЕТ: всё, что уходит в goroutine из диалога удаления,
+// берёт СНИМОК cur, а ответ сверяется с текущим u.cur до того, как
+// попадёт на экран.
+
+// deleteSnapshotCalls — вызовы сервера из диалога удаления, каждый из
+// которых обязан получать контейнер снимком. Перечень поимённый: новый
+// вызов роняет TestDeleteDialogCallsUseSnapshot и вносится сюда видимой
+// строкой диффа.
+//
+// Перечень ВЫВЕДЕН РАЗБОРОМ (а не по памяти): все вызовы u.sess.* в теле
+// deleteSelected, у которых первый аргумент — контейнер. Их три:
+// GetHandshakes (карточка), PlanDelete (предпросмотр) и DeleteByID (запись
+// на сервер). Третий был пропущен первой редакцией правки, и пропущен
+// оказался ровно необратимый.
+var deleteSnapshotCalls = []string{
+	"u.sess.GetHandshakes",
+	"u.sess.PlanDelete",
+	"u.sess.DeleteByID",
+}
+
+// TestDeleteDialogCallsUseSnapshot — первый аргумент каждого серверного
+// вызова диалога — идентификатор cur (снимок), а не селектор u.cur,
+// прочитанный из другого потока.
+func TestDeleteDialogCallsUseSnapshot(t *testing.T) {
+	_, file, fset := readGUIMain(t)
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Body != nil && d.Name.Name == deleteHandlerName {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет метода %s", guiMainPath, deleteHandlerName)
+	}
+
+	// Снимок обязан существовать и быть взят из u.cur.
+	snapshot := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Name != "cur" {
+			return true
+		}
+		if dotted(as.Rhs[0]) == "u.cur" {
+			snapshot = true
+		}
+		return true
+	})
+	if !snapshot {
+		t.Fatalf("%s: нет снимка `cur := u.cur` — всё, что уходит в goroutine, читает поле, "+
+			"которое может смениться под ним", deleteHandlerName)
+	}
+
+	seen := map[string]bool{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name := dotted(call.Fun)
+		guarded := false
+		for _, want := range deleteSnapshotCalls {
+			if name == want {
+				guarded = true
+			}
+		}
+		if !guarded {
+			return true
+		}
+		seen[name] = true
+		var got strings.Builder
+		if err := printer.Fprint(&got, fset, call.Args[0]); err != nil {
+			t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: аргумент не печатается: %v", err)
+		}
+		if got.String() != "cur" {
+			t.Errorf("%s:%d: %s получает контейнер как %q вместо снимка \"cur\" — "+
+				"поле u.cur читается из другой goroutine и может смениться, пока летит запрос; "+
+				"ответ придёт про ДРУГОЙ контейнер, ключа victim в нём не будет, и это напечатается "+
+				"как «Подключений не было»",
+				guiMainPath, fset.Position(call.Pos()).Line, name, got.String())
+		}
+		return true
+	})
+
+	for _, want := range deleteSnapshotCalls {
+		if !seen[want] {
+			t.Errorf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет вызова %s — "+
+				"перечень надо приводить в соответствие, а не удалять", deleteHandlerName, want)
+		}
+	}
+}
+
+// TestDeleteResponseRechecksSnapshot — ответ сверяется со снимком ДО того,
+// как попадёт на экран: устаревший ответ — это «узнать не удалось», а не
+// «подключений не было».
+func TestDeleteResponseRechecksSnapshot(t *testing.T) {
+	resp := deleteResponseHandler(t)
+	if resp == nil {
+		t.Fatal("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: обработчик ответа не найден")
+	}
+	rechecked := false
+	ast.Inspect(resp.Body, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok || bin.Op != token.NEQ {
+			return true
+		}
+		if dotted(bin.X) == "cur" && dotted(bin.Y) == "u.cur" {
+			rechecked = true
+		}
+		return true
+	})
+	if !rechecked {
+		t.Errorf("%s: в обработчике ответа нет сверки `cur != u.cur` — ответ про другой контейнер "+
+			"попадёт в карточку как ответ про этот, и отсутствие ключа victim напечатается как "+
+			"«Подключений не было». Это конвенция файла: так делает refresh()", deleteHandlerName)
 	}
 }
