@@ -657,6 +657,22 @@ func TestReportGolden(t *testing.T) {
 				"Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — libXrandr.so.2, libXrender.so.1. Установите их, так надёжнее: Debian/Ubuntu — `libxrandr2 libxrender1`; Fedora — `libXrandr libXrender`.\n",
 		},
 		{
+			// Место № 3: та же нехватка dlopen-библиотек, что в случае «ж»,
+			// но библиотеку C определить не удалось. Итог — про незнание;
+			// имена ненайденных библиотек остаются в справочной строке.
+			"к) Linux, библиотека C неизвестна, часть библиотек не видно",
+			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
+				Libc:  Libc{},
+				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2"}}, Sess: SessionX11},
+			"Проверка компьютера\n" +
+				"ОС: Void Linux\n" +
+				"Архитектура: amd64\n" +
+				"Библиотека C: определить не удалось\n" +
+				"Библиотеки графики: главные на месте, остальных не видно: libXrandr.so.2\n" +
+				"Графическая сессия: есть (X11)\n" +
+				cannotCheckLibcOnly + "\n",
+		},
+		{
 			"в) Linux, musl",
 			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Alpine Linux v3.20",
 				Libc: Libc{Kind: "musl"}, Graph: Graphics{Known: false}, Sess: SessionNone},
