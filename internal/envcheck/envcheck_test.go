@@ -482,6 +482,151 @@ func TestNonLinuxVerdict(t *testing.T) {
 	}
 }
 
+// --- Порядок ветвей: «определить не удалось» побеждает «скорее всего» ---
+//
+// Место № 3 задания A1, признак 3 («порядок ветвей»): ветка «скорее всего,
+// запустится, но может и не открыться» стоит выше сбора «определить не
+// удалось», и потому непустой MissingDlopen перехватывает незнание про
+// библиотеку C. Программа говорит «скорее всего запустится», не сумев
+// определить то, от чего запуск зависит.
+
+// cannotCheckLibcOnly — итог, когда неизвестна только библиотека C.
+const cannotCheckLibcOnly = "Проверить не удалось: какая в системе библиотека C. " +
+	"Попробуйте просто запустить графическую версию — если она не откроется, " +
+	"пользуйтесь консольной: она работает независимо от этого."
+
+// maybeMissingXrandr — итог «скорее всего запустится» для одного
+// отсутствующего dlopen-имени.
+const maybeMissingXrandr = "Графический интерфейс, скорее всего, запустится, но может и не открыться: " +
+	"не видно библиотек — libXrandr.so.2. Установите их, так надёжнее: " +
+	"Debian/Ubuntu — `libxrandr2`; Fedora — `libXrandr`."
+
+// TestUnknownLibcBeatsMaybeMissingLibs — тест РАЗЛИЧЕНИЯ места № 3.
+//
+// Библиотеки графики во всех трёх случаях одни и те же: главные на месте,
+// libXrandr.so.2 не видно. Различается ТОЛЬКО знание про библиотеку C — и
+// итог обязан различаться вместе с ним. Сравнение целиком, не Contains.
+func TestUnknownLibcBeatsMaybeMissingLibs(t *testing.T) {
+	cases := []struct {
+		name string
+		libc Libc
+		want string
+	}{
+		{"библиотека C известна — «скорее всего запустится»", Libc{Kind: "glibc", Version: "2.36"}, maybeMissingXrandr},
+		{"библиотеку C определить не удалось", Libc{}, cannotCheckLibcOnly},
+		{"версия glibc не разобралась", Libc{Kind: "glibc", Version: "неизвестно"}, cannotCheckLibcOnly},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := Result{
+				GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
+				Libc:  c.libc,
+				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2"}},
+				Sess:  SessionX11,
+			}
+			if got := verdict(r); got != c.want {
+				t.Fatalf("итог = %q,\nхочу  = %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestUnknownLibcBeatsMaybeMissingLibsArrives — тест ДОЕЗДА места № 3.
+//
+// Состояние «библиотеку C определить не удалось» не присваивается в тесте, а
+// возникает боевым путём: из ответов подставленной ОС. Каждый случай — своя
+// причина неудачи разбора, и каждая обязана довезти незнание до итоговой
+// строки, а не утонуть в «скорее всего запустится».
+func TestUnknownLibcBeatsMaybeMissingLibsArrives(t *testing.T) {
+	// ldconfig отработал и показал всё, кроме libXrandr.so.2, — во всех
+	// случаях одинаково: различается только путь к незнанию про libc.
+	ldconfig := ldconfigOut(without("libXrandr.so.2")...)
+	cases := []struct {
+		name string
+		out  map[string]string
+	}{
+		{
+			// getconf и ldd отсутствуют (Run возвращает ошибку), загрузчиков
+			// musl нет.
+			"getconf и ldd отсутствуют",
+			map[string]string{"ldconfig -p": ldconfig},
+		},
+		{
+			// Правило «нераспознанный вывод → определить не удалось» — здесь
+			// единственная защита от неверного образца: Linux-машины для
+			// сверки нет, и ослаблять его нельзя ни в какой ветке.
+			"ldd --version дал нераспознанный вывод",
+			map[string]string{"ldd --version": "some other tool 1.2.3\n", "ldconfig -p": ldconfig},
+		},
+		{
+			// Номер версии разобран, но сравнить его с порогом не удалось
+			// (компонент не умещается в число). Единственный найденный
+			// входной путь к состоянию «версия glibc неизвестна»; путь
+			// маловероятный, но он есть, и через него незнание тоже обязано
+			// доезжать.
+			"версию glibc не удалось сравнить с порогом",
+			map[string]string{"getconf GNU_LIBC_VERSION": "glibc 20260919202609192026.1\n", "ldconfig -p": ldconfig},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeOS{out: c.out}
+			r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+			if !r.Graph.Known || strings.Join(r.Graph.MissingDlopen, ",") != "libXrandr.so.2" {
+				t.Fatalf("Graph = %+v, хочу «главные на месте, не видно libXrandr.so.2»", r.Graph)
+			}
+			if got := verdict(r); got != cannotCheckLibcOnly {
+				t.Fatalf("итог = %q,\nхочу  = %q", got, cannotCheckLibcOnly)
+			}
+		})
+	}
+}
+
+// TestMissingHardBeatsUnknownLibc — охрана ВТОРОЙ границы того же порядка.
+//
+// Сбор «определить не удалось» поднят над «скорее всего, запустится», но НЕ
+// над нехваткой жёсткой зависимости — и это решение ничем не удерживалось,
+// кроме комментария. Подмена «перенести сбор ещё выше, над MissingHard»
+// компилируется, gofmt молчит и буквально следует лозунгу «незнание всегда
+// выше», то есть её мог бы закоммитить человек, не заметив ошибки. Цена
+// ошибки: на машине без libGL.so.1 и с неопределимой libc человек получил бы
+// «Проверить не удалось… попробуйте просто запустить» вместо верного «не
+// запустится» с именами пакетов.
+//
+// Без libGL.so.1 процесс убивает компоновщик, что бы мы ни узнали о
+// библиотеке C: приговор здесь установлен фактом, а не предположением.
+//
+// Вход «нехватка жёсткой зависимости при неизвестной libc» до сих пор не был
+// покрыт ни одним тестом ни в какую сторону. Если A1б выберет исход (в) из
+// `.ask` (не печатать имена пакетов, когда libc неизвестна), этот случай
+// придётся обновить — и это к лучшему: изменение станет видимым.
+func TestMissingHardBeatsUnknownLibc(t *testing.T) {
+	const missingGL = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
+		"Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
+		"После установки выполните проверку ещё раз."
+	cases := []struct {
+		name string
+		libc Libc
+		want string
+	}{
+		{"библиотека C известна", Libc{Kind: "glibc", Version: "2.36"}, missingGL},
+		{"библиотеку C определить не удалось", Libc{}, missingGL},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := Result{
+				GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
+				Libc:  c.libc,
+				Graph: Graphics{Known: true, MissingHard: []string{"libGL.so.1"}},
+				Sess:  SessionX11,
+			}
+			if got := verdict(r); got != c.want {
+				t.Fatalf("итог = %q,\nхочу  = %q", got, c.want)
+			}
+		})
+	}
+}
+
 // --- Дословность вывода (эталоны Д6) -----------------------------------
 
 // TestReportGolden сравнивает ВЕСЬ вывод целиком с эталонами задания
@@ -555,6 +700,22 @@ func TestReportGolden(t *testing.T) {
 				"Библиотеки графики: главные на месте, остальных не видно: libXrandr.so.2, libXrender.so.1\n" +
 				"Графическая сессия: есть (X11)\n" +
 				"Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — libXrandr.so.2, libXrender.so.1. Установите их, так надёжнее: Debian/Ubuntu — `libxrandr2 libxrender1`; Fedora — `libXrandr libXrender`.\n",
+		},
+		{
+			// Место № 3: та же нехватка dlopen-библиотек, что в случае «ж»,
+			// но библиотеку C определить не удалось. Итог — про незнание;
+			// имена ненайденных библиотек остаются в справочной строке.
+			"к) Linux, библиотека C неизвестна, часть библиотек не видно",
+			Result{GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
+				Libc:  Libc{},
+				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2"}}, Sess: SessionX11},
+			"Проверка компьютера\n" +
+				"ОС: Void Linux\n" +
+				"Архитектура: amd64\n" +
+				"Библиотека C: определить не удалось\n" +
+				"Библиотеки графики: главные на месте, остальных не видно: libXrandr.so.2\n" +
+				"Графическая сессия: есть (X11)\n" +
+				cannotCheckLibcOnly + "\n",
 		},
 		{
 			"в) Linux, musl",
