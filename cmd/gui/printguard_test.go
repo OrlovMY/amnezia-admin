@@ -201,7 +201,10 @@ type encPoint struct {
 
 var allowedEncodePoints = []encPoint{
 	{"loadSortState", "Unmarshal", "состояние интерфейса из ui.json (sortStateJSON: четыре поля сортировки, полей конфига нет)"},
-	{"saveSortState", "MarshalIndent", "то же состояние интерфейса в ui.json"},
+	// PR-A4: запись вынесена из saveSortState в saveSortStateTo (каталог
+	// параметром), чтобы права созданного ui.json проверялись тестом на
+	// настоящем файле. Кодирует то же самое — состояние интерфейса.
+	{"saveSortStateTo", "MarshalIndent", "то же состояние интерфейса в ui.json"},
 }
 
 // jsonMethods — методы encoding/json, считающиеся точкой кодирования/разбора.
