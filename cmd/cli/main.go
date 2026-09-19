@@ -283,10 +283,10 @@ func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) er
 // решение печатать его в поток вывода принимает владелец, а не эта функция.
 func saveFailed(w io.Writer, u *core.NewUser, err error) error {
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Пользователь %q на сервере создан, но конфиг сохранить не удалось.\n", u.Name)
-	fmt.Fprintf(w, "Исправьте каталог и перевыпустите конфиг: amnezia-admin rekey -key vpn://... -name %q "+
-		"(в интерактивном режиме — пункт «Перевыпустить конфиг»). После перевыпуска прежний конфиг этого "+
-		"пользователя работать не будет.\n", u.Name)
+	fmt.Fprintln(w, core.SaveFailedAdvice(u.Name))
+	// Своё у CLI — только КАК перевыпустить; смысл совета общий с GUI.
+	fmt.Fprintf(w, "Команда: amnezia-admin rekey -key vpn://... -name %q "+
+		"(в интерактивном режиме — пункт «Перевыпустить конфиг»).\n", u.Name)
 	return err
 }
 

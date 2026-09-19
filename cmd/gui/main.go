@@ -1683,12 +1683,26 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	copyBtn.Hide()
 
 	var saveBtn *widget.Button
+	// Совет на случай неудачи — тот же по смыслу, что в CLI, и тем же текстом
+	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
+	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
+	// перевыпустить: кнопкой «Перевыпустить» в главном окне.
+	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) +
+		" Это делает кнопка «Перевыпустить» в главном окне.")
+	failHint.Wrapping = fyne.TextWrapWord
+	failHint.Hide()
+
 	saveBtn = widget.NewButtonWithIcon("Сохранить .conf", theme.DocumentSaveIcon(), func() {
 		abs, createdDir, err := u.writeConfigFile(nu)
 		if err != nil {
 			dialog.ShowError(err, u.win)
+			// Диалог ошибки человек закроет, а совет обязан остаться перед
+			// глазами: конфиг существует только в памяти, окно закроется — и
+			// ключи клиента потеряны.
+			failHint.Show()
 			return
 		}
+		failHint.Hide()
 		saveBtn.Disable()
 		// Одно событие — одно слово: и здесь, и в строке состояния «Конфиг
 		// сохранён» (ревью UX-01).
@@ -1719,6 +1733,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		savedLabel,
 		copyBtn,
 		moveHint,
+		failHint,
 	)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.

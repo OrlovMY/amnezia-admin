@@ -256,8 +256,8 @@ var hintUsers = []string{
 	filepath.Join("..", "..", "cmd", "gui", "main.go"),
 }
 
-// usesFirstSaveHint — есть ли в файле селектор core.FirstSaveHint.
-func usesFirstSaveHint(path string) (bool, error) {
+// usesCoreName — есть ли в файле селектор core.<name>.
+func usesCoreName(path, name string) (bool, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 	if err != nil {
@@ -266,7 +266,7 @@ func usesFirstSaveHint(path string) (bool, error) {
 	found := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "FirstSaveHint" {
+		if !ok || sel.Sel.Name != name {
 			return true
 		}
 		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "core" {
@@ -277,15 +277,24 @@ func usesFirstSaveHint(path string) (bool, error) {
 	return found, nil
 }
 
-func TestBothWritersShowFirstSaveHint(t *testing.T) {
-	for _, path := range hintUsers {
-		ok, err := usesFirstSaveHint(path)
-		if err != nil {
-			t.Fatalf("разбор %s: %v", path, err)
-		}
-		if !ok {
-			t.Errorf("%s не ссылается на core.FirstSaveHint — человек, впервые сохраняющий "+
-				"конфиг в новое место, не узнает о переезде (ревью UX-01)", path)
+// sharedTexts — тексты в core, на которые ОБЕ половины обязаны ссылаться по
+// имени, а не набирать заново. Каждый попал сюда после того, как половины
+// разошлись по-настоящему: FirstSaveHint — подсказка о переезде, которой в
+// GUI не было бы; SaveFailedAdvice — совет при неудаче, который в первом
+// круге был только в CLI (ревью SEC-01, замечание 3).
+var sharedTexts = []string{"FirstSaveHint", "SaveFailedAdvice"}
+
+func TestBothWritersUseSharedTexts(t *testing.T) {
+	for _, name := range sharedTexts {
+		for _, path := range hintUsers {
+			ok, err := usesCoreName(path, name)
+			if err != nil {
+				t.Fatalf("разбор %s: %v", path, err)
+			}
+			if !ok {
+				t.Errorf("%s не ссылается на core.%s — половины разъезжаются по тому, "+
+					"что видит человек в одном и том же положении (ревью UX-01/SEC-01)", path, name)
+			}
 		}
 	}
 }
@@ -298,10 +307,10 @@ func TestHintGuardCatchesPlanted(t *testing.T) {
 		"without.go": "package main\n\nfunc save() string { return \"это новое место\" }\n",
 		"with.go":    "package main\n\nimport \"amnezia-admin/core\"\n\nfunc save() string { return core.FirstSaveHint }\n",
 	})
-	if ok, err := usesFirstSaveHint(filepath.Join(dir, "without.go")); err != nil || ok {
+	if ok, err := usesCoreName(filepath.Join(dir, "without.go"), "FirstSaveHint"); err != nil || ok {
 		t.Fatalf("проверка засчитала похожий текст за подсказку (ok=%v, err=%v) — она вечнозелёная", ok, err)
 	}
-	if ok, err := usesFirstSaveHint(filepath.Join(dir, "with.go")); err != nil || !ok {
+	if ok, err := usesCoreName(filepath.Join(dir, "with.go"), "FirstSaveHint"); err != nil || !ok {
 		t.Fatalf("проверка не увидела настоящую ссылку core.FirstSaveHint (ok=%v, err=%v)", ok, err)
 	}
 }
