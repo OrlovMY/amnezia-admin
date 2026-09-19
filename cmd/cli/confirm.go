@@ -21,7 +21,23 @@ type ActionCard struct {
 	Created   string // cl.Created(), обрезанный до 19 символов, как в listUsers (main.go)
 	LastSeen  string // значение из GetHandshakes(c) по ClientID; ключа нет в карте → "—"
 	Key       string // cl.ClientID
+
+	// LastSeenUnknown — ТРЕТЬЕ состояние поля «Последнее подключение»
+	// (задание A1, место № 5): статистику с сервера получить НЕ УДАЛОСЬ.
+	// Прежде этот случай был неотличим от «не подключался»: GetHandshakes
+	// глотала ошибку, возвращала пустую карту, и buildCard подставляла
+	// «—» — то есть карточка перед НЕОБРАТИМЫМ действием уверенно говорила
+	// то, чего не знала.
+	//
+	// ОТДЕЛЬНОЕ ПОЛЕ, А НЕ ОСОБОЕ ЗНАЧЕНИЕ LastSeen: состояние, выведенное
+	// из текста («если там написано „не удалось“…»), — тот самый
+	// антипаттерн, против которого написан A1; тест утверждал бы по строке
+	// интерфейса, а не по состоянию.
+	LastSeenUnknown bool
 }
+
+// textLastSeenUnknown — дословный текст третьего состояния в карточке CLI.
+const textLastSeenUnknown = "не удалось получить данные"
 
 // capitalizeFirst делает первую букву заглавной, по рунам (не по байтам —
 // кириллица многобайтовая, s[:1] отрезал бы половину первой буквы).
@@ -54,9 +70,20 @@ func renderCard(card ActionCard) string {
 	fmt.Fprintln(&b, "  Контейнер:              "+card.Container)
 	fmt.Fprintln(&b, "  Имя:                    "+cHead(card.Name))
 	fmt.Fprintln(&b, "  Создан:                 "+card.Created)
-	fmt.Fprintln(&b, "  Последнее подключение:  "+card.LastSeen)
+	lastSeen := card.LastSeen
+	if card.LastSeenUnknown {
+		lastSeen = textLastSeenUnknown
+	}
+	fmt.Fprintln(&b, "  Последнее подключение:  "+lastSeen)
 	fmt.Fprintln(&b, "  Публичный ключ:         "+cDim(card.Key))
-	if card.LastSeen != "" && card.LastSeen != "—" {
+	switch {
+	case card.LastSeenUnknown:
+		// Незнание печатается ТАМ ЖЕ, где печаталась бы активность, и той
+		// же меткой внимания: человек перед необратимым действием обязан
+		// увидеть, что «—» в строке выше сейчас ничего не значит.
+		fmt.Fprintln(&b, cWarn("  ⚠ Внимание: статистику с сервера получить не удалось — "+
+			"неизвестно, пользуется ли клиент этим доступом."))
+	case card.LastSeen != "" && card.LastSeen != "—":
 		fmt.Fprintln(&b, cWarn("  ⚠ Внимание: у этого клиента была активность."))
 	}
 	if card.Action == "перевыпустить конфиг" {
@@ -71,18 +98,23 @@ func renderCard(card ActionCard) string {
 // buildCard собирает ActionCard из текущего состояния сессии — единая точка
 // сборки, чтобы поля карточки в меню и в подкомандах не расходились.
 func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, action string) ActionCard {
-	lastSeen := sess.GetHandshakes(cur)[cl.ClientID]
+	// Прямой вызов при сборке карточки (как и было): данные свежие в момент
+	// принятия решения. Ошибка НЕ отбрасывается — она и есть третье
+	// состояние (A1, место № 5).
+	hs, err := sess.GetHandshakes(cur)
+	lastSeen := hs[cl.ClientID]
 	if lastSeen == "" {
 		lastSeen = "—"
 	}
 	return ActionCard{
-		Action:    action,
-		Host:      sess.Creds.Host,
-		Container: cur.Name,
-		Name:      cl.Name(),
-		Created:   trunc19(cl.Created()),
-		LastSeen:  lastSeen,
-		Key:       cl.ClientID,
+		Action:          action,
+		Host:            sess.Creds.Host,
+		Container:       cur.Name,
+		Name:            cl.Name(),
+		Created:         trunc19(cl.Created()),
+		LastSeen:        lastSeen,
+		LastSeenUnknown: err != nil,
+		Key:             cl.ClientID,
 	}
 }
 

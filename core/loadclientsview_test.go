@@ -239,7 +239,11 @@ func TestContainersWasNowTable(t *testing.T) {
 				var want string
 				switch {
 				case spec.managed && loadErr != nil:
-					want = "Ошибка: " + loadErr.Error()
+					// A1, место № 4: было "Ошибка: <текст>" — таблица молча
+					// сохраняла прежние данные. Стало: то же плюс указание,
+					// что показаны данные прошлого чтения (признак состояния
+					// guiview.View.StaleShown, internal/guiview/stale_test.go).
+					want = "Ошибка: " + loadErr.Error() + " · показаны данные прошлого чтения."
 				case spec.managed:
 					want = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
 				case loadErr != nil:

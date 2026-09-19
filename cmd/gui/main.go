@@ -37,6 +37,15 @@ type ui struct {
 	handshakes map[string]string
 	peerStats  map[string]core.PeerStat
 
+	// activityFailed, statsFailed — ТРЕТЬЕ СОСТОЯНИЕ колонок «Активность» и
+	// «Трафик» (задание A1, место № 2): последний запрос `wg show` за этими
+	// данными не удался. Без отдельных признаков пустая карта неотличима от
+	// «у всех клиентов ноль», и человек читает «0 B / 0 B» как измеренную
+	// величину. Обновляются там же, где handshakes/peerStats, — то есть при
+	// ошибке чтения списка остаются от прошлого чтения, как и сами данные.
+	activityFailed bool
+	statsFailed    bool
+
 	table       *widget.Table
 	status      *widget.Label
 	protoSelect *widget.Select
@@ -1056,29 +1065,12 @@ func (u *ui) buildTable() {
 				}
 				l.SetText(created)
 			case 3:
-				switch {
-				case !u.canManage:
-					// Для непроверяемых протоколов (XRay, DNS и т.п.) статистика
-					// не запрашивается вовсе (guiview.View.LoadStats — Д2), поэтому
-					// "?" здесь означало бы "не подключался", а не "не измеряется" —
-					// разные вещи (Д3, УИ-01).
-					l.SetText("—")
-				case cl.Disabled():
-					l.SetText("отключён")
-				default:
-					hs := u.handshakes[cl.ClientID]
-					if hs == "" {
-						hs = "?"
-					}
-					l.SetText(hs)
-				}
+				// Все ветки (в том числе «запрос активности не удался» —
+				// A1, место № 2) — в guiview.ActivityText, рядом с текстом
+				// трафика: в cmd/gui строку не проверяет ни один тест.
+				l.SetText(guiview.ActivityText(u.canManage, u.activityFailed, cl.Disabled(), u.handshakes[cl.ClientID]))
 			case 4:
-				if !u.canManage {
-					l.SetText("—")
-				} else {
-					st := u.peerStats[cl.ClientID]
-					l.SetText(core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes))
-				}
+				l.SetText(guiview.TrafficText(u.canManage, u.statsFailed, u.peerStats[cl.ClientID]))
 			case 5:
 				l.SetText(cl.ClientID)
 			}
@@ -1224,11 +1216,18 @@ func (u *ui) refresh() {
 		clients, existed, err := u.sess.LoadClientsView(cur)
 		view := guiview.ViewState(*cur, clients, existed, err)
 
+		// Ошибки обоих запросов статистики НЕ ОТБРАСЫВАЮТСЯ (A1, место № 2):
+		// прежде `if s, statErr := …; statErr == nil { stats = s }` не имел
+		// ветви на ошибку, stats оставалась пустой картой, и ниже она
+		// читалась как измеренный нуль трафика.
 		var hs map[string]string
+		var hsErr, statsErr error
 		stats := map[string]core.PeerStat{}
 		if view.LoadStats {
-			hs = u.sess.GetHandshakes(cur)
-			if s, statErr := u.sess.GetPeerStats(cur); statErr == nil {
+			hs, hsErr = u.sess.GetHandshakes(cur)
+			if s, peerErr := u.sess.GetPeerStats(cur); peerErr != nil {
+				statsErr = peerErr
+			} else {
 				stats = s
 			}
 		}
@@ -1248,7 +1247,13 @@ func (u *ui) refresh() {
 				// Управляемый протокол, ошибка чтения: поведение НЕ меняем
 				// относительно d6b3a5a/8c20da1 (Г2 п.5) — таблица сохраняет
 				// последние успешно загруженные данные, меняется только
-				// статус. Для непроверяемых протоколов ошибка/отсутствие
+				// статус. A1, место № 4: статус теперь ГОВОРИТ, что данные
+				// от прошлого чтения (guiview.View.StaleShown и текст
+				// Status), таблица по-прежнему не очищается и кнопки не
+				// блокируются. Диалог удаления при этом снимком больше не
+				// питается — он спрашивает сервер при открытии
+				// (deleteSelected), поэтому устаревание u.handshakes
+				// решения об удалении больше не определяет. Для непроверяемых протоколов ошибка/отсутствие
 				// файла — другое решение (Д3, П4: u.clients = nil, без
 				// числа в статусе) — это ветка ниже (err или !existed
 				// естественно даёт clients == nil от LoadClientsView).
@@ -1258,6 +1263,8 @@ func (u *ui) refresh() {
 			u.clients = clients
 			u.handshakes = hs
 			u.peerStats = stats
+			u.activityFailed = hsErr != nil
+			u.statsFailed = statsErr != nil
 			// применяем текущую (сохранённую/выбранную кликом по заголовку)
 			// сортировку — переключение протокола не должно сбрасывать её на дефолт
 			u.applySort()
@@ -1889,6 +1896,11 @@ func (u *ui) regenerateSelected() {
 
 // ---------- удаление ----------
 
+// errProtoSwitched — протокол переключили, пока летел запрос активности для
+// карточки удаления. Это НЕ «подключений не было», а «узнать не удалось»:
+// третье состояние, которое карточка и так умеет печатать.
+var errProtoSwitched = errors.New("протокол переключён, пока шёл запрос активности")
+
 func (u *ui) deleteSelected() {
 	if !u.cur.Managed {
 		dialog.ShowInformation("Недоступно",
@@ -1901,12 +1913,10 @@ func (u *ui) deleteSelected() {
 		return
 	}
 	victim := u.clients[idx]
-	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s\n", victim.Name(), victim.Created(), victim.ClientID)
-	if hs := u.handshakes[victim.ClientID]; hs != "" && hs != "—" {
-		msg += fmt.Sprintf("\n⚠ У этого клиента была активность!\nПоследнее подключение: %s\n", hs)
-	} else {
-		msg += "\nПодключений не было.\n"
-	}
+	// Снимок контейнера, как в refresh(): всё, что летит в goroutine,
+	// берёт cur, а не читает u.cur из другого потока.
+	cur := u.cur
+	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s", victim.Name(), victim.Created(), victim.ClientID)
 
 	var d dialog.Dialog
 	onDeleted := func() {
@@ -1922,7 +1932,11 @@ func (u *ui) deleteSelected() {
 			u.setBusy(true)
 			u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
 			goSafe(func() {
-				err := u.sess.DeleteByID(u.cur, victim.ClientID)
+				// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
+				// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
+				// снимка (см. refresh()) была применена к соседним двум
+				// вызовам и пропущена ровно у необратимого (ревью BE-01).
+				err := u.sess.DeleteByID(cur, victim.ClientID)
 				fyne.Do(func() {
 					if err != nil {
 						u.setBusy(false)
@@ -1942,7 +1956,7 @@ func (u *ui) deleteSelected() {
 		u.setBusy(true)
 		planStatus.SetText("Считаю изменения...")
 		goSafe(func() {
-			plan, err := u.sess.PlanDelete(u.cur, victim.ClientID)
+			plan, err := u.sess.PlanDelete(cur, victim.ClientID)
 			fyne.Do(func() {
 				u.setBusy(false)
 				planStatus.SetText("")
@@ -1957,12 +1971,55 @@ func (u *ui) deleteSelected() {
 			})
 		})
 	})
+	// СВЕЖИЙ ЗАПРОС АКТИВНОСТИ ПРИ ОТКРЫТИИ ДИАЛОГА (A1, места № 1 и № 4;
+	// решение ядра 19.09.2026) — ровно так, как это давно сделано в CLI
+	// (cmd/cli/confirm.go, buildCard).
+	//
+	// ПОЧЕМУ НЕ ИЗ СНИМКА u.handshakes. Снимок обновляется только успешным
+	// refresh(); при ошибке чтения он остаётся от прошлого раза (ранний
+	// выход выше), и клиент, подключившийся после последнего успешного
+	// чтения, выглядел бы в карточке как «подключений не было». Plan* этого
+	// не ловит: он перечитывает СУЩЕСТВОВАНИЕ клиента, а решение строится на
+	// его АКТИВНОСТИ. Прямой вызов делает гарантию механической: нам больше
+	// не нужно надеяться, что человек прочтёт предупреждение об устаревании.
+	// Цена — один запрос к серверу, и он приходится на момент перед
+	// НЕОБРАТИМЫМ действием.
+	//
+	// ПОЧЕМУ НЕДОСТУПНЫ ОБЕ КНОПКИ, А НЕ ОДНА (ревью BE-01). Блокировать
+	// только «Удалить» бессмысленно: рядом стоит «Показать изменения», и за
+	// ней PlanDelete → окно изменений → «Применить» → sess.Apply, то есть
+	// НЕОБРАТИМОЕ ДЕЙСТВИЕ ЗАВЕРШАЕТСЯ ЦЕЛИКОМ, пока метка ещё говорит
+	// «Узнаю, подключался ли клиент...». Это ровно та ШЕСТАЯ ТОЧКА ЗАПИСИ,
+	// которую A3а нашёл и закрыл предупреждением, — путь самого осторожного
+	// человека, который сначала смотрит, что изменится. Окно, где
+	// подтвердить можно раньше ответа, появилось бы вторым выходом.
+	okBtn.Disable()
+	diffBtn.Disable()
+	activity := widget.NewLabel("Узнаю, подключался ли клиент...")
+	activity.Wrapping = fyne.TextWrapWord
+	goSafe(func() {
+		hs, hsErr := u.sess.GetHandshakes(cur)
+		fyne.Do(func() {
+			// Сверка снимка — конвенция этого файла (см. refresh()): ответ
+			// про ДРУГОЙ контейнер отвечает не на тот вопрос, а ключа victim
+			// в нём нет, и это напечаталось бы как «Подключений не было».
+			// Сегодня случай недостижим (диалог модальный), но конвенция
+			// стоит двух строк и переживёт снятие модальности.
+			if cur != u.cur {
+				hs, hsErr = nil, errProtoSwitched
+			}
+			activity.SetText(guiview.DeleteCardActivity(hs, victim.ClientID, hsErr))
+			okBtn.Enable()
+			diffBtn.Enable()
+		})
+	})
 	content := container.NewVBox(
 		widget.NewLabel(msg),
+		activity,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
 	)
 	d = dialog.NewCustom("Удалить пользователя?", "Отмена", content, u.win)
-	d.Resize(fyne.NewSize(460, 260))
+	d.Resize(fyne.NewSize(460, 280))
 	d.Show()
 }
