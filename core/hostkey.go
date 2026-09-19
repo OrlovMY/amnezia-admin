@@ -369,7 +369,11 @@ func ForgetHostKey(pin, vaultPath, knownHostsPath, host string) error {
 		return fmt.Errorf("%w: %w", ErrForgetVault, err)
 	}
 	payload.HostKeyFingerprint = ""
-	sealed, err := SealVault(pin, payload, info.Params, info.MachineBind)
+	// SealVaultExisting, а не SealVault: файл уже открыт верным пином выше, и
+	// политика создания пина к перезаписи не применяется — иначе хранилище со
+	// старым коротким пином открывалось бы, но никогда не запечатывалось
+	// обратно, и «Забыть ключ сервера» для него не работало бы никогда.
+	sealed, err := SealVaultExisting(pin, payload, info.Params, info.MachineBind)
 	if err != nil {
 		return fmt.Errorf("%w: не удалось перезапечатать хранилище: %w", ErrForgetVault, err)
 	}

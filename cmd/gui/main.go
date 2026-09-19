@@ -98,14 +98,32 @@ func main() {
 	w.ShowAndRun()
 }
 
+// privateFilePerm — права файлов, которые создаёт GUI: чтение и запись
+// только владельцем. crash.log содержит стек с путями и внутренним
+// состоянием, ui.json — состояние интерфейса; ни то, ни другое не должно
+// читаться другими пользователями машины.
+//
+// На Windows POSIX-биты не применяются (там ACL): Go передаёт 0600 в
+// CreateFile и снимает только флаг «только для чтения», а разграничение
+// доступа определяет ACL каталога. Сторож на 0644 и тест прав (perm_test.go)
+// это признают явно — тест прав пропускается на Windows с причиной.
+const privateFilePerm os.FileMode = 0600
+
 // logPanic пишет панику в crash.log рядом с exe — окно без консоли, иначе падение невидимо
 func logPanic() {
 	if r := recover(); r != nil {
 		dir := filepath.Dir(os.Args[0])
 		msg := fmt.Sprintf("%s\npanic: %v\n\n%s\n", time.Now().Format(time.RFC3339), r, debug.Stack())
-		os.WriteFile(filepath.Join(dir, "crash.log"), []byte(msg), 0644)
+		writeCrashLog(dir, msg)
 		panic(r)
 	}
+}
+
+// writeCrashLog вынесен из logPanic отдельной функцией ровно затем, чтобы
+// права создаваемого файла проверялись тестом на настоящем файле, а не на
+// глаз: logPanic сам по себе перевозбуждает панику и пишет рядом с exe.
+func writeCrashLog(dir, msg string) error {
+	return os.WriteFile(filepath.Join(dir, "crash.log"), []byte(msg), privateFilePerm)
 }
 
 // goSafe запускает фоновую операцию с логированием паники
@@ -560,12 +578,21 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 // же пином, которым файл был открыт (используется ДО его обнуления в
 // attemptConnect).
 func reseal(vc *vaultCtx, fp string) error {
-	if vc.pin == nil {
+	// Пустая строка — такое же «пина нет», как и nil: пин обнуляется сразу
+	// после использования в attemptConnect. Проверка парная к той, что
+	// стоит в confirmForgetHostKey, и к границе в core.SealVaultExisting —
+	// инвариант не должен держаться на порядке строк в одной функции
+	// (ревью SEC-01).
+	if vc.pin == nil || *vc.pin == "" {
 		return fmt.Errorf("пин недоступен")
 	}
 	payload := vc.payload
 	payload.HostKeyFingerprint = fp
-	data, err := core.SealVault(*vc.pin, payload, vc.info.Params, vc.info.MachineBind)
+	// SealVaultExisting, а не SealVault: файл уже открыт этим пином
+	// (vc.info из OpenVaultInfo), политика создания пина к перезаписи не
+	// применяется — иначе отпечаток нового ключа сервера никогда не
+	// записался бы в хранилище со старым коротким пином.
+	data, err := core.SealVaultExisting(*vc.pin, payload, vc.info.Params, vc.info.MachineBind)
 	if err != nil {
 		return err
 	}
@@ -948,7 +975,13 @@ func sortDirFromName(s string) core.SortDir {
 }
 
 func uiStatePath() string {
-	return filepath.Join(core.DefaultVaultDir(), "ui.json")
+	return uiStatePathIn(core.DefaultVaultDir())
+}
+
+// uiStatePathIn — то же имя файла, но в заданном каталоге: чтобы запись и
+// чтение не разъехались, когда тест задаёт каталог явно.
+func uiStatePathIn(dir string) string {
+	return filepath.Join(dir, "ui.json")
 }
 
 // loadSortState читает ui.json; при отсутствии файла, битом JSON или
@@ -979,23 +1012,30 @@ func loadSortState() (primary core.SortColumn, primaryDir core.SortDir, secondar
 // Ошибка молча логируется через crash.log не пишется — это некритичная UX-настройка,
 // поэтому просто игнорируем ошибку записи (нет диалога, не мешаем работе).
 func saveSortState(primary core.SortColumn, primaryDir core.SortDir, secondary core.SortColumn, secondaryDir core.SortDir) {
-	dir := core.DefaultVaultDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
-	}
 	st := sortStateJSON{
 		Primary:      sortColumnNames[primary],
 		PrimaryDir:   sortDirName(primaryDir),
 		Secondary:    sortColumnNames[secondary],
 		SecondaryDir: sortDirName(secondaryDir),
 	}
+	saveSortStateTo(core.DefaultVaultDir(), st)
+}
+
+// saveSortStateTo вынесена из saveSortState с явным каталогом ровно затем,
+// чтобы права созданного ui.json проверялись тестом на настоящем файле:
+// core.DefaultVaultDir() указывает на каталог рядом с exe и в тесте не
+// подменяется.
+func saveSortStateTo(dir string, st sortStateJSON) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return
 	}
-	path := uiStatePath()
+	path := uiStatePathIn(dir)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, privateFilePerm); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {

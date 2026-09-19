@@ -8,6 +8,11 @@
 # исключение: golden-фикстуры для тестов (внутри фейковый vpn://golden-fixture-key)
 !core/testdata/v1.avlt
 !core/testdata/v2.avlt
+# PR-A4: хранилище со СТАРЫМ КОРОТКИМ пином (10 символов), внутри фейковый
+# vpn://oldshortpin-fixture. Нужно затем, чтобы тест тупика перезапечатывания
+# компилировался на предыдущей ревизии и краснел там по существу, а не
+# ошибкой компиляции.
+!core/testdata/shortpin.avlt
 throttle.json
 ui.json
 crash.log
