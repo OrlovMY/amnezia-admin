@@ -237,15 +237,26 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 }
 
 // saveUserConfig — см. listUsers про параметр w (Е3).
+//
+// A4в: каталог больше не относительный («Конфигурации» рядом с текущим
+// каталогом), а каталог данных пользователя ОС — см. core.UserConfigsDir.
+// Не удалось его определить — это ошибка, а не запись куда попало.
 func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
-	if err := os.MkdirAll("Конфигурации", 0755); err != nil {
+	dir, err := core.UserConfigsDir()
+	if err != nil {
 		return err
 	}
-	fileName := filepath.Join("Конфигурации", core.SanitizeName(u.Name)+".conf")
-	if err := os.WriteFile(fileName, []byte(u.Config), 0600); err != nil {
+	return saveUserConfigTo(w, dir, u, proto)
+}
+
+// saveUserConfigTo вынесена из saveUserConfig с ЯВНЫМ каталогом затем, чтобы
+// тест подставлял свой и не писал в настоящий каталог данных владельца — тот
+// же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
+func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
+	abs, err := core.WriteClientConfig(dir, u.Name, u.Config)
+	if err != nil {
 		return err
 	}
-	abs, _ := filepath.Abs(fileName)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))

@@ -1627,18 +1627,25 @@ func (u *ui) addDialog() {
 	d.Show()
 }
 
-// writeConfigFile сохраняет клиентский конфиг в "Конфигурации\<Имя>.conf"
+// writeConfigFile сохраняет клиентский конфиг в каталог данных пользователя ОС
 // (перезаписывая, если уже есть) и возвращает абсолютный путь.
+//
+// A4в: раньше каталог был относительным и файл ложился рядом с текущим
+// каталогом процесса. Не удалось определить каталог данных пользователя —
+// возвращаем ошибку, а не пишем куда попало.
 func (u *ui) writeConfigFile(nu *core.NewUser) (string, error) {
-	if err := os.MkdirAll("Конфигурации", 0755); err != nil {
+	dir, err := core.UserConfigsDir()
+	if err != nil {
 		return "", err
 	}
-	fileName := filepath.Join("Конфигурации", core.SanitizeName(nu.Name)+".conf")
-	if err := os.WriteFile(fileName, []byte(nu.Config), 0600); err != nil {
-		return "", err
-	}
-	abs, _ := filepath.Abs(fileName)
-	return abs, nil
+	return writeConfigFileTo(dir, nu)
+}
+
+// writeConfigFileTo вынесена с ЯВНЫМ каталогом затем, чтобы тест подставлял
+// свой и не писал в настоящий каталог данных владельца, — тот же приём, что с
+// writeCrashLog(dir,…) и saveSortStateTo(dir,…).
+func writeConfigFileTo(dir string, nu *core.NewUser) (string, error) {
+	return core.WriteClientConfig(dir, nu.Name, nu.Config)
 }
 
 // showConfigDialog показывает готовый клиентский конфиг в виде QR-кода
