@@ -18,6 +18,10 @@ package permguard
 // заведомыми дефектами и требует находок, а рядом — заведомо честный файл, на
 // котором находок быть НЕ должно. Одной половины мало: канарейка, только
 // ищущая находки, зазеленела бы и на стороже, который красит всё подряд.
+// Отдельно TestGuardChecksDeclarationOfAllowedIdent прибивает проверку
+// ОБЪЯВЛЕНИЯ разрешённого имени: её образцы обязаны лежать по пути
+// cmd/gui/main.go, иначе allowedIdentIn отбракует их раньше и обе ветки
+// останутся непроверенными — так и было до ревью SEC-01.
 //
 // ГРАНИЦА СТОРОЖА — здесь, в коде, а не в отчёте: читатель, уверенный, что
 // сторож ловит всё, перестанет искать обход. Сторож стоит на двух ногах.
@@ -355,6 +359,95 @@ func writePlanted(t *testing.T, names ...string) string {
 		}
 	}
 	return dir
+}
+
+// writePlantedAs кладёт исходник по ЗАДАННОМУ пути внутри временного дерева
+// (например, cmd/gui/main.go) и возвращает корень. Путь важен: allowedIdentIn
+// сверяет хвост пути, и образец, лежащий под чужим именем, до проверки
+// объявления просто не доходит — на этом ветки «объявлено здесь же широким
+// режимом» и «не объявлено литералом» и оставались непроверенными.
+func writePlantedAs(t *testing.T, rel, src string) string {
+	t.Helper()
+	dir := t.TempDir()
+	full := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+		t.Fatalf("каталог для %s: %v", rel, err)
+	}
+	if err := os.WriteFile(full, []byte(src), 0600); err != nil {
+		t.Fatalf("подложить %s: %v", rel, err)
+	}
+	return dir
+}
+
+// TestGuardChecksDeclarationOfAllowedIdent — канарейка на ту половину ноги 1,
+// которая проверяет ОБЪЯВЛЕНИЕ разрешённого имени (ревью SEC-01, третий
+// найденный случай ложно-зелёной канарейки).
+//
+// Почему прежние образцы её не прибивали: они лежали во временном каталоге
+// под чужими именами, allowedIdentIn их отбраковывал раньше, и до веток
+// объявления управление не доходило. Обе ветки можно было обезвредить, и
+// весь пакет оставался зелёным; больше того — заменив в cmd/gui/main.go
+// privateFilePerm на 0666, SEC-01 получил зелёный прогон. Нога 2 такое не
+// подстрахует: она ловит ровно 0644.
+//
+// Поэтому образцы кладутся ИМЕННО по пути cmd/gui/main.go: только так имя
+// проходит allowedIdentIn и доезжает до проверки объявления.
+func TestGuardChecksDeclarationOfAllowedIdent(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			"разрешённое имя объявлено широким режимом",
+			`package main
+
+import "os"
+
+const privateFilePerm os.FileMode = 0666
+
+func f(p string) error { return os.WriteFile(p, nil, privateFilePerm) }
+`,
+			"объявлено здесь же широким режимом",
+		},
+		{
+			"разрешённое имя объявлено не литералом",
+			`package main
+
+import "os"
+
+func modeFromEnv() os.FileMode { return 0666 }
+
+var privateFilePerm = modeFromEnv()
+
+func f(p string) error { return os.WriteFile(p, nil, privateFilePerm) }
+`,
+			"не объявлено литералом в этом же файле",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := writePlantedAs(t, "cmd/gui/main.go", c.src)
+			found, files, err := scanTree(dir)
+			if err != nil {
+				t.Fatalf("scanTree: %v", err)
+			}
+			if files != 1 {
+				t.Fatalf("разобрано файлов %d, want 1", files)
+			}
+			joined := ""
+			for _, f := range found {
+				joined += f.what + "\n"
+			}
+			// Требуется ИМЕННО формулировка этой ветки. Иначе подслучай
+			// зазеленел бы от находки соседней причины (привязки к файлу или
+			// ноги 2) — ровно та ошибка, на которой я уже дважды поймался в
+			// этом же файле.
+			if !strings.Contains(joined, c.want) {
+				t.Fatalf("сторож не проверил объявление разрешённого имени: хотел %q, находки:\n%s", c.want, joined)
+			}
+		})
+	}
 }
 
 func TestGuardCatchesPlantedDefects(t *testing.T) {
