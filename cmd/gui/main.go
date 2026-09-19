@@ -1627,18 +1627,27 @@ func (u *ui) addDialog() {
 	d.Show()
 }
 
-// writeConfigFile сохраняет клиентский конфиг в "Конфигурации\<Имя>.conf"
+// writeConfigFile сохраняет клиентский конфиг в каталог данных пользователя ОС
 // (перезаписывая, если уже есть) и возвращает абсолютный путь.
-func (u *ui) writeConfigFile(nu *core.NewUser) (string, error) {
-	if err := os.MkdirAll("Конфигурации", 0755); err != nil {
-		return "", err
+//
+// A4в: раньше каталог был относительным и файл ложился рядом с текущим
+// каталогом процесса. Не удалось определить каталог данных пользователя —
+// возвращаем ошибку, а не пишем куда попало.
+// Второе возвращаемое значение — «каталога не было, он заведён сейчас»: по
+// нему диалог один раз показывает подсказку о смене места (ревью UX-01).
+func (u *ui) writeConfigFile(nu *core.NewUser) (string, bool, error) {
+	dir, err := core.UserConfigsDir()
+	if err != nil {
+		return "", false, err
 	}
-	fileName := filepath.Join("Конфигурации", core.SanitizeName(nu.Name)+".conf")
-	if err := os.WriteFile(fileName, []byte(nu.Config), 0600); err != nil {
-		return "", err
-	}
-	abs, _ := filepath.Abs(fileName)
-	return abs, nil
+	return writeConfigFileTo(dir, nu)
+}
+
+// writeConfigFileTo вынесена с ЯВНЫМ каталогом затем, чтобы тест подставлял
+// свой и не писал в настоящий каталог данных владельца, — тот же приём, что с
+// writeCrashLog(dir,…) и saveSortStateTo(dir,…).
+func writeConfigFileTo(dir string, nu *core.NewUser) (string, bool, error) {
+	return core.WriteClientConfig(dir, nu.Name, nu.Config)
 }
 
 // showConfigDialog показывает готовый клиентский конфиг в виде QR-кода
@@ -1662,15 +1671,52 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	savedLabel := widget.NewLabel("")
 	savedLabel.Wrapping = fyne.TextWrapWord
 
+	// Одноразовая подсказка о смене места (ревью UX-01): скрыта, пока не
+	// окажется, что каталог заведён этим самым сохранением.
+	moveHint := widget.NewLabel(core.FirstSaveHint)
+	moveHint.Wrapping = fyne.TextWrapWord
+	moveHint.Hide()
+
+	// Путь длинный (~75 знаков) и переносится; перенабирать его руками —
+	// худшее, что можно предложить. Кнопка появляется вместе с путём.
+	copyBtn := widget.NewButtonWithIcon("Скопировать путь", theme.ContentCopyIcon(), nil)
+	copyBtn.Hide()
+
 	var saveBtn *widget.Button
+	// Совет на случай неудачи — тот же по смыслу, что в CLI, и тем же текстом
+	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
+	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
+	// перевыпустить: кнопкой «Перевыпустить» в главном окне.
+	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) +
+		" Это делает кнопка «Перевыпустить» в главном окне.")
+	failHint.Wrapping = fyne.TextWrapWord
+	failHint.Hide()
+
 	saveBtn = widget.NewButtonWithIcon("Сохранить .conf", theme.DocumentSaveIcon(), func() {
-		abs, err := u.writeConfigFile(nu)
+		abs, createdDir, err := u.writeConfigFile(nu)
 		if err != nil {
 			dialog.ShowError(err, u.win)
+			// Диалог ошибки человек закроет, а совет обязан остаться перед
+			// глазами: конфиг существует только в памяти, окно закроется — и
+			// ключи клиента потеряны.
+			failHint.Show()
 			return
 		}
+		failHint.Hide()
 		saveBtn.Disable()
-		savedLabel.SetText("Сохранено: " + abs)
+		// Одно событие — одно слово: и здесь, и в строке состояния «Конфиг
+		// сохранён» (ревью UX-01).
+		savedLabel.SetText("Конфиг сохранён: " + abs)
+		copyBtn.OnTapped = func() {
+			fyne.CurrentApp().Clipboard().SetContent(abs)
+			if u.status != nil {
+				u.status.SetText("Путь скопирован в буфер обмена")
+			}
+		}
+		copyBtn.Show()
+		if createdDir {
+			moveHint.Show()
+		}
 		if u.status != nil {
 			u.status.SetText(fmt.Sprintf("Конфиг сохранён: %s", abs))
 		}
@@ -1685,9 +1731,15 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		hint,
 		saveBtn,
 		savedLabel,
+		copyBtn,
+		moveHint,
+		failHint,
 	)
+	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
+	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
+	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(380, 480))
+	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
 }
 

@@ -237,20 +237,57 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 }
 
 // saveUserConfig — см. listUsers про параметр w (Е3).
+//
+// A4в: каталог больше не относительный («Конфигурации» рядом с текущим
+// каталогом), а каталог данных пользователя ОС — см. core.UserConfigsDir.
+// Не удалось его определить — это ошибка, а не запись куда попало.
 func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
-	if err := os.MkdirAll("Конфигурации", 0755); err != nil {
-		return err
+	dir, err := core.UserConfigsDir()
+	if err != nil {
+		return saveFailed(w, u, err)
 	}
-	fileName := filepath.Join("Конфигурации", core.SanitizeName(u.Name)+".conf")
-	if err := os.WriteFile(fileName, []byte(u.Config), 0600); err != nil {
-		return err
+	return saveUserConfigTo(w, dir, u, proto)
+}
+
+// saveUserConfigTo вынесена из saveUserConfig с ЯВНЫМ каталогом затем, чтобы
+// тест подставлял свой и не писал в настоящий каталог данных владельца — тот
+// же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
+func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
+	abs, createdDir, err := core.WriteClientConfig(dir, u.Name, u.Config)
+	if err != nil {
+		return saveFailed(w, u, err)
 	}
-	abs, _ := filepath.Abs(fileName)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
+	if createdDir {
+		// Одноразовая подсказка: каталога не было, значит в новое место
+		// сохраняется впервые (ревью UX-01).
+		fmt.Fprintln(w, cDim(core.FirstSaveHint))
+	}
 	fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
 	return nil
+}
+
+// saveFailed печатает, ЧТО ДЕЛАТЬ, когда сохранить конфиг не удалось, и
+// возвращает исходную ошибку (код возврата и печать самой ошибки прежние).
+//
+// ЗАЧЕМ ОТДЕЛЬНЫЙ ТЕКСТ (ревью UX-01). К этому месту пользователь на сервере
+// УЖЕ СОЗДАН: и sess.AddUser, и sess.RegenerateUser отработали. Конфиг с
+// этого момента существует только в памяти процесса и больше нигде не
+// печатается — молча выйти с ошибкой значит потерять ключи клиента. A4в
+// завёл ветвь отказа (это правильнее тихой записи куда попало) и обязан
+// сказать, как из неё выйти.
+//
+// Сам конфиг сюда НЕ печатается: это секрет (приватный ключ клиента), и
+// решение печатать его в поток вывода принимает владелец, а не эта функция.
+func saveFailed(w io.Writer, u *core.NewUser, err error) error {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, core.SaveFailedAdvice(u.Name))
+	// Своё у CLI — только КАК перевыпустить; смысл совета общий с GUI.
+	fmt.Fprintf(w, "Команда: amnezia-admin rekey -key vpn://... -name %q "+
+		"(в интерактивном режиме — пункт «Перевыпустить конфиг»).\n", u.Name)
+	return err
 }
 
 func printContainers(containers []core.Container, withNotes bool) {
