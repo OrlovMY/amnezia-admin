@@ -482,6 +482,106 @@ func TestNonLinuxVerdict(t *testing.T) {
 	}
 }
 
+// --- Порядок ветвей: «определить не удалось» побеждает «скорее всего» ---
+//
+// Место № 3 задания A1, признак 3 («порядок ветвей»): ветка «скорее всего,
+// запустится, но может и не открыться» стоит выше сбора «определить не
+// удалось», и потому непустой MissingDlopen перехватывает незнание про
+// библиотеку C. Программа говорит «скорее всего запустится», не сумев
+// определить то, от чего запуск зависит.
+
+// cannotCheckLibcOnly — итог, когда неизвестна только библиотека C.
+const cannotCheckLibcOnly = "Проверить не удалось: какая в системе библиотека C. " +
+	"Попробуйте просто запустить графическую версию — если она не откроется, " +
+	"пользуйтесь консольной: она работает независимо от этого."
+
+// maybeMissingXrandr — итог «скорее всего запустится» для одного
+// отсутствующего dlopen-имени.
+const maybeMissingXrandr = "Графический интерфейс, скорее всего, запустится, но может и не открыться: " +
+	"не видно библиотек — libXrandr.so.2. Установите их, так надёжнее: " +
+	"Debian/Ubuntu — `libxrandr2`; Fedora — `libXrandr`."
+
+// TestUnknownLibcBeatsMaybeMissingLibs — тест РАЗЛИЧЕНИЯ места № 3.
+//
+// Библиотеки графики во всех трёх случаях одни и те же: главные на месте,
+// libXrandr.so.2 не видно. Различается ТОЛЬКО знание про библиотеку C — и
+// итог обязан различаться вместе с ним. Сравнение целиком, не Contains.
+func TestUnknownLibcBeatsMaybeMissingLibs(t *testing.T) {
+	cases := []struct {
+		name string
+		libc Libc
+		want string
+	}{
+		{"библиотека C известна — «скорее всего запустится»", Libc{Kind: "glibc", Version: "2.36"}, maybeMissingXrandr},
+		{"библиотеку C определить не удалось", Libc{}, cannotCheckLibcOnly},
+		{"версия glibc не разобралась", Libc{Kind: "glibc", Version: "неизвестно"}, cannotCheckLibcOnly},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := Result{
+				GOOS: "linux", GOARCH: "amd64", OSName: "Void Linux",
+				Libc:  c.libc,
+				Graph: Graphics{Known: true, MissingDlopen: []string{"libXrandr.so.2"}},
+				Sess:  SessionX11,
+			}
+			if got := verdict(r); got != c.want {
+				t.Fatalf("итог = %q,\nхочу  = %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestUnknownLibcBeatsMaybeMissingLibsArrives — тест ДОЕЗДА места № 3.
+//
+// Состояние «библиотеку C определить не удалось» не присваивается в тесте, а
+// возникает боевым путём: из ответов подставленной ОС. Каждый случай — своя
+// причина неудачи разбора, и каждая обязана довезти незнание до итоговой
+// строки, а не утонуть в «скорее всего запустится».
+func TestUnknownLibcBeatsMaybeMissingLibsArrives(t *testing.T) {
+	// ldconfig отработал и показал всё, кроме libXrandr.so.2, — во всех
+	// случаях одинаково: различается только путь к незнанию про libc.
+	ldconfig := ldconfigOut(without("libXrandr.so.2")...)
+	cases := []struct {
+		name string
+		out  map[string]string
+	}{
+		{
+			// getconf и ldd отсутствуют (Run возвращает ошибку), загрузчиков
+			// musl нет.
+			"getconf и ldd отсутствуют",
+			map[string]string{"ldconfig -p": ldconfig},
+		},
+		{
+			// Правило «нераспознанный вывод → определить не удалось» — здесь
+			// единственная защита от неверного образца: Linux-машины для
+			// сверки нет, и ослаблять его нельзя ни в какой ветке.
+			"ldd --version дал нераспознанный вывод",
+			map[string]string{"ldd --version": "some other tool 1.2.3\n", "ldconfig -p": ldconfig},
+		},
+		{
+			// Номер версии разобран, но сравнить его с порогом не удалось
+			// (компонент не умещается в число). Единственный найденный
+			// входной путь к состоянию «версия glibc неизвестна»; путь
+			// маловероятный, но он есть, и через него незнание тоже обязано
+			// доезжать.
+			"версию glibc не удалось сравнить с порогом",
+			map[string]string{"getconf GNU_LIBC_VERSION": "glibc 20260919202609192026.1\n", "ldconfig -p": ldconfig},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeOS{out: c.out}
+			r := detect(f.deps(), "linux", "amd64", env(map[string]string{"DISPLAY": ":0"}))
+			if !r.Graph.Known || strings.Join(r.Graph.MissingDlopen, ",") != "libXrandr.so.2" {
+				t.Fatalf("Graph = %+v, хочу «главные на месте, не видно libXrandr.so.2»", r.Graph)
+			}
+			if got := verdict(r); got != cannotCheckLibcOnly {
+				t.Fatalf("итог = %q,\nхочу  = %q", got, cannotCheckLibcOnly)
+			}
+		})
+	}
+}
+
 // --- Дословность вывода (эталоны Д6) -----------------------------------
 
 // TestReportGolden сравнивает ВЕСЬ вывод целиком с эталонами задания
