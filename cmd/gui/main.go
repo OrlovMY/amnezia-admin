@@ -578,7 +578,12 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 // же пином, которым файл был открыт (используется ДО его обнуления в
 // attemptConnect).
 func reseal(vc *vaultCtx, fp string) error {
-	if vc.pin == nil {
+	// Пустая строка — такое же «пина нет», как и nil: пин обнуляется сразу
+	// после использования в attemptConnect. Проверка парная к той, что
+	// стоит в confirmForgetHostKey, и к границе в core.SealVaultExisting —
+	// инвариант не должен держаться на порядке строк в одной функции
+	// (ревью SEC-01).
+	if vc.pin == nil || *vc.pin == "" {
 		return fmt.Errorf("пин недоступен")
 	}
 	payload := vc.payload

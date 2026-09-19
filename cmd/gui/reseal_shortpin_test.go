@@ -14,6 +14,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"amnezia-admin/core"
@@ -56,5 +57,30 @@ func TestResealOldShortPin(t *testing.T) {
 	}
 	if got.HostKeyFingerprint != newFP {
 		t.Fatalf("HostKeyFingerprint = %q, want %q", got.HostKeyFingerprint, newFP)
+	}
+}
+
+// TestResealRejectsEmptyPin — вторая половина запрета пустого пина (ревью
+// SEC-01): reseal проверял только vc.pin == nil, а пин обнуляется сразу
+// после использования, то есть пустая строка сюда доезжает штатным путём.
+// ПОЧЕМУ ПРОВЕРЯЕТСЯ ТЕКСТ ОШИБКИ, А НЕ ПРОСТО «ошибка не nil». Защит две, и
+// они дублируют друг друга намеренно: если снять проверку здесь, откажет
+// граница в core.SealVaultExisting, и тест на «err != nil» остался бы
+// зелёным — то есть сторожил бы не то место. Поэтому тест требует, чтобы
+// отказал ИМЕННО reseal, своим текстом. Подмена, возвращающая условие к
+// одному vc.pin == nil, обязана уронить этот тест.
+func TestResealRejectsEmptyPin(t *testing.T) {
+	empty := ""
+	vc := &vaultCtx{path: filepath.Join(t.TempDir(), "нет.avlt"), pin: &empty}
+	err := reseal(vc, "SHA256:ccc")
+	if err == nil {
+		t.Fatal("reseal с пустым пином = nil, want ошибка")
+	}
+	if !strings.Contains(err.Error(), "пин недоступен") {
+		t.Fatalf("отказал не reseal, а кто-то ниже: %v — проверка пустого пина в reseal не работает", err)
+	}
+	// Файл не создан: ни одна ветка не записала хранилище.
+	if _, err := os.Stat(vc.path); err == nil {
+		t.Fatal("reseal с пустым пином создал файл хранилища")
 	}
 }

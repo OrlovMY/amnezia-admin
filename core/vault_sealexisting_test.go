@@ -8,7 +8,12 @@ package core
 // компилируется. Соседний файл с главным покраснением намеренно обходится
 // старым API, чтобы падать по существу, а не ошибкой компиляции.
 
-import "testing"
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestSealVaultStillRejectsNewShortPin — подмена, убирающая ValidatePin из
 // SealVault, обязана уронить этот тест.
@@ -50,5 +55,47 @@ func TestSealVaultExistingIgnoresPinPolicy(t *testing.T) {
 	}
 	if got.Key != payload.Key || got.HostKeyFingerprint != payload.HostKeyFingerprint {
 		t.Fatalf("содержимое не доехало: %+v", got)
+	}
+}
+
+// TestSealVaultExistingRejectsEmptyPin — пустой пин на границе (ревью
+// SEC-01). До PR-A4 последним рубежом против "" был ValidatePin внутри
+// SealVault; после разведения путей его не стало, и инвариант держался
+// только на порядке строк в вызывающем. Цена ошибки: файл, запечатанный
+// пустым пином, потом молча открывается — OpenVault политику не применяет.
+//
+// Подмена, снимающая проверку pin == "" в SealVaultExisting, обязана уронить
+// этот тест.
+func TestSealVaultExistingRejectsEmptyPin(t *testing.T) {
+	if _, err := SealVaultExisting("", VaultPayload{Key: "vpn://x"}, testArgonParams, false); err == nil {
+		t.Fatal("SealVaultExisting(\"\") = nil, want ошибка: пустым пином хранилище запечатывать нельзя")
+	}
+	// Различение: дело именно в пустоте, а не в «коротком» вообще — пин из
+	// одного символа по-прежнему проходит (перезапечатывание не применяет
+	// политику создания пина).
+	if _, err := SealVaultExisting("x", VaultPayload{Key: "vpn://x"}, testArgonParams, false); err != nil {
+		t.Fatalf("SealVaultExisting(\"x\") = %v, want nil — запрет обязан касаться только пустого пина", err)
+	}
+}
+
+// TestForgetHostKeyRejectsEmptyPin — доезд того же запрета боевым путём:
+// пустой пин не должен доходить до записи файла. Здесь он не доходит даже до
+// SealVaultExisting (файл не открывается), и это тоже результат: ни одна
+// ветка не записывает хранилище.
+func TestForgetHostKeyRejectsEmptyPin(t *testing.T) {
+	vaultPath := loadShortPinVault(t)
+	before, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("чтение до: %v", err)
+	}
+	if err := ForgetHostKey("", vaultPath, filepath.Join(t.TempDir(), "known_hosts"), "198.51.100.7:22"); err == nil {
+		t.Fatal("ForgetHostKey с пустым пином = nil, want ошибка")
+	}
+	after, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("чтение после: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("хранилище изменилось при пустом пине — этого не должно случиться ни на одной ветке")
 	}
 }
