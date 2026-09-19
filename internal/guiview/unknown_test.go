@@ -145,6 +145,76 @@ func TestDeleteCardActivityFreshDataArrives(t *testing.T) {
 	}
 }
 
+// TestActivityTextThreeStates — ТЕСТ РАЗЛИЧЕНИЯ ячейки активности: «запрос
+// не удался» отличимо и от «не подключался» («—» в ответе сервера), и от
+// «не спрашивали» («—» у неуправляемого протокола). Текст этой ячейки
+// переехал из cmd/gui в guiview по ревью BE-01: ветка «?» была написана
+// литералом там, где её не проверяет ни один тест.
+func TestActivityTextThreeStates(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		canManage, failed, disabled bool
+		hs                          string
+		want                        string
+	}{
+		{"неуправляемый протокол — не спрашивали", false, false, false, "", "—"},
+		{"неуправляемый и при отказе — по-прежнему не спрашивали", false, true, false, "", "—"},
+		{"отключённый клиент", true, false, true, "2026-09-18 21:40", "отключён"},
+		{"сервер ответил: подключался", true, false, false, "2026-09-18 21:40", "2026-09-18 21:40"},
+		{"сервер ответил: не подключался", true, false, false, "—", "—"},
+		{"ключа нет в ответе — про него не знаем", true, false, false, "", "?"},
+		{"запрос не удался", true, true, false, "", "?"},
+		{"запрос не удался — прежнее значение не печатается", true, true, false, "2026-09-18 21:40", "?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := guiview.ActivityText(tc.canManage, tc.failed, tc.disabled, tc.hs)
+			if got != tc.want {
+				t.Errorf("ActivityText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if guiview.ActivityText(true, true, false, "2026-09-18 21:40") ==
+		guiview.ActivityText(true, false, false, "2026-09-18 21:40") {
+		t.Fatal("«узнать не удалось» неотличимо от свежей даты подключения")
+	}
+	if guiview.ActivityText(true, true, false, "") == guiview.ActivityText(true, false, false, "—") {
+		t.Fatal("«узнать не удалось» неотличимо от «не подключался»")
+	}
+}
+
+// TestActivityTextArrivesFromServer — ТЕСТ ДОЕЗДА той же ячейки: отказ
+// приходит боевым путём из core.Session.GetHandshakes.
+func TestActivityTextArrivesFromServer(t *testing.T) {
+	sess := core.NewSessionWithRunner(
+		&failWgShow{inner: fakesrv.New(), err: errors.New("ssh: connection reset")},
+		&core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
+
+	hs, err := sess.GetHandshakes(wgContainer())
+	if err == nil {
+		t.Fatal("тест перестал что-либо проверять: GetHandshakes не вернула ошибку на отказавшем транспорте")
+	}
+	if got, want := guiview.ActivityText(true, err != nil, false, hs["peer-1"]), "?"; got != want {
+		t.Errorf("отказ сервера не доехал до ячейки активности: %q, want %q", got, want)
+	}
+
+	ok := core.NewSessionWithRunner(fakesrv.New(), &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
+	hs, err = ok.GetHandshakes(wgContainer())
+	if err != nil {
+		t.Fatalf("исправный сервер: %v", err)
+	}
+	var anyPeer string
+	for pub := range hs {
+		anyPeer = pub
+		break
+	}
+	if anyPeer == "" {
+		t.Fatal("тест перестал что-либо проверять: fakesrv не вернул ни одного peer'а")
+	}
+	if got, want := guiview.ActivityText(true, err != nil, false, hs[anyPeer]), "—"; got != want {
+		t.Errorf("исправный сервер: %q, want %q — ответ «не подключался» обязан остаться собой", got, want)
+	}
+}
+
 // TestTrafficTextThreeStates — ТЕСТ РАЗЛИЧЕНИЯ места № 2: "не удалось
 // получить статистику" отличимо от измеренного нуля. До правки ошибка
 // GetPeerStats отбрасывалась (if … statErr == nil), карта оставалась пустой,

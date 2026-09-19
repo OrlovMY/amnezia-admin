@@ -51,6 +51,36 @@ func DeleteCardActivity(hs map[string]string, clientID string, err error) string
 	return cardActivityNone
 }
 
+// ActivityText — ячейка колонки «Активность» таблицы пользователей.
+//
+//	!canManage       → "—"        статистика не запрашивалась вовсе (нет `wg`
+//	                              у XRay/DNS): "?" здесь означало бы «не
+//	                              смогли узнать», а мы и не спрашивали;
+//	disabled         → "отключён" состояние записи, а не измерение;
+//	activityFailed   → "?"        запрос был и не удался;
+//	hs == ""         → "?"        сервер ответил, но этого ключа в ответе
+//	                              нет — про него мы тоже не знаем;
+//	иначе            → значение из ответа ("—" = не подключался).
+//
+// Порядок ветвей — часть решения, а не стиль (признак 3 правила
+// П-НЕЗНАНИЕ): частный случай выше общего перехватывал бы «не знаем».
+// Текст живёт здесь, а не в cmd/gui, по тому же доводу, что и остальное в
+// этом файле: в cmd/gui строку не проверяет ни один тест.
+func ActivityText(canManage, activityFailed, disabled bool, hs string) string {
+	switch {
+	case !canManage:
+		return "—"
+	case disabled:
+		return "отключён"
+	case activityFailed:
+		return "?"
+	case hs == "":
+		return "?"
+	default:
+		return hs
+	}
+}
+
 // TrafficText — ячейка колонки «Трафик» таблицы пользователей.
 //
 //	!canManage  → "—"  статистика не запрашивалась вовсе (нет `wg` у
