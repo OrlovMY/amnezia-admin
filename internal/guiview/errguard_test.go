@@ -332,8 +332,12 @@ func TestGuiDiscardGuardStillSeesSomething(t *testing.T) {
 	t.Logf("разбор видит объявлений функций в %s: %d", guiPkgFiles, funcs)
 }
 
-// countFuncDecls — тем же парсером, что и findDiscarded: если сломается
-// разбор, оба замолчат одинаково, и канарейка это заметит.
+// countFuncDecls — ОТДЕЛЬНЫЙ разбор теми же go/parser и теми же аргументами,
+// что в findDiscarded; общего кода у них нет (замечание SEC-01: прежний
+// комментарий «тем же парсером» обещал больше). Поэтому канарейка ловит
+// ровно одно: файлы перестали разбираться или пакет переехал. Ошибку в самой
+// логике findDiscarded она НЕ ловит — за это отвечает
+// TestGuiDiscardGuardCatchesBothForms.
 func countFuncDecls(t *testing.T, path string) int {
 	t.Helper()
 	fset := token.NewFileSet()

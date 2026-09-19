@@ -1633,10 +1633,12 @@ func (u *ui) addDialog() {
 // A4в: раньше каталог был относительным и файл ложился рядом с текущим
 // каталогом процесса. Не удалось определить каталог данных пользователя —
 // возвращаем ошибку, а не пишем куда попало.
-func (u *ui) writeConfigFile(nu *core.NewUser) (string, error) {
+// Второе возвращаемое значение — «каталога не было, он заведён сейчас»: по
+// нему диалог один раз показывает подсказку о смене места (ревью UX-01).
+func (u *ui) writeConfigFile(nu *core.NewUser) (string, bool, error) {
 	dir, err := core.UserConfigsDir()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	return writeConfigFileTo(dir, nu)
 }
@@ -1644,7 +1646,7 @@ func (u *ui) writeConfigFile(nu *core.NewUser) (string, error) {
 // writeConfigFileTo вынесена с ЯВНЫМ каталогом затем, чтобы тест подставлял
 // свой и не писал в настоящий каталог данных владельца, — тот же приём, что с
 // writeCrashLog(dir,…) и saveSortStateTo(dir,…).
-func writeConfigFileTo(dir string, nu *core.NewUser) (string, error) {
+func writeConfigFileTo(dir string, nu *core.NewUser) (string, bool, error) {
 	return core.WriteClientConfig(dir, nu.Name, nu.Config)
 }
 
@@ -1669,15 +1671,38 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	savedLabel := widget.NewLabel("")
 	savedLabel.Wrapping = fyne.TextWrapWord
 
+	// Одноразовая подсказка о смене места (ревью UX-01): скрыта, пока не
+	// окажется, что каталог заведён этим самым сохранением.
+	moveHint := widget.NewLabel(core.FirstSaveHint)
+	moveHint.Wrapping = fyne.TextWrapWord
+	moveHint.Hide()
+
+	// Путь длинный (~75 знаков) и переносится; перенабирать его руками —
+	// худшее, что можно предложить. Кнопка появляется вместе с путём.
+	copyBtn := widget.NewButtonWithIcon("Скопировать путь", theme.ContentCopyIcon(), nil)
+	copyBtn.Hide()
+
 	var saveBtn *widget.Button
 	saveBtn = widget.NewButtonWithIcon("Сохранить .conf", theme.DocumentSaveIcon(), func() {
-		abs, err := u.writeConfigFile(nu)
+		abs, createdDir, err := u.writeConfigFile(nu)
 		if err != nil {
 			dialog.ShowError(err, u.win)
 			return
 		}
 		saveBtn.Disable()
-		savedLabel.SetText("Сохранено: " + abs)
+		// Одно событие — одно слово: и здесь, и в строке состояния «Конфиг
+		// сохранён» (ревью UX-01).
+		savedLabel.SetText("Конфиг сохранён: " + abs)
+		copyBtn.OnTapped = func() {
+			fyne.CurrentApp().Clipboard().SetContent(abs)
+			if u.status != nil {
+				u.status.SetText("Путь скопирован в буфер обмена")
+			}
+		}
+		copyBtn.Show()
+		if createdDir {
+			moveHint.Show()
+		}
 		if u.status != nil {
 			u.status.SetText(fmt.Sprintf("Конфиг сохранён: %s", abs))
 		}
@@ -1692,9 +1717,14 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		hint,
 		saveBtn,
 		savedLabel,
+		copyBtn,
+		moveHint,
 	)
+	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
+	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
+	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(380, 480))
+	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
 }
 

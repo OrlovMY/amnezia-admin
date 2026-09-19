@@ -72,7 +72,7 @@ func TestUserConfigsDirSaysItDoesNotKnow(t *testing.T) {
 }
 
 func TestWriteClientConfigRejectsRelativeDir(t *testing.T) {
-	if _, err := WriteClientConfig("Конфигурации", "Вася", "[Interface]"); err == nil {
+	if _, _, err := WriteClientConfig("Конфигурации", "Вася", "[Interface]"); err == nil {
 		t.Fatal("относительный каталог принят — файл снова уйдёт рядом с текущим каталогом")
 	}
 	if _, err := os.Stat("Конфигурации"); err == nil {
@@ -86,7 +86,7 @@ func TestWriteClientConfigDirPerm(t *testing.T) {
 		t.Skip("ПРОПУСК, а не успех: на Windows POSIX-биты каталога не применяются — доступ решают ACL, и проверять здесь нечего. Смысл 0700 на Windows не проверен ничем.")
 	}
 	dir := filepath.Join(t.TempDir(), "amnezia-admin", "Конфигурации")
-	path, err := WriteClientConfig(dir, "Вася", "[Interface]")
+	path, _, err := WriteClientConfig(dir, "Вася", "[Interface]")
 	if err != nil {
 		t.Fatalf("WriteClientConfig: %v", err)
 	}

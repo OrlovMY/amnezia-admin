@@ -155,10 +155,10 @@ const goodSrc = `package main
 import "amnezia-admin/core"
 
 // Каталог «Конфигурации» выбирается в core — тут только вызов.
-func save(name, cfg string) (string, error) {
+func save(name, cfg string) (string, bool, error) {
 	dir, err := core.UserConfigsDir()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	return core.WriteClientConfig(dir, name, cfg)
 }
@@ -180,10 +180,13 @@ func TestGuardCatchesPlantedLiteral(t *testing.T) {
 		if len(found) == 0 {
 			t.Fatal("сторож НЕ споткнулся на os.MkdirAll(\"Конфигурации\", …) — он вечнозелёный")
 		}
-		// Требуется формулировка ИМЕННО этой ветви, иначе канарейка зазеленела
-		// бы от находки соседней причины (как трижды вышло в A4).
-		if !strings.Contains(found[0].text, "строковый литерал") {
-			t.Fatalf("находка не про литерал: %s", found[0].text)
+		// Сверяем НЕ текст находки (он собран из тех же констант, что и сама
+		// проверка, — такая сверка тавтологична; замечание SEC-01 по ревью), а
+		// МЕСТО: строка и колонка обязаны указывать на подложенный литерал,
+		// то есть на строку 5 файла cli/main.go. Сторож, нашедший «что-то
+		// где-то», не помог бы найти нарушение.
+		if !strings.Contains(found[0].pos, filepath.Join("cli", "main.go")+":5:") {
+			t.Fatalf("находка указывает не на подложенный литерал (cli/main.go:5): %s", found[0].pos)
 		}
 	})
 
@@ -235,5 +238,70 @@ func TestGuardFailsOnUnparsableInput(t *testing.T) {
 	dir := writeTree(t, map[string]string{"cli/broken.go": "package main\nfunc ("})
 	if _, _, err := scanTree(dir); err == nil {
 		t.Fatal("сторож молча проглотил неразбираемый файл")
+	}
+}
+
+// --- одноразовая подсказка о смене места (ревью UX-01, блокирующее 3) ------
+//
+// Подсказку обязаны показывать ОБА места записи. Проверка структурная и живёт
+// здесь по той же причине, что и сторож guiview: cmd/gui нельзя проверить
+// поведенчески без дисплея, а текст подсказки — ровно то, что человек увидит.
+// Требуется ИМЕНОВАННАЯ ссылка на core.FirstSaveHint, а не похожий текст,
+// набранный заново: два разошедшихся текста одного события — это то, что
+// UX-01 и нашёл в паре «Сохранено» / «Конфиг сохранён».
+
+// hintUsers — файлы, обязанные ссылаться на core.FirstSaveHint.
+var hintUsers = []string{
+	filepath.Join("..", "..", "cmd", "cli", "main.go"),
+	filepath.Join("..", "..", "cmd", "gui", "main.go"),
+}
+
+// usesFirstSaveHint — есть ли в файле селектор core.FirstSaveHint.
+func usesFirstSaveHint(path string) (bool, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "FirstSaveHint" {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "core" {
+			found = true
+		}
+		return true
+	})
+	return found, nil
+}
+
+func TestBothWritersShowFirstSaveHint(t *testing.T) {
+	for _, path := range hintUsers {
+		ok, err := usesFirstSaveHint(path)
+		if err != nil {
+			t.Fatalf("разбор %s: %v", path, err)
+		}
+		if !ok {
+			t.Errorf("%s не ссылается на core.FirstSaveHint — человек, впервые сохраняющий "+
+				"конфиг в новое место, не узнает о переезде (ревью UX-01)", path)
+		}
+	}
+}
+
+// TestHintGuardCatchesPlanted — канарейка ИМЕННО этой проверки: на файле без
+// ссылки она обязана сказать «нет», на файле со ссылкой — «да». Реагирует
+// своё: это не сканер литералов и не порог minFiles.
+func TestHintGuardCatchesPlanted(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"without.go": "package main\n\nfunc save() string { return \"это новое место\" }\n",
+		"with.go":    "package main\n\nimport \"amnezia-admin/core\"\n\nfunc save() string { return core.FirstSaveHint }\n",
+	})
+	if ok, err := usesFirstSaveHint(filepath.Join(dir, "without.go")); err != nil || ok {
+		t.Fatalf("проверка засчитала похожий текст за подсказку (ok=%v, err=%v) — она вечнозелёная", ok, err)
+	}
+	if ok, err := usesFirstSaveHint(filepath.Join(dir, "with.go")); err != nil || !ok {
+		t.Fatalf("проверка не увидела настоящую ссылку core.FirstSaveHint (ok=%v, err=%v)", ok, err)
 	}
 }

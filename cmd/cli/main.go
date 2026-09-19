@@ -244,7 +244,7 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 	dir, err := core.UserConfigsDir()
 	if err != nil {
-		return err
+		return saveFailed(w, u, err)
 	}
 	return saveUserConfigTo(w, dir, u, proto)
 }
@@ -253,15 +253,41 @@ func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 // тест подставлял свой и не писал в настоящий каталог данных владельца — тот
 // же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
 func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
-	abs, err := core.WriteClientConfig(dir, u.Name, u.Config)
+	abs, createdDir, err := core.WriteClientConfig(dir, u.Name, u.Config)
 	if err != nil {
-		return err
+		return saveFailed(w, u, err)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
+	if createdDir {
+		// Одноразовая подсказка: каталога не было, значит в новое место
+		// сохраняется впервые (ревью UX-01).
+		fmt.Fprintln(w, cDim(core.FirstSaveHint))
+	}
 	fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
 	return nil
+}
+
+// saveFailed печатает, ЧТО ДЕЛАТЬ, когда сохранить конфиг не удалось, и
+// возвращает исходную ошибку (код возврата и печать самой ошибки прежние).
+//
+// ЗАЧЕМ ОТДЕЛЬНЫЙ ТЕКСТ (ревью UX-01). К этому месту пользователь на сервере
+// УЖЕ СОЗДАН: и sess.AddUser, и sess.RegenerateUser отработали. Конфиг с
+// этого момента существует только в памяти процесса и больше нигде не
+// печатается — молча выйти с ошибкой значит потерять ключи клиента. A4в
+// завёл ветвь отказа (это правильнее тихой записи куда попало) и обязан
+// сказать, как из неё выйти.
+//
+// Сам конфиг сюда НЕ печатается: это секрет (приватный ключ клиента), и
+// решение печатать его в поток вывода принимает владелец, а не эта функция.
+func saveFailed(w io.Writer, u *core.NewUser, err error) error {
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Пользователь %q на сервере создан, но конфиг сохранить не удалось.\n", u.Name)
+	fmt.Fprintf(w, "Исправьте каталог и перевыпустите конфиг: amnezia-admin rekey -key vpn://... -name %q "+
+		"(в интерактивном режиме — пункт «Перевыпустить конфиг»). После перевыпуска прежний конфиг этого "+
+		"пользователя работать не будет.\n", u.Name)
+	return err
 }
 
 func printContainers(containers []core.Container, withNotes bool) {

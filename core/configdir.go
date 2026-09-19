@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,17 +56,17 @@ func UserConfigsDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		base = os.Getenv("LOCALAPPDATA")
 		if base == "" {
-			return "", errors.New("не удалось определить каталог данных пользователя: переменная окружения LOCALAPPDATA не задана")
+			return "", errors.New(`не удалось определить каталог данных пользователя: переменная окружения LOCALAPPDATA не задана (обычно это C:\Users\<имя>\AppData\Local). Конфиг НЕ сохранён`)
 		}
 	} else {
 		var err error
 		base, err = os.UserConfigDir()
 		if err != nil {
-			return "", fmt.Errorf("не удалось определить каталог данных пользователя: %w", err)
+			return "", fmt.Errorf("не удалось определить каталог данных пользователя: %w. Конфиг НЕ сохранён", err)
 		}
 	}
 	if !filepath.IsAbs(base) {
-		return "", fmt.Errorf("каталог данных пользователя %q не абсолютный — программа не станет гадать, куда писать конфиги", base)
+		return "", fmt.Errorf("каталог данных пользователя %q не абсолютный — конфиг не сохранён", base)
 	}
 	return filepath.Join(base, appDirName, clientConfigsDirName), nil
 }
@@ -79,16 +80,36 @@ func UserConfigsDir() (string, error) {
 // dir обязан быть абсолютным: возвращаемый путь показывается человеку как
 // «куда сохранено», и относительный путь в этой строке — то самое, что A4в
 // чинит.
-func WriteClientConfig(dir, name, config string) (string, error) {
+//
+// Второе возвращаемое значение — createdDir: каталога до этого вызова НЕ было,
+// и он заведён сейчас. По нему CLI и GUI показывают ОДНОРАЗОВУЮ подсказку о
+// смене места (ревью UX-01). Признак намеренно узкий: true только если
+// os.Stat сказал «нет такого каталога». Если Stat не смог ответить по другой
+// причине (нет прав, сбой ФС), createdDir остаётся false — лучше не показать
+// подсказку, чем объявить место новым, не зная этого.
+func WriteClientConfig(dir, name, config string) (path string, createdDir bool, err error) {
 	if !filepath.IsAbs(dir) {
-		return "", fmt.Errorf("каталог для конфигов %q не абсолютный", dir)
+		return "", false, fmt.Errorf("каталог для конфигов %q не абсолютный — конфиг не сохранён", dir)
 	}
+	_, statErr := os.Stat(dir)
+	createdDir = errors.Is(statErr, fs.ErrNotExist)
 	if err := os.MkdirAll(dir, configsDirPerm); err != nil {
-		return "", err
+		return "", false, err
 	}
-	path := filepath.Join(dir, SanitizeName(name)+".conf")
+	path = filepath.Join(dir, SanitizeName(name)+".conf")
 	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return path, nil
+	return path, createdDir, nil
 }
+
+// FirstSaveHint — текст одноразовой подсказки о смене места сохранения
+// (показывается, когда WriteClientConfig вернул createdDir).
+//
+// Формулировка НИЧЕГО НЕ УТВЕРЖДАЕТ о содержимом каталогов владельца:
+// программа не открывает прежнюю папку, не знает, лежит ли там что-нибудь, и
+// не знает, откуда её запускали раньше. Поэтому «если такие файлы есть», а не
+// «ваши файлы остались там-то».
+const FirstSaveHint = "Это новое место. Прежние версии сохраняли .conf в папку «Конфигурации» " +
+	"рядом с каталогом, из которого запускалась программа. Если такие файлы есть, они остались " +
+	"на прежнем месте: эта версия их не переносит, не открывает и не удаляет."

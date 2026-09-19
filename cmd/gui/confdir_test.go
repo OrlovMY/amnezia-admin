@@ -47,7 +47,7 @@ func TestGuiWriteConfigFileWritesToUserDataDirNotCwd(t *testing.T) {
 
 	var u ui
 	nu := &core.NewUser{Name: "Вася", IP: "10.8.1.7", Config: "[Interface]\n"}
-	abs, err := u.writeConfigFile(nu)
+	abs, _, err := u.writeConfigFile(nu)
 	if err != nil {
 		t.Fatalf("writeConfigFile: %v", err)
 	}

@@ -32,3 +32,17 @@ func TestSaveUserConfigToUsesGivenDir(t *testing.T) {
 		t.Errorf("в выводе нет пути %s. Вывод:\n%s", want, buf.String())
 	}
 }
+
+// TestFirstSaveHintClaimsNothingAboutOwnerFiles — подсказка не утверждает
+// ничего о содержимом каталогов владельца: программа их не открывает и не
+// знает, откуда её запускали раньше (П-НЕЗНАНИЕ).
+func TestFirstSaveHintClaimsNothingAboutOwnerFiles(t *testing.T) {
+	for _, forbidden := range []string{"ваши файлы", "Ваши файлы", "остались ваши", "там лежат"} {
+		if strings.Contains(core.FirstSaveHint, forbidden) {
+			t.Errorf("подсказка утверждает %q о том, чего программа не знает: %s", forbidden, core.FirstSaveHint)
+		}
+	}
+	if !strings.Contains(core.FirstSaveHint, "Если такие файлы есть") {
+		t.Errorf("подсказка говорит о прежних файлах без оговорки «если они есть»: %s", core.FirstSaveHint)
+	}
+}
