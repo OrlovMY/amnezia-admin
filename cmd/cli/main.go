@@ -347,7 +347,7 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 		if err != nil {
 			return err
 		}
-		idx, err := core.ResolveNonNumeric(clients, name)
+		idx, err := resolveByFlag(w, clients, name)
 		if err != nil {
 			return err
 		}
@@ -361,7 +361,7 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 		if err != nil {
 			return err
 		}
-		idx, err := core.ResolveNonNumeric(clients, name)
+		idx, err := resolveByFlag(w, clients, name)
 		if err != nil {
 			return err
 		}
@@ -375,7 +375,7 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 		if err != nil {
 			return err
 		}
-		idx, err := core.ResolveNonNumeric(clients, name)
+		idx, err := resolveByFlag(w, clients, name)
 		if err != nil {
 			return err
 		}
@@ -390,7 +390,7 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 		if err != nil {
 			return err
 		}
-		idx, err := core.ResolveNonNumeric(clients, name)
+		idx, err := resolveByFlag(w, clients, name)
 		if err != nil {
 			return err
 		}
@@ -520,13 +520,12 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			ident := ask("\nКого удалить (номер, имя или публичный ключ): ")
+			ident := ask("\nКого удалить (имя, публичный ключ или номер строки): ")
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -550,13 +549,12 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			ident := ask("\nКого переименовать (номер, имя или публичный ключ): ")
+			ident := ask("\nКого переименовать (имя, публичный ключ или номер строки): ")
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -579,13 +577,12 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			ident := ask("\nКого отключить/включить (номер, имя или публичный ключ): ")
+			ident := ask("\nКого отключить/включить (имя, публичный ключ или номер строки): ")
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -622,13 +619,12 @@ func interactive() {
 				printErr(err)
 				break
 			}
-			ident := ask("\nКому перевыпустить конфиг (номер, имя или публичный ключ): ")
+			ident := ask("\nКому перевыпустить конфиг (имя, публичный ключ или номер строки): ")
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -806,7 +802,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
-		idx, e := core.ResolveNonNumeric(clients, *name)
+		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
 			break
@@ -830,7 +826,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
-		idx, e := core.ResolveNonNumeric(clients, *name)
+		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
 			break
@@ -851,7 +847,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
-		idx, e := core.ResolveNonNumeric(clients, *name)
+		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
 			break
@@ -880,7 +876,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
-		idx, e := core.ResolveNonNumeric(clients, *name)
+		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
 			break
