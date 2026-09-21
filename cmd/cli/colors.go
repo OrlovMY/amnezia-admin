@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
+
+	"amnezia-admin/core"
 )
 
 // colorsEnabled — включаем ANSI-цвета, если консоль их поддерживает.
@@ -23,6 +26,24 @@ func cErr(s string) string    { return color("1;31", s) } // красный — 
 func cDim(s string) string    { return color("90", s) }   // серый — второстепенное
 func cWarn(s string) string   { return color("1;33", s) } // жирный жёлтый — предупреждения
 func cAccent(s string) string { return color("36", s) }   // циан — значения
+
+// resolveInteractive — разрешение ввода внутри напечатанного интерактивного
+// списка (A8). Печатает человеку, КОГО поняли (Resolution.Note — когда ввод
+// годился и как номер строки, и как имя), либо почему выбрать нельзя
+// (Resolution.Err — «не найдено» и «подходит несколько» суть разные тексты).
+// Возвращает -1, если действовать нельзя: молчаливое действие по первому
+// совпадению недопустимо, del/rename/toggle необратимы.
+func resolveInteractive(w io.Writer, clients []core.ClientEntry, ident string) int {
+	r := core.ResolveClient(clients, ident)
+	if err := r.Err(clients); err != nil {
+		printErr(err)
+		return -1
+	}
+	if note := r.Note(); note != "" {
+		fmt.Fprintln(w, cWarn(note))
+	}
+	return r.Index
+}
 
 // printErr — единообразный вывод ошибок
 func printErr(err error) {

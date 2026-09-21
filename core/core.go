@@ -436,17 +436,109 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// ResolveClient ищет клиента по номеру в списке (с 1), имени или публичному ключу; -1 если не найден
-func ResolveClient(clients []ClientEntry, ident string) int {
+// ResolveKind — исход разрешения идентификатора клиента. Три состояния, а не
+// два: прежняя сигнатура возвращала int, где -1 означало одновременно «такого
+// клиента нет» и «подходящих несколько, выбран первый» — перегруженное
+// значение, из-за которого del/rename/toggle могли молча ударить не по тому
+// человеку (A8, П-НЕЗНАНИЕ применительно к внутреннему интерфейсу).
+type ResolveKind int
+
+const (
+	// ResolveNotFound — не подошёл ни один клиент.
+	ResolveNotFound ResolveKind = iota
+	// ResolveFound — подошёл ровно один клиент, Index указывает на него.
+	ResolveFound
+	// ResolveAmbiguous — подошло несколько клиентов, Matches перечисляет их.
+	// Действовать по первому нельзя: операции необратимы.
+	ResolveAmbiguous
+)
+
+// Resolution — результат ResolveClient. Выбирать по Index можно ТОЛЬКО при
+// Kind == ResolveFound; в остальных случаях Err() объясняет, почему нельзя.
+type Resolution struct {
+	Kind  ResolveKind
+	Ident string // что ввёл человек (как есть)
+	Index int    // индекс в clients; осмыслен только при ResolveFound
+	// Matches — индексы всех совпавших по имени/ключу, в порядке списка;
+	// заполняется только при ResolveAmbiguous.
+	Matches []int
+	// ByName — при ResolveFound: клиент найден по имени/публичному ключу
+	// (true) или по номеру строки (false).
+	ByName bool
+	// NameOverNumber — ввод годился И как номер строки, И как имя
+	// существующего клиента. По решению владельца (21.09.2026) имя главнее
+	// номера, но программа обязана сказать вслух, кого поняла, — иначе
+	// привычный ввод номера однажды молча попадёт не в того клиента.
+	NameOverNumber bool
+	// LineIfNumber — номер строки (с 1), как ident читался бы числом; 0, если
+	// ident числом не читается или выходит за пределы списка.
+	LineIfNumber int
+}
+
+// ResolveClient ищет клиента по имени, публичному ключу или номеру строки в
+// напечатанном списке (с 1).
+//
+// Порядок по решению владельца (21.09.2026): ИМЯ ГЛАВНЕЕ НОМЕРА. Точное
+// совпадение имени (или ClientID) выигрывает; номер строки работает, только
+// если клиента с таким именем нет. Благодаря этому к клиенту с именем из
+// одних цифр («12») в интерактивном списке вообще можно обратиться — прежняя
+// редакция перехватывала такой ввод ветвью strconv.Atoi и делала имя
+// недостижимым.
+func ResolveClient(clients []ClientEntry, ident string) Resolution {
+	r := Resolution{Ident: ident}
 	if n, e := strconv.Atoi(strings.TrimSpace(ident)); e == nil && n >= 1 && n <= len(clients) {
-		return n - 1
+		r.LineIfNumber = n
 	}
 	for i, cl := range clients {
 		if cl.Name() == ident || cl.ClientID == ident {
-			return i
+			r.Matches = append(r.Matches, i)
 		}
 	}
-	return -1
+	switch {
+	case len(r.Matches) > 1:
+		r.Kind = ResolveAmbiguous
+	case len(r.Matches) == 1:
+		r.Kind = ResolveFound
+		r.Index = r.Matches[0]
+		r.Matches = nil
+		r.ByName = true
+		r.NameOverNumber = r.LineIfNumber != 0
+	case r.LineIfNumber != 0:
+		r.Kind = ResolveFound
+		r.Index = r.LineIfNumber - 1
+	default:
+		r.Kind = ResolveNotFound
+	}
+	return r
+}
+
+// Note — то, что программа обязана сказать человеку ДО действия; "" если
+// говорить нечего. Сейчас единственный случай — ввод, годный и как номер
+// строки, и как имя: человек должен видеть, кого поняли.
+func (r Resolution) Note() string {
+	if r.Kind != ResolveFound || !r.NameOverNumber {
+		return ""
+	}
+	return fmt.Sprintf("Понял %q как ИМЯ пользователя (строка %d списка), а не как строку № %d: имя главнее номера.",
+		r.Ident, r.Index+1, r.LineIfNumber)
+}
+
+// Err — почему по этому вводу действовать нельзя; nil при ResolveFound.
+// «Не найдено» и «подходит несколько» — разные ошибки с разным текстом.
+func (r Resolution) Err(clients []ClientEntry) error {
+	switch r.Kind {
+	case ResolveFound:
+		return nil
+	case ResolveAmbiguous:
+		lines := make([]string, 0, len(r.Matches))
+		for _, i := range r.Matches {
+			lines = append(lines, fmt.Sprintf("\n  строка %d — %q, ключ %s", i+1, clients[i].Name(), clients[i].ClientID))
+		}
+		return fmt.Errorf("под %q подходит несколько пользователей (%d) — уточните публичным ключом:%s",
+			r.Ident, len(r.Matches), strings.Join(lines, ""))
+	default:
+		return fmt.Errorf("пользователь %q не найден", r.Ident)
+	}
 }
 
 // ResolveNonNumeric резолвит идентификатора клиента ТОЛЬКО по имени или
@@ -456,15 +548,25 @@ func ResolveClient(clients []ClientEntry, ident string) int {
 // LoadClients не совпадает с порядком, который видел пользователь
 // (LoadClients не сортирован по активности, как отображаемая таблица), и
 // резолв по номеру мог бы попасть не в того клиента (wrong-target).
+//
+// A8: «имя главнее номера» действует и здесь. Числовой ident отклоняется
+// ТОЛЬКО если клиента с таким именем нет: совпадение по имени однозначно и
+// wrong-target не создаёт, а вот резолв по номеру строки по-прежнему
+// запрещён — до него дело не доходит никогда.
 func ResolveNonNumeric(clients []ClientEntry, ident string) (int, error) {
+	r := ResolveClient(clients, ident)
+	if r.Kind == ResolveAmbiguous {
+		return -1, r.Err(clients)
+	}
+	if r.Kind == ResolveFound && r.ByName {
+		return r.Index, nil
+	}
+	// Дальше — либо не найдено вовсе, либо найдено ТОЛЬКО по номеру строки.
+	// Номер строки вне интерактивного списка не резолвим никогда (wrong-target).
 	if _, err := strconv.Atoi(strings.TrimSpace(ident)); err == nil {
 		return -1, fmt.Errorf("укажите имя или публичный ключ — номера действительны только внутри интерактивного списка")
 	}
-	idx := ResolveClient(clients, ident)
-	if idx < 0 {
-		return -1, fmt.Errorf("пользователь %q не найден (укажите имя или публичный ключ)", ident)
-	}
-	return idx, nil
+	return -1, fmt.Errorf("пользователь %q не найден (укажите имя или публичный ключ)", ident)
 }
 
 // SortByActivity сортирует клиентов по активности: недавний LastHandshake —

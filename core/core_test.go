@@ -278,30 +278,121 @@ func TestResolveClient(t *testing.T) {
 	}
 
 	t.Run("by number", func(t *testing.T) {
-		if idx := ResolveClient(clients, "2"); idx != 1 {
-			t.Errorf("idx = %d, want 1", idx)
+		r := ResolveClient(clients, "2")
+		if r.Kind != ResolveFound || r.Index != 1 {
+			t.Errorf("r = %+v, want Found index 1", r)
+		}
+		if r.ByName {
+			t.Errorf("ByName = true, want false (найден по номеру строки)")
 		}
 	})
 
 	t.Run("by pubkey", func(t *testing.T) {
-		if idx := ResolveClient(clients, "pk2"); idx != 1 {
-			t.Errorf("idx = %d, want 1", idx)
+		r := ResolveClient(clients, "pk2")
+		if r.Kind != ResolveFound || r.Index != 1 || !r.ByName {
+			t.Errorf("r = %+v, want Found index 1 ByName", r)
 		}
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		if idx := ResolveClient(clients, "nope"); idx != -1 {
-			t.Errorf("idx = %d, want -1", idx)
+		r := ResolveClient(clients, "nope")
+		if r.Kind != ResolveNotFound {
+			t.Errorf("Kind = %v, want ResolveNotFound", r.Kind)
 		}
 	})
 
-	// При дублях имён ResolveClient по имени возвращает первого найденного
-	// (индекс 0, "Alice" на pk1), а не pk3 — таково задокументированное поведение.
-	t.Run("duplicate names returns first", func(t *testing.T) {
-		if idx := ResolveClient(clients, "Alice"); idx != 0 {
-			t.Errorf("idx = %d, want 0 (первый с этим именем)", idx)
+	// A8: дубль имени БОЛЬШЕ НЕ разрешается молча в первого — это отдельный,
+	// отличимый исход. Прежнее поведение (вернуть индекс 0) — ровно тот
+	// дефект, из-за которого del/rename/toggle могли ударить не по тому.
+	t.Run("duplicate names is ambiguous", func(t *testing.T) {
+		r := ResolveClient(clients, "Alice")
+		if r.Kind != ResolveAmbiguous {
+			t.Fatalf("Kind = %v, want ResolveAmbiguous (было: молча индекс 0)", r.Kind)
+		}
+		if len(r.Matches) != 2 || r.Matches[0] != 0 || r.Matches[1] != 2 {
+			t.Fatalf("Matches = %v, want [0 2]", r.Matches)
+		}
+		err := r.Err(clients)
+		if err == nil {
+			t.Fatal("Err = nil, want ошибку с перечнем")
+		}
+		for _, want := range []string{"несколько", "pk1", "pk3"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Err = %q, не содержит %q", err.Error(), want)
+			}
 		}
 	})
+}
+
+// TestResolveClientThreeOutcomes — тест РАЗЛИЧЕНИЯ (CLAUDE.md): «не найдено»
+// и «подходит несколько» обязаны отличаться друг от друга, а не оба
+// сворачиваться в одно перегруженное -1. Плюс решение владельца
+// (21.09.2026): имя главнее номера, и программа говорит, кого поняла.
+func TestResolveClientThreeOutcomes(t *testing.T) {
+	// Список из 12 строк; у 12-го клиента имя из одних цифр — "12".
+	var many []ClientEntry
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("user%d", i)
+		if i == 12 {
+			name = "12"
+		}
+		many = append(many, ClientEntry{
+			ClientID: fmt.Sprintf("key%d", i),
+			UserData: map[string]any{"clientName": name},
+		})
+	}
+	// Клиент с именем "12" стоит ПОСЛЕДНИМ (индекс 11), и строка № 12 — это
+	// он же; чтобы проверка «имя главнее номера» не проходила случайно,
+	// переставим его на первое место: тогда имя даёт 0, а номер — 11.
+	many[0], many[11] = many[11], many[0]
+
+	dup := []ClientEntry{
+		{ClientID: "pkA", UserData: map[string]any{"clientName": "Дубль"}},
+		{ClientID: "pkB", UserData: map[string]any{"clientName": "Дубль"}},
+	}
+
+	cases := []struct {
+		name     string
+		clients  []ClientEntry
+		ident    string
+		wantKind ResolveKind
+		wantIdx  int
+	}{
+		{"имя из цифр главнее номера строки", many, "12", ResolveFound, 0},
+		{"номер строки без конфликта имён", many, "5", ResolveFound, 4},
+		{"обычное имя", many, "user5", ResolveFound, 4},
+		{"два одноимённых — неоднозначно", dup, "Дубль", ResolveAmbiguous, -1},
+		{"ничего не совпало", many, "нет-такого", ResolveNotFound, -1},
+		{"число вне списка — не номер строки", many, "999", ResolveNotFound, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := ResolveClient(tc.clients, tc.ident)
+			if r.Kind != tc.wantKind {
+				t.Fatalf("Kind = %v, want %v (r = %+v)", r.Kind, tc.wantKind, r)
+			}
+			if tc.wantKind == ResolveFound && r.Index != tc.wantIdx {
+				t.Fatalf("Index = %d, want %d", r.Index, tc.wantIdx)
+			}
+			// Тест различения: третье состояние не равно «нет».
+			if tc.wantKind == ResolveAmbiguous && r.Kind == ResolveNotFound {
+				t.Fatal("неоднозначность неотличима от «не найдено»")
+			}
+		})
+	}
+
+	// «Не найдено» и «неоднозначно» — разные тексты, а не один.
+	notFound := ResolveClient(many, "нет-такого").Err(many)
+	ambiguous := ResolveClient(dup, "Дубль").Err(dup)
+	if notFound == nil || ambiguous == nil {
+		t.Fatal("оба исхода обязаны давать ошибку")
+	}
+	if notFound.Error() == ambiguous.Error() {
+		t.Fatalf("тексты совпали (%q) — исходы неотличимы для человека", notFound.Error())
+	}
+	if strings.Contains(ambiguous.Error(), "не найден") {
+		t.Fatalf("неоднозначность выдана за «не найдено»: %q", ambiguous.Error())
+	}
 }
 
 // ---------- ValidateName ----------
@@ -440,9 +531,9 @@ func TestSortedSliceRowNumberInvariant(t *testing.T) {
 		t.Fatalf("clients[0] = %s, want c", clients[0].ClientID)
 	}
 	// строка "1" в отрисованном списке должна резолвиться именно в clients[0]
-	idx := ResolveClient(clients, "1")
-	if idx != 0 || clients[idx].ClientID != "c" {
-		t.Fatalf("ResolveClient(clients, \"1\") = %d (%s), want 0 (c)", idx, clients[idx].ClientID)
+	r := ResolveClient(clients, "1")
+	if r.Kind != ResolveFound || r.Index != 0 || clients[r.Index].ClientID != "c" {
+		t.Fatalf("ResolveClient(clients, \"1\") = %+v, want Found index 0 (c)", r)
 	}
 }
 
@@ -1205,5 +1296,53 @@ func TestAddUserDeleteByIDIntegration(t *testing.T) {
 	wg0, ok = srv.File(c.Dir + "/wg0.conf")
 	if !ok || strings.Contains(string(wg0), daveID) {
 		t.Errorf("wg0.conf всё ещё содержит удалённый peer")
+	}
+}
+
+// TestResolveClientAnnouncesNameOverNumber — условие ядра сверх выбора
+// владельца: когда ввод годится И как номер строки, И как имя
+// существующего клиента, программа обязана сказать ВСЛУХ, кого поняла.
+// Без этого привычный ввод номера однажды молча попадёт не в того клиента,
+// а del/rename/toggle необратимы. Отдельный тест от
+// TestResolveClientThreeOutcomes: молчание и неверный выбор — разные
+// дефекты, и канарейки на них обязаны различаться.
+func TestResolveClientAnnouncesNameOverNumber(t *testing.T) {
+	// Клиент с именем "12" — на первой строке; строка № 12 — другой клиент.
+	var clients []ClientEntry
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("user%d", i)
+		if i == 1 {
+			name = "12"
+		}
+		clients = append(clients, ClientEntry{
+			ClientID: fmt.Sprintf("key%d", i),
+			UserData: map[string]any{"clientName": name},
+		})
+	}
+
+	r := ResolveClient(clients, "12")
+	if r.Kind != ResolveFound {
+		t.Fatalf("Kind = %v, want ResolveFound", r.Kind)
+	}
+	if !r.NameOverNumber {
+		t.Fatal("NameOverNumber = false — программа не заметила, что ввод двусмыслен")
+	}
+	note := r.Note()
+	if note == "" {
+		t.Fatal("Note() пуст: программа молча выбрала между именем и номером строки")
+	}
+	for _, want := range []string{"ИМЯ", `"12"`, "строка 1", "12"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("Note() = %q, не содержит %q — не сказано, кого поняли", note, want)
+		}
+	}
+
+	// Однозначные случаи молчат: болтовня на каждом вводе обесценивает
+	// предупреждение.
+	if n := ResolveClient(clients, "5").Note(); n != "" {
+		t.Errorf("Note() для обычного номера = %q, want пусто", n)
+	}
+	if n := ResolveClient(clients, "user5").Note(); n != "" {
+		t.Errorf("Note() для обычного имени = %q, want пусто", n)
 	}
 }

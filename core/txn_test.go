@@ -670,3 +670,95 @@ func TestRestoreTriesBothFilesIndependently(t *testing.T) {
 		t.Error("запись clientsTable при откате не найдена ПОСЛЕ провалившейся (второй) записи wg0.conf")
 	}
 }
+
+// TestRestoreWhenClientsTableDidNotExist — A8 п.3, проверка утверждения
+// программы аудита фактами.
+//
+// Факт подтверждён: clientsTable, которой на сервере НЕ БЫЛО, после отката
+// существует (пустая) — её создаёт applySteps, а restore лишь опустошает;
+// вернуть отсутствие файла нечем.
+//
+// Следствие, которое программа числила катастрофой, ОПРОВЕРГНУТО тут же:
+// пустая таблица поведенчески равна отсутствующей (LoadClients в обоих
+// случаях даёт пустой список), терять было нечего — прежнего файла не
+// существовало, искать «настоящую копию» не требуется.
+//
+// Что остаётся и чинится: текст. «Восстановлено» про файл, которого не было,
+// — неправда. В этой ветке слова «восстановлено» быть не должно, а факт
+// подмены отсутствия пустотой обязан быть назван вслух.
+func TestRestoreWhenClientsTableDidNotExist(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+
+	// На сервере ещё нет ни одного пользователя: clientsTable отсутствует.
+	srv.DeleteFile(c.Dir + "/clientsTable")
+	if _, ok := srv.File(c.Dir + "/clientsTable"); ok {
+		t.Fatal("подготовка: clientsTable должна отсутствовать")
+	}
+
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+
+	_, err := sess.AddUser(c, "Carol")
+	if err == nil {
+		t.Fatal("AddUser: ожидалась ошибка (FailSyncconf)")
+	}
+	msg := err.Error()
+
+	// (1) Факт: файл появился там, где его не было, и он пуст.
+	data, ok := srv.File(c.Dir + "/clientsTable")
+	if !ok {
+		t.Fatal("ожидалось, что после отката файл существует (пустым) — иначе этот тест описывает не ту ситуацию")
+	}
+	if len(data) != 0 {
+		t.Fatalf("clientsTable после отката = %q, want пустой", data)
+	}
+
+	// (2) Программа обязана сказать, что файла НЕ БЫЛО, и не называть это
+	// «восстановлено».
+	if strings.Contains(msg, "восстановлено") {
+		t.Errorf("в ветке «файла не было» есть слово «восстановлено»: %v", err)
+	}
+	if !strings.Contains(msg, "НЕ СУЩЕСТВОВАЛА") {
+		t.Errorf("не сказано, что clientsTable не существовала: %v", err)
+	}
+	if !strings.Contains(msg, "ПУСТЫМ") {
+		t.Errorf("не сказано, что файл оставлен пустым: %v", err)
+	}
+
+	// (3) A8 п.2: граница проверки названа — AllowedIPs и PSK в рантайме не
+	// сверялись, и «проверено» не выдаётся за полное.
+	for _, want := range []string{"AllowedIPs", "PSK", "НЕ сверялись"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("в тексте нет %q (граница проверки не названа): %v", want, err)
+		}
+	}
+}
+
+// TestRestoreVerifyScopeStatedWhenTableExisted — та же граница проверки
+// обязана быть названа и в обычной ветке (файл существовал). Без этого
+// «восстановлено и проверено» означает «проверено частично», выданное за
+// полное (A8 п.2).
+func TestRestoreVerifyScopeStatedWhenTableExisted(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+	if _, ok := srv.File(c.Dir + "/clientsTable"); !ok {
+		t.Fatal("подготовка: clientsTable должна существовать")
+	}
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+
+	_, err := sess.AddUser(c, "Carol")
+	if err == nil {
+		t.Fatal("AddUser: ожидалась ошибка (FailSyncconf)")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "восстановлено и проверено") {
+		t.Fatalf("ожидалась ветка (а): %v", err)
+	}
+	for _, want := range []string{"AllowedIPs", "PSK", "НЕ сверялись"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("в тексте нет %q — «проверено» выдано за полное: %v", want, err)
+		}
+	}
+}

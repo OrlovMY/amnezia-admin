@@ -524,9 +524,8 @@ func interactive() {
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -554,9 +553,8 @@ func interactive() {
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -583,9 +581,8 @@ func interactive() {
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
@@ -626,9 +623,8 @@ func interactive() {
 			if ident == "" {
 				break
 			}
-			idx := core.ResolveClient(clients, ident)
+			idx := resolveInteractive(os.Stdout, clients, ident)
 			if idx < 0 {
-				printErr(fmt.Errorf("пользователь %q не найден", ident))
 				break
 			}
 			victim := clients[idx]
