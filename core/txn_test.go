@@ -719,19 +719,23 @@ func TestRestoreWhenClientsTableDidNotExist(t *testing.T) {
 	if strings.Contains(msg, "восстановлено") {
 		t.Errorf("в ветке «файла не было» есть слово «восстановлено»: %v", err)
 	}
-	if !strings.Contains(msg, "НЕ СУЩЕСТВОВАЛА") {
+	if !strings.Contains(msg, "не существовала") {
 		t.Errorf("не сказано, что clientsTable не существовала: %v", err)
 	}
-	if !strings.Contains(msg, "ПУСТЫМ") {
+	if !strings.Contains(msg, "оставлен пустым") {
 		t.Errorf("не сказано, что файл оставлен пустым: %v", err)
 	}
 
 	// (3) A8 п.2: граница проверки названа — AllowedIPs и PSK в рантайме не
 	// сверялись, и «проверено» не выдаётся за полное.
-	for _, want := range []string{"AllowedIPs", "PSK", "НЕ сверялись"} {
+	for _, want := range []string{"Проверено:", "Не проверялись:", "AllowedIPs", "PSK"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("в тексте нет %q (граница проверки не названа): %v", want, err)
 		}
+	}
+	// UX-01: причина должна стоять РАНЬШЕ служебной границы проверки.
+	if strings.Index(msg, "Исходная причина:") > strings.Index(msg, "Проверено:") {
+		t.Errorf("служебный текст раньше причины сбоя: %v", err)
 	}
 }
 
@@ -756,9 +760,12 @@ func TestRestoreVerifyScopeStatedWhenTableExisted(t *testing.T) {
 	if !strings.Contains(msg, "восстановлено и проверено") {
 		t.Fatalf("ожидалась ветка (а): %v", err)
 	}
-	for _, want := range []string{"AllowedIPs", "PSK", "НЕ сверялись"} {
+	for _, want := range []string{"Проверено:", "Не проверялись:", "AllowedIPs", "PSK"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("в тексте нет %q — «проверено» выдано за полное: %v", want, err)
 		}
+	}
+	if strings.Index(msg, "Исходная причина:") > strings.Index(msg, "Проверено:") {
+		t.Errorf("служебный текст раньше причины сбоя: %v", err)
 	}
 }

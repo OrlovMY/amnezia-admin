@@ -453,10 +453,27 @@ const (
 	ResolveAmbiguous
 )
 
-// Resolution — результат ResolveClient. Выбирать по Index можно ТОЛЬКО при
-// Kind == ResolveFound; в остальных случаях Err() объясняет, почему нельзя.
+// ResolveMode — видел ли человек пронумерованный список в момент ввода.
+// От этого зависит, ЧЕМ ему предлагать уточнить выбор: номер строки,
+// которой он не видел, — приглашение к wrong-target (ревью UX-01, A8 круг 2).
+type ResolveMode int
+
+const (
+	// ModeFlags — флаговый режим (amnezia-admin del -name …): списка перед
+	// глазами НЕТ, номера строк не называются и не действуют.
+	ModeFlags ResolveMode = iota
+	// ModeList — интерактивное меню: список только что напечатан, номера
+	// строк осмысленны и на них можно ссылаться.
+	ModeList
+)
+
+// Resolution — результат ResolveClient/ResolveNonNumeric. Выбирать по Index
+// можно ТОЛЬКО при Kind == ResolveFound; в остальных случаях Err()
+// объясняет, почему нельзя.
 type Resolution struct {
-	Kind  ResolveKind
+	Kind ResolveKind
+	// Mode — режим ввода; влияет ТОЛЬКО на тексты Note()/Err(), не на выбор.
+	Mode  ResolveMode
 	Ident string // что ввёл человек (как есть)
 	Index int    // индекс в clients; осмыслен только при ResolveFound
 	// Matches — индексы всех совпавших по имени/ключу, в порядке списка;
@@ -485,7 +502,7 @@ type Resolution struct {
 // редакция перехватывала такой ввод ветвью strconv.Atoi и делала имя
 // недостижимым.
 func ResolveClient(clients []ClientEntry, ident string) Resolution {
-	r := Resolution{Ident: ident}
+	r := Resolution{Ident: ident, Mode: ModeList}
 	if n, e := strconv.Atoi(strings.TrimSpace(ident)); e == nil && n >= 1 && n <= len(clients) {
 		r.LineIfNumber = n
 	}
@@ -513,28 +530,47 @@ func ResolveClient(clients []ClientEntry, ident string) Resolution {
 }
 
 // Note — то, что программа обязана сказать человеку ДО действия; "" если
-// говорить нечего. Сейчас единственный случай — ввод, годный и как номер
-// строки, и как имя: человек должен видеть, кого поняли.
+// говорить нечего. Единственный случай — ввод, годный и как номер строки, и
+// как имя: человек должен видеть, кого поняли (условие ядра к решению
+// владельца 21.09.2026). Работает в ОБОИХ режимах: во флаговом карточки
+// подтверждения у rename нет вовсе, и молчание там опаснее, а не безопаснее.
 func (r Resolution) Note() string {
 	if r.Kind != ResolveFound || !r.NameOverNumber {
 		return ""
 	}
-	return fmt.Sprintf("Понял %q как ИМЯ пользователя (строка %d списка), а не как строку № %d: имя главнее номера.",
-		r.Ident, r.Index+1, r.LineIfNumber)
+	if r.Mode == ModeList {
+		return fmt.Sprintf("Это ИМЯ, а не номер: %q — имя пользователя из строки %d. Строка %d не выбрана.",
+			r.Ident, r.Index+1, r.LineIfNumber)
+	}
+	return fmt.Sprintf("Это ИМЯ, а не номер: %q — имя пользователя. Номера строк вне списка не действуют.",
+		r.Ident)
 }
 
 // Err — почему по этому вводу действовать нельзя; nil при ResolveFound.
 // «Не найдено» и «подходит несколько» — разные ошибки с разным текстом.
+//
+// Форма перечня зависит от режима (ревью UX-01, A8 круг 2): во флаговом
+// режиме человек списка НЕ ВИДЕЛ, поэтому номера строк там не называются
+// вовсе — иначе программа предлагает номера несуществующего списка, ровно
+// то, что ResolveNonNumeric запрещает своим же текстом. Вместо номеров —
+// готовая замена аргумента.
 func (r Resolution) Err(clients []ClientEntry) error {
 	switch r.Kind {
 	case ResolveFound:
 		return nil
 	case ResolveAmbiguous:
 		lines := make([]string, 0, len(r.Matches))
-		for _, i := range r.Matches {
-			lines = append(lines, fmt.Sprintf("\n  строка %d — %q, ключ %s", i+1, clients[i].Name(), clients[i].ClientID))
+		if r.Mode == ModeList {
+			for _, i := range r.Matches {
+				lines = append(lines, fmt.Sprintf("\n  строка %d — %q, ключ %s", i+1, clients[i].Name(), clients[i].ClientID))
+			}
+			return fmt.Errorf("под %q подходит несколько пользователей (%d) — уточните публичным ключом (последний столбец списка):%s",
+				r.Ident, len(r.Matches), strings.Join(lines, ""))
 		}
-		return fmt.Errorf("под %q подходит несколько пользователей (%d) — уточните публичным ключом:%s",
+		for _, i := range r.Matches {
+			lines = append(lines, fmt.Sprintf("\n  -name %s   (пользователь %q)", clients[i].ClientID, clients[i].Name()))
+		}
+		return fmt.Errorf("под %q подходит несколько пользователей (%d) — повторите команду с публичным ключом вместо имени:%s",
 			r.Ident, len(r.Matches), strings.Join(lines, ""))
 	default:
 		return fmt.Errorf("пользователь %q не найден", r.Ident)
@@ -553,20 +589,43 @@ func (r Resolution) Err(clients []ClientEntry) error {
 // ТОЛЬКО если клиента с таким именем нет: совпадение по имени однозначно и
 // wrong-target не создаёт, а вот резолв по номеру строки по-прежнему
 // запрещён — до него дело не доходит никогда.
-func ResolveNonNumeric(clients []ClientEntry, ident string) (int, error) {
+//
+// ВОЗВРАЩАЕТ Resolution, А НЕ int (ревью BE-01/QA-01 M13, A8 круг 2).
+// Прежняя сигнатура (int, error) не несла третьего состояния, и Note() —
+// «понял как имя, а не как номер» — ВЫБРАСЫВАЛАСЬ по дороге: сужение
+// запрета без компенсации. Материально это означало, что
+// `amnezia-admin rename -name 12 -newname X` не печатает ничего до
+// действия (карточки подтверждения у rename нет) и молча переименовывает
+// клиента по имени «12». Тотальный запрет числовых ident назад не
+// возвращается — это отменило бы решение владельца для флагового режима;
+// вместо этого третье состояние выпущено наружу, а вызывающий обязан
+// напечатать Note() ДО действия.
+//
+// Mode у результата — ModeFlags: списка человек не видел, номера строк в
+// текстах не называются.
+func ResolveNonNumeric(clients []ClientEntry, ident string) (Resolution, error) {
 	r := ResolveClient(clients, ident)
+	r.Mode = ModeFlags
 	if r.Kind == ResolveAmbiguous {
-		return -1, r.Err(clients)
+		return r, r.Err(clients)
 	}
 	if r.Kind == ResolveFound && r.ByName {
-		return r.Index, nil
+		// Во флаговом режиме «двусмысленно» означает просто «ввод —
+		// число»: списка нет, и диапазон номеров строк тут ни при чём.
+		// (В ModeList NameOverNumber ставится по попаданию в диапазон —
+		// там номер вне диапазона действительно ничего не значит.)
+		if _, err := strconv.Atoi(strings.TrimSpace(ident)); err == nil {
+			r.NameOverNumber = true
+		}
+		return r, nil
 	}
 	// Дальше — либо не найдено вовсе, либо найдено ТОЛЬКО по номеру строки.
 	// Номер строки вне интерактивного списка не резолвим никогда (wrong-target).
+	notFound := Resolution{Kind: ResolveNotFound, Mode: ModeFlags, Ident: ident}
 	if _, err := strconv.Atoi(strings.TrimSpace(ident)); err == nil {
-		return -1, fmt.Errorf("укажите имя или публичный ключ — номера действительны только внутри интерактивного списка")
+		return notFound, fmt.Errorf("укажите имя или публичный ключ — номера действительны только внутри интерактивного списка")
 	}
-	return -1, fmt.Errorf("пользователь %q не найден (укажите имя или публичный ключ)", ident)
+	return notFound, fmt.Errorf("пользователь %q не найден (укажите имя или публичный ключ)", ident)
 }
 
 // SortByActivity сортирует клиентов по активности: недавний LastHandshake —

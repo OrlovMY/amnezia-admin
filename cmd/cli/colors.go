@@ -45,6 +45,23 @@ func resolveInteractive(w io.Writer, clients []core.ClientEntry, ident string) i
 	return r.Index
 }
 
+// resolveByFlag — разрешение -name во ФЛАГОВОМ режиме (A8 круг 2, ревью
+// BE-01/QA-01 M13). Единственная точка, где cmd/cli зовёт
+// core.ResolveNonNumeric: третье состояние обязано доехать до человека, а
+// Note — напечататься ДО действия. У rename карточки подтверждения нет
+// вовсе, поэтому молчание здесь опаснее, чем в интерактиве, а не безопаснее.
+// Сторож internal/resolveguard держит это свойство.
+func resolveByFlag(w io.Writer, clients []core.ClientEntry, ident string) (int, error) {
+	r, err := core.ResolveNonNumeric(clients, ident)
+	if err != nil {
+		return -1, err
+	}
+	if note := r.Note(); note != "" {
+		fmt.Fprintln(w, cWarn(note))
+	}
+	return r.Index, nil
+}
+
 // printErr — единообразный вывод ошибок
 func printErr(err error) {
 	fmt.Println(cErr("Ошибка: ") + err.Error())

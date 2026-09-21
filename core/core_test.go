@@ -365,6 +365,21 @@ func TestResolveClientThreeOutcomes(t *testing.T) {
 		{"ничего не совпало", many, "нет-такого", ResolveNotFound, -1},
 		{"число вне списка — не номер строки", many, "999", ResolveNotFound, -1},
 	}
+	// Канарейка на недозапуск (ревью QA-01 M15): усохшая таблица случаев
+	// зеленеет молча и неотличима от «проверять нечего». Порог по числу
+	// случаев И по покрытию всех трёх исходов — падение, а не зелень.
+	if len(cases) < 6 {
+		t.Fatalf("таблица усохла до %d случаев (ожидалось не меньше 6) — проверка смотрит не туда", len(cases))
+	}
+	seenKind := map[ResolveKind]int{}
+	for _, tc := range cases {
+		seenKind[tc.wantKind]++
+	}
+	for _, k := range []ResolveKind{ResolveNotFound, ResolveFound, ResolveAmbiguous} {
+		if seenKind[k] == 0 {
+			t.Fatalf("в таблице нет ни одного случая с исходом %v — третье состояние не проверяется", k)
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := ResolveClient(tc.clients, tc.ident)
@@ -778,32 +793,38 @@ func TestResolveNonNumericRejectsNumbers(t *testing.T) {
 	}
 
 	numeric := []string{"1", "2", "3", " 2 ", "007"}
+	// Канарейка на недозапуск (ревью QA-01 M16): опустевший перечень случаев
+	// зеленеет молча и выглядит как «проверять нечего». Порог делает пустоту
+	// падением.
+	if len(numeric) < 5 {
+		t.Fatalf("перечень числовых ident усох до %d (ожидалось не меньше 5) — проверка смотрит не туда", len(numeric))
+	}
 	for _, ident := range numeric {
 		t.Run("numeric_"+ident, func(t *testing.T) {
-			idx, err := ResolveNonNumeric(clients, ident)
+			r, err := ResolveNonNumeric(clients, ident)
 			if err == nil {
-				t.Fatalf("ResolveNonNumeric(%q) = idx %d, nil — want error (numbers must be rejected)", ident, idx)
+				t.Fatalf("ResolveNonNumeric(%q) = %+v, nil — want error (numbers must be rejected)", ident, r)
 			}
 		})
 	}
 
 	t.Run("by name", func(t *testing.T) {
-		idx, err := ResolveNonNumeric(clients, "Bob")
+		r, err := ResolveNonNumeric(clients, "Bob")
 		if err != nil {
 			t.Fatalf("ResolveNonNumeric(Bob): %v", err)
 		}
-		if idx != 1 {
-			t.Errorf("idx = %d, want 1", idx)
+		if r.Index != 1 {
+			t.Errorf("Index = %d, want 1", r.Index)
 		}
 	})
 
 	t.Run("by pubkey", func(t *testing.T) {
-		idx, err := ResolveNonNumeric(clients, "pk3")
+		r, err := ResolveNonNumeric(clients, "pk3")
 		if err != nil {
 			t.Fatalf("ResolveNonNumeric(pk3): %v", err)
 		}
-		if idx != 2 {
-			t.Errorf("idx = %d, want 2", idx)
+		if r.Index != 2 {
+			t.Errorf("Index = %d, want 2", r.Index)
 		}
 	})
 
@@ -811,6 +832,95 @@ func TestResolveNonNumericRejectsNumbers(t *testing.T) {
 		_, err := ResolveNonNumeric(clients, "nope")
 		if err == nil {
 			t.Fatal("expected error for unknown ident")
+		}
+	})
+}
+
+// TestResolveNonNumericThirdState — A8 круг 2, ревью BE-01/QA-01 M13 и M9.
+//
+// Флаговый путь обязан нести ВСЕ ТРИ состояния, а не два: сигнатура
+// (int, error) выбрасывала Note() и сворачивала «подходит несколько» в
+// «не найден». Проверяем оба провала по отдельности.
+func TestResolveNonNumericThirdState(t *testing.T) {
+	// Клиент с именем из одних цифр: по решению владельца имя главнее.
+	digits := []ClientEntry{
+		{ClientID: "keyA", UserData: map[string]any{"clientName": "12"}},
+		{ClientID: "keyB", UserData: map[string]any{"clientName": "Боб"}},
+	}
+	dup := []ClientEntry{
+		{ClientID: "pkA", UserData: map[string]any{"clientName": "Дубль"}},
+		{ClientID: "pkB", UserData: map[string]any{"clientName": "Дубль"}},
+	}
+
+	t.Run("M13: имя из цифр проходит И объявляется вслух", func(t *testing.T) {
+		r, err := ResolveNonNumeric(digits, "12")
+		if err != nil {
+			t.Fatalf("ResolveNonNumeric(\"12\"): %v — имя главнее номера, отказа быть не должно", err)
+		}
+		if r.Index != 0 {
+			t.Fatalf("Index = %d, want 0", r.Index)
+		}
+		if !r.NameOverNumber {
+			t.Fatal("NameOverNumber = false — двусмысленность ввода потеряна по дороге")
+		}
+		note := r.Note()
+		if note == "" {
+			t.Fatal("Note() пуст: во флаговом режиме программа молча переименует/удалит клиента по имени \"12\"")
+		}
+		if !strings.Contains(note, "ИМЯ") || !strings.Contains(note, `"12"`) {
+			t.Errorf("Note() = %q — не сказано, кого поняли", note)
+		}
+		// UX-01: списка человек не видел — номеров строк в тексте быть не должно.
+		if strings.Contains(note, "строк"+"а ") || strings.Contains(note, "строки ") {
+			t.Errorf("Note() ссылается на строку списка, которого человек не видел: %q", note)
+		}
+	})
+
+	t.Run("M9: дубль имени — «несколько», а не «не найден»", func(t *testing.T) {
+		_, err := ResolveNonNumeric(dup, "Дубль")
+		if err == nil {
+			t.Fatal("ожидалась ошибка: на сервере два клиента с этим именем")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "несколько") {
+			t.Errorf("текст не говорит о неоднозначности: %q", msg)
+		}
+		if strings.Contains(msg, "не найден") {
+			t.Fatalf("неоднозначность выдана за «не найдено» — признак № 1 CLAUDE.md: %q", msg)
+		}
+		for _, want := range []string{"pkA", "pkB"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("в перечне нет ключа %q: %q", want, msg)
+			}
+		}
+	})
+
+	t.Run("UX-01: во флаговом режиме номера строк не предлагаются", func(t *testing.T) {
+		_, err := ResolveNonNumeric(dup, "Дубль")
+		if err == nil {
+			t.Fatal("ожидалась ошибка")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "строка ") {
+			t.Errorf("программа предлагает номера списка, которого человек не видел: %q", msg)
+		}
+		if !strings.Contains(msg, "-name ") {
+			t.Errorf("нет готовой подсказки «повторите с публичным ключом»: %q", msg)
+		}
+	})
+
+	// Тот же дубль в ИНТЕРАКТИВЕ — наоборот, обязан называть номера строк:
+	// список перед глазами. Две формы, а не одна на оба режима.
+	t.Run("в интерактиве номера строк называются", func(t *testing.T) {
+		err := ResolveClient(dup, "Дубль").Err(dup)
+		if err == nil {
+			t.Fatal("ожидалась ошибка")
+		}
+		if !strings.Contains(err.Error(), "строка 1") {
+			t.Errorf("в интерактиве номер строки обязан быть: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "последний столбец") {
+			t.Errorf("не сказано, где взять ключ: %q", err.Error())
 		}
 	})
 }
@@ -1331,7 +1441,7 @@ func TestResolveClientAnnouncesNameOverNumber(t *testing.T) {
 	if note == "" {
 		t.Fatal("Note() пуст: программа молча выбрала между именем и номером строки")
 	}
-	for _, want := range []string{"ИМЯ", `"12"`, "строка 1", "12"} {
+	for _, want := range []string{"ИМЯ", `"12"`, "строки 1", "Строка 12 не выбрана"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("Note() = %q, не содержит %q — не сказано, кого поняли", note, want)
 		}

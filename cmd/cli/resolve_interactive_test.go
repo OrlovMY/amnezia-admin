@@ -53,13 +53,13 @@ func TestResolveInteractiveReachesHuman(t *testing.T) {
 	}
 
 	t.Run("неоднозначность останавливает действие и печатает перечень", func(t *testing.T) {
-		var out string
+		// printErr пишет в os.Stdout, а Note — в переданный writer;
+		// собираем оба, иначе проверка смотрит только на половину вывода.
 		var idx int
-		out = captureStdout(t, func() {
-			var buf bytes.Buffer
-			idx = resolveInteractive(&buf, dup, "Дубль")
-			out += buf.String()
-		})
+		var note bytes.Buffer
+		out := captureStdout(t, func() {
+			idx = resolveInteractive(&note, dup, "Дубль")
+		}) + note.String()
 		if idx >= 0 {
 			t.Fatalf("idx = %d — действие по первому совпадению НЕ должно состояться", idx)
 		}
@@ -75,10 +75,10 @@ func TestResolveInteractiveReachesHuman(t *testing.T) {
 
 	t.Run("не найдено — свой текст", func(t *testing.T) {
 		var idx int
+		var note bytes.Buffer
 		out := captureStdout(t, func() {
-			var buf bytes.Buffer
-			idx = resolveInteractive(&buf, many, "нет-такого")
-		})
+			idx = resolveInteractive(&note, many, "нет-такого")
+		}) + note.String()
 		if idx >= 0 {
 			t.Fatalf("idx = %d, want -1", idx)
 		}
@@ -113,6 +113,76 @@ func TestResolveInteractiveReachesHuman(t *testing.T) {
 		}
 		if buf.String() != "" {
 			t.Errorf("лишнее сообщение на однозначном вводе: %q", buf.String())
+		}
+	})
+}
+
+// TestResolveByFlagReachesHuman — доезд для ФЛАГОВОГО пути (A8 круг 2,
+// ревью BE-01/QA-01 M13). Именно эту обёртку зовут del/rename/toggle/rekey
+// и их -dry-run. У rename карточки подтверждения нет вовсе: если Note не
+// напечатана здесь, человек не увидит ДО действия ничего.
+func TestResolveByFlagReachesHuman(t *testing.T) {
+	digits := []core.ClientEntry{
+		{ClientID: "keyA", UserData: map[string]any{"clientName": "12"}},
+		{ClientID: "keyB", UserData: map[string]any{"clientName": "Боб"}},
+	}
+	dup := []core.ClientEntry{
+		{ClientID: "pkA", UserData: map[string]any{"clientName": "Дубль"}},
+		{ClientID: "pkB", UserData: map[string]any{"clientName": "Дубль"}},
+	}
+
+	t.Run("имя из цифр: действие идёт, но человек слышит, кого поняли", func(t *testing.T) {
+		var out bytes.Buffer
+		idx, err := resolveByFlag(&out, digits, "12")
+		if err != nil {
+			t.Fatalf("resolveByFlag: %v — имя главнее номера", err)
+		}
+		if idx != 0 {
+			t.Fatalf("idx = %d, want 0", idx)
+		}
+		if out.String() == "" {
+			t.Fatal("во флаговом режиме ничего не напечатано: rename -name 12 переименует молча")
+		}
+		if !strings.Contains(out.String(), "ИМЯ") {
+			t.Errorf("не сказано, что понято как имя: %q", out.String())
+		}
+	})
+
+	t.Run("дубль имени: отказ с ключами и без номеров строк", func(t *testing.T) {
+		var out bytes.Buffer
+		idx, err := resolveByFlag(&out, dup, "Дубль")
+		if err == nil {
+			t.Fatalf("idx = %d, err = nil — действие по первому совпадению недопустимо", idx)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "несколько") || strings.Contains(msg, "не найден") {
+			t.Errorf("неоднозначность не отличена от «не найдено»: %q", msg)
+		}
+		if strings.Contains(msg, "строка ") {
+			t.Errorf("предложены номера списка, которого человек не видел: %q", msg)
+		}
+		for _, want := range []string{"-name pkA", "-name pkB"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("нет готовой подсказки %q: %q", want, msg)
+			}
+		}
+	})
+
+	t.Run("обычное имя — молча", func(t *testing.T) {
+		var out bytes.Buffer
+		idx, err := resolveByFlag(&out, digits, "Боб")
+		if err != nil || idx != 1 {
+			t.Fatalf("idx = %d, err = %v, want 1, nil", idx, err)
+		}
+		if out.String() != "" {
+			t.Errorf("лишнее сообщение: %q", out.String())
+		}
+	})
+
+	t.Run("число без совпадения по имени — запрет остаётся", func(t *testing.T) {
+		var out bytes.Buffer
+		if _, err := resolveByFlag(&out, digits, "2"); err == nil {
+			t.Fatal("номер строки во флаговом режиме резолвиться не должен")
 		}
 	})
 }
