@@ -132,9 +132,20 @@ func TestNoRawResolveOutsideWrapper(t *testing.T) {
 		t.Errorf("сырой вызов %s вне %s: %s — резолв обязан идти через resolveInteractive/resolveByFlag, иначе Note() не печатается и неоднозначность не останавливает действие", f.text, wrapperFile, f.pos)
 	}
 	for name, want := range wrapperCalls {
-		if calls[name] != want {
-			t.Errorf("вызовов %s в cmd/: %d, ожидалось %d — место резолва потеряно или заведено мимо обёртки", name, calls[name], want)
+		got := calls[name]
+		if got == want {
+			continue
 		}
+		// Сообщение ДВУСТОРОННЕЕ (ревью QA-01 N20): точное равенство
+		// нарушается в обе стороны, и законный пятый вызов обёртки роняет
+		// сторож текстом про «потеряно», описывающим ровно обратное.
+		// Сравнение остаётся строгим: с `>=` исчезновение места прошло бы
+		// молча, а это и есть охраняемый дефект.
+		if got < want {
+			t.Errorf("вызовов %s в cmd/: %d, ожидалось %d — место резолва ПОТЕРЯНО или заведено мимо обёртки", name, got, want)
+			continue
+		}
+		t.Errorf("вызовов %s в cmd/: %d, ожидалось %d — ПОЯВИЛОСЬ лишнее место резолва; если оно законное, поднимите ожидание в wrapperCalls вместе с разбором, кто и что там печатает человеку", name, got, want)
 	}
 }
 
@@ -164,7 +175,13 @@ func plantTree(t *testing.T, pad bool, files map[string]string) string {
 	return root
 }
 
-const rawCallFile = "package main\n\nfunc f(clients []int, id string) { _ = core.ResolveClient(clients, id) }\n"
+// rawCallFile подкладывает по вызову на КАЖДУЮ охраняемую функцию (ревью
+// QA-01 G2, круг 3). Раньше здесь стоял только core.ResolveClient, и выпадение
+// core.ResolveNonNumeric из rawFuncs не ронял никто: защита второй функции не
+// подтверждалась ничем. Ниже — перекрёстная проверка, что краснеет каждая.
+const rawCallFile = "package main\n\n" +
+	"func f(clients []int, id string) { _ = core.ResolveClient(clients, id) }\n" +
+	"func g(clients []int, id string) { _, _ = core.ResolveNonNumeric(clients, id) }\n"
 
 func TestGuardCatchesPlantedRawCall(t *testing.T) {
 	root := plantTree(t, true, map[string]string{
@@ -178,7 +195,28 @@ func TestGuardCatchesPlantedRawCall(t *testing.T) {
 		t.Fatalf("подготовка: разобрано %d файлов, нужно не меньше %d", files, minFiles)
 	}
 	if len(found) == 0 {
-		t.Fatal("сторож НЕ заметил заведомый сырой вызов core.ResolveClient вне обёртки")
+		t.Fatal("сторож НЕ заметил заведомый сырой вызов вне обёртки")
+	}
+	// Каждая охраняемая функция — по отдельности: общий счётчик «хоть
+	// что-то нашлось» позволил бы одной из них выпасть из rawFuncs молча.
+	//
+	// ОЖИДАНИЕ НАЗВАНО ЛИТЕРАЛОМ, А НЕ ВЗЯТО ИЗ rawFuncs. Первая редакция
+	// этой проверки перебирала сам rawFuncs — и потому на подмене «функция
+	// выпала из rawFuncs» не краснела вовсе: исчезнувшее имя исчезало и из
+	// перебора. Канарейка мерила подменяемым прибором подменяемую величину.
+	for _, name := range []string{"ResolveClient", "ResolveNonNumeric"} {
+		if !rawFuncs[name] {
+			t.Errorf("core.%s выпала из rawFuncs — сторож её больше не охраняет", name)
+		}
+		seen := false
+		for _, f := range found {
+			if f.text == "core."+name {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("сторож НЕ заметил заведомый сырой вызов core.%s — защита этой функции ничем не подтверждена", name)
+		}
 	}
 }
 
