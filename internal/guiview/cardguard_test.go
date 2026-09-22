@@ -405,13 +405,15 @@ func TestTrafficCellUsesGuiview(t *testing.T) {
 	}
 	text := b.String()
 
-	if !strings.Contains(text, "guiview.TrafficText(") {
-		t.Errorf("%s: ячейка трафика собирается не через guiview.TrafficText", guiMainPath)
-	}
-	if !strings.Contains(text, "guiview.ActivityText(") {
-		t.Errorf("%s: ячейка активности собирается не через guiview.ActivityText — "+
-			"ветка «запрос не удался» снова описана строкой в cmd/gui, где её не проверяет ни один тест",
-			guiMainPath)
+	// GUI-КОПИРОВАНИЕ: с этой ревизии cmd/gui не зовёт ActivityText и
+	// TrafficText напрямую — текст ЛЮБОЙ ячейки собирает guiview.CellText,
+	// которая зовёт их внутри. Это не ослабление сторожа, а перенос точки
+	// сверки: именно из CellText берётся и то, что видно, и то, что
+	// копируется в буфер, — разъехаться они не могут.
+	if !strings.Contains(text, "guiview.CellText(") {
+		t.Errorf("%s: текст ячеек таблицы собирается не через guiview.CellText — "+
+			"ветка «запрос не удался» снова описана строкой в cmd/gui, где её не проверяет "+
+			"ни один тест без дисплея, и «что видно» разъезжается с «что копируется»", guiMainPath)
 	}
 	if strings.Contains(text, "HumanBytes(") {
 		t.Errorf("%s: core.HumanBytes снова вызывается прямо в cmd/gui — "+
@@ -424,22 +426,32 @@ func TestTrafficCellUsesGuiview(t *testing.T) {
 	}
 }
 
-// cellFailFlagArg — вторым (индекс 1) аргументом ячейки идёт ПРИЗНАК
-// «запрос не удался». Перечень: функция → ожидаемое выражение признака.
-var cellFailFlagArg = map[string]string{
-	"ActivityText": "u.activityFailed",
-	"TrafficText":  "u.statsFailed",
+// rowFieldSource — ПОЛЯ guiview.Row, собираемого в cmd/gui.rowFor, и
+// выражения, из которых они обязаны браться. Перечень поимённый: строка
+// «ActivityFailed: false» — обход стоимостью одной клавиши, после которого
+// отказ сервера снова печатается и КОПИРУЕТСЯ как измеренная величина.
+var rowFieldSource = map[string]string{
+	"CanManage":      "u.canManage",
+	"ActivityFailed": "u.activityFailed",
+	"StatsFailed":    "u.statsFailed",
+	"Handshake":      "u.handshakes[cl.ClientID]",
+	"Stats":          "u.peerStats[cl.ClientID]",
+	"ClientID":       "cl.ClientID",
 }
 
-// TestCellsReceiveTheFailureFlag — ПРИЗНАК ДОЕЗЖАЕТ ДО ЯЧЕЙКИ.
+// TestCellsReceiveTheFailureFlag — ПРИЗНАК ДОЕЗЖАЕТ ДО ЯЧЕЙКИ И ДО БУФЕРА.
 //
 // ЧЕГО НЕ ХВАТАЛО ПРЕЖНЕЙ РЕДАКЦИИ (ревью BE-01). Она проверяла только
 // ПРИСУТСТВИЕ вызова guiview.TrafficText — то есть форму. Обход стоил одной
 // клавиши и выглядел как упрощение: `guiview.TrafficText(u.canManage,
 // false, …)` — вызов на месте, тесты guiview зелёные, а на экране снова
-// «0 B / 0 B» при недоступной статистике. Для карточки такая сверка уже
-// была (TestDeleteCardPassesServerError); здесь тот же приём применён к
-// обеим ячейкам таблицы.
+// «0 B / 0 B» при недоступной статистике.
+//
+// ЧТО ИЗМЕНИЛОСЬ (GUI-КОПИРОВАНИЕ). Признаки теперь едут в ячейку не
+// аргументами, а полями guiview.Row, который собирает cmd/gui.rowFor, —
+// и из того же Row берётся текст для буфера обмена. Поэтому сверка
+// перенесена на составной литерал: каждое поле перечня обязано браться из
+// названного выражения, а не из константы.
 func TestCellsReceiveTheFailureFlag(t *testing.T) {
 	raw, _, _ := readGUIMain(t)
 	fset := token.NewFileSet()
@@ -448,49 +460,72 @@ func TestCellsReceiveTheFailureFlag(t *testing.T) {
 		t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: %s не разбирается: %v", guiMainPath, err)
 	}
 
-	seen := map[string]bool{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Body != nil && d.Name.Name == "rowFor" {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет метода rowFor — "+
+			"данные строки превращают в видимое и копируемое где-то ещё; перечень надо "+
+			"приводить в соответствие, а не удалять", guiMainPath)
+	}
+
+	got := map[string]string{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || dotted(lit.Type) != "guiview.Row" {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		want, guarded := cellFailFlagArg[sel.Sel.Name]
-		if !guarded {
-			return true
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if !ok || pkg.Name != "guiview" {
-			return true
-		}
-		seen[sel.Sel.Name] = true
-		if len(call.Args) < 2 {
-			t.Errorf("%s:%d: guiview.%s вызвана с %d аргументами — признак «запрос не удался» передать нечем",
-				guiMainPath, fset.Position(call.Pos()).Line, sel.Sel.Name, len(call.Args))
-			return true
-		}
-		var got strings.Builder
-		if err := printer.Fprint(&got, fset, call.Args[1]); err != nil {
-			t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: аргумент не печатается: %v", err)
-		}
-		if got.String() != want {
-			t.Errorf("%s:%d: guiview.%s получает вторым аргументом %q вместо %q — "+
-				"признак «статистику получить не удалось» до ячейки не доезжает, и отказ сервера "+
-				"снова печатается как измеренная величина",
-				guiMainPath, fset.Position(call.Pos()).Line, sel.Sel.Name, got.String(), want)
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			var b strings.Builder
+			if err := printer.Fprint(&b, fset, kv.Value); err != nil {
+				t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: значение поля не печатается: %v", err)
+			}
+			got[key.Name] = b.String()
 		}
 		return true
 	})
-
-	for name := range cellFailFlagArg {
-		if !seen[name] {
-			t.Errorf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в %s нет ни одного вызова guiview.%s — "+
-				"ячейку собирают чем-то другим, и перечень надо приводить в соответствие, а не удалять",
-				guiMainPath, name)
+	if len(got) == 0 {
+		t.Fatalf("сторож A1 ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: в rowFor нет составного литерала guiview.Row " +
+			"с именованными полями — сверять нечего")
+	}
+	for field, want := range rowFieldSource {
+		switch have, ok := got[field]; {
+		case !ok:
+			t.Errorf("rowFor: поле guiview.Row.%s не заполняется (ожидалось %q) — "+
+				"в ячейку и в буфер уедет нулевое значение вместо данных сервера", field, want)
+		case have != want:
+			t.Errorf("rowFor: поле guiview.Row.%s берётся из %q вместо %q — признак «узнать не удалось» "+
+				"до ячейки не доезжает, и отказ сервера снова печатается и копируется как измеренная величина",
+				field, have, want)
 		}
+	}
+}
+
+// TestCellTextComesFromRowFor — ДОЕЗД ДО МЕСТА ПЕЧАТИ: текст ячейки строится
+// из того самого Row, который вернул rowFor, а не из отдельно собранного
+// литерала рядом. Без этой проверки rowFor мог бы остаться безупречным и
+// никем не используемым.
+func TestCellTextComesFromRowFor(t *testing.T) {
+	body := guiBody(t, "buildTable")
+	if !strings.Contains(body, "u.rowFor(id.Row)") {
+		t.Errorf("buildTable: ячейка строится не из u.rowFor(id.Row) — данные для показа " +
+			"собирают вторым способом, и он разойдётся с копированием")
+	}
+	if !strings.Contains(body, "guiview.CellText(r, id.Col)") {
+		t.Errorf("buildTable: нет вызова guiview.CellText(r, id.Col) — текст ячейки берётся " +
+			"не из общего с буфером обмена места")
 	}
 }
 

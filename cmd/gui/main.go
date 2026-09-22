@@ -1077,42 +1077,129 @@ func (l *tappableLabel) Tapped(*fyne.PointEvent) {
 
 func (l *tappableLabel) TappedSecondary(*fyne.PointEvent) {}
 
+// tableColumnWidths — ширины колонок таблицы пользователей.
+//
+// ПОСЛЕДНЯЯ (публичный ключ) ИЗМЕРЕНА, А НЕ ПОДОБРАНА. Ключ WireGuard — 44
+// знака base64; на 280 точках он не помещался, и владелец видел обрезок
+// (живая приёмка v0.2.0). Число получено fyne.MeasureText тем же шрифтом и
+// размером, каким рисуется ячейка, плюс внутренние отступы widget.Label —
+// см. TestKeyColumnFitsMeasuredKey, который меряет заново при каждом
+// прогоне и краснеет, если ширина перестала вмещать ключ.
+var tableColumnWidths = []float32{40, 280, 165, 140, 150, 425}
+
+// keyColumn — индекс колонки «Публичный ключ».
+const keyColumn = 5
+
+// tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ПРАВУЮ КНОПКУ.
+//
+// ПОЧЕМУ НЕ Tapped. Левый клик обязан по-прежнему доставаться самой
+// widget.Table (Table.Tapped → OnSelected → u.selectedRow), от этого зависят
+// удаление, переименование и включение. Драйвер Fyne при хит-тесте ищет
+// САМЫЙ ВЛОЖЕННЫЙ объект, реализующий нужный интерфейс, — ровно этим
+// пользуется tappableLabel в заголовке. Поэтому здесь реализован ТОЛЬКО
+// fyne.SecondaryTappable: для первичного тапа ячейка невидима, и выбор
+// строки идёт прежним путём. Тест TestCellIsNotPrimaryTappable держит это
+// свойство: добавь сюда Tapped — и выбор строки сломается молча.
+type tableCell struct {
+	widget.Label
+	onSecondary func(*fyne.PointEvent)
+}
+
+func newTableCell() *tableCell {
+	c := &tableCell{}
+	c.ExtendBaseWidget(c)
+	return c
+}
+
+func (c *tableCell) TappedSecondary(e *fyne.PointEvent) {
+	if c.onSecondary != nil {
+		c.onSecondary(e)
+	}
+}
+
+// rowFor собирает guiview.Row для строки таблицы — ЕДИНСТВЕННОЕ место, где
+// данные строки превращаются в то, что видно и что копируется. Признаки
+// «запрос не удался» передаются отдельными полями, а не выводятся из пустоты
+// значений (CLAUDE.md, признак 2).
+func (u *ui) rowFor(row int) (guiview.Row, bool) {
+	if row < 0 || row >= len(u.clients) {
+		return guiview.Row{}, false
+	}
+	cl := u.clients[row]
+	return guiview.Row{
+		Num:            row + 1,
+		Name:           cl.Name(),
+		Created:        cl.Created(),
+		ClientID:       cl.ClientID,
+		Disabled:       cl.Disabled(),
+		CanManage:      u.canManage,
+		ActivityFailed: u.activityFailed,
+		StatsFailed:    u.statsFailed,
+		Handshake:      u.handshakes[cl.ClientID],
+		Stats:          u.peerStats[cl.ClientID],
+	}, true
+}
+
+// copyToClipboard кладёт текст в буфер и подтверждает это человеку в строке
+// состояния — тем же способом, что кнопка «Скопировать путь» в диалоге
+// конфига.
+func (u *ui) copyToClipboard(text, status string) {
+	fyne.CurrentApp().Clipboard().SetContent(text)
+	if u.status != nil {
+		u.status.SetText(status)
+	}
+}
+
+// cellMenu — контекстное меню ячейки (решение владельца: «Копировать
+// значение», «Копировать строку»). Возвращает nil, если строки нет.
+// Отдельный метод, а не литерал внутри обработчика, ровно затем, чтобы его
+// можно было проверить тестом без окна.
+func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
+	r, ok := u.rowFor(id.Row)
+	if !ok {
+		return nil
+	}
+	col := id.Col
+	return fyne.NewMenu("",
+		fyne.NewMenuItem(guiview.MenuCopyValue, func() {
+			u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)
+		}),
+		fyne.NewMenuItem(guiview.MenuCopyRow, func() {
+			u.copyToClipboard(guiview.CopyRow(r), guiview.StatusCopiedRow)
+		}),
+	)
+}
+
 func (u *ui) buildTable() {
 	headers := tableHeaders
-	widths := []float32{40, 280, 165, 140, 150, 280}
+	widths := tableColumnWidths
 
 	u.table = widget.NewTableWithHeaders(
 		func() (int, int) { return len(u.clients), len(headers) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject { return newTableCell() },
 		func(id widget.TableCellID, o fyne.CanvasObject) {
-			l := o.(*widget.Label)
-			l.TextStyle = fyne.TextStyle{}
-			if id.Row >= len(u.clients) {
-				l.SetText("")
+			c := o.(*tableCell)
+			c.TextStyle = fyne.TextStyle{}
+			r, ok := u.rowFor(id.Row)
+			if !ok {
+				c.onSecondary = nil
+				c.SetText("")
 				return
 			}
-			cl := u.clients[id.Row]
-			switch id.Col {
-			case 0:
-				l.SetText(fmt.Sprintf("%d", id.Row+1))
-			case 1:
-				l.TextStyle = fyne.TextStyle{Bold: true, Italic: cl.Disabled()}
-				l.SetText(cl.Name())
-			case 2:
-				created := cl.Created()
-				if r := []rune(created); len(r) > 19 {
-					created = string(r[:19])
+			if id.Col == 1 {
+				c.TextStyle = fyne.TextStyle{Bold: true, Italic: r.Disabled}
+			}
+			// Текст ячейки — из guiview.CellText: и «?» при неудавшемся
+			// запросе, и всё остальное решается там же, откуда берётся
+			// копируемое значение. Разъехаться они не могут.
+			c.SetText(guiview.CellText(r, id.Col))
+			cellID := id
+			c.onSecondary = func(e *fyne.PointEvent) {
+				m := u.cellMenu(cellID)
+				if m == nil || u.win == nil {
+					return
 				}
-				l.SetText(created)
-			case 3:
-				// Все ветки (в том числе «запрос активности не удался» —
-				// A1, место № 2) — в guiview.ActivityText, рядом с текстом
-				// трафика: в cmd/gui строку не проверяет ни один тест.
-				l.SetText(guiview.ActivityText(u.canManage, u.activityFailed, cl.Disabled(), u.handshakes[cl.ClientID]))
-			case 4:
-				l.SetText(guiview.TrafficText(u.canManage, u.statsFailed, u.peerStats[cl.ClientID]))
-			case 5:
-				l.SetText(cl.ClientID)
+				widget.ShowPopUpMenuAtPosition(m, u.win.Canvas(), e.AbsolutePosition)
 			}
 		},
 	)
