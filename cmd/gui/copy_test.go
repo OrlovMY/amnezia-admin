@@ -364,66 +364,138 @@ func TestKeyColumnWidthCapped(t *testing.T) {
 	}
 }
 
-// TestStartWindowFitsColumns — стартовая ширина окна считается ПО
-// СОДЕРЖИМОМУ: она не меньше суммы тех же колонок плюс обрамление (пока не
-// упёрлась в потолок). Подмена, возвращающая жёсткое число 980, роняет тест.
-func TestStartWindowFitsColumns(t *testing.T) {
+// randomBase64Keys — n псевдослучайных 44-значных base64-ключей. Генератор
+// детерминированный (тест не должен мигать), но выборка настоящая: именно по
+// такой снято practicalWidestKeyText в продукте.
+func randomBase64Keys(n int) []string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	seed := uint64(20260922)
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		b := make([]byte, 44)
+		for j := 0; j < 43; j++ {
+			seed = seed*6364136223846793005 + 1442695040888963407
+			b[j] = alphabet[(seed>>33)%64]
+		}
+		b[43] = '='
+		out = append(out, string(b))
+	}
+	return out
+}
+
+// TestStartWindowFitsWidestLikelyKey — РЕШЕНИЕ ВЛАДЕЛЬЦА: окно открывается
+// сразу с запасом, по самому широкому ПРАКТИЧЕСКИ возможному ключу, а не по
+// типичному. Окно на лету не переразмеряется, поэтому расчёт по типичному
+// ключу означал бы прокрутку сразу после подключения — то, на что владелец и
+// жаловался.
+//
+// Ожидание НЕ берётся из проверяемого кода: тест сам набирает выборку из 5000
+// случайных ключей и меряет их fyne.MeasureText, а обрамление складывает из
+// размеров темы напрямую.
+func TestStartWindowFitsWidestLikelyKey(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
+	th := a.Settings().Theme()
+	size := th.Size(theme.SizeNameText)
 
-	sample := clientsWithKeys(typicalKeyWidthSample)
-	var sum float32
-	for _, w := range tableColumnWidths(sample) {
-		sum += w
+	var widest float32
+	for _, k := range randomBase64Keys(5000) {
+		if w := fyne.MeasureText(k, size, fyne.TextStyle{}).Width; w > widest {
+			widest = w
+		}
 	}
-	need := sum + windowChrome()
-	got := startWindowSize()
+	if widest < minReasonableKeyWidth {
+		t.Fatalf("ПРИБОР СЛОМАН: самый широкий ключ выборки измерен в %v точек", widest)
+	}
+	typical := fyne.MeasureText(typicalKeyWidthSample, size, fyne.TextStyle{}).Width
+	if widest <= typical {
+		t.Fatalf("ПРОВЕРКА ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: максимум выборки (%v) не шире типичного "+
+			"ключа (%v) — различать «по типичному» и «по практическому максимуму» больше не на чем",
+			widest, typical)
+	}
 
+	var fixed float32
+	for _, w := range fixedColumnWidths {
+		fixed += w
+	}
+	chrome := th.Size(theme.SizeNameScrollBar) + 4*th.Size(theme.SizeNamePadding)
+	need := fixed + widest + 2*th.Size(theme.SizeNameInnerPadding) + chrome
+
+	got := startWindowSize()
 	switch {
 	case need > maxStartWindowWidth:
 		if got.Width != maxStartWindowWidth {
-			t.Errorf("содержимое шире потолка (%v > %v), а окно %v — потолок не соблюдён",
-				need, float32(maxStartWindowWidth), got.Width)
+			t.Errorf("содержимое шире потолка (%v > %v), а окно %v", need, float32(maxStartWindowWidth), got.Width)
 		}
 	case got.Width < need:
-		t.Errorf("стартовая ширина окна %v меньше содержимого %v (колонки %v + обрамление %v): "+
-			"таблица с первой же секунды уезжает за край, и человек видит обрезанную колонку",
-			got.Width, need, sum, windowChrome())
+		t.Errorf("стартовая ширина окна %v меньше, чем нужно самому широкому практически "+
+			"возможному ключу: %v (колонки %v + ключ %v + отступы + обрамление %v). Окно на лету "+
+			"не переразмеряется, значит у человека с широкими ключами прокрутка появится сразу "+
+			"после подключения", got.Width, need, fixed, widest, chrome)
 	}
 	if got.Width < minStartWindowWidth {
-		t.Errorf("стартовая ширина %v уже пола %v — верстка главного экрана разъедется",
-			got.Width, float32(minStartWindowWidth))
+		t.Errorf("стартовая ширина %v уже пола %v", got.Width, float32(minStartWindowWidth))
 	}
 	if got.Height != mainWindowHeight {
 		t.Errorf("высота окна %v вместо прежней %v — её менять не просили", got.Height, float32(mainWindowHeight))
 	}
-	t.Logf("стартовое окно: %v × %v (колонки %v + обрамление %v)", got.Width, got.Height, sum, windowChrome())
+	t.Logf("выборка 5000 ключей: максимум текста %v, типичный %v; окно %v × %v (нужно %v)",
+		widest, typical, got.Width, got.Height, need)
 }
 
-// TestKeyColumnWidthReachesTheTable — ДОЕЗД: пересчитанная ширина попадает в
-// саму таблицу, а не остаётся правильным числом в функции. Сверяется по
-// отрисованной ячейке.
-func TestKeyColumnWidthReachesTheTable(t *testing.T) {
-	u := testUI(t)
-	u.win.Resize(fyne.NewSize(1600, 400))
-	u.clients = clientsWithKeys(repeatKey('m'))
-	u.applyKeyColumnWidth()
-	u.table.Refresh()
-
-	want := keyColumnWidth(u.clients)
-	var cellW float32
+// renderedKeyCellWidth — ширина отрисованной ячейки с данным ключом.
+func renderedKeyCellWidth(t *testing.T, u *ui, key string) float32 {
+	t.Helper()
+	var w float32
 	found := false
 	walkObjects(u.win.Canvas().Content(), func(o fyne.CanvasObject) {
-		if c, ok := o.(*tableCell); ok && c.Text == repeatKey('m') {
-			cellW, found = c.Size().Width, true
+		if c, ok := o.(*tableCell); ok && c.Text == key {
+			w, found = c.Size().Width, true
 		}
 	})
 	if !found {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране нет ячейки с ключом")
 	}
-	if cellW < want {
+	return w
+}
+
+// TestBuildTableSetsMeasuredWidths — ПЕРВИЧНЫЙ путь: ширины, с которыми
+// таблица СОБИРАЕТСЯ, тоже измеренные. Прежняя редакция этого не проверяла:
+// тест звал applyKeyColumnWidth и перекрывал то, что поставил buildTable, —
+// подмена «второй список чисел прямо в buildTable» проходила зелёной
+// (находка QA-01).
+func TestBuildTableSetsMeasuredWidths(t *testing.T) {
+	a := test.NewApp()
+	t.Cleanup(a.Quit)
+	key := repeatKey('m')
+	u := &ui{win: test.NewWindow(nil), clients: clientsWithKeys(key), canManage: true}
+	t.Cleanup(func() { u.win.Close() })
+	u.buildTable() // и НИКАКОГО applyKeyColumnWidth
+	u.win.SetContent(u.table)
+	u.win.Resize(fyne.NewSize(1600, 400))
+	u.table.Refresh()
+
+	want := keyColumnWidth(u.clients)
+	if got := renderedKeyCellWidth(t, u, key); got < want {
+		t.Errorf("сразу после buildTable ячейка ключа %v уже измеренной ширины %v — "+
+			"таблица строится по другому списку ширин", got, want)
+	}
+}
+
+// TestKeyColumnWidthReachesTheTable — ДОЕЗД ПРИ СМЕНЕ СОСТАВА: после
+// applyKeyColumnWidth новая ширина попадает в таблицу.
+func TestKeyColumnWidthReachesTheTable(t *testing.T) {
+	u := testUI(t)
+	u.win.Resize(fyne.NewSize(1600, 400))
+	key := repeatKey('m')
+	u.clients = clientsWithKeys(key)
+	u.applyKeyColumnWidth()
+	u.table.Refresh()
+
+	want := keyColumnWidth(u.clients)
+	if got := renderedKeyCellWidth(t, u, key); got < want {
 		t.Errorf("отрисованная ячейка ключа %v уже вычисленной ширины %v — пересчёт до таблицы "+
-			"не доезжает", cellW, want)
+			"не доезжает", got, want)
 	}
 }
 

@@ -129,12 +129,27 @@ func writeCrashLog(dir, msg string) error {
 
 // guiGoroutines считает фоновые операции, запущенные через goSafe.
 //
-// ЗАЧЕМ СЧЁТЧИК. Диалоги, которые уходят в фон при открытии (пин-код
-// спрашивает онлайн-время), в тесте продолжают писать в виджеты уже после
-// проверок — и `go test -race` справедливо показывает гонку между фоновой
-// перерисовкой и чтением тех же виджетов в тесте. Ждать «на всякий случай»
-// временем нельзя: это гадание. Счётчик даёт тесту точку синхронизации в
-// ЕДИНСТВЕННОМ месте, где в этой программе вообще запускаются goroutine.
+// ЗАЧЕМ СЧЁТЧИК — И ЧЕГО ОН НЕ ЗНАЧИТ. Он нужен ТЕСТУ, а не продукту: в
+// продукте гонки нет. Механика такая (проверено по исходникам Fyne 2.7.4):
+//
+//   - боевой драйвер, fyne.io/fyne/v2/internal/driver/glfw/driver.go
+//     (DoFromGoroutine → runOnMainWithWait), СТАВИТ переданную функцию в
+//     очередь главной нити — записи в виджеты из фоновых goroutine
+//     сериализованы самим драйвером;
+//   - тестовый драйвер, fyne.io/fyne/v2/test/driver.go (DoFromGoroutine →
+//     async.EnsureNotMain), исполняет её ПРЯМО В ВЫЗЫВАЮЩЕЙ goroutine:
+//     очереди нет, и запись из фоновой операции идёт параллельно чтению
+//     тех же виджетов в теле теста.
+//
+// Поэтому `-race` в тестах показывает свойство ТЕСТОВОГО драйвера, а не
+// дефект программы, и лечится оно синхронизацией в тесте. Ждать временем
+// нельзя — это гадание; счётчик даёт точку ожидания в ЕДИНСТВЕННОМ месте,
+// где в этой программе вообще запускаются goroutine.
+//
+// ВНИМАНИЕ НА БУДУЩЕЕ: счётчик — ещё и глушитель. Если кто-то заведёт
+// goSafe, который трогает виджеты МИМО fyne.Do, продукт получит настоящую
+// гонку, а ожидание в тесте её спрячет. Ровно от этого стоит сторож
+// TestGoSafeTouchesWidgetsOnlyInsideFyneDo в internal/guiview.
 var guiGoroutines sync.WaitGroup
 
 // goSafe запускает фоновую операцию с логированием паники
@@ -1199,11 +1214,40 @@ const maxStartWindowWidth = 1280
 // верстка главного экрана (кнопки, выбор протокола, строка состояния).
 const minStartWindowWidth = 980
 
-// typicalKeyWidthSample — образец ключа для стартового размера окна. На
-// старте клиентов ещё нет (окно создаётся до подключения), но длина ключа
-// WireGuard известна — 44 знака base64; ширина этого образца ИЗМЕРЯЕТСЯ, а
-// не берётся числом.
+// typicalKeyWidthSample — образец ТИПИЧНОГО 44-значного ключа. Нужен
+// тестам как точка отсчёта; стартовый размер окна по нему НЕ считается —
+// см. practicalWidestKeyText.
 const typicalKeyWidthSample = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/aBcD1="
+
+// practicalWidestKeyText — ширина текста САМОГО ШИРОКОГО ПРАКТИЧЕСКИ
+// ВСТРЕЧАЮЩЕГОСЯ ключа WireGuard, в точках при размере шрифта
+// referenceTextSize.
+//
+// ОТКУДА ЧИСЛО. Прогон fyne.MeasureText по 20000 случайных 44-значных
+// base64-ключей шрифтом темы 14 точек: максимум 406.8, типичный ключ 356.8.
+// Взято 410 — округление вверх с небольшим запасом. Теоретический худший
+// случай (44 знака «m», 571 точка) СОЗНАТЕЛЬНО не берётся: под него окно
+// раздулось бы под потолок ради строки, которой не бывает.
+// Тест TestStartWindowFitsWidestLikelyKey набирает свою выборку заново и
+// краснеет, если это число перестало её покрывать.
+const practicalWidestKeyText = 410
+
+// referenceTextSize — размер шрифта, при котором снято practicalWidestKeyText.
+// Если тема даёт другой размер, число масштабируется пропорционально.
+const referenceTextSize = 14
+
+// widestLikelyKeyColumnWidth — ширина колонки ключа под самый широкий
+// практически возможный ключ: practicalWidestKeyText, пересчитанный на
+// текущий размер шрифта, плюс отступы ячейки, но не больше потолка колонки.
+func widestLikelyKeyColumnWidth() float32 {
+	th := fyne.CurrentApp().Settings().Theme()
+	size := th.Size(theme.SizeNameText)
+	w := practicalWidestKeyText*size/referenceTextSize + 2*th.Size(theme.SizeNameInnerPadding)
+	if cap := keyColumnCap(); w > cap {
+		return cap
+	}
+	return w
+}
 
 // windowChrome — то, что к сумме колонок добавляет само окно: полоса
 // прокрутки плюс поля темы.
@@ -1212,16 +1256,20 @@ func windowChrome() float32 {
 	return th.Size(theme.SizeNameScrollBar) + 4*th.Size(theme.SizeNamePadding)
 }
 
-// startWindowSize — стартовый размер окна ПО ШИРИНЕ СОДЕРЖИМОГО: сумма тех
-// же колонок (tableColumnWidths) плюс обрамление, с потолком и полом.
-// Клиентов на старте ещё нет, поэтому колонка ключа считается по
-// измеренному образцу типичного ключа.
+// startWindowSize — стартовый размер окна ПО ШИРИНЕ СОДЕРЖИМОГО.
+//
+// РЕШЕНИЕ ВЛАДЕЛЬЦА 22.09.2026: открывать СРАЗУ С ЗАПАСОМ — по самому
+// широкому ПРАКТИЧЕСКИ возможному ключу, а не по типичному. Причина: окно не
+// переразмеряется на лету (ни при первой загрузке списка, ни потом), и
+// расчёт по типичному ключу означал бы, что у человека с широкими ключами
+// прокрутка появляется сразу после подключения. Цена решения названа и
+// принята: при узких ключах справа остаётся пустое место.
 func startWindowSize() fyne.Size {
-	sample := []core.ClientEntry{{ClientID: typicalKeyWidthSample}}
 	var sum float32
-	for _, w := range tableColumnWidths(sample) {
+	for _, w := range fixedColumnWidths {
 		sum += w
 	}
+	sum += widestLikelyKeyColumnWidth()
 	width := sum + windowChrome()
 	if width > maxStartWindowWidth {
 		width = maxStartWindowWidth
@@ -1372,6 +1420,9 @@ func (u *ui) buildTable() {
 			hl.onTap = func() { u.onHeaderTapped(colCopy) }
 		}
 	}
+	// Ширины ставятся ЗДЕСЬ же, при постройке: колонка ключа уже измерена по
+	// текущему составу (widths выше). Отдельный applyKeyColumnWidth нужен
+	// потом, когда состав сменится.
 	for i, w := range widths {
 		u.table.SetColumnWidth(i, w)
 	}
@@ -2004,6 +2055,11 @@ func (u *ui) renameSelected() {
 	victim := u.clients[idx]
 	entry := widget.NewEntry()
 	entry.SetText(victim.Name())
+	// Курсор в КОНЕЦ предзаполненного имени (ревью UX-01): при курсоре в
+	// начале человек открывает диалог, печатает — и получает
+	// «НовоеИмяСтароеИмя». Это тот же класс промаха, на который жаловался
+	// владелец: «ткнул и хочу печатать».
+	entry.CursorColumn = len([]rune(victim.Name()))
 	form := widget.NewForm(widget.NewFormItem("Новое имя", entry))
 
 	var d dialog.Dialog

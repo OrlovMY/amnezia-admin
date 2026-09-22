@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
@@ -24,6 +25,28 @@ import (
 //     нет, фокусировать нечего;
 //   - сама таблица пользователей — фокус ввода отобрал бы клавиатуру у
 //     прокрутки списка.
+
+// waitGUIGoroutines ждёт завершения фоновых операций goSafe — с ТАЙМАУТОМ.
+//
+// Ожидание без таймаута было бы ловушкой: в программе есть goSafe, который
+// живёт, пока идёт обратный отсчёт блокировки (тикер в showVaultPinDialog), и
+// прогон повис бы молча на 10 минут до общего таймаута go test. Сейчас в этом
+// тесте отсчёт не запускается (онлайн-время не получено — блокировке неоткуда
+// взяться), но полагаться на это молча нельзя.
+func waitGUIGoroutines(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		guiGoroutines.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Errorf("фоновые операции goSafe не завершились за 30 с — ожидание прервано, " +
+			"чтобы прогон не повис; проверьте, не остался ли работать тикер")
+	}
+}
 
 // focusedIs — фокус канвы указывает ровно на этот виджет.
 func focusedIs(t *testing.T, c fyne.Canvas, want fyne.Focusable, what string) {
@@ -86,14 +109,14 @@ func TestPinDialogFocusesPinEntry(t *testing.T) {
 	// фоновой операции ДО проверок — иначе её запись в виджеты и чтение тех
 	// же виджетов тестом идут без синхронизации, и -race справедливо
 	// показывает гонку. Ждём по счётчику goSafe, а не временем.
-	t.Cleanup(guiGoroutines.Wait)
+	t.Cleanup(func() { waitGUIGoroutines(t) })
 	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
 
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
 		t.Fatal("диалог пин-кода не открылся — проверять нечего")
 	}
-	guiGoroutines.Wait() // фоновый запрос онлайн-времени завершён
+	waitGUIGoroutines(t) // фоновый запрос онлайн-времени завершён
 	want := firstEntry(over[len(over)-1])
 	if want == nil {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: в диалоге пин-кода нет поля ввода")
@@ -160,4 +183,10 @@ func TestRenameDialogFocusesNameEntry(t *testing.T) {
 		t.Errorf("в поле переименования %q вместо прежнего имени — фокус ставится не в то поле", want.Text)
 	}
 	focusedIs(t, u.win.Canvas(), want, "диалог «Переименовать»")
+	// Курсор в КОНЦЕ имени (ревью UX-01): иначе человек открывает диалог,
+	// печатает и получает «НовоеИмяСтароеИмя».
+	if got, end := want.CursorColumn, len([]rune("Ноутбук")); got != end {
+		t.Errorf("курсор в поле переименования стоит на позиции %d, а имя длиной %d знаков: "+
+			"набранное человеком имя припишется к старому спереди", got, end)
+	}
 }
