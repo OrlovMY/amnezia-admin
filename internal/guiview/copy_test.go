@@ -130,15 +130,37 @@ func TestCopyValueIsFullValue(t *testing.T) {
 func TestCopyRowFormat(t *testing.T) {
 	r := sample()
 	got := CopyRow(r)
-	want := "3 | Ноутбук | 2026-09-22T12:34:56.789Z | 2 минуты назад | 1.2 MB / 900.0 KB | " + r.ClientID
+	want := "Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2 минуты назад | " +
+		"Трафик ↓/↑: 1.2 MB / 900.0 KB | Ключ: " + r.ClientID
 	if got != want {
 		t.Errorf("CopyRow() =\n%q\nожидалось\n%q", got, want)
 	}
 	if strings.ContainsAny(got, "\n\r\t") {
 		t.Errorf("CopyRow() содержит перевод строки или табуляцию: %q — вставка в переписку развалится", got)
 	}
-	if n := len(strings.Split(got, RowSeparator)); n != CopyColumnCount {
-		t.Errorf("CopyRow() даёт %d полей вместо %d колонок таблицы", n, CopyColumnCount)
+	// Разделитель тут ЛИТЕРАЛЬНЫЙ: сверка через RowSeparator брала бы
+	// ожидание из того же места, которое проверяется (на этом уже попадались).
+	if n := len(strings.Split(got, " | ")); n != 5 {
+		t.Errorf("CopyRow() даёт %d полей вместо 5 (номер строки в письмо не идёт)", n)
+	}
+	// ПРЕЗЕНТАЦИОННОГО НОМЕРА СТРОКИ В ПИСЬМЕ НЕТ (ревью UX-01): он зависит
+	// от сортировки и к клиенту не относится.
+	if strings.HasPrefix(got, "3") || strings.Contains(got, "| 3 |") {
+		t.Errorf("CopyRow() содержит номер строки: %q", got)
+	}
+	// ...но по клику на самой колонке номера он по-прежнему копируется.
+	if v := CopyValue(r, 0); v != "3" {
+		t.Errorf("CopyValue(колонка номера) = %q, ожидалось \"3\"", v)
+	}
+	// Поля подписаны заголовками, иначе получатель не отличит активность от
+	// даты создания.
+	for _, want := range []string{"Создан: ", "Активность: ", "Трафик ↓/↑: ", "Ключ: "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("CopyRow() без подписи %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "Имя: ") {
+		t.Errorf("CopyRow(): имя подписано, хотя идёт первым и узнаётся без подписи: %q", got)
 	}
 	// Полный ключ обязан быть в строке целиком — ради этого весь пункт.
 	if !strings.Contains(got, r.ClientID) {
@@ -158,7 +180,23 @@ func TestCopyRowUnknownStaysUnknown(t *testing.T) {
 		t.Errorf("строка целиком: «статистику получить не удалось» неотличима от нулевого трафика: %q",
 			CopyRow(failed))
 	}
-	if !strings.Contains(CopyRow(failed), RowSeparator+"?"+RowSeparator) {
+	if !strings.Contains(CopyRow(failed), "Трафик ↓/↑: ?") {
 		t.Errorf("строка целиком при неудавшемся запросе не содержит «?» отдельным полем: %q", CopyRow(failed))
+	}
+}
+
+// TestCopiedRowStatusNamesTheClient — подтверждение называет клиента (ревью
+// UX-01): правая кнопка не меняет выделение строки, и человек, промахнувшийся
+// на строку выше, иначе не заметит, что скопировал чужие данные.
+func TestCopiedRowStatusNamesTheClient(t *testing.T) {
+	r := sample()
+	got := CopiedRowStatus(r)
+	if want := "Строка «Ноутбук» скопирована в буфер обмена"; got != want {
+		t.Errorf("CopiedRowStatus() = %q, ожидалось %q", got, want)
+	}
+	other := sample()
+	other.Name = "Телефон"
+	if CopiedRowStatus(other) == got {
+		t.Errorf("подтверждение одинаково для разных клиентов (%q) — имя в него не подставляется", got)
 	}
 }

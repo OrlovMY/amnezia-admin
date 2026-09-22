@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -88,13 +89,13 @@ func main() {
 	defer logPanic()
 	a := app.New()
 	w := a.NewWindow("Amnezia Admin " + version.String())
-	w.Resize(fyne.NewSize(980, 620))
+	w.Resize(startWindowSize())
 
 	// warnFreq: выбор владельца от 18.09.2026 — "один раз за запуск"
 	// (сброс при смене сервера). Второй режим — guiview.WarnEveryTime.
 	u := &ui{win: w, selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
 	u.sortPrimary, u.sortPrimaryDir, u.sortSecondary, u.sortSecondaryDir = loadSortState()
-	w.SetContent(u.connectScreen())
+	u.showConnectScreen("")
 	w.ShowAndRun()
 }
 
@@ -126,9 +127,21 @@ func writeCrashLog(dir, msg string) error {
 	return os.WriteFile(filepath.Join(dir, "crash.log"), []byte(msg), privateFilePerm)
 }
 
+// guiGoroutines считает фоновые операции, запущенные через goSafe.
+//
+// ЗАЧЕМ СЧЁТЧИК. Диалоги, которые уходят в фон при открытии (пин-код
+// спрашивает онлайн-время), в тесте продолжают писать в виджеты уже после
+// проверок — и `go test -race` справедливо показывает гонку между фоновой
+// перерисовкой и чтением тех же виджетов в тесте. Ждать «на всякий случай»
+// временем нельзя: это гадание. Счётчик даёт тесту точку синхронизации в
+// ЕДИНСТВЕННОМ месте, где в этой программе вообще запускаются goroutine.
+var guiGoroutines sync.WaitGroup
+
 // goSafe запускает фоновую операцию с логированием паники
 func goSafe(fn func()) {
+	guiGoroutines.Add(1)
 	go func() {
+		defer guiGoroutines.Done()
 		defer logPanic()
 		fn()
 	}()
@@ -136,8 +149,25 @@ func goSafe(fn func()) {
 
 // ---------- экран подключения ----------
 
-func (u *ui) connectScreen() fyne.CanvasObject {
-	return u.connectScreenWithStatus("")
+// focusField ставит фокус ввода в поле сразу после того, как экран или
+// диалог оказался на канве. ЕДИНСТВЕННОЕ место постановки фокуса (жалоба
+// владельца 22.09.2026: «ткнул на сервер и хочу начать вводить пароль, но
+// мне надо еще ткнуть в это поле»). Вызывается ПОСЛЕ SetContent/d.Show():
+// Canvas.Focus умеет фокусировать только объект, уже попавший в содержимое,
+// меню или наложения, иначе Fyne пишет в журнал ошибку и не делает ничего.
+func (u *ui) focusField(f fyne.Focusable) {
+	if u.win == nil || f == nil {
+		return
+	}
+	u.win.Canvas().Focus(f)
+}
+
+// showConnectScreen показывает экран подключения и ставит курсор в поле
+// ключа. Отдельный метод, потому что фокус ставится только после SetContent.
+func (u *ui) showConnectScreen(status string) {
+	content, keyEntry := u.connectScreenWithStatus(status)
+	u.win.SetContent(content)
+	u.focusField(keyEntry)
 }
 
 // connectScreenWithStatus — connectScreen() с предзаполненным статусом в
@@ -145,7 +175,7 @@ func (u *ui) connectScreen() fyne.CanvasObject {
 // подключения, куда возвращает вторая (подтверждающая) диалоговая форма,
 // сразу показывает "Ключ сервера забыт. Нажмите «Подключиться»..." (С3,
 // UI-01, "Статус после").
-func (u *ui) connectScreenWithStatus(status string) fyne.CanvasObject {
+func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.Entry) {
 	keyEntry := widget.NewMultiLineEntry()
 	keyEntry.SetPlaceHolder("Вставьте админский ключ vpn://...")
 	keyEntry.Wrapping = fyne.TextWrapBreak
@@ -179,7 +209,7 @@ func (u *ui) connectScreenWithStatus(status string) fyne.CanvasObject {
 		form.Add(vaultBlock)
 	}
 
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(560, 400), form))
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(560, 400), form)), keyEntry
 }
 
 // savedVaultsBlock строит блок «Или загрузить из сохранённых» под кнопкой
@@ -444,6 +474,9 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	d.SetOnClosed(stopTicker) // не течь тикером, если пользователь закрыл диалог во время отсчёта
 	d.Resize(fyne.NewSize(380, 280))
 	d.Show()
+	// Человек ткнул в сохранённый сервер, чтобы ВВЕСТИ ПИН, — курсор стоит
+	// там, а не «ещё один клик в поле» (жалоба владельца 22.09.2026).
+	u.focusField(pinEntry)
 
 	acquireOnlineTime()
 }
@@ -739,7 +772,7 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 					info.SetText(msg)
 					return
 				}
-				u.win.SetContent(u.connectScreenWithStatus("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток."))
+				u.showConnectScreen("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток.")
 			})
 		})
 	}, u.win).Show()
@@ -874,6 +907,8 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	d = dialog.NewCustom("Сохранить ключ?", "Не сохранять", content, u.win)
 	d.Resize(fyne.NewSize(460, 360))
 	d.Show()
+	// Первое поле формы; дальше Enter ведёт метка → пин → повтор → «Сохранить».
+	u.focusField(labelEntry)
 }
 
 // ---------- главный экран ----------
@@ -1077,18 +1112,125 @@ func (l *tappableLabel) Tapped(*fyne.PointEvent) {
 
 func (l *tappableLabel) TappedSecondary(*fyne.PointEvent) {}
 
-// tableColumnWidths — ширины колонок таблицы пользователей.
-//
-// ПОСЛЕДНЯЯ (публичный ключ) ИЗМЕРЕНА, А НЕ ПОДОБРАНА. Ключ WireGuard — 44
-// знака base64; на 280 точках он не помещался, и владелец видел обрезок
-// (живая приёмка v0.2.0). Число получено fyne.MeasureText тем же шрифтом и
-// размером, каким рисуется ячейка, плюс внутренние отступы widget.Label —
-// см. TestKeyColumnFitsMeasuredKey, который меряет заново при каждом
-// прогоне и краснеет, если ширина перестала вмещать ключ.
-var tableColumnWidths = []float32{40, 280, 165, 140, 150, 425}
+// fixedColumnWidths — ширины колонок таблицы, КРОМЕ последней. Последняя
+// («Публичный ключ») не имеет постоянного числа: она измеряется по
+// фактическим ключам, см. keyColumnWidth.
+var fixedColumnWidths = []float32{40, 280, 165, 140, 150}
 
 // keyColumn — индекс колонки «Публичный ключ».
 const keyColumn = 5
+
+// ПОЧЕМУ КОЛОНКА КЛЮЧА ИЗМЕРЯЕТСЯ, А НЕ ЗАДАНА ЧИСЛОМ.
+//
+// 1. Владелец видел ключ целиком при 280 точках и всё равно был прав про
+//    «выделяется не весь ключ» (скриншот живой приёмки v0.2.0). Механика:
+//    Fyne НЕ обрезает подпись по ширине ячейки — текст рисуется поверх и
+//    спокойно вылезает за правую границу колонки, поэтому ключ читался. А
+//    подсветка выделения рисуется РОВНО ПО КОЛОНКЕ и обрывалась на середине
+//    ключа. Чиним мы, стало быть, не «видимость», а границы ячейки.
+//
+// 2. Шрифт пропорциональный, и 44 знака base64 занимают разную ширину:
+//    357 точек у среднего ключа, до 407 по случайной выборке из 20000, 571 у
+//    вымышленного худшего из одних «m». Любое зашитое число либо избыточно,
+//    либо кому-то не хватит — и подсветка снова обрежет ключ (слова
+//    владельца 22.09.2026: «хочу, чтобы учитывало ширину строки ключа»).
+//
+// Поэтому ширина берётся как максимум по НАСТОЯЩИМ ключам таблицы, тем же
+// шрифтом и размером, каким рисуется ячейка.
+
+// keyColumnWidth — ширина колонки «Публичный ключ» для данного состава
+// таблицы: максимум измеренной ширины ключей и заголовка, плюс внутренние
+// отступы ячейки, но не больше keyColumnCap().
+//
+// Заголовок участвует в максимуме, чтобы при пустом списке (или у протокола
+// без ключей) не оказалась обрезанной сама подпись колонки.
+func keyColumnWidth(clients []core.ClientEntry) float32 {
+	th := fyne.CurrentApp().Settings().Theme()
+	size := th.Size(theme.SizeNameText)
+	// Заголовок рисуется жирным (tappableLabel), ячейки — обычным: меряем
+	// каждый своим стилем, а не «примерно тем же».
+	widest := fyne.MeasureText(tableHeaders[keyColumn], size, fyne.TextStyle{Bold: true}).Width
+	for _, c := range clients {
+		if w := fyne.MeasureText(c.ClientID, size, fyne.TextStyle{}).Width; w > widest {
+			widest = w
+		}
+	}
+	widest += 2 * th.Size(theme.SizeNameInnerPadding) // отступы widget.Label
+	if cap := keyColumnCap(); widest > cap {
+		return cap
+	}
+	return widest
+}
+
+// keyColumnCap — потолок колонки ключа: столько, чтобы таблица не распирала
+// окно шире maxStartWindowWidth. Упор в потолок означает возврат
+// горизонтальной прокрутки — это честнее обрезанной подсветки, но об этом
+// сказано в отчёте.
+func keyColumnCap() float32 {
+	var fixed float32
+	for _, w := range fixedColumnWidths {
+		fixed += w
+	}
+	return maxStartWindowWidth - fixed - windowChrome()
+}
+
+// tableColumnWidths — ширины ВСЕХ колонок для данного состава таблицы.
+// Единственный источник и для SetColumnWidth, и для стартового размера окна:
+// второго списка чисел не существует, разойтись нечему.
+func tableColumnWidths(clients []core.ClientEntry) []float32 {
+	out := make([]float32, 0, len(fixedColumnWidths)+1)
+	out = append(out, fixedColumnWidths...)
+	return append(out, keyColumnWidth(clients))
+}
+
+// Высота главного окна. Ширина НЕ ЗАДАЁТСЯ ЧИСЛОМ — она считается по
+// содержимому (решение владельца 22.09.2026), см. startWindowSize.
+const mainWindowHeight = 620
+
+// maxStartWindowWidth — потолок ширины окна и, через него, колонки ключа.
+//
+// ПОЧЕМУ КОНСТАНТА, А НЕ РАЗМЕР ЭКРАНА. В Fyne 2.7 нет публичного способа
+// спросить размер экрана (в fyne.Driver такого метода нет), поэтому «не шире
+// экрана» выражено потолком, который заведомо помещается на распространённом
+// ноутбучном экране 1366×768 с учётом полей рабочего стола.
+const maxStartWindowWidth = 1280
+
+// minStartWindowWidth — пол: окно не уже прежнего (980), иначе разъезжается
+// верстка главного экрана (кнопки, выбор протокола, строка состояния).
+const minStartWindowWidth = 980
+
+// typicalKeyWidthSample — образец ключа для стартового размера окна. На
+// старте клиентов ещё нет (окно создаётся до подключения), но длина ключа
+// WireGuard известна — 44 знака base64; ширина этого образца ИЗМЕРЯЕТСЯ, а
+// не берётся числом.
+const typicalKeyWidthSample = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/aBcD1="
+
+// windowChrome — то, что к сумме колонок добавляет само окно: полоса
+// прокрутки плюс поля темы.
+func windowChrome() float32 {
+	th := fyne.CurrentApp().Settings().Theme()
+	return th.Size(theme.SizeNameScrollBar) + 4*th.Size(theme.SizeNamePadding)
+}
+
+// startWindowSize — стартовый размер окна ПО ШИРИНЕ СОДЕРЖИМОГО: сумма тех
+// же колонок (tableColumnWidths) плюс обрамление, с потолком и полом.
+// Клиентов на старте ещё нет, поэтому колонка ключа считается по
+// измеренному образцу типичного ключа.
+func startWindowSize() fyne.Size {
+	sample := []core.ClientEntry{{ClientID: typicalKeyWidthSample}}
+	var sum float32
+	for _, w := range tableColumnWidths(sample) {
+		sum += w
+	}
+	width := sum + windowChrome()
+	if width > maxStartWindowWidth {
+		width = maxStartWindowWidth
+	}
+	if width < minStartWindowWidth {
+		width = minStartWindowWidth
+	}
+	return fyne.NewSize(width, mainWindowHeight)
+}
 
 // tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ПРАВУЮ КНОПКУ.
 //
@@ -1165,14 +1307,14 @@ func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
 			u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)
 		}),
 		fyne.NewMenuItem(guiview.MenuCopyRow, func() {
-			u.copyToClipboard(guiview.CopyRow(r), guiview.StatusCopiedRow)
+			u.copyToClipboard(guiview.CopyRow(r), guiview.CopiedRowStatus(r))
 		}),
 	)
 }
 
 func (u *ui) buildTable() {
 	headers := tableHeaders
-	widths := tableColumnWidths
+	widths := tableColumnWidths(u.clients)
 
 	u.table = widget.NewTableWithHeaders(
 		func() (int, int) { return len(u.clients), len(headers) },
@@ -1236,6 +1378,17 @@ func (u *ui) buildTable() {
 	u.table.OnSelected = func(id widget.TableCellID) {
 		u.selectedRow = id.Row
 	}
+}
+
+// applyKeyColumnWidth пересчитывает ширину колонки ключа по ТЕКУЩЕМУ составу
+// таблицы. Вызывается там же, где меняется u.clients (refresh — единственная
+// точка загрузки списка, через неё проходят и создание, и удаление, и
+// переименование, и смена протокола, и повторное подключение).
+func (u *ui) applyKeyColumnWidth() {
+	if u.table == nil {
+		return
+	}
+	u.table.SetColumnWidth(keyColumn, keyColumnWidth(u.clients))
 }
 
 // onHeaderTapped обрабатывает клик по заголовку сортируемой колонки: тот же
@@ -1395,6 +1548,10 @@ func (u *ui) refresh() {
 			// применяем текущую (сохранённую/выбранную кликом по заголовку)
 			// сортировку — переключение протокола не должно сбрасывать её на дефолт
 			u.applySort()
+			// Состав таблицы сменился — колонка ключа меряется заново по
+			// НОВЫМ ключам (решение владельца 22.09.2026: ширина колонки
+			// учитывает ширину строки ключа, а не зашитое число).
+			u.applyKeyColumnWidth()
 			// widget.Table в Fyne после смены данных иногда не перерисовывает
 			// видимые (уже отрисованные ранее) ячейки, если таблица осталась
 			// проскроллена не в начало — без явного Refresh+ScrollToTop
@@ -1712,6 +1869,7 @@ func (u *ui) addDialog() {
 	d = dialog.NewCustom("Новый пользователь", "Отмена", content, u.win)
 	d.Resize(fyne.NewSize(420, 200))
 	d.Show()
+	u.focusField(entry)
 }
 
 // writeConfigFile сохраняет клиентский конфиг в каталог данных пользователя ОС
@@ -1911,6 +2069,7 @@ func (u *ui) renameSelected() {
 	d = dialog.NewCustom(fmt.Sprintf("Переименовать %q", victim.Name()), "Отмена", content, u.win)
 	d.Resize(fyne.NewSize(420, 200))
 	d.Show()
+	u.focusField(entry)
 }
 
 // ---------- отключение/включение ----------
