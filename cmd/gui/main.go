@@ -1280,18 +1280,31 @@ func startWindowSize() fyne.Size {
 	return fyne.NewSize(width, mainWindowHeight)
 }
 
-// tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ПРАВУЮ КНОПКУ.
+// tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ОБЕ КНОПКИ.
 //
-// ПОЧЕМУ НЕ Tapped. Левый клик обязан по-прежнему доставаться самой
-// widget.Table (Table.Tapped → OnSelected → u.selectedRow), от этого зависят
-// удаление, переименование и включение. Драйвер Fyne при хит-тесте ищет
-// САМЫЙ ВЛОЖЕННЫЙ объект, реализующий нужный интерфейс, — ровно этим
-// пользуется tappableLabel в заголовке. Поэтому здесь реализован ТОЛЬКО
-// fyne.SecondaryTappable: для первичного тапа ячейка невидима, и выбор
-// строки идёт прежним путём. Тест TestCellIsNotPrimaryTappable держит это
-// свойство: добавь сюда Tapped — и выбор строки сломается молча.
+// ПОЧЕМУ ЗДЕСЬ ЕСТЬ Tapped (регресс 23.09, «не выделяется строка»). Прежний
+// комментарий на этом месте утверждал, что ячейка, реализующая только
+// fyne.SecondaryTappable, для левого клика невидима. Это неправда. Боевой
+// драйвер (fyne.io/fyne/v2@v2.7.4/internal/driver/glfw/window.go:460-468,
+// window.processMouseClicked) ищет самый вложенный объект, реализующий
+// ЛЮБОЙ из пяти интерфейсов сразу — fyne.Tappable, fyne.SecondaryTappable,
+// fyne.DoubleTappable, fyne.Focusable, desktop.Mouseable — и лишь ПОТОМ
+// смотрит, что именно объект умеет. Ячейка с одним TappedSecondary
+// становилась целью и для левой кнопки, а обработчика левой кнопки у неё не
+// было: клик пропадал, до widget.Table не доходил, строка не выделялась.
+//
+// ПОЧЕМУ НЕ УБРАЛИ TappedSecondary вместо этого. Тогда правую кнопку надо
+// было бы ловить на самой таблице, а widget.Table в Fyne 2.7 не
+// SecondaryTappable, и её отображение точки в ячейку (columnAt/rowAt плюс
+// смещение прокрутки) неэкспортировано. Пришлось бы заново писать чужую
+// приватную геометрию — путь заметно хуже. Раз ячейка всё равно перехватывает
+// мышь, она обязана САМА обработать всё, что перехватила.
+//
+// ПРАВИЛО КЛАССА держит internal/mouseguard: объект в cmd/gui, реализующий
+// любой из «хватающих» интерфейсов, обязан реализовывать и Tapped.
 type tableCell struct {
 	widget.Label
+	onTap       func()
 	onSecondary func(*fyne.PointEvent)
 }
 
@@ -1301,10 +1314,35 @@ func newTableCell() *tableCell {
 	return c
 }
 
+// Tapped повторяет то, что сделала бы widget.Table.Tapped, получи она этот
+// клик: выбирает ячейку (→ OnSelected → u.selectedRow) и отдаёт таблице
+// фокус клавиатуры. Фокус здесь не украшение: без него перестают работать
+// стрелки по таблице, потому что Table.Tapped на десктопе фокусирует себя
+// сама, а до неё клик больше не доходит.
+func (c *tableCell) Tapped(*fyne.PointEvent) {
+	if c.onTap != nil {
+		c.onTap()
+	}
+}
+
 func (c *tableCell) TappedSecondary(e *fyne.PointEvent) {
 	if c.onSecondary != nil {
 		c.onSecondary(e)
 	}
+}
+
+// selectCell — единственное место, где клик по ячейке превращается в выбор
+// строки. Повторяет хвост widget.Table.Tapped: сначала фокус, потом Select.
+func (u *ui) selectCell(id widget.TableCellID) {
+	if u.table == nil {
+		return
+	}
+	if !fyne.CurrentDevice().IsMobile() && u.win != nil {
+		if cv := u.win.Canvas(); cv != nil {
+			cv.Focus(u.table)
+		}
+	}
+	u.table.Select(id)
 }
 
 // rowFor собирает guiview.Row для строки таблицы — ЕДИНСТВЕННОЕ место, где
@@ -1372,6 +1410,7 @@ func (u *ui) buildTable() {
 			c.TextStyle = fyne.TextStyle{}
 			r, ok := u.rowFor(id.Row)
 			if !ok {
+				c.onTap = nil
 				c.onSecondary = nil
 				c.SetText("")
 				return
@@ -1384,6 +1423,7 @@ func (u *ui) buildTable() {
 			// копируемое значение. Разъехаться они не могут.
 			c.SetText(guiview.CellText(r, id.Col))
 			cellID := id
+			c.onTap = func() { u.selectCell(cellID) }
 			c.onSecondary = func(e *fyne.PointEvent) {
 				m := u.cellMenu(cellID)
 				if m == nil || u.win == nil {
