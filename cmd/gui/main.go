@@ -20,11 +20,13 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/guiview"
+	"amnezia-admin/internal/kbdlayout"
 	"amnezia-admin/internal/version"
 )
 
@@ -47,7 +49,7 @@ type ui struct {
 	activityFailed bool
 	statsFailed    bool
 
-	table       *widget.Table
+	table       *clientTable
 	status      *widget.Label
 	protoSelect *widget.Select
 	selectedRow int
@@ -177,6 +179,168 @@ func (u *ui) focusField(f fyne.Focusable) {
 	u.win.Canvas().Focus(f)
 }
 
+// ---------- раскладка клавиатуры при вводе секретов ----------
+
+// forceEnglishLayout переключает раскладку на английскую перед вводом
+// пин-кода или ключа и возвращает текст, который НАДО ПОКАЗАТЬ ЧЕЛОВЕКУ, или
+// пустую строку.
+//
+// ТРИ СОСТОЯНИЯ, А НЕ ДВА (CLAUDE.md): переключили — молчим; ОС так не умеет
+// (ErrUnsupported) — тоже молчим, потому что ничего и не обещали, а страховку
+// даёт подсказка про раскладку по самому вводу; ПЫТАЛИСЬ И НЕ СМОГЛИ —
+// говорим прямо, иначе человек будет уверен, что раскладка английская, хотя
+// она не менялась. Секрет сюда не попадает: функция не видит введённого.
+//
+// Зовётся ОДИН РАЗ при открытии экрана или диалога, а не на каждое нажатие:
+// смена раскладки на каждую клавишу — это дёрганье системы и риск сбить
+// фокус, который мы только что поставили (PR #16).
+// forceEnglish — точка подмены для проверок. Без неё третье состояние
+// («пытались и не смогли») в GUI не прибито ничем: на всех трёх ОС прогон
+// остаётся зелёным, даже если ветка отказа перестанет что-либо показывать, и
+// человек будет уверен, что раскладка английская, хотя она не менялась
+// (ревью SEC-01).
+var forceEnglish = kbdlayout.ForceEnglish
+
+func forceEnglishLayout() string {
+	err := forceEnglish()
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, kbdlayout.ErrUnsupported):
+		return ""
+	default:
+		return guiview.LayoutSwitchFailed
+	}
+}
+
+// layoutHint — место под подсказку про раскладку, ЗАРЕЗЕРВИРОВАННОЕ ЗАРАНЕЕ.
+//
+// ПОЧЕМУ НЕ Hide()/Show() (ревью UX-01). Скрытая подпись выпадает из
+// раскладки: подсказка появляется — всё, что ниже, едет вниз. В диалоге
+// пин-кода это кнопка «Открыть», в диалоге сохранения — «Сохранить»: человек
+// печатает пароль вслепую, а кнопка уезжает у него под пальцами. Поэтому
+// подпись существует всегда и внутри контейнера постоянного размера, а
+// меняется только её ТЕКСТ.
+type layoutHint struct {
+	label *widget.Label
+	box   fyne.CanvasObject // это кладётся в форму
+	text  string            // текст «включённого» состояния
+}
+
+// newLayoutHint строит подсказку под заданную ширину формы. Высота
+// резервируется под ПОЛНЫЙ текст: сколько строк он займёт при переносе по
+// словам, столько и занято всегда.
+//
+// ГРАНИЦА, НАЗВАННАЯ ВСЛУХ (ревью QA-01): размер шрифта берётся из темы ОДИН
+// РАЗ, здесь. Если человек увеличит масштаб текста, пока диалог уже открыт,
+// резерв останется прежним и длинная подсказка обрежется. Лечится
+// переоткрытием диалога — он пересчитает резерв по новой теме. Подписываться
+// на смену темы ради этого мы не стали: это goroutine на каждую подсказку в
+// коротко живущем диалоге, цена выше пользы. Достаточность резерва для
+// ТЕКУЩЕЙ темы меряется настоящей вёрсткой в
+// TestLayoutHintSlotFitsTextAndNeverMoves.
+func newLayoutHint(text string, width float32) *layoutHint {
+	th := fyne.CurrentApp().Settings().Theme()
+	size := th.Size(theme.SizeNameText)
+	pad := th.Size(theme.SizeNameInnerPadding)
+
+	l := widget.NewLabel("")
+	l.Wrapping = fyne.TextWrapWord
+
+	usable := width - 2*pad
+	lines := wrappedLineCount(text, size, usable)
+	height := float32(lines)*fyne.MeasureText("Ауj", size, fyne.TextStyle{}).Height + 2*pad
+
+	return &layoutHint{
+		label: l,
+		box:   container.NewGridWrap(fyne.NewSize(width, height), l),
+		text:  text,
+	}
+}
+
+// wrappedLineCount — сколько строк займёт текст при переносе по словам в
+// полосе шириной usable. Повторяет жадный перенос: слово не влезло — новая
+// строка.
+func wrappedLineCount(text string, size, usable float32) int {
+	if usable <= 0 {
+		return 1
+	}
+	spaceW := fyne.MeasureText(" ", size, fyne.TextStyle{}).Width
+	lines, cur := 1, float32(0)
+	for _, w := range strings.Fields(text) {
+		ww := fyne.MeasureText(w, size, fyne.TextStyle{}).Width
+		switch {
+		case cur == 0:
+			cur = ww
+		case cur+spaceW+ww <= usable:
+			cur += spaceW + ww
+		default:
+			lines++
+			cur = ww
+		}
+	}
+	return lines
+}
+
+// setOn включает и выключает подсказку, не трогая геометрию.
+func (h *layoutHint) setOn(on bool) {
+	if on {
+		h.label.SetText(h.text)
+		return
+	}
+	h.label.SetText("")
+}
+
+// setText кладёт в то же зарезервированное место текст, пришедший извне
+// (сообщение о неудавшемся переключении раскладки). Именно ТЕКСТ, а не
+// «что-то заранее набранное»: иначе при изменении сообщения на экране
+// осталось бы старое (ревью SEC-01).
+func (h *layoutHint) setText(s string) { h.label.SetText(s) }
+
+// attachLayoutHint — ЖИВАЯ подсказка по мере ввода. Поле пароля скрывает
+// символы, поэтому человек не видит, что набирает не тем алфавитом; отказ
+// «недопустимые символы» после десятка попыток — худшее, что можно ему
+// предложить. Поэтому подсказка появляется СРАЗУ, как только в поле попал
+// символ не из допустимого набора, и исчезает, когда его не стало.
+//
+// Наружу из поля не уходит ни один символ: core.NonEnglishLayoutSuspect
+// отвечает только ДА/НЕТ, а текст подсказки — константа без подстановок.
+//
+// Прежний обработчик OnChanged не теряется, а вызывается первым (в диалоге
+// сохранения ключа на нём висит сверка двух пинов).
+// suspect — признак «набрано не в английской раскладке». Передаётся
+// параметром, потому что он РАЗНЫЙ у разных полей, и это не украшение:
+//   - поля пина зовут core.NonEnglishLayoutSuspect — тот самый признак, что
+//     привязан тестом к core.ValidatePin. Пин однострочный, и послаблений у
+//     него быть не должно: подсказка обязана срабатывать ровно там, где
+//     ValidatePin откажет, иначе человек читает одно, а получает другое;
+//   - поле ключа зовёт core.LayoutSuspectIgnoringLineBreaks: там текст
+//     многострочный, ключ копируют уже разбитым на строки, и перенос
+//     признаком раскладки не считается (ревью UX-01).
+func attachLayoutHint(e *widget.Entry, hint *layoutHint, suspect func(string) bool) {
+	prev := e.OnChanged
+	sync := func(s string) { hint.setOn(suspect(s)) }
+	e.OnChanged = func(s string) {
+		if prev != nil {
+			prev(s)
+		}
+		sync(s)
+	}
+	// Поле может быть уже заполнено к моменту подключения подсказки
+	// (вставленный ключ, AMNEZIA_KEY): состояние подсказки берётся из
+	// текущего текста, а не из будущих нажатий.
+	sync(e.Text)
+}
+
+// Ширины форм, под которые резервируется место для подсказок про раскладку.
+// Одно число на форму: и сама форма, и подсказка под ней меряются им, поэтому
+// разойтись нечему.
+const (
+	connectFormWidth = float32(560) // экран подключения
+	pinDialogWidth   = float32(380) // диалог «Введите пин-код»
+	saveKeyDialWidth = float32(460) // диалог «Сохранить ключ?»
+)
+
 // showConnectScreen показывает экран подключения и ставит курсор в поле
 // ключа. Отдельный метод, потому что фокус ставится только после SetContent.
 func (u *ui) showConnectScreen(status string) {
@@ -218,13 +382,23 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 	hint := widget.NewLabel("Нужен админский ключ — внутри него SSH-доступ к серверу.\nПользовательский (share) ключ не подойдёт.")
 	hint.Wrapping = fyne.TextWrapWord
 
-	form := container.NewVBox(title, versionLabel, hint, keyEntry, connectBtn, info)
+	// Подсказка про раскладку под полем ключа. Признак здесь свой:
+	// многострочный ключ, скопированный из мессенджера, переносами строк
+	// раскладку не выдаёт (ревью UX-01).
+	keyHint := newLayoutHint(guiview.LayoutHintKey, connectFormWidth)
+	attachLayoutHint(keyEntry, keyHint, core.LayoutSuspectIgnoringLineBreaks)
+	// Раскладка переключается ОДИН РАЗ при показе экрана; если переключить не
+	// удалось, человеку говорится об этом, а не молчится (CLAUDE.md).
+	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, connectFormWidth)
+	layoutNotice.setText(forceEnglishLayout())
+
+	form := container.NewVBox(title, versionLabel, hint, keyEntry, keyHint.box, layoutNotice.box, connectBtn, info)
 
 	if vaultBlock := u.savedVaultsBlock(connectBtn, info); vaultBlock != nil {
 		form.Add(vaultBlock)
 	}
 
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(560, 400), form)), keyEntry
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(connectFormWidth, 400), form)), keyEntry
 }
 
 // savedVaultsBlock строит блок «Или загрузить из сохранённых» под кнопкой
@@ -294,6 +468,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	pinEntry.SetPlaceHolder("Пин-код")
 	statusLabel := widget.NewLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
+	// Подсказка про раскладку — ОТДЕЛЬНАЯ подпись, а не statusLabel: тот
+	// занят обратным отсчётом блокировки и «Расшифровываю…», и подсказка
+	// затирала бы их (или они её).
+	pinHint := newLayoutHint(guiview.LayoutHintPin, pinDialogWidth)
+	attachLayoutHint(pinEntry, pinHint, core.NonEnglishLayoutSuspect)
+	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, pinDialogWidth)
 
 	// throttleAttempts — сколько попыток даётся до блокировки (держим в
 	// синхроне с core.throttleMaxFails; вынести в core.ExportedConst не стали,
@@ -481,6 +661,8 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	content := container.NewVBox(
 		widget.NewLabel(label),
 		pinEntry,
+		pinHint.box,
+		layoutNotice.box,
 		statusLabel,
 		openBtn,
 		retryBtn,
@@ -492,6 +674,9 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	// Человек ткнул в сохранённый сервер, чтобы ВВЕСТИ ПИН, — курсор стоит
 	// там, а не «ещё один клик в поле» (жалоба владельца 22.09.2026).
 	u.focusField(pinEntry)
+	// И раскладка уже английская — пин принимает только латиницу (просьба
+	// владельца 23.09.2026). Не удалось — говорим, а не умалчиваем.
+	layoutNotice.setText(forceEnglishLayout())
 
 	acquireOnlineTime()
 }
@@ -851,6 +1036,17 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	}
 	pinEntry.OnChanged = func(string) { checkMismatch() }
 	pinRepeat.OnChanged = func(string) { checkMismatch() }
+	// Подсказка про раскладку — ПЕРВЫЙ ВВОД пина, тот самый случай, ради
+	// которого просьба и появилась: символы скрыты, а core.ValidatePin
+	// отвергнет весь набранный пин целиком. attachLayoutHint не затирает
+	// checkMismatch, а вызывает его первым.
+	// У каждого поля СВОЯ подсказка: одна на двоих гасла бы от соседнего
+	// поля, набранного верно.
+	pinLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
+	repeatLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
+	attachLayoutHint(pinEntry, pinLayoutHint, core.NonEnglishLayoutSuspect)
+	attachLayoutHint(pinRepeat, repeatLayoutHint, core.NonEnglishLayoutSuspect)
+	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, saveKeyDialWidth)
 
 	submit := func() {
 		if saveBtn.Disabled() {
@@ -858,7 +1054,12 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 		}
 		pin := pinEntry.Text
 		if err := core.ValidatePin(pin); err != nil {
-			statusLabel.SetText(err.Error())
+			// ПРАВИЛО ЦЕЛИКОМ И ОДИН РАЗ (ревью UX-01). Подсказка про
+			// раскладку уже висит под полем; повторять её здесь — показать
+			// человеку одну фразу дважды на одном экране и заодно отнять у
+			// него остальную часть правила: исправит раскладку, а пин короче
+			// двенадцати знаков — получит второй отказ.
+			statusLabel.SetText("Пин-код не принят: " + err.Error())
 			return
 		}
 		if pin != pinRepeat.Text {
@@ -913,6 +1114,9 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 			widget.NewFormItem("Пин-код", pinEntry),
 			widget.NewFormItem("Повтор пина", pinRepeat),
 		),
+		pinLayoutHint.box,
+		repeatLayoutHint.box,
+		layoutNotice.box,
 		mismatchLabel,
 		bindCheck,
 		bindHint,
@@ -924,6 +1128,12 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	d.Show()
 	// Первое поле формы; дальше Enter ведёт метка → пин → повтор → «Сохранить».
 	u.focusField(labelEntry)
+	// ПЕРВОЕ задание пина — раскладка английская сразу (просьба владельца
+	// 23.09.2026). Метка при этом может быть русской: раскладку никто не
+	// запирает, человек переключит её сам, если захочет назвать сервер
+	// по-русски. Возврат прежней раскладки при закрытии диалога сознательно
+	// НЕ делается — см. kbdlayout.ForceEnglish.
+	layoutNotice.setText(forceEnglishLayout())
 }
 
 // ---------- главный экран ----------
@@ -1110,6 +1320,9 @@ var tableColumnSort = []core.SortColumn{
 type tappableLabel struct {
 	widget.Label
 	onTap func()
+	// table — таблица, которой заголовок отдаёт нажатие кнопки мыши,
+	// см. MouseDown.
+	table *clientTable
 }
 
 func newTappableLabel() *tappableLabel {
@@ -1126,6 +1339,140 @@ func (l *tappableLabel) Tapped(*fyne.PointEvent) {
 }
 
 func (l *tappableLabel) TappedSecondary(*fyne.PointEvent) {}
+
+// ПОЧЕМУ ЗАГОЛОВОК ПРОБРАСЫВАЕТ НАЖАТИЕ КНОПКИ В ТАБЛИЦУ (живая приёмка
+// 23.09.2026: «ширина колонки не тянется мышью»).
+//
+// ЧЕСТНАЯ ОГОВОРКА, СНЯТАЯ ИЗМЕРЕНИЕМ. Сама по себе эта переадресация
+// симптом владельца НЕ ЧИНИТ: полоса, на которой Fyne вообще берётся тянуть
+// границу, — это ЩЕЛЬ между подписями заголовка шириной в отступ темы (4
+// точки), и подпись её не накрывает (измерено: подпись «#» занимает 16..56
+// точек от левого края таблицы, следующая начинается с 60, а
+// hoverHeaderCol выставляется только при попадании в 56..60). Там целью
+// нажатия и раньше была сама таблица. Настоящая причина симптома — ЗАЩЁЛКА
+// dragCol, см. clientTable.MouseUp ниже.
+//
+// ЧЕМ ПОЛЕЗНА ПЕРЕАДРЕСАЦИЯ, ЕСЛИ НЕ ЭТИМ. Польза узкая, и врать про неё не
+// надо. Нажатие в щели захватывает границу, а снимает захват отпускание
+// (clientTable.MouseUp). Отпускание может до таблицы НЕ ДОЙТИ ВОВСЕ —
+// alt-tab, потеря фокуса окном, перехват ввода другой программой, — и тогда
+// граница остаётся захваченной. (Вариант «курсор успел уехать на кнопку» сюда
+// не годится и назван быть не может: порог начала протаскивания в Fyne равен
+// двум точкам, любое заметное смещение начинает протаскивание, а его конец
+// драйвер сопровождает DragEnd сам.) Следующий обычный клик по подписи заголовка снимает
+// её: подпись пробрасывает и нажатие, и отпускание. Пока подпись
+// перехватывала мышь, не реализуя desktop.Mouseable, такой клик не доходил
+// до таблицы вовсе. Ни сортировку, ни выбор цели клика переадресация не
+// меняет (проверено TestHeaderClickStillSorts).
+//
+// В Fyne 2.7 протаскивание границы колонки собрано из трёх событий, и они
+// приходят РАЗНЫМ объектам:
+//   - Table.MouseMoved/MouseIn (desktop.Hoverable) запоминает, над какой
+//     границей курсор: hoverHeaderCol. Эти события таблица получает и
+//     сейчас — подпись заголовка не Hoverable, и боевой драйвер ищет
+//     ближайший Hoverable, то есть саму таблицу;
+//   - Table.MouseDown (desktop.Mouseable) → Table.tapped(pos) — ЕДИНСТВЕННОЕ
+//     место, где hoverHeaderCol превращается в dragCol (widget/table.go:231
+//     и :766-780);
+//   - Table.Dragged (fyne.Draggable) меняет ширину, но только при
+//     dragCol != noCellMatch (widget/table.go:186-198). Это событие таблица
+//     тоже получает: драйвер ищет ближайший Draggable, а подпись им не
+//     является.
+//
+// Над подписью заголовка боевой драйвер находит tappableLabel (она Tappable
+// и SecondaryTappable), а desktop.Mouseable она не реализовывала — значит
+// Table.MouseDown от нажатий по подписи не вызывался никогда.
+//
+// КООРДИНАТЫ ПЕРЕСЧИТЫВАЮТСЯ В СИСТЕМУ ТАБЛИЦЫ. Драйвер даёт Position
+// относительно НАЙДЕННОГО объекта, то есть подписи, а Table.tapped кладёт её
+// в dragStartPos, с которой потом сравнивается Position события Dragged —
+// уже относительная ТАБЛИЦЕ. Отдай мы позицию как есть, ширина при первом же
+// движении прыгнула бы на смещение заголовка внутри таблицы.
+func (l *tappableLabel) MouseDown(e *desktop.MouseEvent) {
+	t := l.table
+	if t == nil || e == nil {
+		return
+	}
+	t.MouseDown(mouseEventInTableCoords(t, e))
+}
+
+// MouseUp, кроме проброса, СБРАСЫВАЕТ захваченную границу.
+//
+// Table.DragEnd — единственное место, где dragCol возвращается в
+// noCellMatch, и вызывается оно драйвером только если протаскивание
+// действительно началось. Клик по заголовку (сортировка) протаскиванием не
+// является: без этого сброса dragCol оставался бы висеть до конца жизни
+// таблицы, и Table.tapped при следующем нажатии молча не обновил бы
+// dragStartPos — следующее протаскивание дёрнуло бы ширину скачком.
+func (l *tappableLabel) MouseUp(e *desktop.MouseEvent) {
+	t := l.table
+	if t == nil || e == nil {
+		return
+	}
+	t.MouseUp(mouseEventInTableCoords(t, e))
+	t.DragEnd()
+}
+
+// clientTable — widget.Table, которая НЕ ОСТАВЛЯЕТ ЗАЩЁЛКНУТОЙ границу
+// колонки.
+//
+// СИМПТОМ ВЛАДЕЛЬЦА (живая приёмка 23.09.2026): «ширина колонки не тянется
+// мышью». Снято измерением на headless-прогоне: на только что открытой
+// таблице граница тянется, а после ОДНОГО нажатия на границу БЕЗ
+// протаскивания всякая последующая попытка тянет не ту колонку и скачком —
+// в замере колонка «#» прыгала с 40 до 384 точек, когда тянули границу между
+// «Имя» и «Создан».
+//
+// ПОЧЕМУ. widget.Table.MouseDown → tapped(pos) запоминает захваченную границу
+// (dragCol) и стартовую точку, а возвращает dragCol в «ничего не захвачено»
+// ТОЛЬКО DragEnd (widget/table.go:206-209). DragEnd же вызывается боевым
+// драйвером лишь тогда, когда протаскивание действительно НАЧАЛОСЬ
+// (glfw/window.go:518-526: mouseDragged != nil). Нажал и отпустил, не
+// двинув мышью, — dragCol остался висеть навсегда, а tapped() при следующем
+// нажатии уходит в ранний возврат (dragCol != noCellMatch) и НЕ обновляет
+// стартовую точку. Дальше Dragged считает новую ширину от чужой границы и от
+// точки, записанной когда-то раньше.
+//
+// Table.MouseUp в Fyne пустая — туда и ставится сброс. Своя обёртка нужна
+// потому, что поле dragCol неэкспортировано, а DragEnd — единственный
+// публичный способ его очистить.
+type clientTable struct {
+	widget.Table
+}
+
+// newClientTable повторяет widget.NewTableWithHeaders для нашего подтипа:
+// конструктора для расширения Fyne не даёт, поля заполняются руками, а
+// ExtendBaseWidget(t) обязателен — без него канва увидит базовую Table и
+// переопределённый MouseUp не вызовется.
+func newClientTable(length func() (int, int), create func() fyne.CanvasObject,
+	update func(widget.TableCellID, fyne.CanvasObject)) *clientTable {
+	t := &clientTable{}
+	t.Length = length
+	t.CreateCell = create
+	t.UpdateCell = update
+	t.ShowHeaderRow = true
+	t.ShowHeaderColumn = true
+	t.ExtendBaseWidget(t)
+	return t
+}
+
+// MouseUp снимает защёлку: отпустили кнопку — захваченной границы больше нет.
+// Если протаскивание было, драйвер вызовет DragEnd ещё раз следом — это тот
+// же сброс, повторение безвредно.
+func (t *clientTable) MouseUp(e *desktop.MouseEvent) {
+	t.Table.MouseUp(e)
+	t.Table.DragEnd()
+}
+
+// mouseEventInTableCoords — копия события с Position, пересчитанной из
+// абсолютной в систему координат таблицы.
+func mouseEventInTableCoords(t *clientTable, e *desktop.MouseEvent) *desktop.MouseEvent {
+	out := &desktop.MouseEvent{Button: e.Button, Modifier: e.Modifier}
+	out.AbsolutePosition = e.AbsolutePosition
+	origin := fyne.CurrentApp().Driver().AbsolutePositionForObject(t)
+	out.Position = fyne.NewPos(e.AbsolutePosition.X-origin.X, e.AbsolutePosition.Y-origin.Y)
+	return out
+}
 
 // fixedColumnWidths — ширины колонок таблицы, КРОМЕ последней. Последняя
 // («Публичный ключ») не имеет постоянного числа: она измеряется по
@@ -1402,7 +1749,7 @@ func (u *ui) buildTable() {
 	headers := tableHeaders
 	widths := tableColumnWidths(u.clients)
 
-	u.table = widget.NewTableWithHeaders(
+	u.table = newClientTable(
 		func() (int, int) { return len(u.clients), len(headers) },
 		func() fyne.CanvasObject { return newTableCell() },
 		func(id widget.TableCellID, o fyne.CanvasObject) {
@@ -1434,7 +1781,11 @@ func (u *ui) buildTable() {
 		},
 	)
 	u.table.CreateHeader = func() fyne.CanvasObject {
-		return newTappableLabel()
+		hl := newTappableLabel()
+		// Без этой связи заголовок перехватывает нажатие кнопки мыши и
+		// теряет его: ширина колонки перестаёт тянуться (см. MouseDown).
+		hl.table = u.table
+		return hl
 	}
 	u.table.UpdateHeader = func(id widget.TableCellID, o fyne.CanvasObject) {
 		hl := o.(*tappableLabel)
