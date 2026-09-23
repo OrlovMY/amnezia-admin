@@ -64,12 +64,14 @@ func matchesBootPredicate(o fyne.CanvasObject) bool {
 // findByBootPredicate повторяет driver.FindObjectAtPositionMatching: обходит
 // дерево сверху вниз и оставляет ПОСЛЕДНИЙ (то есть самый вложенный)
 // видимый объект, который накрывает точку и проходит предикат.
+// Обход — walkVisible, а не walkObjects: боевой драйвер В СКРЫТОЕ НЕ
+// ЗАХОДИТ (driver.WalkVisibleObjectTree), и проверка, которая заходит,
+// способна выбрать цель внутри спрятанного родителя — состояние, в бою
+// недостижимое. Ровно этот класс («правило теста не равно правилу боя»)
+// стоил владельцу регресса с левым кликом.
 func findByBootPredicate(root fyne.CanvasObject, at fyne.Position) fyne.CanvasObject {
 	var found fyne.CanvasObject
-	walkObjects(root, func(o fyne.CanvasObject) {
-		if !o.Visible() {
-			return
-		}
+	walkVisible(root, func(o fyne.CanvasObject) {
 		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
 		size := o.Size()
 		if at.X < pos.X || at.Y < pos.Y {
@@ -231,10 +233,7 @@ func TestTestTapCanvasIsBlindToTheCell(t *testing.T) {
 	cell, center := cellCenter(t, u, "Ноутбук")
 
 	var tappable fyne.CanvasObject
-	walkObjects(u.win.Canvas().Content(), func(o fyne.CanvasObject) {
-		if !o.Visible() {
-			return
-		}
+	walkVisible(u.win.Canvas().Content(), func(o fyne.CanvasObject) {
 		if _, ok := o.(fyne.Tappable); !ok {
 			return
 		}

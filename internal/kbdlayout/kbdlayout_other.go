@@ -20,3 +20,7 @@ package kbdlayout
 // «пытались и не смогли». Человека на этих ОС защищает кроссплатформенная
 // страховка: core.NonEnglishLayoutSuspect и подсказка про раскладку.
 func forceEnglish() error { return ErrUnsupported }
+
+// windowStationName — понятия «оконная станция» вне Windows нет. Отвечает
+// ErrUnsupported, чтобы проверка не гадала, а видела: спрашивать негде.
+func windowStationName() (string, error) { return "", ErrUnsupported }

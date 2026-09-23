@@ -230,6 +230,15 @@ type layoutHint struct {
 // newLayoutHint строит подсказку под заданную ширину формы. Высота
 // резервируется под ПОЛНЫЙ текст: сколько строк он займёт при переносе по
 // словам, столько и занято всегда.
+//
+// ГРАНИЦА, НАЗВАННАЯ ВСЛУХ (ревью QA-01): размер шрифта берётся из темы ОДИН
+// РАЗ, здесь. Если человек увеличит масштаб текста, пока диалог уже открыт,
+// резерв останется прежним и длинная подсказка обрежется. Лечится
+// переоткрытием диалога — он пересчитает резерв по новой теме. Подписываться
+// на смену темы ради этого мы не стали: это goroutine на каждую подсказку в
+// коротко живущем диалоге, цена выше пользы. Достаточность резерва для
+// ТЕКУЩЕЙ темы меряется настоящей вёрсткой в
+// TestLayoutHintSlotFitsTextAndNeverMoves.
 func newLayoutHint(text string, width float32) *layoutHint {
 	th := fyne.CurrentApp().Settings().Theme()
 	size := th.Size(theme.SizeNameText)
@@ -300,9 +309,14 @@ func (h *layoutHint) setText(s string) { h.label.SetText(s) }
 // Прежний обработчик OnChanged не теряется, а вызывается первым (в диалоге
 // сохранения ключа на нём висит сверка двух пинов).
 // suspect — признак «набрано не в английской раскладке». Передаётся
-// параметром, потому что у поля ключа он свой: там текст многострочный, и
-// перенос строки признаком раскладки не считается (см.
-// core.LayoutSuspectIgnoringLineBreaks).
+// параметром, потому что он РАЗНЫЙ у разных полей, и это не украшение:
+//   - поля пина зовут core.NonEnglishLayoutSuspect — тот самый признак, что
+//     привязан тестом к core.ValidatePin. Пин однострочный, и послаблений у
+//     него быть не должно: подсказка обязана срабатывать ровно там, где
+//     ValidatePin откажет, иначе человек читает одно, а получает другое;
+//   - поле ключа зовёт core.LayoutSuspectIgnoringLineBreaks: там текст
+//     многострочный, ключ копируют уже разбитым на строки, и перенос
+//     признаком раскладки не считается (ревью UX-01).
 func attachLayoutHint(e *widget.Entry, hint *layoutHint, suspect func(string) bool) {
 	prev := e.OnChanged
 	sync := func(s string) { hint.setOn(suspect(s)) }
@@ -458,7 +472,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	// занят обратным отсчётом блокировки и «Расшифровываю…», и подсказка
 	// затирала бы их (или они её).
 	pinHint := newLayoutHint(guiview.LayoutHintPin, pinDialogWidth)
-	attachLayoutHint(pinEntry, pinHint, core.LayoutSuspectIgnoringLineBreaks)
+	attachLayoutHint(pinEntry, pinHint, core.NonEnglishLayoutSuspect)
 	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, pinDialogWidth)
 
 	// throttleAttempts — сколько попыток даётся до блокировки (держим в
@@ -1030,8 +1044,8 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	// поля, набранного верно.
 	pinLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
 	repeatLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
-	attachLayoutHint(pinEntry, pinLayoutHint, core.LayoutSuspectIgnoringLineBreaks)
-	attachLayoutHint(pinRepeat, repeatLayoutHint, core.LayoutSuspectIgnoringLineBreaks)
+	attachLayoutHint(pinEntry, pinLayoutHint, core.NonEnglishLayoutSuspect)
+	attachLayoutHint(pinRepeat, repeatLayoutHint, core.NonEnglishLayoutSuspect)
 	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, saveKeyDialWidth)
 
 	submit := func() {
@@ -1340,9 +1354,12 @@ func (l *tappableLabel) TappedSecondary(*fyne.PointEvent) {}
 //
 // ЧЕМ ПОЛЕЗНА ПЕРЕАДРЕСАЦИЯ, ЕСЛИ НЕ ЭТИМ. Польза узкая, и врать про неё не
 // надо. Нажатие в щели захватывает границу, а снимает захват отпускание
-// (clientTable.MouseUp). Отпускание может уйти МИМО таблицы — курсор к тому
-// времени над кнопкой, над краем окна или вне его, — и тогда граница
-// остаётся захваченной. Следующий обычный клик по подписи заголовка снимает
+// (clientTable.MouseUp). Отпускание может до таблицы НЕ ДОЙТИ ВОВСЕ —
+// alt-tab, потеря фокуса окном, перехват ввода другой программой, — и тогда
+// граница остаётся захваченной. (Вариант «курсор успел уехать на кнопку» сюда
+// не годится и назван быть не может: порог начала протаскивания в Fyne равен
+// двум точкам, любое заметное смещение начинает протаскивание, а его конец
+// драйвер сопровождает DragEnd сам.) Следующий обычный клик по подписи заголовка снимает
 // её: подпись пробрасывает и нажатие, и отпускание. Пока подпись
 // перехватывала мышь, не реализуя desktop.Mouseable, такой клик не доходил
 // до таблицы вовсе. Ни сортировку, ни выбор цели клика переадресация не

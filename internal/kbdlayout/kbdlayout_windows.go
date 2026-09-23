@@ -81,3 +81,51 @@ func reason(err error) string {
 	}
 	return ": " + err.Error()
 }
+
+// ---------- где проверка ВОЗМОЖНА, а где проверять негде ----------
+
+var (
+	procGetProcessWindowStation = user32.NewProc("GetProcessWindowStation")
+	procGetUserObjectInfoW      = user32.NewProc("GetUserObjectInformationW")
+)
+
+// uoiName — код запроса «имя объекта» для GetUserObjectInformationW.
+const uoiName = 2
+
+// windowStationName возвращает имя оконной станции процесса.
+//
+// ЗАЧЕМ ЭТО ЗДЕСЬ. ActivateKeyboardLayout в сеансе БЕЗ интерактивной оконной
+// станции (служба, часть раннеров CI) законно возвращает 0, и прогон
+// покраснел бы не из-за нашего кода, а из-за среды. Ложное покраснение чинят
+// ослаблением проверки — мы это уже проходили. Поэтому «проверить негде» —
+// отдельное состояние, и оно устанавливается ФАКТОМ, а не догадкой:
+// интерактивная станция называется WinSta0.
+//
+// Ошибка отдаётся наружу: «не смогли узнать» — это тоже не «всё хорошо».
+func windowStationName() (string, error) {
+	if err := procGetProcessWindowStation.Find(); err != nil {
+		return "", fmt.Errorf("user32.dll!GetProcessWindowStation недоступна: %w", err)
+	}
+	if err := procGetUserObjectInfoW.Find(); err != nil {
+		return "", fmt.Errorf("user32.dll!GetUserObjectInformationW недоступна: %w", err)
+	}
+	hwinsta, _, callErr := procGetProcessWindowStation.Call()
+	if hwinsta == 0 {
+		return "", fmt.Errorf("GetProcessWindowStation не вернул станцию%s", reason(callErr))
+	}
+	buf := make([]uint16, 256)
+	var needed uint32
+	ok, _, callErr := procGetUserObjectInfoW.Call(
+		hwinsta,
+		uintptr(uoiName),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)*2),
+		uintptr(unsafe.Pointer(&needed)),
+	)
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(&needed)
+	if ok == 0 {
+		return "", fmt.Errorf("GetUserObjectInformationW не выполнен%s", reason(callErr))
+	}
+	return windows.UTF16ToString(buf), nil
+}

@@ -17,12 +17,28 @@ package kbdlayout
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 )
 
 // TestForceEnglishDistinguishesThreeStates — тест РАЗЛИЧЕНИЯ: «не умеем» не
 // превращается ни в «сделали», ни в неизвестную ошибку.
 func TestForceEnglishDistinguishesThreeStates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// ГДЕ ПРОВЕРЯТЬ НЕГДЕ — ОТДЕЛЬНОЕ СОСТОЯНИЕ (ревью QA-01).
+		// ActivateKeyboardLayout в сеансе без интерактивной оконной станции
+		// (служба, часть раннеров CI) законно возвращает 0. Покраснеть на
+		// этом значило бы позвать людей чинить среду, а чинят такое
+		// ослаблением проверки. Поэтому спрашиваем систему: интерактивная
+		// станция называется WinSta0.
+		switch name, err := windowStationName(); {
+		case err != nil:
+			t.Skipf("проверить негде: не удалось узнать оконную станцию (%v)", err)
+		case !strings.EqualFold(name, "WinSta0"):
+			t.Skipf("проверить негде: сеанс без интерактивной оконной станции (станция %q) — "+
+				"переключение раскладки в таком сеансе невозможно по устройству Windows", name)
+		}
+	}
 	err := ForceEnglish()
 	if runtime.GOOS == "windows" {
 		if errors.Is(err, ErrUnsupported) {
@@ -36,9 +52,10 @@ func TestForceEnglishDistinguishesThreeStates(t *testing.T) {
 			// писала t.Logf, то есть на единственной ОС, где переключение
 			// вообще делается, прогон нельзя было уронить ничем.
 			//
-			// Если этот тест покраснеет на раннере CI (нет раскладки в
-			// образе, сеанс без оконной станции) — это находка и повод
-			// разобраться, а не повод заменить обратно на Logf.
+			// Но падать можно только там, где проверка ВОЗМОЖНА, и это
+			// установлено выше фактом (имя оконной станции), а не догадкой:
+			// «негде проверить» — третье состояние, отличное и от «работает»,
+			// и от «сломано».
 			t.Fatalf("ForceEnglish на Windows не выполнился: %v — переключения раскладки, "+
 				"обещанного владельцу, на боевой ОС нет", err)
 		}
@@ -60,4 +77,30 @@ func TestUnsupportedIsNotNil(t *testing.T) {
 	if errors.Is(nil, ErrUnsupported) {
 		t.Fatal("errors.Is(nil, ErrUnsupported) истинно — различать состояния нечем")
 	}
+}
+
+// TestWindowStationIsKnown — СТОРОЖ НА САМУ КАЛИТКУ (CLAUDE.md: проверка
+// обязана доказывать, что она выполнялась).
+//
+// Тест выше пропускает себя, если оконную станцию узнать не удалось. Значит
+// сломанный windowStationName превратил бы проверку переключения в вечный
+// пропуск — молчаливо и навсегда. Здесь это и ловится: на Windows имя
+// станции обязано быть известно.
+func TestWindowStationIsKnown(t *testing.T) {
+	name, err := windowStationName()
+	if runtime.GOOS != "windows" {
+		if !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("на %s windowStationName вернул (%q, %v), ожидался ErrUnsupported",
+				runtime.GOOS, name, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("имя оконной станции не получено: %v — проверка переключения раскладки "+
+			"будет молча пропускаться всегда", err)
+	}
+	if name == "" {
+		t.Fatal("имя оконной станции пусто — калитка пропустит проверку, ничего не сказав")
+	}
+	t.Logf("оконная станция: %q", name)
 }

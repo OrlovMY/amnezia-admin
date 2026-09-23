@@ -20,11 +20,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -63,13 +65,19 @@ const typedLatinPin = "Abcdefgh1234!"
 // печатает ПРОГРАММА.
 func visibleTexts(root fyne.CanvasObject) []string {
 	var out []string
-	walkVisible(root, func(o fyne.CanvasObject) {
+	walkVisibleStop(root, func(o fyne.CanvasObject) bool {
 		switch x := o.(type) {
 		case *widget.Label:
 			out = append(out, x.Text)
+			// ВНУТРЬ подписи не спускаемся: там тот же текст, разложенный
+			// RichText на пословные куски. Куски засоряют выборку и мешают
+			// искать в ней ЦЕЛЫЕ фразы — в том числе проверке на утечку
+			// (ревью SEC-01).
+			return true
 		case *canvas.Text:
 			out = append(out, x.Text)
 		}
+		return false
 	})
 	return out
 }
@@ -82,18 +90,26 @@ func visibleTexts(root fyne.CanvasObject) []string {
 // вытаскивал бы текст спрятанных подписей на свет. Боевой драйвер обходит
 // дерево именно так — не спускаясь в скрытое.
 func walkVisible(o fyne.CanvasObject, fn func(fyne.CanvasObject)) {
+	walkVisibleStop(o, func(x fyne.CanvasObject) bool { fn(x); return false })
+}
+
+// walkVisibleStop — то же, но обработчик может сказать «внутрь этого не
+// надо», вернув true.
+func walkVisibleStop(o fyne.CanvasObject, fn func(fyne.CanvasObject) bool) {
 	if o == nil || !o.Visible() {
 		return
 	}
-	fn(o)
+	if fn(o) {
+		return
+	}
 	switch x := o.(type) {
 	case *fyne.Container:
 		for _, c := range x.Objects {
-			walkVisible(c, fn)
+			walkVisibleStop(c, fn)
 		}
 	case fyne.Widget:
 		for _, c := range test.WidgetRenderer(x).Objects() {
-			walkVisible(c, fn)
+			walkVisibleStop(c, fn)
 		}
 	}
 }
@@ -461,6 +477,38 @@ func TestLayoutHintDoesNotMoveButtons(t *testing.T) {
 // разным для пустого и заполненного состояния — тогда всё, что ниже, снова
 // поедет. Проверяется и то и другое, на настоящих текстах и настоящих
 // ширинах форм.
+// renderedTextBottom — нижняя граница НАРИСОВАННОГО текста подсказки,
+// отсчитанная от верха её коробки. Подсказка для этого кладётся в настоящее
+// окно и разворачивается на размер коробки: только после раскладки Fyne
+// расставляет строки переноса по своим местам.
+func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
+	t.Helper()
+	w := test.NewWindow(h.box)
+	t.Cleanup(w.Close)
+	size := h.box.MinSize()
+	w.Resize(size)
+	h.box.Refresh()
+
+	drv := fyne.CurrentApp().Driver()
+	top := drv.AbsolutePositionForObject(h.box).Y
+	var bottom float32
+	rows := 0
+	walkVisible(h.box, func(o fyne.CanvasObject) {
+		txt, ok := o.(*canvas.Text)
+		if !ok || txt.Text == "" {
+			return
+		}
+		rows++
+		if b := drv.AbsolutePositionForObject(txt).Y + txt.Size().Height - top; b > bottom {
+			bottom = b
+		}
+	})
+	if rows == 0 {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: в подсказке не нарисовано ни одной строки")
+	}
+	return bottom
+}
+
 func TestLayoutHintSlotFitsTextAndNeverMoves(t *testing.T) {
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
@@ -485,11 +533,20 @@ func TestLayoutHintSlotFitsTextAndNeverMoves(t *testing.T) {
 				t.Errorf("место под подсказку изменилось с %v на %v — содержимое под ней поедет",
 					empty, full)
 			}
-			// Подпись со своим текстом обязана помещаться в отведённое место.
-			need := h.label.MinSize()
-			if need.Height > full.Height+0.5 {
-				t.Errorf("подсказке нужно %v в высоту, а отведено %v — текст обрежется, "+
-					"человек прочтёт полфразы", need.Height, full.Height)
+			// Подпись со своим текстом обязана ПОМЕЩАТЬСЯ в отведённое
+			// место — и меряется это НАСТОЯЩЕЙ ВЁРСТКОЙ, а не MinSize
+			// подписи.
+			//
+			// ПОЧЕМУ НЕ MinSize (ревью QA-01). У подписи с переносом
+			// MinSize() равен одной строке ВНЕ ЗАВИСИМОСТИ от текста:
+			// сравнение с ним не могло покраснеть никогда, и подмена
+			// wrappedLineCount → return 1 (подсказка обрезается до трети
+			// фразы) оставляла прогон зелёным. Теперь подпись кладётся в
+			// окно, разворачивается на ширину коробки и спрашивается, докуда
+			// НА САМОМ ДЕЛЕ дотянулся нарисованный текст.
+			if bottom := renderedTextBottom(t, h); bottom > full.Height+0.5 {
+				t.Errorf("нарисованный текст подсказки уходит на %v точек вниз, а отведено %v — "+
+					"текст обрежется, человек прочтёт полфразы", bottom, full.Height)
 			}
 			h.setOn(false)
 			if off := h.box.MinSize(); off != empty {
@@ -569,5 +626,45 @@ func TestLayoutHintForPrefilledKeyField(t *testing.T) {
 	if texts := visibleTexts(content); !hasText(texts, wantKeyLayoutHint) {
 		t.Errorf("ключ попал в поле мимо нажатий клавиш и содержит кириллицу, "+
 			"а подсказки нет: %q", texts)
+	}
+}
+
+// TestVisibleTextsIgnoresHiddenText — КАНАРЕЙКА НА САМ ОБХОД (ревью SEC-01 и
+// QA-01).
+//
+// Вся проверка «что человек видит на экране» стоит на walkVisible. Наивный
+// обход — тот, что смотрит Visible() только у самого объекта и всё равно
+// спускается внутрь скрытого, — вытаскивал бы текст спрятанных подписей на
+// свет: widget.Label рисует себя вложенным RichText, и у СКРЫТОЙ подписи
+// внутренний текст «видим» сам по себе. Такая подмена компилируется и
+// оставляла бы зелёными все тесты подсказок сразу, потому что подсказку они
+// нашли бы и в скрытом виде.
+//
+// Четыре случая в одном дереве, как просил SEC-01: скрытая подпись, скрытый
+// canvas.Text, подпись внутри скрытого контейнера и один видимый canvas.Text.
+// Вернуться должен ровно последний.
+func TestVisibleTextsIgnoresHiddenText(t *testing.T) {
+	a := test.NewApp()
+	t.Cleanup(a.Quit)
+
+	hiddenLabel := widget.NewLabel("скрытая-подпись")
+	hiddenLabel.Hide()
+	hiddenText := canvas.NewText("скрытый-canvas-текст", color.Black)
+	hiddenText.Hide()
+	inHiddenBox := widget.NewLabel("подпись-внутри-скрытого-контейнера")
+	hiddenBox := container.NewVBox(inHiddenBox)
+	hiddenBox.Hide()
+	visible := canvas.NewText("видимый-canvas-текст", color.Black)
+
+	root := container.NewVBox(hiddenLabel, hiddenText, hiddenBox, visible)
+	w := test.NewWindow(root)
+	t.Cleanup(w.Close)
+	w.Resize(fyne.NewSize(400, 300))
+
+	got := visibleTexts(root)
+	if len(got) != 1 || got[0] != "видимый-canvas-текст" {
+		t.Fatalf("видимыми признаны %q, а видима на экране ровно одна подпись — "+
+			"обход заглядывает внутрь скрытого, и любая проверка «что видит человек» "+
+			"на нём врёт", got)
 	}
 }
