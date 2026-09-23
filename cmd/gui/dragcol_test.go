@@ -200,25 +200,39 @@ func TestColumnDragAfterPlainHeaderClickResizesTheGrabbedColumn(t *testing.T) {
 	}
 }
 
-// TestHeaderLabelDoesNotSwallowMouseDown — подпись заголовка НЕ СЪЕДАЕТ
-// нажатие кнопки.
+// TestHeaderLabelClearsStuckDragAfterLostRelease — ЧЕМ ПОЛЕЗЕН ПРОБРОС
+// НАЖАТИЯ В ТАБЛИЦУ, и польза эта узкая (ревью QA-01).
 //
-// Боевой драйвер выбирает получателя движения и получателя нажатия
-// НЕЗАВИСИМО: курсор стоит на границе (её запоминает таблица как
-// Hoverable), а нажатие достаётся ближайшему объекту мыши — подписи
-// заголовка. Пока подпись не была desktop.Mouseable, нажатие пропадало
-// целиком: таблице оно не доставалось, и протаскивание не начиналось.
-func TestHeaderLabelDoesNotSwallowMouseDown(t *testing.T) {
+// ЧЕГО ЗДЕСЬ НЕТ И ПОЧЕМУ. Прежняя редакция этого теста наводила курсор на
+// границу, а нажимала по подписи заголовка — последовательность, НЕДОСТИЖИМУЮ
+// в бою: переход мыши из щели на подпись обязательно вызовет
+// Table.MouseMoved, и запомненная граница обнулится. Правило хит-теста тест
+// соблюдал, а порядок событий — нет, и краснел он на состоянии, которого не
+// бывает.
+//
+// ДОСТИЖИМЫЙ СЦЕНАРИЙ такой. Нажатие в щели захватывает границу. Отпускание
+// обычно снимает захват (clientTable.MouseUp), но оно может уйти МИМО
+// ТАБЛИЦЫ — если курсор к этому времени над кнопкой, над краем окна или вне
+// его. Тогда граница остаётся захваченной. Следующий обычный клик по подписи
+// заголовка — тот самый, которым сортируют, — снимает её, потому что подпись
+// пробрасывает нажатие и отпускание в таблицу. Без проброса клик по подписи
+// не доходил до таблицы вовсе, и захват жил дальше.
+func TestHeaderLabelClearsStuckDragAfterLostRelease(t *testing.T) {
 	u := dragTestUI(t)
 	origin := tableOrigin(u)
-	before := headerColumnWidth(t, u, "#")
+	beforeNum := headerColumnWidth(t, u, "#")
+	beforeName := headerColumnWidth(t, u, "Имя")
 
-	// Курсор — на границе колонки «#»: её и запоминает таблица.
-	hoverAt(t, u, fyne.NewPos(origin.X+boundaryNumX, origin.Y+headerY))
+	// 1. Нажали в щели у колонки «#». Отпускание ушло мимо таблицы — его
+	//    просто нет.
+	first := fyne.NewPos(origin.X+boundaryNumX, origin.Y+headerY)
+	hoverAt(t, u, first)
+	pressAt(t, u, first)
 
-	// А нажатие приходится на подпись заголовка.
-	at := fyne.NewPos(origin.X+labelNumX, origin.Y+headerY)
-	target, handled := pressAt(t, u, at)
+	// 2. Обычный клик по подписи заголовка: навели, нажали, отпустили.
+	label := fyne.NewPos(origin.X+labelNumX, origin.Y+headerY)
+	hoverAt(t, u, label)
+	target, handled := pressAt(t, u, label)
 	if _, isLabel := target.(*tappableLabel); !isLabel {
 		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: нажатие по подписи заголовка "+
 			"боевое правило отдало %T, а не подписи", target)
@@ -227,14 +241,35 @@ func TestHeaderLabelDoesNotSwallowMouseDown(t *testing.T) {
 		t.Fatalf("боевое правило отдаёт нажатие подписи заголовка (%T), а обработать его "+
 			"она не умеет: нажатие пропадает, до таблицы не доходит", target)
 	}
+	releaseAt(t, u, label)
 
-	dragTo(t, u, at, fyne.NewPos(at.X+60, at.Y))
-	releaseAt(t, u, fyne.NewPos(at.X+60, at.Y))
+	// 3. Теперь тянем границу колонки «Имя».
+	second := fyne.NewPos(origin.X+boundaryNameX, origin.Y+headerY)
+	to := fyne.NewPos(second.X+60, second.Y)
+	hoverAt(t, u, second)
+	pressAt(t, u, second)
+	dragTo(t, u, second, to)
+	releaseAt(t, u, to)
 
-	if after := headerColumnWidth(t, u, "#"); after <= before {
-		t.Errorf("после нажатия по подписи заголовка и протаскивания вправо на 60 точек "+
-			"ширина колонки «#» осталась %v (была %v): нажатие не дошло до таблицы, "+
-			"граница колонки не захвачена", after, before)
+	if after := headerColumnWidth(t, u, "#"); after != beforeNum {
+		t.Errorf("тянули границу колонки «Имя», а изменилась ширина «#»: %v → %v. "+
+			"Клик по подписи заголовка не снял захваченную границу — нажатие до таблицы "+
+			"не дошло", beforeNum, after)
+	}
+	if after := headerColumnWidth(t, u, "Имя"); after <= beforeName {
+		t.Errorf("ширина колонки «Имя» после протаскивания: %v → %v — тянется не та колонка",
+			beforeName, after)
+	}
+}
+
+// TestHeaderLabelIsMouseable — СТРУКТУРНАЯ проверка, и названа так честно:
+// она говорит лишь, что подпись заголовка умеет принять нажатие кнопки, а не
+// что от этого что-то меняется на экране. Поведение — в тесте выше.
+func TestHeaderLabelIsMouseable(t *testing.T) {
+	var o fyne.CanvasObject = newTappableLabel()
+	if _, ok := o.(desktop.Mouseable); !ok {
+		t.Fatalf("%T не desktop.Mouseable: боевой драйвер отдаёт ей нажатие над заголовком, "+
+			"и оно пропадает — до таблицы не доходит ничего", o)
 	}
 }
 

@@ -96,3 +96,38 @@ func TestLayoutSuspectFollowsValidatePin(t *testing.T) {
 		t.Fatalf("проверено всего %d символов — выборка схлопнулась, тест ничего не доказывает", checked)
 	}
 }
+
+// TestLayoutSuspectIgnoringLineBreaks — ПОЛЕ АДМИНСКОГО КЛЮЧА (ревью UX-01).
+//
+// Ключ vpn://… длинный, его копируют из мессенджера и почты уже разбитым на
+// строки, а поле ввода многострочное. Перенос строки — не признак раскладки,
+// и называть его раскладкой значит дать уверенный неверный ответ там, где
+// причина другая. Всё остальное — ровно как в общем признаке.
+func TestLayoutSuspectIgnoringLineBreaks(t *testing.T) {
+	const key = "vpn://aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"однострочный ключ", key, false},
+		{"ключ, разбитый на строки", key[:20] + "\n" + key[20:], false},
+		{"он же с возвратом каретки", key[:20] + "\r\n" + key[20:], false},
+		{"только переносы", "\n\r\n", false},
+		{"кириллица в разбитом ключе", key[:20] + "\n" + "кириллица" + key[20:], true},
+		{"кириллица без переносов", "vpn://кириллица", true},
+		{"табуляция", key + "\t", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := LayoutSuspectIgnoringLineBreaks(c.in); got != c.want {
+				t.Errorf("LayoutSuspectIgnoringLineBreaks = %v, ожидалось %v", got, c.want)
+			}
+		})
+	}
+	// И связь с общим признаком: перенос строки — ЕДИНСТВЕННОЕ послабление.
+	if !NonEnglishLayoutSuspect(key[:20] + "\n" + key[20:]) {
+		t.Error("общий признак перестал считать перенос строки подозрительным — " +
+			"тогда отдельная функция для ключа ничего не значит")
+	}
+}

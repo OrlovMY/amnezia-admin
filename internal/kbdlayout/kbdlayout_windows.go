@@ -3,7 +3,10 @@
 package kbdlayout
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -43,8 +46,17 @@ func forceEnglish() error {
 		uintptr(unsafe.Pointer(name)),
 		uintptr(klfActivate|klfSetForProcess),
 	)
+	// name больше нигде не используется, а это LazyProc.Call, а не
+	// syscall.Syscall: спецправило, сохраняющее указатель живым на время
+	// вызова, здесь не действует, и сборщик вправе освободить буфер (ревью
+	// SEC-01).
+	runtime.KeepAlive(name)
 	if hkl == 0 {
-		return fmt.Errorf("LoadKeyboardLayout(%s) не вернул раскладку: %w", layoutEnglishUS, callErr)
+		// callErr у LazyProc.Call не бывает nil и при успехе равен «The
+		// operation completed successfully» — подставлять его в текст отказа
+		// значит сбивать с толку. Поэтому он попадает в сообщение, только
+		// если это НАСТОЯЩАЯ ошибка.
+		return fmt.Errorf("LoadKeyboardLayout(%s) не вернул раскладку%s", layoutEnglishUS, reason(callErr))
 	}
 	if err := procActivateKeyboard.Find(); err != nil {
 		// Раскладка уже загружена и активирована флагом KLF_ACTIVATE —
@@ -52,7 +64,20 @@ func forceEnglish() error {
 		return fmt.Errorf("user32.dll!ActivateKeyboardLayout недоступна: %w", err)
 	}
 	if ok, _, callErr := procActivateKeyboard.Call(hkl, uintptr(klfSetForProcess)); ok == 0 {
-		return fmt.Errorf("ActivateKeyboardLayout не выполнен: %w", callErr)
+		return fmt.Errorf("ActivateKeyboardLayout не выполнен%s", reason(callErr))
 	}
 	return nil
+}
+
+// reason превращает errno от LazyProc.Call в добавку к сообщению. Windows
+// возвращает из GetLastError ERROR_SUCCESS, когда «всё хорошо», и текст «The
+// operation completed successfully» в отказе читается как издевательство —
+// поэтому в таком случае говорится прямо, что кода ошибки нет, а не
+// подставляется успех вместо причины.
+func reason(err error) string {
+	var errno syscall.Errno
+	if err == nil || (errors.As(err, &errno) && errno == 0) {
+		return " (код ошибки система не сообщила)"
+	}
+	return ": " + err.Error()
 }

@@ -111,7 +111,19 @@ const requiredParams = "*fyne.PointEvent"
 // knownMouseTypes — типы cmd/gui, которые СЕГОДНЯ работают с мышью. Список
 // нужен не для запрета новых, а чтобы сторож не зеленел на пустоте: если ни
 // одного из них не видно, охват потерян.
-var knownMouseTypes = []string{"tableCell", "tappableLabel"}
+//
+// clientTable в списке потому, что он тоже работает с мышью (перекрывает
+// MouseUp, чтобы не оставалась захваченной граница колонки): тип, исчезнувший
+// из поля зрения сторожа, — это потерянный охват, независимо от того,
+// нарушает он правило или нет.
+var knownMouseTypes = []string{"tableCell", "tappableLabel", "clientTable"}
+
+// mouseOnlyTypes — типы из knownMouseTypes, которые НЕ перехватывают левый
+// клик и потому Tapped объявлять не обязаны. Перечислены поимённо: молчаливое
+// послабление «ну этот пусть без Tapped» — это способ правилу растаять.
+// clientTable сам и есть widget.Table, то есть полноценная цель мыши со своим
+// обработчиком клика внутри Fyne; MouseUp он лишь дополняет.
+var mouseOnlyTypes = map[string]bool{"clientTable": true}
 
 type typeInfo struct {
 	methods map[string]string // метод → позиция
@@ -171,7 +183,7 @@ func scanTree(root string) (map[string]*typeInfo, int, error) {
 				continue
 			}
 			method := fn.Name.Name
-			if method != requiredMethod {
+			if method != requiredMethod && method != "MouseUp" {
 				if _, isGrab := grabMethods[method]; !isGrab {
 					continue
 				}
@@ -263,6 +275,9 @@ func TestGuardSeesRealMouseTypes(t *testing.T) {
 			t.Errorf("сторож не видит тип %s в %s — охват потерян "+
 				"(тип переименован, переехал или перестал работать с мышью)", want, scannedRoot)
 			continue
+		}
+		if mouseOnlyTypes[want] {
+			continue // левый клик не перехватывает, Tapped не обязан
 		}
 		if _, ok := ti.methods[requiredMethod]; !ok {
 			t.Errorf("у типа %s нет %s", want, requiredMethod)
