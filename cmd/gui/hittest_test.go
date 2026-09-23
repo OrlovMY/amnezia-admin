@@ -163,6 +163,48 @@ func TestPrimaryClickSelectsRowByBootRule(t *testing.T) {
 	}
 }
 
+// TestPrimaryClickFocusesTableForKeyboard — ПОСЛЕ КЛИКА КЛАВИАТУРА РАБОТАЕТ.
+//
+// Почему это отдельная проверка (найдено QA-01 в PR #17). Ячейка перехватила
+// клик, и widget.Table больше не получает его сама — а вместе с кликом она
+// перестала получать и то, что делала при нём на десктопе: забирать себе
+// фокус клавиатуры (widget/table.go, Table.Tapped). Поэтому selectCell
+// ставит фокус руками. Строка эта молчаливая: убери её — выбор строки
+// по-прежнему работает, и ВЕСЬ прогон оставался зелёным, а у человека молча
+// переставали листать таблицу стрелки.
+//
+// Проверяется боевым путём: цель клика ищется боевым правилом, клик отдаётся
+// так же, как его отдаёт драйвер, и спрашивается КАНВА — куда уйдёт
+// следующее нажатие клавиши.
+func TestPrimaryClickFocusesTableForKeyboard(t *testing.T) {
+	u := testUI(t)
+	_, center := cellCenter(t, u, "Ноутбук")
+
+	u.win.Canvas().Unfocus()
+	target := findByBootPredicate(u.win.Canvas().Content(), center)
+	if target == nil {
+		t.Fatal("под центром ячейки боевое правило не нашло ни одного объекта мыши — " +
+			"проверка перестала что-либо значить")
+	}
+	ev := &fyne.PointEvent{AbsolutePosition: center}
+	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(target)
+	ev.Position = fyne.NewPos(center.X-pos.X, center.Y-pos.Y)
+	if !deliverPrimaryClick(target, ev) {
+		t.Fatalf("боевая цель клика %T не умеет обработать левый клик", target)
+	}
+
+	focused := u.win.Canvas().Focused()
+	if focused == nil {
+		t.Fatal("после клика по ячейке фокус клавиатуры не стоит НИГДЕ: стрелки по таблице " +
+			"молча перестают работать (Table.Tapped на десктопе фокусирует таблицу сама, " +
+			"а клик до неё больше не доходит)")
+	}
+	if focused != fyne.Focusable(u.table) {
+		t.Errorf("после клика по ячейке фокус клавиатуры стоит в %T, а должен в таблице (%T): "+
+			"стрелки по таблице работать не будут", focused, u.table)
+	}
+}
+
 // TestBootRuleTargetIsTheCellItself — сторож на саму проверку выше: она
 // обязана мерить ЯЧЕЙКУ, а не проходить её насквозь, как test.TapCanvas.
 // Если боевое правило вдруг находит под курсором не ячейку, значит либо

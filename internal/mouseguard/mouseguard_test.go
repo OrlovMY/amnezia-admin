@@ -22,6 +22,14 @@ package mouseguard
 // боевой предикат, не будучи fyne.Tappable. Tapped в список не входит —
 // он и есть требуемое.
 //
+// СИГНАТУРА, А НЕ ТОЛЬКО ИМЯ (найдено QA-01 после PR #17). Первая редакция
+// сторожа сверяла методы ПО ИМЕНИ. Подложенный `func (p *planted) Tapped()`
+// без аргумента интерфейс fyne.Tappable НЕ реализует — объект остаётся
+// целью мыши и теряет левый клик ровно как раньше, — а сторожа проходил
+// зелёным: «формально Tapped есть, фактически клик пропадает». Поэтому от
+// Tapped требуется ровно один параметр, печатающийся как *fyne.PointEvent.
+// Это ровно та форма, в которой Go признаёт реализацию fyne.Tappable.
+//
 // СТОРОЖ ПРЕДЪЯВЛЯЕТ КАНАРЕЙКИ, каждую ОТДЕЛЬНОЙ компилируемой подменой,
 // краснеющей именно на своей причине:
 //   - TestGuardCatchesPlantedGrabWithoutTapped — подложенный тип с
@@ -30,12 +38,28 @@ package mouseguard
 //     должен (иначе сторож краснеет не по заявленной причине);
 //   - TestGuardAllowsTappedOnly — тип с одним лишь Tapped (наш
 //     tappableLabel) не находка;
+//   - TestGuardCatchesTappedWithoutArgument и
+//     TestGuardCatchesTappedWithWrongArgument — Tapped есть, но не той
+//     формы: интерфейс не реализован, клик теряется, сторож обязан краснеть
+//     ИМЕННО про сигнатуру;
 //   - TestGuardCatchesEmptyRoot — пустой корень (сторож смотрит не туда)
 //     обязан ронять прогон, а не зеленеть молча;
 //   - TestGuardSeesRealMouseTypes — сторож видит НАСТОЯЩИЕ типы мыши в
 //     cmd/gui; исчезли — значит охват потерян.
 //
 // ЧЕГО СТОРОЖ НЕ ЛОВИТ, поимённо:
+//   - ТОЛЬКО КАТАЛОГ cmd/gui, без подкаталогов и без internal/ (граница
+//     названа QA-01). Файлы читаются одним os.ReadDir, вложенные каталоги
+//     пропускаются: новый мышиный виджет, вынесенный в internal/ или в
+//     подпакет, сторожу невидим целиком. Держится это не молчанием, а
+//     проверкой minFiles и списком knownMouseTypes: переедет сам cmd/gui —
+//     сторож упадёт, а не позеленеет. Переезд ОТДЕЛЬНОГО виджета в
+//     internal/ он не заметит, и это надо помнить при таком переносе;
+//   - СИГНАТУРЫ «хватающих» методов. Проверяется сигнатура только у Tapped —
+//     того метода, которого сторож ТРЕБУЕТ. У четырёх «хватающих» сверяется
+//     лишь имя, и это осознанно: метод TappedSecondary(*int) интерфейса не
+//     реализует и целью мыши не делает, но выглядит как попытка перехватить
+//     мышь, и краснеть на нём честнее, чем молчать;
 //   - интерфейс, полученный ВСТРАИВАНИЕМ (тип встроил widget.Entry и стал
 //     Focusable, ничего не объявив): по AST этого не видно. Такой объект
 //     уже умеет левый клик сам — как раз потому, что унаследовал целиком
@@ -52,6 +76,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,6 +103,11 @@ var grabMethods = map[string]string{
 // requiredMethod — метод, который обязан быть у перехватчика.
 const requiredMethod = "Tapped"
 
+// requiredParams — дословная сигнатура параметров Tapped, при которой Go
+// признаёт тип реализующим fyne.Tappable. Сравнивается ТЕКСТОМ: сторож
+// разбирает AST и типов не знает, а нам и нужна та форма, которой пишут.
+const requiredParams = "*fyne.PointEvent"
+
 // knownMouseTypes — типы cmd/gui, которые СЕГОДНЯ работают с мышью. Список
 // нужен не для запрета новых, а чтобы сторож не зеленел на пустоте: если ни
 // одного из них не видно, охват потерян.
@@ -85,6 +115,27 @@ var knownMouseTypes = []string{"tableCell", "tappableLabel"}
 
 type typeInfo struct {
 	methods map[string]string // метод → позиция
+	params  map[string]string // метод → сигнатура параметров, например "*fyne.PointEvent"
+}
+
+// paramsOf печатает список параметров функции так, как он написан в
+// исходнике: "*fyne.PointEvent", "" (нет параметров), "a, b int" и т.п.
+func paramsOf(fn *ast.FuncDecl) string {
+	if fn.Type == nil || fn.Type.Params == nil {
+		return ""
+	}
+	var parts []string
+	for _, f := range fn.Type.Params.List {
+		typ := types.ExprString(f.Type)
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		for i := 0; i < n; i++ {
+			parts = append(parts, typ)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // scanTree разбирает дерево и возвращает методы мыши по типам и число
@@ -127,10 +178,11 @@ func scanTree(root string) (map[string]*typeInfo, int, error) {
 			}
 			ti := types[recv]
 			if ti == nil {
-				ti = &typeInfo{methods: map[string]string{}}
+				ti = &typeInfo{methods: map[string]string{}, params: map[string]string{}}
 				types[recv] = ti
 			}
 			ti.methods[method] = fset.Position(fn.Pos()).String()
+			ti.params[method] = paramsOf(fn)
 		}
 	}
 	return types, files, nil
@@ -151,7 +203,12 @@ func receiverTypeName(e ast.Expr) string {
 func findings(types map[string]*typeInfo) []string {
 	var out []string
 	for name, ti := range types {
-		if _, ok := ti.methods[requiredMethod]; ok {
+		pos, declared := ti.methods[requiredMethod]
+		// Сигнатура, а не только имя: Tapped() без аргумента интерфейса
+		// fyne.Tappable не реализует, и объект теряет левый клик ровно так
+		// же, как если бы Tapped не было вовсе.
+		rightShape := declared && ti.params[requiredMethod] == requiredParams
+		if rightShape {
 			continue
 		}
 		var grabbed []string
@@ -164,10 +221,15 @@ func findings(types map[string]*typeInfo) []string {
 			continue
 		}
 		sort.Strings(grabbed)
-		out = append(out, fmt.Sprintf("тип %s объявляет %s, но не объявляет %s: "+
+		lack := fmt.Sprintf("не объявляет %s", requiredMethod)
+		if declared {
+			lack = fmt.Sprintf("объявляет %s(%s) в %s — а интерфейс fyne.Tappable требует %s(%s)",
+				requiredMethod, ti.params[requiredMethod], pos, requiredMethod, requiredParams)
+		}
+		out = append(out, fmt.Sprintf("тип %s объявляет %s, но %s: "+
 			"он становится целью ЛЕВОГО клика по боевому предикату Fyne "+
 			"(glfw/window.go:460-468) и теряет этот клик — родительский виджет его не получит",
-			name, strings.Join(grabbed, ", "), requiredMethod))
+			name, strings.Join(grabbed, ", "), lack))
 	}
 	sort.Strings(out)
 	return out
@@ -204,6 +266,13 @@ func TestGuardSeesRealMouseTypes(t *testing.T) {
 		}
 		if _, ok := ti.methods[requiredMethod]; !ok {
 			t.Errorf("у типа %s нет %s", want, requiredMethod)
+			continue
+		}
+		// И сигнатура настоящая: иначе сторож доказывал бы охват типом,
+		// который сам интерфейса не реализует.
+		if got := ti.params[requiredMethod]; got != requiredParams {
+			t.Errorf("у типа %s метод %s(%s), а fyne.Tappable требует %s(%s)",
+				want, requiredMethod, got, requiredMethod, requiredParams)
 		}
 	}
 }
@@ -218,26 +287,48 @@ func plant(t *testing.T, src string) string {
 	return dir
 }
 
+// Подмены пишутся В ТОЙ ЖЕ ФОРМЕ, в какой пишут настоящие виджеты: с
+// *fyne.PointEvent. Иначе канарейка «правильный тип не краснеет» доказывала
+// бы не то, что нужно.
 const plantedGrabOnly = `package main
 
 type planted struct{}
 
-func (p *planted) TappedSecondary(e *int) {}
+func (p *planted) TappedSecondary(e *fyne.PointEvent) {}
 `
 
 const plantedGrabWithTapped = `package main
 
 type planted struct{}
 
-func (p *planted) Tapped(e *int)          {}
-func (p *planted) TappedSecondary(e *int) {}
+func (p *planted) Tapped(e *fyne.PointEvent)          {}
+func (p *planted) TappedSecondary(e *fyne.PointEvent) {}
 `
 
 const plantedTappedOnly = `package main
 
 type planted struct{}
 
-func (p *planted) Tapped(e *int) {}
+func (p *planted) Tapped(e *fyne.PointEvent) {}
+`
+
+// plantedTappedNoArg — ПОДМЕНА QA-01: Tapped есть, аргумента нет. Интерфейс
+// fyne.Tappable не реализован, левый клик теряется — сторож обязан краснеть.
+const plantedTappedNoArg = `package main
+
+type planted struct{}
+
+func (p *planted) Tapped()                            {}
+func (p *planted) TappedSecondary(e *fyne.PointEvent) {}
+`
+
+// plantedTappedWrongArg — то же другой ценой: аргумент есть, но не тот.
+const plantedTappedWrongArg = `package main
+
+type planted struct{}
+
+func (p *planted) Tapped(e *fyne.DragEvent)           {}
+func (p *planted) TappedSecondary(e *fyne.PointEvent) {}
 `
 
 // TestGuardCatchesPlantedGrabWithoutTapped — КАНАРЕЙКА: перехватчик без
@@ -278,6 +369,38 @@ func TestGuardAllowsTappedOnly(t *testing.T) {
 	}
 	if got := findings(types); len(got) != 0 {
 		t.Errorf("сторож краснеет на типе с одним лишь Tapped: %v", got)
+	}
+}
+
+// TestGuardCatchesTappedWithoutArgument — КАНАРЕЙКА НА СИГНАТУРУ (QA-01):
+// подложенный Tapped() без аргумента обязан краснеть, и краснеть ИМЕННО про
+// сигнатуру, а не «метода нет».
+func TestGuardCatchesTappedWithoutArgument(t *testing.T) {
+	types, _, err := scanTree(plant(t, plantedTappedNoArg))
+	if err != nil {
+		t.Fatalf("сторож не выполнялся: %v", err)
+	}
+	got := findings(types)
+	if len(got) == 0 {
+		t.Fatal("сторож НЕ заметил подложенный Tapped() без аргумента: интерфейс " +
+			"fyne.Tappable таким методом не реализуется, левый клик теряется — " +
+			"«формально Tapped есть, фактически клик пропадает»")
+	}
+	if !strings.Contains(got[0], requiredParams) {
+		t.Errorf("сторож покраснел не про сигнатуру: %q", got[0])
+	}
+}
+
+// TestGuardCatchesTappedWithWrongArgument — та же причина, другая цена:
+// аргумент есть, но чужого типа.
+func TestGuardCatchesTappedWithWrongArgument(t *testing.T) {
+	types, _, err := scanTree(plant(t, plantedTappedWrongArg))
+	if err != nil {
+		t.Fatalf("сторож не выполнялся: %v", err)
+	}
+	if got := findings(types); len(got) == 0 {
+		t.Fatal("сторож НЕ заметил Tapped(*fyne.DragEvent): интерфейс fyne.Tappable " +
+			"не реализован, левый клик теряется")
 	}
 }
 
