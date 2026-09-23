@@ -168,18 +168,28 @@ func TestSecondaryTapShowsMenu(t *testing.T) {
 	}
 }
 
-// TestCellIsNotPrimaryTappable — НЫНЕШНЕЕ ПОВЕДЕНИЕ НЕ СЛОМАНО: ячейка не
-// перехватывает ЛЕВЫЙ клик. Драйвер Fyne отдаёт тап самому вложенному
-// объекту, реализующему fyne.Tappable; реализуй ячейка этот интерфейс — тап
-// не дошёл бы до widget.Table, и перестали бы работать выбор строки, а с ним
-// удаление, переименование и включение.
-func TestCellIsNotPrimaryTappable(t *testing.T) {
+// TestCellHandlesPrimaryTap — ячейка ОБЯЗАНА обрабатывать левый клик.
+//
+// ЧТО ЗДЕСЬ БЫЛО. До 23.09 этот тест требовал ОБРАТНОГО — чтобы ячейка не
+// реализовывала fyne.Tappable, — в уверенности, что тогда левый клик
+// достанется widget.Table. Уверенность неверна: боевой драйвер выбирает
+// цель по пяти интерфейсам сразу (см. шапку hittest_test.go), и ячейка с
+// одним лишь TappedSecondary перехватывала левый клик, не умея его
+// обработать. Требование перевёрнуто по факту регресса у владельца.
+func TestCellHandlesPrimaryTap(t *testing.T) {
 	u := testUI(t)
 	cell := u.table.CreateCell()
 	u.table.UpdateCell(widget.TableCellID{Row: 0, Col: 1}, cell)
-	if _, bad := cell.(fyne.Tappable); bad {
-		t.Errorf("ячейка (%T) сама обрабатывает левый клик — выбор строки в таблице сломан, "+
-			"а с ним удаление, переименование и включение", cell)
+	tap, ok := cell.(fyne.Tappable)
+	if !ok {
+		t.Fatalf("ячейка (%T) не обрабатывает левый клик, хотя перехватывает его как цель "+
+			"мыши — выбор строки сломан, а с ним удаление, переименование и включение", cell)
+	}
+	u.selectedRow = -1
+	tap.Tapped(&fyne.PointEvent{})
+	if u.selectedRow != 0 {
+		t.Errorf("после левого клика по ячейке строки 0 u.selectedRow = %d, ожидалось 0",
+			u.selectedRow)
 	}
 	if _, bad := cell.(fyne.Draggable); bad {
 		t.Errorf("ячейка (%T) перехватывает протаскивание — прокрутка таблицы сломана", cell)
