@@ -24,9 +24,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
@@ -87,7 +89,7 @@ func visibleHintPopups(root fyne.CanvasObject) []fyne.CanvasObject {
 
 // onePopup — ровно одна видимая всплывашка. Ни одной — проверять нечего и
 // проверка перестала что-либо значить.
-func onePopup(t *testing.T, root fyne.CanvasObject) rect {
+func onePopupObj(t *testing.T, root fyne.CanvasObject) (fyne.CanvasObject, rect) {
 	t.Helper()
 	pops := visibleHintPopups(root)
 	if len(pops) != 1 {
@@ -98,6 +100,13 @@ func onePopup(t *testing.T, root fyne.CanvasObject) rect {
 	if r.size.Width <= 0 || r.size.Height <= 0 {
 		t.Fatalf("всплывашка нулевого размера (%v) — её не видно, проверка ничего не значит", r)
 	}
+	return pops[0], r
+}
+
+// onePopup — то же, когда нужен только прямоугольник.
+func onePopup(t *testing.T, root fyne.CanvasObject) rect {
+	t.Helper()
+	_, r := onePopupObj(t, root)
 	return r
 }
 
@@ -111,9 +120,62 @@ type hintScene struct {
 	canvas  fyne.Canvas
 	field   *widget.Entry
 	confirm *widget.Button
+	// mayCover — ПОИМЁННЫЙ список того, что всплывашке разрешено накрыть.
+	// Всё остальное видимое накрывать нельзя. Список пишется руками именно
+	// затем, чтобы каждое перекрытие было чьим-то решением, а не побочным
+	// следствием вёрстки: добавить сюда строку — значит согласиться, что
+	// человек её в этот момент не увидит.
+	mayCover []string
 }
 
-func openPinScene(t *testing.T) hintScene {
+func openConnectScene(t *testing.T) hintScene {
+	t.Helper()
+	u := focusTestUI(t)
+	u.win.Resize(fyne.NewSize(900, 700))
+	u.showConnectScreen("")
+	c := u.win.Canvas().Content()
+	e := firstEntry(c)
+	if e == nil {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране подключения нет поля ввода")
+	}
+	e.SetText("vpn://кириллицаВКлюче")
+	c.Refresh()
+	return hintScene{
+		what: "экран подключения", root: c, canvas: u.win.Canvas(),
+		field: e, confirm: buttonByText(t, c, "Подключиться"),
+		// Накрыта поясняющая подпись над полем ключа. Это единственное, что
+		// там стоит, и к моменту показа подсказки человек уже вставил ключ,
+		// то есть подпись прочитана и своё дело сделала.
+		mayCover: []string{
+			"Нужен админский ключ — внутри него SSH-доступ к серверу." +
+				"\nПользовательский (share) ключ не подойдёт.",
+		},
+	}
+}
+
+// hintScenes — формы, где подсказка ВСПЛЫВАЕТ. Их одна: в диалоге пин-кода и
+// в диалоге сохранения свободной полосы под всплывашку не нашлось, и там
+// подсказка стоит в зарезервированном месте (см. комментарий к layoutHint и
+// TestReservedHintFormsHaveNoPopup, который следит, чтобы этот список не
+// разошёлся с кодом молча).
+var hintScenes = []func(*testing.T) hintScene{openConnectScene}
+
+// bootRoot — дерево, в котором боевой драйвер ИЩЕТ цель мыши, по правилу
+// driver.FindObjectAtPositionMatching (window.go:322): если на канве есть
+// оверлей, обыскивается ТОЛЬКО ВЕРХНИЙ оверлей, а до содержимого окна дело не
+// доходит вовсе. Искать сразу в диалоге было бы правилом теста, а не боя:
+// всплывашка, выехавшая в стек оверлеев (ровно то, что делает widget.PopUp),
+// в таком поиске не участвовала бы, и перехват мыши остался бы незамеченным.
+func bootRoot(c fyne.Canvas) fyne.CanvasObject {
+	if top := c.Overlays().Top(); top != nil {
+		return top
+	}
+	return c.Content()
+}
+
+// openPinDialog и openSaveDialog — формы с ЗАРЕЗЕРВИРОВАННЫМ местом под
+// подсказку. Подсказка в них включена (набрано не в английской раскладке).
+func openPinDialog(t *testing.T) (fyne.CanvasObject, fyne.Canvas) {
 	t.Helper()
 	savedHosts := core.NetworkTimeHosts
 	core.NetworkTimeHosts = []string{"https://127.0.0.1:1"}
@@ -129,82 +191,156 @@ func openPinScene(t *testing.T) hintScene {
 	}
 	waitGUIGoroutines(t)
 	d := over[len(over)-1]
-	e := passwordEntry(t, d, 0)
-	e.SetText(typedCyrillicPin)
+	passwordEntry(t, d, 0).SetText(typedCyrillicPin)
 	d.Refresh()
-	return hintScene{what: "диалог «Введите пин-код»", root: d, canvas: u.win.Canvas(), field: e, confirm: buttonByText(t, d, "Открыть")}
+	return d, u.win.Canvas()
 }
 
-func openSaveScene(t *testing.T) hintScene {
+func openSaveDialog(t *testing.T) (fyne.CanvasObject, fyne.Canvas) {
 	t.Helper()
 	u := focusTestUI(t)
 	u.win.Resize(fyne.NewSize(900, 700))
 	u.offerSaveKey("vpn://не-настоящий", "Сервер 1", "")
 	d := u.win.Canvas().Overlays().List()[0]
-	e := passwordEntry(t, d, 0)
-	e.SetText(typedCyrillicPin)
+	passwordEntry(t, d, 0).SetText(typedCyrillicPin)
 	d.Refresh()
-	return hintScene{what: "диалог «Сохранить ключ?»", root: d, canvas: u.win.Canvas(), field: e, confirm: buttonByText(t, d, "Сохранить")}
-}
-
-func openConnectScene(t *testing.T) hintScene {
-	t.Helper()
-	u := focusTestUI(t)
-	u.win.Resize(fyne.NewSize(900, 700))
-	u.showConnectScreen("")
-	c := u.win.Canvas().Content()
-	e := firstEntry(c)
-	if e == nil {
-		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране подключения нет поля ввода")
-	}
-	e.SetText("vpn://кириллицаВКлюче")
-	c.Refresh()
-	return hintScene{what: "экран подключения", root: c, canvas: u.win.Canvas(), field: e, confirm: buttonByText(t, c, "Подключиться")}
-}
-
-var hintScenes = []func(*testing.T) hintScene{openPinScene, openSaveScene, openConnectScene}
-
-// bootRoot — дерево, в котором боевой драйвер ИЩЕТ цель мыши, по правилу
-// driver.FindObjectAtPositionMatching (window.go:322): если на канве есть
-// оверлей, обыскивается ТОЛЬКО ВЕРХНИЙ оверлей, а до содержимого окна дело не
-// доходит вовсе. Искать сразу в диалоге было бы правилом теста, а не боя:
-// всплывашка, выехавшая в стек оверлеев (ровно то, что делает widget.PopUp),
-// в таком поиске не участвовала бы, и перехват мыши остался бы незамеченным.
-func bootRoot(c fyne.Canvas) fyne.CanvasObject {
-	if top := c.Overlays().Top(); top != nil {
-		return top
-	}
-	return c.Content()
+	return d, u.win.Canvas()
 }
 
 // ---------- 2. всплывашка никого не накрывает ----------
 
-// TestFloatingHintCoversNeitherFieldNorButton — ВСПЛЫВАШКА НЕ НАКРЫВАЕТ НИ
-// ПОЛЕ ВВОДА, НИ КНОПКУ ПОДТВЕРЖДЕНИЯ.
+// coverable — видимый объект формы, который всплывашка может собой закрыть, и
+// имя, которым он назовётся в отчёте об ошибке.
+type coverable struct {
+	obj  fyne.CanvasObject
+	name string
+}
+
+// coverableObjects — ВСЁ ВИДИМОЕ, что всплывашка способна закрыть: органы
+// управления (по боевому предикату — поля, кнопки, галки) и подписи
+// (widget.Label, canvas.Text).
 //
-// Это и есть цена отказа от резерва: подсказка больше не раздвигает форму, но
-// теперь она лежит поверх чужого места, и надо доказать, что место это —
-// ничьё. Поле ввода человек в этот момент заполняет, кнопку собирается нажать.
-// Сторона выбрана в коде раз и навсегда (над полем); проверка меряет
-// НАСТОЯЩУЮ вёрстку всех трёх форм, поэтому переставь кто-нибудь кнопку или
-// поле — она покраснеет, а не промолчит.
-func TestFloatingHintCoversNeitherFieldNorButton(t *testing.T) {
+// ПОЧЕМУ НЕ ТОЛЬКО ОРГАНЫ УПРАВЛЕНИЯ (ревью UX-01, круг 2). Первая редакция
+// спрашивала про два объекта, назначенных «своими», и пропустила две беды.
+// Вторая спрашивала про все органы управления — и поймала поле «Метка», но
+// пропустила имя хранилища в диалоге пин-кода: это ПОДПИСЬ, а не орган
+// управления. Между тем это единственное место, которое говорит, ЧЕЙ пин
+// вводится, а ошибка тут стоит попытки из десяти и блокировки на пять минут.
+// Поэтому правило теперь самое широкое, какое можно проверить: накрывать
+// нельзя НИЧЕГО, кроме поимённо перечисленного в scene.mayCover.
+//
+// Внутрь подписи не спускаемся: widget.Label рисует себя вложенным RichText, и
+// его куски — тот же текст. Внутрь органов управления тоже: они проверены сами.
+//
+// Отброшены две категории, и обе — не послабление:
+//   - вырожденные (нулевой ширины или высоты): скрытая кнопка «Повторить»
+//     стоит на канве нулевым прямоугольником, накрыть её нечем;
+//
+// Сама всплывашка и её содержимое из обхода исключены: иначе она «накрывала
+// бы» собственный текст.
+//
+//   - те, кто накрывает ВСЮ всплывашку целиком: подложка модального диалога
+//     (widget.PopUp самого dialog.NewCustom) во весь экран и контейнеры формы.
+//     Это фон, а не содержимое.
+func coverableObjects(root, popObj fyne.CanvasObject, pop rect) []coverable {
+	var out []coverable
+	walkVisibleStop(root, func(o fyne.CanvasObject) bool {
+		if o == popObj {
+			return true // сама всплывашка: она не то, что она накрывает
+		}
+		name, stop := "", false
+		switch x := o.(type) {
+		case *widget.Label:
+			name, stop = x.Text, true
+		case *widget.Button:
+			name, stop = "кнопка «"+x.Text+"»", true
+		case *widget.Check:
+			name, stop = "галка «"+x.Text+"»", true
+		case *widget.Entry:
+			name, stop = fmt.Sprintf("поле ввода (парольное: %v)", x.Password), true
+		case *canvas.Text:
+			name = x.Text
+		default:
+			if matchesBootPredicate(o) {
+				name, stop = fmt.Sprintf("%T", o), true
+			}
+		}
+		if name == "" {
+			return false
+		}
+		r := rectOf(o)
+		if r.contains(pop) {
+			// Фон или контейнер во всю форму — не содержимое. ВНУТРЬ ЗАХОДИМ:
+			// подложка модального диалога (widget.PopUp самого
+			// dialog.NewCustom) сама проходит боевой предикат, и остановка на
+			// ней оставила бы проверку без единого объекта.
+			return false
+		}
+		if r.size.Width <= 0 || r.size.Height <= 0 {
+			return stop
+		}
+		out = append(out, coverable{obj: o, name: name})
+		return stop
+	})
+	return out
+}
+
+// TestFloatingHintCoversOnlyWhatTheFormAllows — ВСПЛЫВАШКА НЕ НАКРЫВАЕТ
+// НИЧЕГО, КРОМЕ ПОИМЁННО РАЗРЕШЁННОГО.
+//
+// По умолчанию накрывать нельзя ничего. Разрешение выписывается в форме
+// (scene.mayCover) отдельной строкой на каждый объект — так перекрытие
+// перестаёт быть побочным следствием вёрстки и становится чьим-то решением.
+// Ровно этого не хватило первой редакции: она спрашивала про поле ввода и
+// кнопку подтверждения, то есть про тех, кого мы сами назначили важными, и
+// потому не заметила ни имени хранилища в диалоге пин-кода, ни поля «Метка» в
+// диалоге сохранения.
+func TestFloatingHintCoversOnlyWhatTheFormAllows(t *testing.T) {
 	for _, open := range hintScenes {
 		s := open(t)
 		t.Run(s.what, func(t *testing.T) {
-			pop := onePopup(t, s.root)
-			field, btn := rectOf(s.field), rectOf(s.confirm)
-			if field.size.Height <= 0 || btn.size.Height <= 0 {
-				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: поле %v или кнопка %v "+
-					"не размещены на канве", field, btn)
+			popObj, pop := onePopupObj(t, s.root)
+			objs := coverableObjects(s.root, popObj, pop)
+			if len(objs) < 3 {
+				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: видимых объектов формы найдено "+
+					"%d — обход не видит ни полей, ни кнопок, ни подписей", len(objs))
 			}
-			if pop.overlaps(field) {
-				t.Errorf("всплывашка %v накрывает поле ввода %v — человек печатает вслепую "+
-					"в поле, которого не видит", pop, field)
+			seenField, seenConfirm := false, false
+			allowed := map[string]bool{}
+			for _, a := range s.mayCover {
+				allowed[a] = true
 			}
-			if pop.overlaps(btn) {
-				t.Errorf("всплывашка %v накрывает кнопку «%s» %v — человек не видит того, "+
-					"что собирается нажать", pop, s.confirm.Text, btn)
+			used := map[string]bool{}
+			for _, c := range objs {
+				if c.obj == fyne.CanvasObject(s.field) {
+					seenField = true
+				}
+				if c.obj == fyne.CanvasObject(s.confirm) {
+					seenConfirm = true
+				}
+				if !pop.overlaps(rectOf(c.obj)) {
+					continue
+				}
+				if allowed[c.name] {
+					used[c.name] = true
+					continue
+				}
+				t.Errorf("всплывашка %v накрывает %q %v, а в списке разрешённого этого нет. "+
+					"Либо переставь подсказку, либо впиши строку в mayCover — и тем самым "+
+					"скажи вслух, что человек её в этот момент не видит",
+					pop, c.name, rectOf(c.obj))
+			}
+			if !seenField || !seenConfirm {
+				t.Errorf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: среди объектов формы нет самого "+
+					"поля ввода (%v) или кнопки подтверждения (%v)", seenField, seenConfirm)
+			}
+			// Разрешение, которым никто не воспользовался, — это забытая
+			// строка: она будет молча оправдывать будущее перекрытие.
+			for _, a := range s.mayCover {
+				if !used[a] {
+					t.Errorf("в mayCover разрешено накрывать %q, но всплывашка этого не "+
+						"накрывает — разрешение устарело и оправдает собой что угодно", a)
+				}
 			}
 		})
 	}
@@ -302,29 +438,34 @@ func TestFloatingHintStealsNoClicks(t *testing.T) {
 
 // ---------- 1. всплывашка не занимает места ----------
 
-// Пределы компактности. Числа сняты с настоящей вёрстки ЭТОЙ ревизии и стоят
-// чуть выше неё: они стерегут не точное значение, а возврат резерва — любая
-// подсказка, снова вставшая в поток, добавит диалогу от 35 точек высоты.
-// Прежние (с резервом) высоты записаны рядом, чтобы было видно, что предел не
-// подогнан под них.
+// Пределы компактности. Сняты с настоящей вёрстки ЭТОЙ ревизии (385.5 и
+// 481.8) и стоят выше неё, но ЗАВЕДОМО НИЖЕ прежних (443.7 и 617.2): на базе
+// 7d69bf3 оба предела красные. Стерегут они не точное значение, а возврат
+// того, что мы убрали, — постоянного резерва под сообщение о неудавшемся
+// переключении раскладки и второй подсказки в диалоге сохранения.
+//
+// Почему пределы не 330 и 430, как в первой редакции: подсказка про раскладку
+// в этих двух диалогах вернулась в зарезервированное место — всплывашке там
+// негде встать, не накрыв орган управления (замеры см. в комментарии к
+// layoutHint в main.go). Это названная вслух цена, а не просадка втихую.
 const (
-	pinDialogMaxHeight  = 330 // с резервом было 443.7
-	saveDialogMaxHeight = 430 // с резервом было 617.2
+	pinDialogMaxHeight  = 400 // ревизия: 385.5; на базе 7d69bf3 было 443.7
+	saveDialogMaxHeight = 500 // ревизия: 481.8; на базе 7d69bf3 было 617.2
 )
 
 // TestDialogsStayCompact — ДИАЛОГИ ОСТАЛИСЬ КОМПАКТНЫМИ (претензия владельца
 // «Слишко»).
 func TestDialogsStayCompact(t *testing.T) {
 	t.Run("диалог пин-кода", func(t *testing.T) {
-		s := openPinScene(t)
-		if h := s.root.MinSize().Height; h > pinDialogMaxHeight {
+		d, _ := openPinDialog(t)
+		if h := d.MinSize().Height; h > pinDialogMaxHeight {
 			t.Errorf("наименьшая высота диалога пин-кода %.1f при пределе %d — "+
 				"диалог снова раздут местом под подсказку", h, pinDialogMaxHeight)
 		}
 	})
 	t.Run("диалог сохранения ключа", func(t *testing.T) {
-		s := openSaveScene(t)
-		if h := s.root.MinSize().Height; h > saveDialogMaxHeight {
+		d, _ := openSaveDialog(t)
+		if h := d.MinSize().Height; h > saveDialogMaxHeight {
 			t.Errorf("наименьшая высота диалога сохранения %.1f при пределе %d — "+
 				"диалог снова раздут местом под подсказку", h, saveDialogMaxHeight)
 		}
@@ -336,7 +477,8 @@ func TestDialogsStayCompact(t *testing.T) {
 //
 // Это то же требование, что и у TestLayoutHintDoesNotMoveButtons, но с другой
 // стороны: кнопка может не двигаться и в диалоге, который вырос вниз. Здесь
-// спрашивается сам диалог.
+// спрашивается сам диалог. Проверка не зависит от того, всплывашка перед нами
+// или резерв, — оба обязаны держать высоту.
 func TestHintDoesNotChangeDialogHeight(t *testing.T) {
 	savedHosts := core.NetworkTimeHosts
 	core.NetworkTimeHosts = []string{"https://127.0.0.1:1"}
@@ -353,17 +495,47 @@ func TestHintDoesNotChangeDialogHeight(t *testing.T) {
 	e := passwordEntry(t, d, 0)
 	e.SetText(typedCyrillicPin)
 	d.Refresh()
-	if len(visibleHintPopups(d)) == 0 {
-		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: подсказка не всплыла, мерить нечего")
+	if !hasText(visibleTexts(d), wantPinLayoutHint) {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: подсказка не появилась, мерить нечего")
 	}
 	if with := d.MinSize(); with != before {
-		t.Errorf("с всплывшей подсказкой диалог стал %v вместо %v — подсказка занимает место "+
-			"в потоке, содержимое едет", with, before)
+		t.Errorf("с показанной подсказкой диалог стал %v вместо %v — подсказка занимает место "+
+			"в потоке по-разному, содержимое едет", with, before)
 	}
 	e.SetText(typedLatinPin)
 	d.Refresh()
 	if after := d.MinSize(); after != before {
 		t.Errorf("после исчезновения подсказки диалог стал %v вместо %v", after, before)
+	}
+}
+
+// TestReservedHintFormsHaveNoPopup — СТОРОЖ НА СПИСОК hintScenes.
+//
+// Всплывашка разрешена только там, где доказано, что она никого не накрывает,
+// а доказывает это TestFloatingHintCoversNothingInteractive по списку
+// hintScenes. Переведи кто-нибудь диалог пин-кода или сохранения на
+// всплывашку, забыв дописать форму в список, — доказательства не будет, а
+// прогон останется зелёным. Поэтому здесь прямо требуется: в этих двух формах
+// всплывашек нет.
+func TestReservedHintFormsHaveNoPopup(t *testing.T) {
+	for _, c := range []struct {
+		what string
+		open func(*testing.T) (fyne.CanvasObject, fyne.Canvas)
+	}{
+		{"диалог «Введите пин-код»", openPinDialog},
+		{"диалог «Сохранить ключ?»", openSaveDialog},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			d, _ := c.open(t)
+			if !hasText(visibleTexts(d), wantPinLayoutHint) {
+				t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: подсказка не показана")
+			}
+			if n := len(visibleHintPopups(d)); n != 0 {
+				t.Errorf("в этой форме %d всплывающих подсказок, а в списке hintScenes её нет: "+
+					"никто не проверил, что всплывашка не накрывает орган управления. "+
+					"Добавь форму в hintScenes — или верни ей зарезервированное место", n)
+			}
+		})
 	}
 }
 
@@ -433,3 +605,80 @@ var (
 	errWantedLayoutRefusal = errors.New("user32: отказ")
 	errUnsupportedLayout   = kbdlayout.ErrUnsupported
 )
+
+// words — текст со схлопнутыми пробелами: сравнивать нарисованное с исходным
+// надо по словам, потому что перенос по словам разрезает фразу на куски и
+// меняет пробелы на краях.
+func words(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// TestLayoutNoticeTextFitsItsPlace — СООБЩЕНИЕ ОБ ОТКАЗЕ ВИДНО ЦЕЛИКОМ.
+//
+// Сторож, потерянный в первой редакции (ревью UX-01, круг 2). Пока сообщение
+// стояло в зарезервированном месте, его достаточность проверялась вместе с
+// подсказками; резерв убран — и проверять стало нечему, хотя обрезать текст
+// по-прежнему есть чем: подпись переносится по словам, а сколько высоты ей
+// даст VBox, зависит от расчёта Fyne, а не от нас.
+//
+// Меряется настоящей вёрсткой открытого диалога: докуда дотянулся
+// НАРИСОВАННЫЙ текст подписи и сколько высоты ей отведено.
+func TestLayoutNoticeTextFitsItsPlace(t *testing.T) {
+	savedHosts := core.NetworkTimeHosts
+	core.NetworkTimeHosts = []string{"https://127.0.0.1:1"}
+	t.Cleanup(func() { core.NetworkTimeHosts = savedHosts })
+
+	for _, c := range []struct {
+		what string
+		open func(*testing.T) (fyne.CanvasObject, fyne.Canvas)
+	}{
+		{"диалог «Введите пин-код»", openPinDialog},
+		{"диалог «Сохранить ключ?»", openSaveDialog},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			substituteForceEnglish(t, errWantedLayoutRefusal)
+			d, _ := c.open(t)
+
+			var notice *widget.Label
+			walkVisible(d, func(o fyne.CanvasObject) {
+				if l, ok := o.(*widget.Label); ok && l.Text == wantLayoutSwitchFailed {
+					notice = l
+				}
+			})
+			if notice == nil {
+				t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: сообщения об отказе на экране нет")
+			}
+			box := rectOf(notice)
+			if box.size.Height <= 0 {
+				t.Fatalf("подпись с сообщением об отказе нулевой высоты (%v)", box)
+			}
+			var bottom float32
+			var drawn []string
+			walkVisible(notice, func(o fyne.CanvasObject) {
+				txt, ok := o.(*canvas.Text)
+				if !ok || txt.Text == "" {
+					return
+				}
+				drawn = append(drawn, txt.Text)
+				if b := rectOf(txt).bottom(); b > bottom {
+					bottom = b
+				}
+			})
+			if len(drawn) == 0 {
+				t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: в подписи не нарисовано ни строки")
+			}
+			// Первое: нарисованное не вылезает вниз за отведённое подписи.
+			if bottom > box.bottom()+0.5 {
+				t.Errorf("нарисованный текст сообщения об отказе доходит до %.1f, а подписи "+
+					"отведено до %.1f (%v) — сообщение обрежется по высоте", bottom, box.bottom(), box)
+			}
+			// Второе, и без него первого мало: нарисованы ВСЕ слова. Обрезка
+			// внутри строки (Wrapping не по словам) высоту не меняет вовсе —
+			// просто хвост фразы не рисуется, и человек читает «Не удалось
+			// переключить раскладку на английскую» без того, что делать
+			// дальше. Вертикальная проверка такого не видит.
+			if got, want := words(strings.Join(drawn, " ")), words(wantLayoutSwitchFailed); got != want {
+				t.Errorf("нарисовано %q, а сообщение целиком — %q: человек прочтёт полфразы "+
+					"и не узнает, что раскладку надо переключить самому", got, want)
+			}
+		})
+	}
+}

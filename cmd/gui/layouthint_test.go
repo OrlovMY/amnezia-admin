@@ -475,17 +475,23 @@ func TestLayoutHintDoesNotMoveButtons(t *testing.T) {
 // Fyne расставляет строки переноса по своим местам.
 func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
 	t.Helper()
-	w := test.NewWindow(h.pop)
+	// У всплывашки меряется она сама, у резерва — его коробка: и там и там это
+	// прямоугольник, в который текст обязан уложиться.
+	var box fyne.CanvasObject = h.box
+	if h.pop != nil {
+		box = h.pop
+	}
+	w := test.NewWindow(box)
 	t.Cleanup(w.Close)
 	w.Resize(h.size)
-	h.pop.Resize(h.size)
-	h.pop.Refresh()
+	box.Resize(h.size)
+	box.Refresh()
 
 	drv := fyne.CurrentApp().Driver()
-	top := drv.AbsolutePositionForObject(h.pop).Y
+	top := drv.AbsolutePositionForObject(box).Y
 	var bottom float32
 	rows := 0
-	walkVisible(h.pop, func(o fyne.CanvasObject) {
+	walkVisible(box, func(o fyne.CanvasObject) {
 		txt, ok := o.(*canvas.Text)
 		if !ok || txt.Text == "" {
 			return
@@ -528,28 +534,39 @@ func TestLayoutHintSlotFitsText(t *testing.T) {
 		what  string
 		text  string
 		width float32
+		float bool // true — всплывашка, false — зарезервированное место
 	}{
-		{"подсказка про пин в диалоге пин-кода", wantPinLayoutHint, pinDialogHintWidth},
-		{"подсказка про пин в диалоге сохранения", wantPinLayoutHint, saveKeyDialWidth},
-		{"подсказка про ключ на экране подключения", wantKeyLayoutHint, connectFormWidth},
+		{"резерв под подсказку о пине в диалоге пин-кода", wantPinLayoutHint, pinDialogWidth, false},
+		{"резерв под подсказку о пине в диалоге сохранения", wantPinLayoutHint, saveKeyDialWidth, false},
+		{"всплывашка про ключ на экране подключения", wantKeyLayoutHint, connectFormWidth, true},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			anchor := widget.NewEntry()
-			h := newLayoutHint(c.text, c.width, anchor)
-			want := anchor.MinSize()
+			var h *layoutHint
+			var want fyne.Size
+			if c.float {
+				h = newLayoutHint(c.text, c.width, anchor)
+				// Всплывашка обязана быть невидимкой для измерения: коробка,
+				// стоящая в форме, меряется по ОДНОМУ полю ввода.
+				want = anchor.MinSize()
+			} else {
+				h = newReservedHint(c.text, c.width)
+				// Резерв обязан быть постоянным: место занято одинаково и с
+				// подсказкой, и без неё.
+				want = h.size
+			}
 
 			if off := h.box.MinSize(); off != want {
-				t.Errorf("выключенная подсказка занимает в форме %v, а поле ввода — %v: "+
-					"место под подсказку снова зарезервировано, диалог вырастет", off, want)
+				t.Errorf("с выключенной подсказкой коробка занимает в форме %v, ожидалось %v", off, want)
 			}
 			h.setOn(true)
 			if on := h.box.MinSize(); on != want {
-				t.Errorf("включённая подсказка занимает в форме %v вместо %v — "+
+				t.Errorf("с включённой подсказкой коробка занимает в форме %v вместо %v — "+
 					"содержимое под ней поедет, кнопка уйдёт из-под пальца", on, want)
 			}
 			if bottom := renderedTextBottom(t, h); bottom > h.size.Height+0.5 {
-				t.Errorf("нарисованный текст подсказки уходит на %v точек вниз, а всплывашка "+
-					"высотой %v — текст обрежется, человек прочтёт полфразы", bottom, h.size.Height)
+				t.Errorf("нарисованный текст подсказки уходит на %v точек вниз, а отведено %v — "+
+					"текст обрежется, человек прочтёт полфразы", bottom, h.size.Height)
 			}
 			h.setOn(false)
 			if off := h.box.MinSize(); off != want {
