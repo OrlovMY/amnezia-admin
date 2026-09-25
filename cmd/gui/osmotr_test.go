@@ -1049,9 +1049,12 @@ func TestOsmotrCanaryFormsGateWired(t *testing.T) {
 // К9 — РАЗРЕШЕНИЕ НЕ ШИРЕ ДЕФЕКТА: в диалог нового пользователя добавлена
 // ещё одна пустая подпись. При минимальном окне она вылезает снизу — строка
 // «подпись «»: снизу …» с ДРУГИМ числом. Подстрочное сопоставление проглотило
-// бы её разрешением Д1 «подпись «»: снизу 12.0»; полное обязано показать.
+// бы её разрешением вида «подпись «»: снизу» — такое, укороченное, форма и
+// получает здесь нарочно. Полное сопоставление обязано показать находку.
 func TestOsmotrCanaryAllowanceNotWider(t *testing.T) {
-	gateCanary(t, formByName(t, "(в) новый пользователь"), "минимальный", func(t *testing.T, s osmotrScene) {
+	f := formByName(t, "(в) новый пользователь")
+	f.known = append(append([]osmotrKnown{}, f.known...), knownD1("подпись «»: снизу"))
+	gateCanary(t, f, "минимальный", func(t *testing.T, s osmotrScene) {
 		row := findParent(s.root, buttonByText(t, s.root, "Показать изменения"))
 		col := findParent(s.root, row)
 		if col == nil {
