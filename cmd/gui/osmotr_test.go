@@ -1307,3 +1307,62 @@ var knownD3 = osmotrKnown{
 	size:  "",
 	match: "ширина рамки диалога 570.8 вместо 452.0",
 }
+
+// ---------- канарейки разрешения Д3 (ширина рамки) ----------
+
+// formD3 — форма, в которой известен Д3, без разрешения Д3 или с заменой.
+func formD3(t *testing.T, replace *osmotrKnown) osmotrForm {
+	t.Helper()
+	f := formByName(t, "(в) удаление, клиента нет в статистике")
+	var known []osmotrKnown
+	found := false
+	for _, k := range f.known {
+		if k.id == knownD3.id {
+			found = true
+			if replace == nil {
+				continue
+			}
+			k = *replace
+		}
+		known = append(known, k)
+	}
+	if !found {
+		t.Fatal("канарейка ничего не значит: в форме нет разрешения Д3")
+	}
+	f.known = known
+	return f
+}
+
+// К-Д3а — без разрешения Д3 ворота краснеют на раздутой рамке.
+func TestOsmotrCanaryD3Unallowed(t *testing.T) {
+	gateCanary(t, formD3(t, nil), "стартовый", nil,
+		"ширина рамки диалога 570.8 вместо 452.0 — диалог раздулся или сжался")
+}
+
+// К-Д3б — разрешение Д3 с чужим числом не покрывает находку и само
+// остаётся неиспользованным.
+func TestOsmotrCanaryD3OtherNumber(t *testing.T) {
+	other := knownD3
+	other.match = "ширина рамки диалога 570.9 вместо 452.0"
+	gateCanary(t, formD3(t, &other), "стартовый", nil, "НЕИСПОЛЬЗОВАННОЕ РАЗРЕШЕНИЕ «"+knownD3.id)
+}
+
+// К-Д3в — разрешение ширины НЕ ШИРЕ дефекта: подпись с ключом удлинена, и
+// рамка раздувается иначе, чем на 570.8. Настоящее разрешение Д3 на месте,
+// и ворота обязаны покраснеть на новой ширине. Ослабление сравнения до
+// «любая строка про ширину» (ревью QA-01, подмена X4) прошло бы зелёным.
+func TestOsmotrCanaryD3AllowanceNotWider(t *testing.T) {
+	f := formByName(t, "(в) удаление, клиента нет в статистике")
+	gateCanary(t, f, "стартовый", func(t *testing.T, s osmotrScene) {
+		var l *widget.Label
+		walkVisible(s.root, func(o fyne.CanvasObject) {
+			if w, ok := o.(*widget.Label); ok && strings.HasPrefix(w.Text, "Имя: ") {
+				l = w
+			}
+		})
+		if l == nil {
+			t.Fatal("канарейка ничего не значит: подписи «Имя: …» нет")
+		}
+		l.SetText(l.Text + "QQQQQQ")
+	}, "— диалог раздулся или сжался")
+}

@@ -73,6 +73,13 @@ func guiDesync(t *testing.T) (*gatedRunner, *core.Session, *core.Container, []st
 // refreshedUI — окно с таблицей, заполненной НАСТОЯЩИМ refresh().
 func refreshedUI(t *testing.T, sess *core.Session, c *core.Container) *ui {
 	t.Helper()
+	return refreshedUISorted(t, sess, c, nil)
+}
+
+// refreshedUISorted — то же, но до refresh выставляется сортировка (как
+// после клика по заголовку): refresh применяет её через applySort.
+func refreshedUISorted(t *testing.T, sess *core.Session, c *core.Container, prep func(*ui)) *ui {
+	t.Helper()
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
 	u := &ui{
@@ -84,6 +91,9 @@ func refreshedUI(t *testing.T, sess *core.Session, c *core.Container) *ui {
 	}
 	t.Cleanup(func() { u.win.Close() })
 	u.cur = &u.containers[0]
+	if prep != nil {
+		prep(u)
+	}
 	u.buildTable()
 	u.win.SetContent(u.table)
 	u.refresh()
@@ -120,7 +130,21 @@ func shownAndCopied(t *testing.T, u *ui, name string) (shown, copied string) {
 // «0 B / 0 B». Присутствующий с нулевым трафиком Carol — честный ноль.
 func TestTrafficAbsentReachesTableAndClipboard(t *testing.T) {
 	_, sess, c, absent, present := guiDesync(t)
-	u := refreshedUI(t, sess, c)
+	// Сортировка «Трафик ↑» — способ искать неиспользуемых на удаление
+	// (ревью QA-01): неизвестные обязаны встать В КОНЕЦ, а не первыми как
+	// «наименьший трафик». Идёт боевым путём refresh → applySort.
+	u := refreshedUISorted(t, sess, c, func(u *ui) {
+		u.sortPrimary, u.sortPrimaryDir = core.SortByTraffic, core.Asc
+		u.sortSecondary, u.sortSecondaryDir = core.SortNone, core.Asc
+	})
+	if got := u.clients[0].Name(); got != present {
+		t.Errorf("«Трафик ↑»: первой строкой стоит %q, а не измеренный %q — клиент с неизвестным трафиком выдан за «наименьший»", got, present)
+	}
+	for _, cl := range u.clients[1:] {
+		if cl.Name() == present {
+			t.Errorf("«Трафик ↑»: измеренный %q стоит после неизвестных", present)
+		}
+	}
 	if u.statsFailed {
 		t.Fatal("тест перестал что-либо проверять: статистика не получена вовсе — проверяется не тот случай")
 	}
