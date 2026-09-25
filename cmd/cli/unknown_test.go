@@ -264,8 +264,12 @@ func TestListCellsThreeStates(t *testing.T) {
 // строка таблицы клиента name.
 func listRow(t *testing.T, out, name string) string {
 	t.Helper()
+	// Строка ищется по КОЛОНКЕ «Имя» (второе поле), а не по вхождению:
+	// случайный публичный ключ fakesrv может содержать «Bob» подстрокой, и
+	// тогда вернулась бы чужая строка (подозрение на единичное покраснение
+	// 25.09, см. отчёт).
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, name) {
+		if f := strings.Fields(line); len(f) >= 2 && f[1] == name {
 			return line
 		}
 	}

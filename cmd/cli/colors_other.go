@@ -2,14 +2,19 @@
 
 package main
 
-import "os"
+import (
+	"os"
 
-// enableVT — на Linux/macOS терминалы поддерживают ANSI нативно, никакой
-// Windows-специфичной настройки консоли (кодовая страница, VT-режим) не
-// требуется. Уважаем только общепринятую переменную NO_COLOR.
+	"golang.org/x/term"
+)
+
+// enableVT — на Linux/macOS терминалы поддерживают ANSI нативно, настройки
+// консоли не требуется. Но цвет включается ТОЛЬКО если stdout — терминал:
+// прежняя редакция возвращала true всегда (кроме NO_COLOR), и
+// `amnezia-admin list > файл` на Linux/macOS писал управляющие коды
+// вперемешку с данными, а на Windows — чистый текст (там GetConsoleMode
+// падает на перенаправленном выводе). Поведение расходилось между ОС; это
+// вскрыл CI PR #20 (задание НЕЗНАНИЕ-ТРАФИК). Решение — общая colorDecision.
 func enableVT() bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return true
+	return colorDecision(os.Getenv("NO_COLOR"), term.IsTerminal(int(os.Stdout.Fd())))
 }
