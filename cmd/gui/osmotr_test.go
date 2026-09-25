@@ -39,7 +39,9 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -477,9 +479,15 @@ func distinct(v []float32) []float32 {
 
 // ---------- ворота ----------
 
-// osmotrKnown — ИЗВЕСТНЫЙ ДЕФЕКТ, разрешённый поимённо. match — кусок строки
-// выдачи БЕЗ чисел (вылезание, перекрытие или сжатие), size — размер окна,
-// в котором дефект известен. Разрешение, ничего не покрывшее в своём
+// osmotrKnown — ИЗВЕСТНЫЙ ДЕФЕКТ, разрешённый поимённо. match — ПОЛНАЯ
+// строка находки (вылезание, перекрытие или сжатие) с числами, сравнивается
+// на равенство; size — размер окна, в котором дефект известен.
+//
+// ПОЧЕМУ НЕ ПОДСТРОКА (ревью QA-01). Разрешение «подпись «»: снизу» подстрокой
+// покрыло бы вылезание ЛЮБОЙ пустой подписи формы на любую глубину — оно
+// было шире дефекта, который описывает. Полная строка покрывает ровно одну
+// находку; сдвинулась она хоть на точку — это уже другая находка, и ворота
+// покажут обе: новую как дефект, старую как неиспользованное разрешение. Разрешение, ничего не покрывшее в своём
 // размере, роняет прогон.
 type osmotrKnown struct {
 	id, size, match string
@@ -523,7 +531,7 @@ func osmotrGate(f osmotrForm, size string, rep *osmotrReport, errf func(string, 
 		for _, l := range lines {
 			ok := false
 			for i, k := range f.known {
-				if strings.HasPrefix(size, k.size) && strings.Contains(l, k.match) {
+				if strings.HasPrefix(size, k.size) && l == k.match {
 					used[i], ok = true, true
 				}
 			}
@@ -803,34 +811,45 @@ var connectMayOverlap = []string{"подсказка про раскладку|"
 // Д1 поимённо: какие строки выдачи известны в минимальном окне.
 var (
 	knownSaveD1 = []osmotrKnown{
-		knownD1("текст «Пин-код»: снизу"), knownD1("поле «Пин-код»: снизу"),
-		knownD1("текст «Повтор пина»: снизу"), knownD1("поле «Повтор пина»: снизу"),
-		knownD1("подпись «Похоже, включена не английская раскладка…»: снизу"),
-		knownD1("галка «Привязать к этой учётке Windows (файл не…»: снизу"),
-		knownD1("текст «Рекомендуется: украденный файл будет бес…»: снизу"),
-		knownD1("подпись «»: снизу"), knownD1("кнопка «Сохранить»: снизу"),
-		knownD1("поле «Метка» × кнопка «Не сохранять»"),
-		knownD1("поле «Пин-код» × кнопка «Не сохранять»"),
+		knownD1("текст «Пин-код»: снизу 3.1"), knownD1("поле «Пин-код»: снизу 11.1"),
+		knownD1("текст «Повтор пина»: снизу 42.2"), knownD1("поле «Повтор пина»: снизу 50.2"),
+		knownD1("подпись «Похоже, включена не английская раскладка…»: снизу 127.4"),
+		knownD1("галка «Привязать к этой учётке Windows (файл не…»: снизу 166.5"),
+		knownD1("текст «Рекомендуется: украденный файл будет бес…»: снизу 185.5"),
+		knownD1("подпись «»: снизу 224.5"), knownD1("кнопка «Сохранить»: снизу 264.5"),
+		knownD1("поле «Метка» × кнопка «Не сохранять»: 114x24 = 2731 т²"),
+		knownD1("поле «Пин-код» × кнопка «Не сохранять»: 114x8 = 910 т²"),
 	}
-	knownSaveFailD1 = append(append([]osmotrKnown{}, knownSaveD1...),
-		knownD1("подпись «"+firstLine(wantLayoutSwitchFailed)+"»: снизу"))
+	// В состоянии отказа раскладки подпись об отказе стоит выше галки, и всё
+	// ниже неё уезжает на её высоту (39 т.): числа свои.
+	knownSaveFailD1 = []osmotrKnown{
+		knownD1("текст «Пин-код»: снизу 3.1"), knownD1("поле «Пин-код»: снизу 11.1"),
+		knownD1("текст «Повтор пина»: снизу 42.2"), knownD1("поле «Повтор пина»: снизу 50.2"),
+		knownD1("подпись «Похоже, включена не английская раскладка…»: снизу 127.4"),
+		knownD1("подпись «" + firstLine(wantLayoutSwitchFailed) + "»: снизу 166.5"),
+		knownD1("галка «Привязать к этой учётке Windows (файл не…»: снизу 205.5"),
+		knownD1("текст «Рекомендуется: украденный файл будет бес…»: снизу 224.5"),
+		knownD1("подпись «»: снизу 263.6"), knownD1("кнопка «Сохранить»: снизу 303.6"),
+		knownD1("поле «Метка» × кнопка «Не сохранять»: 114x24 = 2731 т²"),
+		knownD1("поле «Пин-код» × кнопка «Не сохранять»: 114x8 = 910 т²"),
+	}
 	// knownPinFailD2 — Д2, найден осмотром 25.09.2026 (второй круг): диалог
 	// пин-кода в состоянии «отказ переключения раскладки» выше окна
 	// минимального размера (408 т.), и «Отмена» ложится на «Повторить».
 	knownPinFailD2 = []osmotrKnown{{
 		id:   "ИЗВЕСТНЫЙ ДЕФЕКТ Д2 (пин-код с отказом раскладки не помещается в окно высотой 408 т.)",
-		size: "минимальный", match: "кнопка «Повторить» × кнопка «Отмена»"}}
+		size: "минимальный", match: "кнопка «Повторить» × кнопка «Отмена»: 73x32 = 2304 т²"}}
 	knownActionD1 = []osmotrKnown{
-		knownD1("подпись «»: снизу"),
-		knownD1("кнопка «Показать изменения» × кнопка «Отмена»"),
-		knownD1("подпись «» × кнопка «Отмена»"),
+		knownD1("подпись «»: снизу 12.0"),
+		knownD1("кнопка «Показать изменения» × кнопка «Отмена»: 73x25 = 1812 т²"),
+		knownD1("подпись «» × кнопка «Отмена»: 73x7 = 514 т²"),
 	}
 	knownDeleteD1 = []osmotrKnown{
-		knownD1("подпись «Не удалось получить данные о подключения…»: снизу"),
-		knownD1("кнопка «Удалить»: снизу"), knownD1("кнопка «Показать изменения»: снизу"),
-		knownD1("подпись «»: снизу"),
-		knownD1("подпись «Имя: Ноутбук…» × кнопка «Отмена»"),
-		knownD1("подпись «Не удалось получить данные о подключения…» × кнопка «Отмена»"),
+		knownD1("подпись «Не удалось получить данные о подключения…»: снизу 48.3"),
+		knownD1("кнопка «Удалить»: снизу 88.3"), knownD1("кнопка «Показать изменения»: снизу 88.3"),
+		knownD1("подпись «»: снизу 127.4"),
+		knownD1("подпись «Имя: Ноутбук…» × кнопка «Отмена»: 73x23 = 1677 т²"),
+		knownD1("подпись «Не удалось получить данные о подключения…» × кнопка «Отмена»: 73x9 = 649 т²"),
 	}
 )
 
@@ -883,11 +902,16 @@ func runOsmotr(t *testing.T, f osmotrForm, size, themeName string, v fyne.ThemeV
 // неразрешённом дефекте вида, на недействительной выдаче, на изменившейся
 // ширине диалога и на неиспользованном разрешении.
 func TestOsmotrForms(t *testing.T) {
+	planted := osmotrPlants[os.Getenv(osmotrPlantEnv)]
 	for _, f := range osmotrForms {
 		for _, size := range osmotrSizes {
 			for _, th := range osmotrThemes {
 				t.Run(f.name+"/"+size+"/"+th.name, func(t *testing.T) {
-					rep := runOsmotr(t, f, size, th.name, th.v, nil)
+					var plant func(*testing.T, osmotrScene)
+					if planted.form == f.name {
+						plant = planted.plant // только под канарейкой проводки
+					}
+					rep := runOsmotr(t, f, size, th.name, th.v, plant)
 					t.Log("\n" + rep.String())
 					osmotrGate(f, size, rep, t.Errorf)
 				})
@@ -949,13 +973,92 @@ func replaceIn(t *testing.T, root, old, new fyne.CanvasObject) {
 // К1 — ВЧЕРАШНИЙ ДЕФЕКТ (915fc49): в разметке диалога пин-кода подсказка
 // сделана всплывающей над полем пина. Раскладка ставит её на «Сервер 1».
 func TestOsmotrCanaryPopupOverServerName(t *testing.T) {
-	gateCanary(t, formByName(t, "(б) пин-код, подсказка вкл"), "стартовый", func(t *testing.T, s osmotrScene) {
-		pin := passwordEntry(t, s.root, 0)
-		h := newLayoutHint(wantPinLayoutHint, pinDialogWidth, pin)
-		replaceIn(t, s.root, pin, h.box)
-		h.setOn(true)
-		h.box.Refresh()
-	}, "перекрытие: подпись «Сервер 1» × всплывашка")
+	gateCanary(t, formByName(t, "(б) пин-код, подсказка вкл"), "стартовый", plantPopupOverServerName,
+		"перекрытие: подпись «Сервер 1» × всплывашка")
+}
+
+func plantPopupOverServerName(t *testing.T, s osmotrScene) {
+	pin := passwordEntry(t, s.root, 0)
+	h := newLayoutHint(wantPinLayoutHint, pinDialogWidth, pin)
+	replaceIn(t, s.root, pin, h.box)
+	h.setOn(true)
+	h.box.Refresh()
+}
+
+// ---------- канарейка ПРОВОДКИ: ворота обязаны доходить до TestOsmotrForms ----------
+
+// osmotrPlantEnv — переменная окружения, по которой TestOsmotrForms
+// подсаживает дефект в одну форму. Ставит её ТОЛЬКО канарейка проводки, в
+// дочернем процессе; в обычном прогоне переменной нет и подсадки нет.
+const osmotrPlantEnv = "OSMOTR_PLANT"
+
+var osmotrPlants = map[string]struct {
+	form  string
+	plant func(*testing.T, osmotrScene)
+}{
+	"popup": {"(б) пин-код, подсказка вкл", plantPopupOverServerName},
+}
+
+// TestOsmotrCanaryFormsGateWired — ПРОВОДКА ОТ ОСНОВНОГО ТЕСТА К ВОРОТАМ
+// (ревью QA-01, третий круг). Остальные канарейки зовут ворота со своим
+// сборщиком ошибок и потому не видят, если в TestOsmotrForms ворота
+// подключены к t.Logf вместо t.Errorf: QA-01 так и сделал, и весь пакет был ok.
+//
+// Здесь гоняется НАСТОЯЩИЙ TestOsmotrForms — тем же тестовым бинарником, в
+// дочернем процессе, с подсаженным вчерашним дефектом. Процесс обязан
+// завершиться провалом с сообщением ворот. Без подсадки тот же подтест обязан
+// пройти: иначе фильтр -test.run мог ничего не найти, и «провал» значил бы
+// не то.
+//
+// ПОЧЕМУ ПРОЦЕСС, А НЕ ОБЩАЯ ФУНКЦИЯ С testing.TB. Общая функция переносит
+// провод внутрь себя, но строка вызова в TestOsmotrForms остаётся — и её
+// можно так же переключить на заглушку. Провал обязан дойти до того самого
+// *testing.T, который видит go test; проверить это можно только снаружи.
+func TestOsmotrCanaryFormsGateWired(t *testing.T) {
+	if os.Getenv(osmotrPlantEnv) != "" {
+		t.Skip("дочерний процесс канарейки проводки")
+	}
+	sub := []string{"TestOsmotrForms", "(б)_пин-код,_подсказка_вкл", "стартовый", "светлая"}
+	for i, p := range sub {
+		sub[i] = "^" + regexp.QuoteMeta(p) + "$"
+	}
+	run := func(plant string) (string, error) {
+		cmd := exec.Command(os.Args[0], "-test.run", strings.Join(sub, "/"), "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), osmotrPlantEnv+"="+plant)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	clean, err := run("нет") // переменная задана, подсадки с таким именем нет
+	if err != nil || !strings.Contains(clean, "--- PASS: TestOsmotrForms/") {
+		t.Fatalf("без подсадки подтест не прошёл или не нашёлся (err=%v) — проверка проводки ничего не значит:\n%s", err, clean)
+	}
+	out, err := run("popup")
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "--- FAIL") || strings.Contains(l, "перекрытие:") {
+			t.Log("ДОЧЕРНИЙ: " + strings.TrimSpace(l))
+		}
+	}
+	if err == nil || !strings.Contains(out, "--- FAIL: TestOsmotrForms/") ||
+		!strings.Contains(out, "перекрытие: подпись «Сервер 1» × всплывашка") {
+		t.Errorf("TestOsmotrForms НЕ ПОКРАСНЕЛ на подсаженной всплывашке над «Сервер 1» (err=%v): "+
+			"ворота не доходят до основного теста", err)
+	}
+}
+
+// К9 — РАЗРЕШЕНИЕ НЕ ШИРЕ ДЕФЕКТА: в диалог нового пользователя добавлена
+// ещё одна пустая подпись. При минимальном окне она вылезает снизу — строка
+// «подпись «»: снизу …» с ДРУГИМ числом. Подстрочное сопоставление проглотило
+// бы её разрешением Д1 «подпись «»: снизу 12.0»; полное обязано показать.
+func TestOsmotrCanaryAllowanceNotWider(t *testing.T) {
+	gateCanary(t, formByName(t, "(в) новый пользователь"), "минимальный", func(t *testing.T, s osmotrScene) {
+		row := findParent(s.root, buttonByText(t, s.root, "Показать изменения"))
+		col := findParent(s.root, row)
+		if col == nil {
+			t.Fatal("канарейка ничего не значит: у ряда кнопок нет столбца")
+		}
+		col.Add(widget.NewLabel(""))
+	}, "вылезание: подпись «»: снизу")
 }
 
 // К2 — вылезание: в разметке главного окна очень длинное имя сервера.
