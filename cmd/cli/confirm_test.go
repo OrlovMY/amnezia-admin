@@ -19,7 +19,7 @@ func testCard() ActionCard {
 		Container: "amnezia-awg",
 		Name:      "Иван Иванов",
 		Created:   "2024-01-02 03:04:0",
-		LastSeen:  "2024-05-06 07:08",
+		Seen:      core.LastSeen{State: core.SeenWas, When: "2024-05-06 07:08"},
 		Key:       "PUBKEYXYZ==",
 	}
 }
@@ -73,7 +73,7 @@ func TestNonTTYWithoutYesExit2(t *testing.T) {
 	if !strings.Contains(errOut.String(), "-yes") {
 		t.Errorf("errOut не содержит \"-yes\": %q", errOut.String())
 	}
-	for _, want := range []string{card.Host, card.Container, card.Name, card.Created, card.LastSeen, card.Key, card.Action} {
+	for _, want := range []string{card.Host, card.Container, card.Name, card.Created, card.Seen.When, card.Key, card.Action} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("карточка в out не содержит поле %q; out:\n%s", want, out.String())
 		}
@@ -123,7 +123,7 @@ func TestToggleDisableAsks(t *testing.T) {
 		t.Fatal("needsConfirm(toggle, активная запись) должен быть true")
 	}
 
-	card := ActionCard{Action: "отключить", Host: "h", Container: "c", Name: "Иван", Created: "cr", LastSeen: "—", Key: "k1"}
+	card := ActionCard{Action: "отключить", Host: "h", Container: "c", Name: "Иван", Created: "cr", Seen: core.LastSeen{State: core.SeenNever}, Key: "k1"}
 
 	var out, errOut bytes.Buffer
 	proceed, code := confirmOrExit(strings.NewReader("y\n"), &out, &errOut, true, false, card)

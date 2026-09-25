@@ -21,9 +21,22 @@ func sample() Row {
 		ClientID:  "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/aBcD1=",
 		CanManage: true,
 		Handshake: "2 минуты назад",
-		Stats:     core.PeerStat{RxBytes: 1200000, TxBytes: 900000},
+		Traffic:   measured(core.PeerStat{RxBytes: 1200000, TxBytes: 900000}),
 	}
 }
+
+// measured — показание клиента, который ЕСТЬ в ответе сервера. Собирается
+// через core.ReadPeer, а не литералом: измеренное показание иначе не
+// построить (поле закрыто), и это часть правила.
+func measured(st core.PeerStat) core.PeerReading {
+	return core.ReadPeer(map[string]core.PeerStat{"k": st}, false, "k")
+}
+
+// failedReading — запрос статистики не удался.
+func failedReading() core.PeerReading { return core.ReadPeer(nil, true, "k") }
+
+// absentReading — сервер ответил, клиента в ответе нет.
+func absentReading() core.PeerReading { return core.ReadPeer(map[string]core.PeerStat{}, false, "k") }
 
 func TestCellTextTable(t *testing.T) {
 	cases := []struct {
@@ -56,17 +69,30 @@ func TestCopyKeepsUnknownUnknown(t *testing.T) {
 	notAsked.CanManage = false
 
 	failed := sample()
-	failed.StatsFailed = true
+	failed.Traffic = failedReading()
 	failed.ActivityFailed = true
 
 	zero := sample()
-	zero.Stats = core.PeerStat{}
+	zero.Traffic = measured(core.PeerStat{})
 	zero.Handshake = "—"
+
+	// Задание НЕЗНАНИЕ-ТРАФИК: клиента нет в ответе сервера.
+	absent := sample()
+	absent.Traffic = absentReading()
+	absent.Handshake = ""
 
 	traffic := map[string]string{
 		"не спрашивали": CopyValue(notAsked, 4),
 		"не удалось":    CopyValue(failed, 4),
 		"измеренный 0":  CopyValue(zero, 4),
+		"нет в ответе":  CopyValue(absent, 4),
+	}
+	if got := traffic["нет в ответе"]; got != "?" {
+		t.Errorf("трафик клиента, которого нет в ответе сервера, копируется как %q, ожидалось \"?\" — "+
+			"отсутствие в статистике снова уезжает в буфер измеренным нулём", got)
+	}
+	if got := traffic["измеренный 0"]; got != "0 B / 0 B" {
+		t.Errorf("измеренный ноль копируется как %q, ожидалось \"0 B / 0 B\" — честный ноль обязан остаться нулём", got)
 	}
 	if traffic["не удалось"] == traffic["измеренный 0"] {
 		t.Errorf("трафик: «узнать не удалось» копируется как измеренное значение (%q) — "+
@@ -173,9 +199,15 @@ func TestCopyRowFormat(t *testing.T) {
 // этот, и он обязан быть проверен отдельно.
 func TestCopyRowUnknownStaysUnknown(t *testing.T) {
 	failed := sample()
-	failed.StatsFailed = true
+	failed.Traffic = failedReading()
 	zero := sample()
-	zero.Stats = core.PeerStat{}
+	zero.Traffic = measured(core.PeerStat{})
+	absent := sample()
+	absent.Traffic = absentReading()
+	if got := CopyRow(absent); !strings.Contains(got, "Трафик ↓/↑: ?") || strings.Contains(got, "0 B / 0 B") {
+		t.Errorf("строка целиком для клиента, которого нет в ответе сервера: %q — "+
+			"ожидалось «Трафик ↓/↑: ?» и ни одного «0 B / 0 B»", got)
+	}
 	if CopyRow(failed) == CopyRow(zero) {
 		t.Errorf("строка целиком: «статистику получить не удалось» неотличима от нулевого трафика: %q",
 			CopyRow(failed))

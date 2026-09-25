@@ -640,8 +640,18 @@ func ResolveNonNumeric(clients []ClientEntry, ident string) (Resolution, error) 
 // них порядок по дате создания (Created). Сортировка стабильна и выполняется
 // на месте (in place). stats — карта ClientID → PeerStat (как из GetPeerStats).
 func SortByActivity(clients []ClientEntry, stats map[string]PeerStat) {
+	//
+	// Клиенты, про которых статистики нет (запрос не удался или их нет в
+	// ответе), — после всех измеренных, даже после «не подключался»:
+	// незнание не сортируется как ноль (задание НЕЗНАНИЕ-ТРАФИК). Значения
+	// читаются только через ReadPeer(...).Measured().
 	sort.SliceStable(clients, func(i, j int) bool {
-		hi, hj := stats[clients[i].ClientID].LastHandshake, stats[clients[j].ClientID].LastHandshake
+		si, ki := ReadPeer(stats, false, clients[i].ClientID).Measured()
+		sj, kj := ReadPeer(stats, false, clients[j].ClientID).Measured()
+		if ki != kj {
+			return ki
+		}
+		hi, hj := si.LastHandshake, sj.LastHandshake
 		if hi.IsZero() && hj.IsZero() {
 			return clients[i].Created() < clients[j].Created()
 		}

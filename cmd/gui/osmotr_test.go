@@ -522,11 +522,22 @@ func osmotrGate(f osmotrForm, size string, rep *osmotrReport, errf func(string, 
 		errf("%s | %s | %s: выдача НЕДЕЙСТВИТЕЛЬНА — из описи не найдено %q, сверх описи %q",
 			f.name, rep.size, rep.theme, rep.missing, rep.extra)
 	}
-	if f.width > 0 && (rep.bounds.size.Width < f.width-0.5 || rep.bounds.size.Width > f.width+0.5) {
-		errf("%s | %s | %s: ширина рамки диалога %.1f вместо %.1f — диалог раздулся или сжался",
-			f.name, rep.size, rep.theme, rep.bounds.size.Width, f.width)
-	}
 	used := make([]bool, len(f.known))
+	// Ширина рамки — такая же находка, как вылезание: разрешается только
+	// ПОИМЁННО полной строкой (Д3, задание НЕЗНАНИЕ-ТРАФИК), и
+	// неиспользованное разрешение ширины роняет прогон так же.
+	if f.width > 0 && (rep.bounds.size.Width < f.width-0.5 || rep.bounds.size.Width > f.width+0.5) {
+		line := fmt.Sprintf("ширина рамки диалога %.1f вместо %.1f", rep.bounds.size.Width, f.width)
+		ok := false
+		for i, k := range f.known {
+			if strings.HasPrefix(size, k.size) && line == k.match {
+				used[i], ok = true, true
+			}
+		}
+		if !ok {
+			errf("%s | %s | %s: %s — диалог раздулся или сжался", f.name, rep.size, rep.theme, line)
+		}
+	}
 	check := func(what string, lines []string) {
 		for _, l := range lines {
 			ok := false
@@ -873,6 +884,11 @@ var osmotrForms = []osmotrForm{
 		width: 412, known: knownActionD1},
 	{name: "(в) удаление", open: openDelete, inventory: invDelete, width: 452, known: knownDeleteD1},
 	{name: "(г) главное окно", open: openMain, inventory: invMain},
+	{name: "(г) главное окно, отключённый клиент", open: openMainDisabled, inventory: invMain},
+	{name: "(в) удаление, клиента нет в статистике", open: openDeleteAnswered(1, false),
+		inventory: invDeleteWith(rowQName, deleteAbsentLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteAbsentLabel, "29.2", "69.2", "108.3"), knownD3)},
+	{name: "(в) удаление, клиент отключён", open: openDeleteAnswered(1, true),
+		inventory: invDeleteWith(rowQName, deleteDisabledLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteDisabledLabel, "29.2", "69.2", "108.3"), knownD3)},
 }
 
 var osmotrThemes = []struct {
@@ -1183,4 +1199,170 @@ func findParent(root, child fyne.CanvasObject) *fyne.Container {
 		}
 	})
 	return p
+}
+
+// ---------- кадры задания НЕЗНАНИЕ-ТРАФИК (ревью UX-01: новых экранов не видел никто) ----------
+
+// osmotrWgShow — сервер, который ОТВЕЧАЕТ на `wg show wg0 dump` списком
+// peers (без трафика и рукопожатий); остальные команды — «сервера нет».
+// gate, как у osmotrNoServer, держит ответ, пока форма не собрана.
+type osmotrWgShow struct {
+	gate  chan struct{}
+	peers []string
+}
+
+func (s osmotrWgShow) Run(cmd string, _ []byte) (string, error) {
+	if s.gate != nil {
+		<-s.gate
+	}
+	if !strings.HasSuffix(cmd, "wg show wg0 dump") {
+		return "", fmt.Errorf("осмотр: сервера нет")
+	}
+	out := "serverpriv\tserverpub\t51820\toff\n"
+	for _, p := range s.peers {
+		out += p + "\t(none)\t(none)\t0.0.0.0/0\t0\t0\t0\toff\n"
+	}
+	return out, nil
+}
+
+// osmotrMainDisabled — главное окно, в котором «Телефон Анны» (ключ из 43 «Q») ОТКЛЮЧЁН (в
+// статистике его нет, как в бою): видно «отключён» в активности и трафике.
+func osmotrMainDisabled(u *ui) {
+	osmotrMain(u)
+	u.clients[1].UserData["disabled"] = true
+	u.table.Refresh()
+}
+
+func openMainDisabled(t *testing.T, u *ui, sized func()) osmotrScene {
+	osmotrMainDisabled(u)
+	sized()
+	c := u.win.Canvas()
+	return osmotrScene{root: c.Content(), canvas: c, mins: osmotrFrame(c.Content(), nil)}
+}
+
+// openDeleteAnswered — диалог удаления строки row, когда сервер ОТВЕТИЛ, а
+// клиента row в ответе нет (в ответе только «Ноутбук»). disabled — сначала
+// отключить строку (исход «отключён»), иначе исход «нет в статистике».
+func openDeleteAnswered(row int, disabled bool) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return func(t *testing.T, u *ui, sized func()) osmotrScene {
+		if disabled {
+			osmotrMainDisabled(u)
+		} else {
+			osmotrMain(u)
+		}
+		sized()
+		t.Cleanup(func() { waitGUIGoroutines(t) })
+		gate := make(chan struct{})
+		u.sess = core.NewSessionWithRunner(osmotrWgShow{gate: gate, peers: []string{testKey}}, u.sess.Creds)
+		u.selectedRow = row
+		u.deleteSelected()
+		c := u.win.Canvas()
+		pop := topPopup(t, c)
+		mins := osmotrFrame(pop, nil)
+		close(gate)
+		waitGUIGoroutines(t)
+		return osmotrScene{root: pop, canvas: c, mins: mins}
+	}
+}
+
+// Первые строки меток новых исходов — как их сокращает прибор (набраны
+// руками по выдаче 25.09.2026, а не взяты из guiview).
+const (
+	rowQName            = "Телефон Анны"
+	deleteAbsentLabel   = "Клиента нет в статистике сервера: сейчас…"
+	deleteDisabledLabel = "Клиент отключён: сервер его сейчас не пр…"
+)
+
+// invDeleteWith — опись диалога удаления клиента name с меткой исхода label.
+func invDeleteWith(name, label string) []string {
+	return []string{
+		"подпись:Удалить пользователя?", "подпись:Имя: " + name + "…",
+		"подпись:" + label,
+		"кнопка:Удалить", "кнопка:Показать изменения", "подпись:", "кнопка:Отмена",
+	}
+}
+
+// knownDeleteAnsweredD1 — тот же Д1 (диалог выше окна высотой 161 т.), что
+// у knownDeleteD1; числа по выдаче: метка «нет в статистике» переносится в три строки (как у отказа), «отключён» — в две.
+func knownDeleteAnsweredD1(name, label, lbl, btn, st string) []osmotrKnown {
+	return []osmotrKnown{
+		knownD1("подпись «" + label + "»: снизу " + lbl),
+		knownD1("кнопка «Удалить»: снизу " + btn), knownD1("кнопка «Показать изменения»: снизу " + btn),
+		knownD1("подпись «»: снизу " + st),
+		knownD1("подпись «Имя: " + name + "…» × кнопка «Отмена»: 73x23 = 1677 т²"),
+		knownD1("подпись «" + label + "» × кнопка «Отмена»: 73x9 = 649 т²"),
+	}
+}
+
+// knownD3 — ИЗВЕСТНЫЙ ДЕФЕКТ Д3, найден осмотром 25.09.2026 (задание
+// НЕЗНАНИЕ-ТРАФИК): в диалоге удаления подпись «Имя / Создан / Ключ» не
+// переносится, и ключ из широких знаков (43 «Q» + «=») раздувает рамку с
+// 452 до 570.8 т. — в обоих размерах окна. Формы стоят на строке с таким
+// ключом НАМЕРЕННО: переставить их на удобный ключ значило бы спрятать
+// дефект сменой входных данных. Не чинено: решение владельца вместе с Д1 и
+// Д2. Числа Д1 этих форм сняты при раздутой рамке (метка исхода в две
+// строки): починка Д3 сдвинет и их, и ворота покажут это.
+var knownD3 = osmotrKnown{
+	id:    "ИЗВЕСТНЫЙ ДЕФЕКТ Д3 (подпись с ключом из широких знаков не переносится, диалог удаления раздувается)",
+	size:  "",
+	match: "ширина рамки диалога 570.8 вместо 452.0",
+}
+
+// ---------- канарейки разрешения Д3 (ширина рамки) ----------
+
+// formD3 — форма, в которой известен Д3, без разрешения Д3 или с заменой.
+func formD3(t *testing.T, replace *osmotrKnown) osmotrForm {
+	t.Helper()
+	f := formByName(t, "(в) удаление, клиента нет в статистике")
+	var known []osmotrKnown
+	found := false
+	for _, k := range f.known {
+		if k.id == knownD3.id {
+			found = true
+			if replace == nil {
+				continue
+			}
+			k = *replace
+		}
+		known = append(known, k)
+	}
+	if !found {
+		t.Fatal("канарейка ничего не значит: в форме нет разрешения Д3")
+	}
+	f.known = known
+	return f
+}
+
+// К-Д3а — без разрешения Д3 ворота краснеют на раздутой рамке.
+func TestOsmotrCanaryD3Unallowed(t *testing.T) {
+	gateCanary(t, formD3(t, nil), "стартовый", nil,
+		"ширина рамки диалога 570.8 вместо 452.0 — диалог раздулся или сжался")
+}
+
+// К-Д3б — разрешение Д3 с чужим числом не покрывает находку и само
+// остаётся неиспользованным.
+func TestOsmotrCanaryD3OtherNumber(t *testing.T) {
+	other := knownD3
+	other.match = "ширина рамки диалога 570.9 вместо 452.0"
+	gateCanary(t, formD3(t, &other), "стартовый", nil, "НЕИСПОЛЬЗОВАННОЕ РАЗРЕШЕНИЕ «"+knownD3.id)
+}
+
+// К-Д3в — разрешение ширины НЕ ШИРЕ дефекта: подпись с ключом удлинена, и
+// рамка раздувается иначе, чем на 570.8. Настоящее разрешение Д3 на месте,
+// и ворота обязаны покраснеть на новой ширине. Ослабление сравнения до
+// «любая строка про ширину» (ревью QA-01, подмена X4) прошло бы зелёным.
+func TestOsmotrCanaryD3AllowanceNotWider(t *testing.T) {
+	f := formByName(t, "(в) удаление, клиента нет в статистике")
+	gateCanary(t, f, "стартовый", func(t *testing.T, s osmotrScene) {
+		var l *widget.Label
+		walkVisible(s.root, func(o fyne.CanvasObject) {
+			if w, ok := o.(*widget.Label); ok && strings.HasPrefix(w.Text, "Имя: ") {
+				l = w
+			}
+		})
+		if l == nil {
+			t.Fatal("канарейка ничего не значит: подписи «Имя: …» нет")
+		}
+		l.SetText(l.Text + "QQQQQQ")
+	}, "— диалог раздулся или сжался")
 }

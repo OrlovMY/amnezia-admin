@@ -32,23 +32,43 @@ const (
 	// а не код возврата.
 	cardActivityUnknown = "Не удалось получить данные о подключениях.\n" +
 		"Неизвестно, пользуется ли клиент этим доступом прямо сейчас."
+	// cardActivityAbsent — сервер ответил, но этого клиента в ответе нет
+	// (задание НЕЗНАНИЕ-ТРАФИК, место № 4). Раньше этот случай печатался
+	// как cardActivityNone: пропущенный ключ карты читался пустой строкой.
+	// Первая строка — то, что из ответа ИЗВЕСТНО (работающий wg клиента не
+	// держит, значит, подключиться сейчас он не может); вторая — то, что
+	// неизвестно. Отдельный текст, а не cardActivityUnknown: запрос не
+	// провалился, и «не удалось получить данные» было бы неправдой.
+	cardActivityAbsent = "Клиента нет в статистике сервера: сейчас сервер его не принимает.\n" +
+		"Были ли подключения раньше — неизвестно."
+	// cardActivityDisabled — клиент отключён, и в ответе его нет: это
+	// штатно, отключение само вырезает peer из рантайма. Текст UX-01: без
+	// него владелец читал cardActivityAbsent — «похоже на неисправность» —
+	// про клиента, которого сам отключил.
+	cardActivityDisabled = "Клиент отключён: сервер его сейчас не принимает.\n" +
+		"Были ли подключения до отключения — неизвестно."
 )
 
 // DeleteCardActivity — строка активности в карточке удаления GUI.
 //
-// err ПЕРЕВЕШИВАЕТ содержимое hs: при отказе сервера карта может прийти
-// пустой или частично заполненной, и читать её означало бы снова выдавать
-// незнание за «нет». Порядок ветвей здесь — часть правила, а не стиль
-// (признак 3 правила П-НЕЗНАНИЕ: частный случай выше общего перехватывает
-// «не знаем»).
-func DeleteCardActivity(hs map[string]string, clientID string, err error) string {
-	if err != nil {
-		return cardActivityUnknown
+// Классификацию делает core.ClassifyLastSeen — единственное место правила
+// для GUI и CLI (ревью QA-01/UX-01, задание НЕЗНАНИЕ-ТРАФИК): ошибка
+// перевешивает карту; отключённый клиент, которого нет в ответе, — своё
+// состояние, ВЫШЕ «нет в ответе» (признак 3); отсутствующий ключ — не
+// «Подключений не было.». Здесь только текст для каждого исхода.
+func DeleteCardActivity(hs map[string]string, clientID string, err error, disabled bool) string {
+	s := core.ClassifyLastSeen(hs, err, clientID, disabled)
+	switch s.State {
+	case core.SeenDisabled:
+		return cardActivityDisabled
+	case core.SeenAbsent:
+		return cardActivityAbsent
+	case core.SeenNever:
+		return cardActivityNone
+	case core.SeenWas:
+		return fmt.Sprintf(cardActivityWas, s.When)
 	}
-	if v := hs[clientID]; v != "" && v != "—" {
-		return fmt.Sprintf(cardActivityWas, v)
-	}
-	return cardActivityNone
+	return cardActivityUnknown
 }
 
 // ActivityText — ячейка колонки «Активность» таблицы пользователей.
@@ -83,24 +103,33 @@ func ActivityText(canManage, activityFailed, disabled bool, hs string) string {
 
 // TrafficText — ячейка колонки «Трафик» таблицы пользователей.
 //
-//	!canManage  → "—"  статистика не запрашивалась вовсе (нет `wg` у
-//	                   XRay/DNS): «0 B» здесь означало бы измеренный ноль;
-//	statsFailed → "?"  запрос был и не удался — то же обозначение
-//	                   неизвестного, что в соседней колонке активности;
-//	иначе       → измеренные величины.
+//	!canManage          → "—"        статистика не запрашивалась вовсе (нет
+//	                                 `wg` у XRay/DNS): «0 B» здесь означало
+//	                                 бы измеренный ноль;
+//	disabled            → "отключён" как в соседней колонке активности:
+//	                                 отключённого peer'а в рантайме нет, и
+//	                                 число о нём было бы выдумкой;
+//	не PeerMeasured     → "?"        запрос не удался ИЛИ клиента нет в
+//	                                 ответе сервера — в обоих случаях
+//	                                 величина неизвестна;
+//	иначе               → измеренные величины (в том числе честный ноль).
 //
-// statsFailed — ОТДЕЛЬНЫЙ ПРИЗНАК, а не вывод из пустоты st: пустая
-// core.PeerStat — законное значение (клиент ни разу не подключался), и
-// отличить её от «не измеряли» по самому значению нельзя. Ровно на этом
-// месте (признак 2: отброшенная ошибка) человек и читал «0 B / 0 B» как
-// измеренную величину.
-func TrafficText(canManage, statsFailed bool, st core.PeerStat) string {
-	switch {
-	case !canManage:
+// ТРЕТЬЕ СОСТОЯНИЕ ВЫРАЖЕНО ТИПОМ (задание НЕЗНАНИЕ-ТРАФИК, место № 1).
+// Прежняя сигнатура (canManage, statsFailed bool, st core.PeerStat) знала
+// «запрос не удался», но не «клиента нет в ответе»: вызывающий брал
+// st из карты по ключу, отсутствующий ключ давал нулевую PeerStat, и
+// «0 B / 0 B» уезжал к человеку как измерение. core.PeerReading числа без
+// признака «измерено» не отдаёт.
+func TrafficText(canManage, disabled bool, r core.PeerReading) string {
+	if !canManage {
 		return "—"
-	case statsFailed:
-		return "?"
-	default:
-		return core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes)
 	}
+	if disabled {
+		return "отключён"
+	}
+	st, ok := r.Measured()
+	if !ok {
+		return "?"
+	}
+	return core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes)
 }

@@ -66,3 +66,11 @@ func resolveByFlag(w io.Writer, clients []core.ClientEntry, ident string) (int, 
 func printErr(err error) {
 	fmt.Println(cErr("Ошибка: ") + err.Error())
 }
+
+// colorDecision — общее для всех ОС правило: цвет только в терминал и
+// только без NO_COLOR. Вынесено без build-тега, чтобы таблица проверялась
+// на любой ОС; платформенная часть (enableVT) лишь узнаёт, терминал ли
+// stdout (на Windows — ещё и включает VT-режим консоли).
+func colorDecision(noColor string, stdoutIsTerminal bool) bool {
+	return noColor == "" && stdoutIsTerminal
+}

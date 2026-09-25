@@ -77,13 +77,15 @@ type Row struct {
 	CanManage bool
 	// ActivityFailed — запрос активности был и НЕ УДАЛСЯ.
 	ActivityFailed bool
-	// StatsFailed — запрос трафика был и НЕ УДАЛСЯ.
-	StatsFailed bool
 	// Handshake — значение активности из ответа сервера ("" — ключа в
 	// ответе нет).
 	Handshake string
-	// Stats — измеренный трафик; осмыслен только при !StatsFailed.
-	Stats core.PeerStat
+	// Traffic — показание трафика: измерено / клиента нет в ответе /
+	// запрос не удался (core.ReadPeer). Прежде здесь стояли два поля —
+	// StatsFailed bool и Stats core.PeerStat, — и отсутствующий в ответе
+	// клиент приезжал нулевой Stats при StatsFailed=false, то есть
+	// измеренным нулём (задание НЕЗНАНИЕ-ТРАФИК).
+	Traffic core.PeerReading
 }
 
 // CellText — текст ячейки (row, col) таблицы пользователей, ровно тот, что
@@ -102,7 +104,7 @@ func CellText(r Row, col int) string {
 	case 3:
 		return ActivityText(r.CanManage, r.ActivityFailed, r.Disabled, r.Handshake)
 	case 4:
-		return TrafficText(r.CanManage, r.StatsFailed, r.Stats)
+		return TrafficText(r.CanManage, r.Disabled, r.Traffic)
 	case 5:
 		return r.ClientID
 	}

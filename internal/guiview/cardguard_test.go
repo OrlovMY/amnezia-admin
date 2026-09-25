@@ -169,7 +169,7 @@ func TestDeleteCardPassesServerError(t *testing.T) {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "DeleteCardActivity" || len(call.Args) != 3 {
+		if !ok || sel.Sel.Name != "DeleteCardActivity" || len(call.Args) != 4 {
 			return true
 		}
 		if id, ok := call.Args[0].(*ast.Ident); ok && id.Name == mapName {
@@ -441,10 +441,12 @@ var rowFieldSource = map[string]string{
 	"Disabled":       "cl.Disabled()",
 	"CanManage":      "u.canManage",
 	"ActivityFailed": "u.activityFailed",
-	"StatsFailed":    "u.statsFailed",
 	"Handshake":      "u.handshakes[cl.ClientID]",
-	"Stats":          "u.peerStats[cl.ClientID]",
-	"ClientID":       "cl.ClientID",
+	// Traffic — задание НЕЗНАНИЕ-ТРАФИК: прежняя пара StatsFailed/Stats
+	// (`u.peerStats[cl.ClientID]`) отдавала отсутствующего в ответе
+	// клиента нулём. Признак отказа едет внутрь ReadPeer вторым аргументом.
+	"Traffic":  "core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID)",
+	"ClientID": "cl.ClientID",
 }
 
 // TestCellsReceiveTheFailureFlag — ПРИЗНАК ДОЕЗЖАЕТ ДО ЯЧЕЙКИ И ДО БУФЕРА.

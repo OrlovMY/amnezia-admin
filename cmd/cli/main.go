@@ -186,10 +186,13 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 	if err != nil {
 		return nil, err
 	}
-	stats, err := s.GetPeerStats(c)
-	if err != nil {
-		stats = map[string]core.PeerStat{}
-	}
+	// Ошибка статистики НЕ ОТБРАСЫВАЕТСЯ (задание НЕЗНАНИЕ-ТРАФИК, место
+	// № 2). Прежде здесь подставлялась пустая карта, и таблица печатала всем
+	// «0 B / 0 B» и «—» как измерение. Показание каждой строки берётся через
+	// core.ReadPeer — оно различает «запрос не удался», «клиента нет в
+	// ответе» и «измерено».
+	stats, statsErr := s.GetPeerStats(c)
+	statsFailed := statsErr != nil
 	core.SortByActivity(clients, stats)
 
 	if len(clients) == 0 {
@@ -198,24 +201,22 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
 		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
+		absent := 0 // включённые клиенты, которых нет в ответе `wg show`
 		for i, cl := range clients {
 			created := cl.Created()
 			if r := []rune(created); len(r) > 19 {
 				created = string(r[:19])
 			}
-			var hs string
-			if cl.Disabled() {
-				hs = cDim(pad("(откл.)", 18))
-			} else {
-				st := stats[cl.ClientID]
-				if st.LastHandshake.IsZero() {
-					hs = cDim(pad("—", 18))
-				} else {
-					hs = cOK(pad(st.LastHandshake.Format("2006-01-02 15:04"), 18))
-				}
+			r := core.ReadPeer(stats, statsFailed, cl.ClientID)
+			if !cl.Disabled() && r.State == core.PeerAbsent {
+				absent++
 			}
-			st := stats[cl.ClientID]
-			traffic := core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes)
+			act := listActivityText(cl.Disabled(), r)
+			hs := cDim(pad(act, 18))
+			if _, ok := r.Measured(); ok && !cl.Disabled() && act != "—" {
+				hs = cOK(pad(act, 18))
+			}
+			traffic := listTrafficText(cl.Disabled(), r)
 			name := cl.Name()
 			if cl.Disabled() {
 				name = cDim(pad(name, 34))
@@ -225,6 +226,9 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 			fmt.Fprintln(w, cNum(pad(strconv.Itoa(i+1), 4))+name+cDim(pad(created, 21))+hs+pad(traffic, 24)+cDim(cl.ClientID))
 		}
 		fmt.Fprintln(w, cDim("Трафик и активность — с момента перезапуска сервера."))
+		if note := listStatsNote(statsFailed, absent); note != "" {
+			fmt.Fprintln(w, cWarn(note))
+		}
 	}
 
 	if orphans := s.OrphanPeers(c, clients); len(orphans) > 0 {
@@ -234,6 +238,62 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		}
 	}
 	return clients, nil
+}
+
+// listActivityText — ячейка «Активность» таблицы list, без раскраски.
+//
+//	отключён            → "(откл.)"
+//	не измерено          → "?"   запрос не удался ИЛИ клиента нет в ответе
+//	измерено, без рукопожатия → "—"   сервер ответил: не подключался
+//	иначе                → время последнего рукопожатия
+//
+// Прежде «?» не было вовсе: пустая карта при отказе и отсутствующий ключ
+// давали нулевое время, то есть «—» — «не подключался» (признак 1).
+func listActivityText(disabled bool, r core.PeerReading) string {
+	if disabled {
+		return "(откл.)"
+	}
+	st, ok := r.Measured()
+	switch {
+	case !ok:
+		return "?"
+	case st.LastHandshake.IsZero():
+		return "—"
+	default:
+		return st.LastHandshake.Format("2006-01-02 15:04")
+	}
+}
+
+// listTrafficText — ячейка «Трафик ↓/↑» таблицы list. Число печатается
+// только измеренному клиенту; честный измеренный ноль остаётся «0 B / 0 B».
+func listTrafficText(disabled bool, r core.PeerReading) string {
+	if disabled {
+		return "(откл.)"
+	}
+	st, ok := r.Measured()
+	if !ok {
+		return "?"
+	}
+	return core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes)
+}
+
+// listStatsNote — строка под таблицей, называющая ПРИЧИНУ «?». В ячейке
+// обе причины незнания выглядят одинаково (величина неизвестна в обоих
+// случаях), но действие человека разное: при отказе запроса — повторить
+// позже; при отсутствии клиента в ответе — это рассинхрон записи и
+// работающего сервера, клиент сейчас подключиться не может, и об этом надо
+// знать. Отключённые клиенты сюда не считаются: их отсутствие штатное.
+func listStatsNote(statsFailed bool, absent int) string {
+	switch {
+	case statsFailed:
+		return "Статистику с сервера получить не удалось: активность и трафик неизвестны («?»)."
+	case absent > 0:
+		// Текст UX-01: без внутреннего жаргона и с тем, что делать.
+		return fmt.Sprintf("Клиентов нет в статистике сервера: %d. Подключиться они сейчас не могут; "+
+			"их активность и трафик неизвестны («?»). Возможно, конфигурация сервера не применилась — "+
+			"проверьте сервер, прежде чем удалять.", absent)
+	}
+	return ""
 }
 
 // saveUserConfig — см. listUsers про параметр w (Е3).
