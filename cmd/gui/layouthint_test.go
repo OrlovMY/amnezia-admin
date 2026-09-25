@@ -423,12 +423,12 @@ func TestSaveKeyDialogRefusalGivesWholeRuleOnce(t *testing.T) {
 			rule = s
 		}
 	}
-	// Ровно две: своя подсказка у поля пина и у поля повтора, оба набраны не
-	// в той раскладке. Третья — это та же фраза, продублированная в строке
-	// состояния вместо правила.
-	if hints != 2 {
-		t.Errorf("подсказка про раскладку показана %d раз(а), ожидалось 2 — по одной у каждого "+
-			"поля пина; лишняя означает, что отказ дублирует подсказку вместо правила: %q",
+	// Ровно одна: общая всплывашка над парой полей пина — правило у них
+	// одно. Вторая — это та же фраза, продублированная в строке состояния
+	// вместо правила.
+	if hints != 1 {
+		t.Errorf("подсказка про раскладку показана %d раз(а), ожидалась 1 — общая всплывашка "+
+			"над полями пина; лишняя означает, что отказ дублирует подсказку вместо правила: %q",
 			hints, texts)
 	}
 	if rule == "" {
@@ -469,31 +469,29 @@ func TestLayoutHintDoesNotMoveButtons(t *testing.T) {
 	}
 }
 
-// TestLayoutHintSlotFitsTextAndNeverMoves — зарезервированное место
-// ДОСТАТОЧНО и ПОСТОЯННО.
-//
-// Две беды у «резерва, посчитанного руками»: он может оказаться мал — тогда
-// подсказка обрежется, и человек прочтёт полфразы; и он может оказаться
-// разным для пустого и заполненного состояния — тогда всё, что ниже, снова
-// поедет. Проверяется и то и другое, на настоящих текстах и настоящих
-// ширинах форм.
 // renderedTextBottom — нижняя граница НАРИСОВАННОГО текста подсказки,
-// отсчитанная от верха её коробки. Подсказка для этого кладётся в настоящее
-// окно и разворачивается на размер коробки: только после раскладки Fyne
-// расставляет строки переноса по своим местам.
+// отсчитанная от верха самой всплывашки. Всплывашка для этого кладётся в
+// настоящее окно и разворачивается на свой размер: только после раскладки
+// Fyne расставляет строки переноса по своим местам.
 func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
 	t.Helper()
-	w := test.NewWindow(h.box)
+	// У всплывашки меряется она сама, у резерва — его коробка: и там и там это
+	// прямоугольник, в который текст обязан уложиться.
+	var box fyne.CanvasObject = h.box
+	if h.pop != nil {
+		box = h.pop
+	}
+	w := test.NewWindow(box)
 	t.Cleanup(w.Close)
-	size := h.box.MinSize()
-	w.Resize(size)
-	h.box.Refresh()
+	w.Resize(h.size)
+	box.Resize(h.size)
+	box.Refresh()
 
 	drv := fyne.CurrentApp().Driver()
-	top := drv.AbsolutePositionForObject(h.box).Y
+	top := drv.AbsolutePositionForObject(box).Y
 	var bottom float32
 	rows := 0
-	walkVisible(h.box, func(o fyne.CanvasObject) {
+	walkVisible(box, func(o fyne.CanvasObject) {
 		txt, ok := o.(*canvas.Text)
 		if !ok || txt.Text == "" {
 			return
@@ -509,7 +507,26 @@ func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
 	return bottom
 }
 
-func TestLayoutHintSlotFitsTextAndNeverMoves(t *testing.T) {
+// TestLayoutHintSlotFitsText — ВСПЛЫВАШКА ДОСТАТОЧНА ДЛЯ СВОЕГО ТЕКСТА, а
+// место в форме не занимает ни включённой, ни выключенной.
+//
+// Всплывашка не отодвигает содержимое, но обрезать текст она может ровно так
+// же, как обрезал его маленький резерв: высота по-прежнему считается руками
+// (wrappedLineCount), а подпись по-прежнему переносится по словам. Поэтому
+// проверка «текст помещается» осталась дословно той же и меряется НАСТОЯЩЕЙ
+// ВЁРСТКОЙ.
+//
+// ПОЧЕМУ НЕ MinSize (ревью QA-01). У подписи с переносом MinSize() равен
+// одной строке ВНЕ ЗАВИСИМОСТИ от текста: сравнение с ним не могло покраснеть
+// никогда, и подмена wrappedLineCount → return 1 (подсказка обрезается до
+// трети фразы) оставляла прогон зелёным. Подпись кладётся в окно,
+// разворачивается на размер всплывашки и спрашивается, докуда НА САМОМ ДЕЛЕ
+// дотянулся нарисованный текст.
+//
+// Вторая половина — то, ради чего всплывашку и делали: MinSize коробки,
+// которая стоит в форме, равен MinSize ОДНОГО ПОЛЯ ВВОДА и не зависит от
+// того, показана подсказка или нет.
+func TestLayoutHintSlotFitsText(t *testing.T) {
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
 
@@ -517,40 +534,43 @@ func TestLayoutHintSlotFitsTextAndNeverMoves(t *testing.T) {
 		what  string
 		text  string
 		width float32
+		float bool // true — всплывашка, false — зарезервированное место
 	}{
-		{"подсказка про пин в диалоге пин-кода", wantPinLayoutHint, pinDialogWidth},
-		{"подсказка про пин в диалоге сохранения", wantPinLayoutHint, saveKeyDialWidth},
-		{"подсказка про ключ на экране подключения", wantKeyLayoutHint, connectFormWidth},
-		{"сообщение о неудавшемся переключении", wantLayoutSwitchFailed, pinDialogWidth},
+		{"резерв под подсказку о пине в диалоге пин-кода", wantPinLayoutHint, pinDialogWidth, false},
+		{"резерв под подсказку о пине в диалоге сохранения", wantPinLayoutHint, saveKeyDialWidth, false},
+		{"всплывашка про ключ на экране подключения", wantKeyLayoutHint, connectFormWidth, true},
 	} {
 		t.Run(c.what, func(t *testing.T) {
-			h := newLayoutHint(c.text, c.width)
-			empty := h.box.MinSize()
-
-			h.setOn(true)
-			full := h.box.MinSize()
-			if full != empty {
-				t.Errorf("место под подсказку изменилось с %v на %v — содержимое под ней поедет",
-					empty, full)
+			anchor := widget.NewEntry()
+			var h *layoutHint
+			var want fyne.Size
+			if c.float {
+				h = newLayoutHint(c.text, c.width, anchor)
+				// Всплывашка обязана быть невидимкой для измерения: коробка,
+				// стоящая в форме, меряется по ОДНОМУ полю ввода.
+				want = anchor.MinSize()
+			} else {
+				h = newReservedHint(c.text, c.width)
+				// Резерв обязан быть постоянным: место занято одинаково и с
+				// подсказкой, и без неё.
+				want = h.size
 			}
-			// Подпись со своим текстом обязана ПОМЕЩАТЬСЯ в отведённое
-			// место — и меряется это НАСТОЯЩЕЙ ВЁРСТКОЙ, а не MinSize
-			// подписи.
-			//
-			// ПОЧЕМУ НЕ MinSize (ревью QA-01). У подписи с переносом
-			// MinSize() равен одной строке ВНЕ ЗАВИСИМОСТИ от текста:
-			// сравнение с ним не могло покраснеть никогда, и подмена
-			// wrappedLineCount → return 1 (подсказка обрезается до трети
-			// фразы) оставляла прогон зелёным. Теперь подпись кладётся в
-			// окно, разворачивается на ширину коробки и спрашивается, докуда
-			// НА САМОМ ДЕЛЕ дотянулся нарисованный текст.
-			if bottom := renderedTextBottom(t, h); bottom > full.Height+0.5 {
+
+			if off := h.box.MinSize(); off != want {
+				t.Errorf("с выключенной подсказкой коробка занимает в форме %v, ожидалось %v", off, want)
+			}
+			h.setOn(true)
+			if on := h.box.MinSize(); on != want {
+				t.Errorf("с включённой подсказкой коробка занимает в форме %v вместо %v — "+
+					"содержимое под ней поедет, кнопка уйдёт из-под пальца", on, want)
+			}
+			if bottom := renderedTextBottom(t, h); bottom > h.size.Height+0.5 {
 				t.Errorf("нарисованный текст подсказки уходит на %v точек вниз, а отведено %v — "+
-					"текст обрежется, человек прочтёт полфразы", bottom, full.Height)
+					"текст обрежется, человек прочтёт полфразы", bottom, h.size.Height)
 			}
 			h.setOn(false)
-			if off := h.box.MinSize(); off != empty {
-				t.Errorf("после выключения место стало %v вместо %v", off, empty)
+			if off := h.box.MinSize(); off != want {
+				t.Errorf("после выключения коробка стала %v вместо %v", off, want)
 			}
 		})
 	}

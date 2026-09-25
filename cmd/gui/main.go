@@ -213,49 +213,162 @@ func forceEnglishLayout() string {
 	}
 }
 
-// layoutHint — место под подсказку про раскладку, ЗАРЕЗЕРВИРОВАННОЕ ЗАРАНЕЕ.
+// layoutHint — подсказка про раскладку. У неё ДВА способа стоять на форме, и
+// выбор между ними — не вкусовщина, а замер.
 //
-// ПОЧЕМУ НЕ Hide()/Show() (ревью UX-01). Скрытая подпись выпадает из
-// раскладки: подсказка появляется — всё, что ниже, едет вниз. В диалоге
-// пин-кода это кнопка «Открыть», в диалоге сохранения — «Сохранить»: человек
-// печатает пароль вслепую, а кнопка уезжает у него под пальцами. Поэтому
-// подпись существует всегда и внутри контейнера постоянного размера, а
-// меняется только её ТЕКСТ.
+// ТРИ ТРЕБОВАНИЯ, КОТОРЫЕ НАДО ВЫПОЛНИТЬ ОДНОВРЕМЕННО.
+//
+//  1. Ничего не двигать (ревью UX-01). Подсказка, скрытая через Hide(),
+//     выпадает из раскладки: она появляется — и всё, что ниже, едет вниз. В
+//     диалоге пин-кода это кнопка «Открыть», в диалоге сохранения —
+//     «Сохранить»: человек печатает пароль вслепую, а кнопка уезжает у него
+//     под пальцами.
+//  2. Не раздувать форму (живая приёмка владельца 23.09.2026, «Слишко»):
+//     постоянный резерв места вырастил диалог пин-кода с 380x280 до 420x444
+//     ради текста, которого в норме на экране нет вовсе.
+//  3. Ничего не закрывать собой (ревью UX-01, круг 2). Всплывашка не двигает
+//     содержимое, но ложится поверх него, и закрыть она может то, что человеку
+//     в этот момент нужно: поле ввода, кнопку, галку.
+//
+// ВСПЛЫВАШКА (newLayoutHint) выполняет 1 и 2, но 3 — только там, где над полем
+// есть свободная полоса без органов управления. Такая полоса нашлась ровно на
+// ОДНОЙ форме — на экране подключения: над полем ключа стоит поясняющая
+// подпись «Нужен админский ключ…», и больше ничего.
+//
+// РЕЗЕРВ (newReservedHint) выполняет 1 и 3 ценой 2: место занято всегда.
+// Он остаётся в диалоге пин-кода и в диалоге сохранения, потому что
+// СВОБОДНОГО МЕСТА ПОД ВСПЛЫВАШКУ ТАМ НЕТ — замерено, а не предположено:
+//
+//   - диалог пин-кода, самая широкая полоса без органов управления — 43.1
+//     точки (между полем пина и кнопкой «Открыть»), подсказке нужно 73.2.
+//     Над полем стоит ИМЯ ХРАНИЛИЩА — единственное место, которое говорит,
+//     чей пин вводится, а выше него полоса заголовка диалога;
+//   - диалог сохранения: под парой полей пина сразу идёт галка привязки к
+//     учётке (356.1..391.2), над полем пина — поле «Метка», которое человек
+//     только что заполнил и где стоит фокус при открытии.
+//
+// Это развилка, а не тупик: если владелец согласится на КОРОТКИЙ текст
+// подсказки (полное правило и так говорится в отказе), в диалоге пин-кода
+// одна строка (35.1) в свободные 43.1 точки помещается. Решение за ним.
+//
+// ПОЧЕМУ ВСПЛЫВАШКА — НЕ widget.PopUp, хотя он для этого и предназначен.
+// PopUp кладётся в СТЕК ОВЕРЛЕЕВ канвы и растягивается на всю канву, а сам
+// реализует fyne.Tappable и fyne.SecondaryTappable, чтобы гаснуть по клику
+// мимо. По БОЕВОМУ правилу попадания мыши (см. cmd/gui/hittest_test.go, пять
+// интерфейсов) это значит, что, пока подсказка видна, ЛЮБОЙ клик по диалогу
+// достаётся ей, а не полю и не кнопке: первое нажатие на «Открыть» всего лишь
+// погасило бы подсказку. Это ровно тот класс дефекта, который уже стоил
+// владельцу регресса с левым кликом. Наш слой — обычные canvas.Rectangle и
+// widget.Label, ни одного из пяти интерфейсов мыши, и живёт он ВНУТРИ дерева
+// формы, а не поверх канвы: закрылась форма — исчез и он.
 type layoutHint struct {
 	label *widget.Label
+	pop   *fyne.Container   // всплывашка; nil у резерва
 	box   fyne.CanvasObject // это кладётся в форму
+	size  fyne.Size         // размер всплывашки (у резерва — размер места)
 	text  string            // текст «включённого» состояния
 }
 
-// newLayoutHint строит подсказку под заданную ширину формы. Высота
-// резервируется под ПОЛНЫЙ текст: сколько строк он займёт при переносе по
-// словам, столько и занято всегда.
+// hintFloatLayout — «якорь и висящая над ним подсказка».
+//
+// objs[0] — якорь (поле ввода), он один и меряется; objs[1] — всплывашка,
+// она ставится НАД якорем и в измерении не участвует.
+//
+// ПОЧЕМУ НАД, А НЕ ПОД. Под полем ключа стоит кнопка «Подключиться».
+// Подсказка, свисающая вниз, накрыла бы именно её — то есть то, что человек
+// собирается нажать. Само поле не накрыто ни в том, ни в другом случае:
+// всплывашка начинается ровно там, где поле кончается.
+//
+// Что над полем и правда никого нет, проверяется на настоящей вёрстке и по
+// ОБЩЕМУ правилу — TestFloatingHintCoversOnlyWhatTheFormAllows требует, чтобы
+// всплывашка не накрывала НИЧЕГО видимого (ни органа управления, ни подписи),
+// кроме поимённо разрешённого в форме (hintScene.mayCover). Прежние редакции
+// спрашивали сперва про поле и кнопку подтверждения, потом про все органы
+// управления, и потому не заметили ни имени хранилища (это подпись), ни поля
+// «Метка» (ревью UX-01, круг 2).
+type hintFloatLayout struct {
+	size fyne.Size
+}
+
+func (l *hintFloatLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	if len(objs) == 0 {
+		return fyne.Size{}
+	}
+	return objs[0].MinSize() // подсказки в измерении НЕТ — в этом вся суть
+}
+
+func (l *hintFloatLayout) Layout(objs []fyne.CanvasObject, s fyne.Size) {
+	if len(objs) < 2 {
+		return
+	}
+	objs[0].Move(fyne.NewPos(0, 0))
+	objs[0].Resize(s)
+	objs[1].Resize(l.size)
+	objs[1].Move(fyne.NewPos(0, -l.size.Height))
+}
+
+// hintMetrics — размер, который подсказка займёт под данную ширину: сколько
+// строк её текст даст при переносе по словам, столько и высоты. Общее и для
+// всплывашки, и для резерва — расходиться им нечему.
 //
 // ГРАНИЦА, НАЗВАННАЯ ВСЛУХ (ревью QA-01): размер шрифта берётся из темы ОДИН
-// РАЗ, здесь. Если человек увеличит масштаб текста, пока диалог уже открыт,
-// резерв останется прежним и длинная подсказка обрежется. Лечится
-// переоткрытием диалога — он пересчитает резерв по новой теме. Подписываться
-// на смену темы ради этого мы не стали: это goroutine на каждую подсказку в
-// коротко живущем диалоге, цена выше пользы. Достаточность резерва для
-// ТЕКУЩЕЙ темы меряется настоящей вёрсткой в
-// TestLayoutHintSlotFitsTextAndNeverMoves.
-func newLayoutHint(text string, width float32) *layoutHint {
+// РАЗ, здесь. Если человек увеличит масштаб текста, пока форма уже открыта,
+// высота останется прежней и длинная подсказка обрежется. Лечится
+// переоткрытием формы. Подписываться на смену темы ради этого мы не стали:
+// это goroutine на каждую подсказку в коротко живущей форме, цена выше пользы.
+// Достаточность высоты для ТЕКУЩЕЙ темы меряется настоящей вёрсткой в
+// TestLayoutHintSlotFitsText.
+func hintMetrics(text string, width float32) fyne.Size {
 	th := fyne.CurrentApp().Settings().Theme()
 	size := th.Size(theme.SizeNameText)
 	pad := th.Size(theme.SizeNameInnerPadding)
+	lines := wrappedLineCount(text, size, width-2*pad)
+	return fyne.NewSize(width, float32(lines)*fyne.MeasureText("Ауj", size, fyne.TextStyle{}).Height+2*pad)
+}
+
+// newReservedHint — подсказка, под которую место ЗАРЕЗЕРВИРОВАНО заранее.
+// Применяется там, где всплывашке негде встать, не накрыв орган управления
+// (см. замеры в комментарии к layoutHint). Подпись существует всегда и внутри
+// контейнера постоянного размера — меняется только её ТЕКСТ, поэтому ничего
+// не едет.
+func newReservedHint(text string, width float32) *layoutHint {
+	l := widget.NewLabel("")
+	l.Wrapping = fyne.TextWrapWord
+	size := hintMetrics(text, width)
+	return &layoutHint{
+		label: l,
+		box:   container.NewGridWrap(size, l),
+		size:  size,
+		text:  text,
+	}
+}
+
+// newLayoutHint строит ВСПЛЫВАЮЩУЮ подсказку над полем anchor. Ширина
+// задаётся формой и не должна превышать ширину поля — иначе всплывашка вылезет
+// за край формы (TestFloatingHintStandsAtTheField). Высоту считает
+// hintMetrics.
+func newLayoutHint(text string, width float32, anchor fyne.CanvasObject) *layoutHint {
+	app := fyne.CurrentApp()
+	th := app.Settings().Theme()
+	variant := app.Settings().ThemeVariant()
 
 	l := widget.NewLabel("")
 	l.Wrapping = fyne.TextWrapWord
 
-	usable := width - 2*pad
-	lines := wrappedLineCount(text, size, usable)
-	height := float32(lines)*fyne.MeasureText("Ауj", size, fyne.TextStyle{}).Height + 2*pad
+	// Подложка непрозрачная: под всплывашкой лежит чужой текст, и без неё
+	// человек читал бы две наложенные фразы. Рамка цветом предупреждения —
+	// чтобы подсказка читалась как подсказка, а не как часть формы.
+	bg := canvas.NewRectangle(th.Color(theme.ColorNameOverlayBackground, variant))
+	bg.StrokeColor = th.Color(theme.ColorNameWarning, variant)
+	bg.StrokeWidth = 1
+	bg.CornerRadius = th.Size(theme.SizeNameInputRadius)
 
-	return &layoutHint{
-		label: l,
-		box:   container.NewGridWrap(fyne.NewSize(width, height), l),
-		text:  text,
-	}
+	pop := container.NewStack(bg, l)
+	pop.Hide() // выключенная подсказка не рисуется вовсе
+
+	h := &layoutHint{label: l, pop: pop, size: hintMetrics(text, width), text: text}
+	h.box = container.New(&hintFloatLayout{size: h.size}, anchor, pop)
+	return h
 }
 
 // wrappedLineCount — сколько строк займёт текст при переносе по словам в
@@ -282,20 +395,45 @@ func wrappedLineCount(text string, size, usable float32) int {
 	return lines
 }
 
-// setOn включает и выключает подсказку, не трогая геометрию.
+// setOn включает и выключает подсказку. Геометрию формы это не трогает ни в
+// ту, ни в другую сторону: у всплывашки — потому что её нет в измерении, у
+// резерва — потому что место занято всегда и меняется только текст.
 func (h *layoutHint) setOn(on bool) {
 	if on {
 		h.label.SetText(h.text)
+		if h.pop != nil {
+			h.pop.Show()
+		}
 		return
 	}
 	h.label.SetText("")
+	if h.pop != nil {
+		h.pop.Hide()
+	}
 }
 
-// setText кладёт в то же зарезервированное место текст, пришедший извне
-// (сообщение о неудавшемся переключении раскладки). Именно ТЕКСТ, а не
-// «что-то заранее набранное»: иначе при изменении сообщения на экране
-// осталось бы старое (ревью SEC-01).
-func (h *layoutHint) setText(s string) { h.label.SetText(s) }
+// layoutNoticeLabel — подпись про НЕУДАВШЕЕСЯ переключение раскладки.
+//
+// ПОЧЕМУ ОНА, В ОТЛИЧИЕ ОТ ПОДСКАЗКИ, ОСТАЁТСЯ В ПОТОКЕ. Это не отклик на
+// ввод, а состояние сессии: раскладку переключить не удалось, и это верно всё
+// время, пока диалог открыт. Такое сообщение нельзя ронять на чужой текст —
+// его надо прочитать и держать перед глазами, а не смахивать взглядом.
+// Болезнь «кнопка уезжает из-под пальца» здесь недостижима по построению:
+// текст известен ДО показа диалога, подпись создаётся сразу в окончательном
+// виде и больше не меняется — двигать ей нечего и некогда. Пустая подпись
+// прячется, а скрытые объекты VBox не занимают места: в норме (переключили
+// или ОС так не умеет) она не стоит ни одной точки высоты.
+//
+// Именно ТЕКСТ параметром, а не «что-то заранее набранное»: иначе при
+// изменении сообщения на экране осталось бы старое (ревью SEC-01).
+func layoutNoticeLabel(text string) *widget.Label {
+	l := widget.NewLabel(text)
+	l.Wrapping = fyne.TextWrapWord
+	if text == "" {
+		l.Hide()
+	}
+	return l
+}
 
 // attachLayoutHint — ЖИВАЯ подсказка по мере ввода. Поле пароля скрывает
 // символы, поэтому человек не видит, что набирает не тем алфавитом; отказ
@@ -318,18 +456,43 @@ func (h *layoutHint) setText(s string) { h.label.SetText(s) }
 //     многострочный, ключ копируют уже разбитым на строки, и перенос
 //     признаком раскладки не считается (ревью UX-01).
 func attachLayoutHint(e *widget.Entry, hint *layoutHint, suspect func(string) bool) {
-	prev := e.OnChanged
-	sync := func(s string) { hint.setOn(suspect(s)) }
-	e.OnChanged = func(s string) {
-		if prev != nil {
-			prev(s)
+	attachLayoutHintShared(hint, suspect, e)
+}
+
+// attachLayoutHintShared — ОДНА подсказка на несколько полей: она включена,
+// пока хоть одно из них набрано не в английской раскладке.
+//
+// ЗАЧЕМ ОБЩАЯ (живая приёмка 23.09.2026). Пока подсказка стояла в потоке, у
+// каждого поля пина была своя: общая гасла бы от соседнего поля, набранного
+// верно. Всплывашка же висит НАД содержимым, и две подсказки с одинаковым
+// текстом, всплывшие над соседними строками формы, наложились бы друг на
+// друга, а нижняя из них накрыла бы поле «Пин-код» — то самое поле ввода,
+// которое накрывать нельзя. Общая подсказка снимает и то и другое: она одна,
+// висит над парой полей и говорит ровно то же самое — правило одно на оба
+// поля.
+func attachLayoutHintShared(hint *layoutHint, suspect func(string) bool, entries ...*widget.Entry) {
+	sync := func() {
+		for _, e := range entries {
+			if suspect(e.Text) {
+				hint.setOn(true)
+				return
+			}
 		}
-		sync(s)
+		hint.setOn(false)
+	}
+	for _, e := range entries {
+		prev := e.OnChanged
+		e.OnChanged = func(s string) {
+			if prev != nil {
+				prev(s)
+			}
+			sync()
+		}
 	}
 	// Поле может быть уже заполнено к моменту подключения подсказки
 	// (вставленный ключ, AMNEZIA_KEY): состояние подсказки берётся из
 	// текущего текста, а не из будущих нажатий.
-	sync(e.Text)
+	sync()
 }
 
 // Ширины форм, под которые резервируется место для подсказок про раскладку.
@@ -385,14 +548,14 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 	// Подсказка про раскладку под полем ключа. Признак здесь свой:
 	// многострочный ключ, скопированный из мессенджера, переносами строк
 	// раскладку не выдаёт (ревью UX-01).
-	keyHint := newLayoutHint(guiview.LayoutHintKey, connectFormWidth)
+	keyHint := newLayoutHint(guiview.LayoutHintKey, connectFormWidth, keyEntry)
 	attachLayoutHint(keyEntry, keyHint, core.LayoutSuspectIgnoringLineBreaks)
 	// Раскладка переключается ОДИН РАЗ при показе экрана; если переключить не
-	// удалось, человеку говорится об этом, а не молчится (CLAUDE.md).
-	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, connectFormWidth)
-	layoutNotice.setText(forceEnglishLayout())
+	// удалось, человеку говорится об этом, а не молчится (CLAUDE.md). Текст
+	// известен ДО сборки формы — подпись сразу окончательна и ничего не сдвинет.
+	layoutNotice := layoutNoticeLabel(forceEnglishLayout())
 
-	form := container.NewVBox(title, versionLabel, hint, keyEntry, keyHint.box, layoutNotice.box, connectBtn, info)
+	form := container.NewVBox(title, versionLabel, hint, keyHint.box, layoutNotice, connectBtn, info)
 
 	if vaultBlock := u.savedVaultsBlock(connectBtn, info); vaultBlock != nil {
 		form.Add(vaultBlock)
@@ -471,9 +634,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	// Подсказка про раскладку — ОТДЕЛЬНАЯ подпись, а не statusLabel: тот
 	// занят обратным отсчётом блокировки и «Расшифровываю…», и подсказка
 	// затирала бы их (или они её).
-	pinHint := newLayoutHint(guiview.LayoutHintPin, pinDialogWidth)
+	pinHint := newReservedHint(guiview.LayoutHintPin, pinDialogWidth)
 	attachLayoutHint(pinEntry, pinHint, core.NonEnglishLayoutSuspect)
-	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, pinDialogWidth)
+	// Раскладка переключается ОДИН РАЗ, ДО показа диалога: подпись об отказе
+	// создаётся сразу окончательной и потому ничего не двигает. Не удалось —
+	// говорим, а не умалчиваем (просьба владельца 23.09.2026, CLAUDE.md).
+	layoutNotice := layoutNoticeLabel(forceEnglishLayout())
 
 	// throttleAttempts — сколько попыток даётся до блокировки (держим в
 	// синхроне с core.throttleMaxFails; вынести в core.ExportedConst не стали,
@@ -662,7 +828,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		widget.NewLabel(label),
 		pinEntry,
 		pinHint.box,
-		layoutNotice.box,
+		layoutNotice,
 		statusLabel,
 		openBtn,
 		retryBtn,
@@ -674,9 +840,6 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	// Человек ткнул в сохранённый сервер, чтобы ВВЕСТИ ПИН, — курсор стоит
 	// там, а не «ещё один клик в поле» (жалоба владельца 22.09.2026).
 	u.focusField(pinEntry)
-	// И раскладка уже английская — пин принимает только латиницу (просьба
-	// владельца 23.09.2026). Не удалось — говорим, а не умалчиваем.
-	layoutNotice.setText(forceEnglishLayout())
 
 	acquireOnlineTime()
 }
@@ -1040,13 +1203,17 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	// которого просьба и появилась: символы скрыты, а core.ValidatePin
 	// отвергнет весь набранный пин целиком. attachLayoutHint не затирает
 	// checkMismatch, а вызывает его первым.
-	// У каждого поля СВОЯ подсказка: одна на двоих гасла бы от соседнего
-	// поля, набранного верно.
-	pinLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
-	repeatLayoutHint := newLayoutHint(guiview.LayoutHintPin, saveKeyDialWidth)
-	attachLayoutHint(pinEntry, pinLayoutHint, core.NonEnglishLayoutSuspect)
-	attachLayoutHint(pinRepeat, repeatLayoutHint, core.NonEnglishLayoutSuspect)
-	layoutNotice := newLayoutHint(guiview.LayoutSwitchFailed, saveKeyDialWidth)
+	// ОДНА подсказка на оба поля пина — почему именно так, см.
+	// attachLayoutHintShared.
+	pinLayoutHint := newReservedHint(guiview.LayoutHintPin, saveKeyDialWidth)
+	attachLayoutHintShared(pinLayoutHint, core.NonEnglishLayoutSuspect, pinEntry, pinRepeat)
+	// ПЕРВОЕ задание пина — раскладка английская сразу (просьба владельца
+	// 23.09.2026). Метка при этом может быть русской: раскладку никто не
+	// запирает, человек переключит её сам, если захочет назвать сервер
+	// по-русски. Возврат прежней раскладки при закрытии диалога сознательно
+	// НЕ делается — см. kbdlayout.ForceEnglish. Переключаем ДО сборки формы,
+	// чтобы подпись об отказе встала сразу на своё окончательное место.
+	layoutNotice := layoutNoticeLabel(forceEnglishLayout())
 
 	submit := func() {
 		if saveBtn.Disabled() {
@@ -1115,8 +1282,7 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 			widget.NewFormItem("Повтор пина", pinRepeat),
 		),
 		pinLayoutHint.box,
-		repeatLayoutHint.box,
-		layoutNotice.box,
+		layoutNotice,
 		mismatchLabel,
 		bindCheck,
 		bindHint,
@@ -1128,12 +1294,6 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	d.Show()
 	// Первое поле формы; дальше Enter ведёт метка → пин → повтор → «Сохранить».
 	u.focusField(labelEntry)
-	// ПЕРВОЕ задание пина — раскладка английская сразу (просьба владельца
-	// 23.09.2026). Метка при этом может быть русской: раскладку никто не
-	// запирает, человек переключит её сам, если захочет назвать сервер
-	// по-русски. Возврат прежней раскладки при закрытии диалога сознательно
-	// НЕ делается — см. kbdlayout.ForceEnglish.
-	layoutNotice.setText(forceEnglishLayout())
 }
 
 // ---------- главный экран ----------
