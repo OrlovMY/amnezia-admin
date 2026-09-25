@@ -522,11 +522,22 @@ func osmotrGate(f osmotrForm, size string, rep *osmotrReport, errf func(string, 
 		errf("%s | %s | %s: выдача НЕДЕЙСТВИТЕЛЬНА — из описи не найдено %q, сверх описи %q",
 			f.name, rep.size, rep.theme, rep.missing, rep.extra)
 	}
-	if f.width > 0 && (rep.bounds.size.Width < f.width-0.5 || rep.bounds.size.Width > f.width+0.5) {
-		errf("%s | %s | %s: ширина рамки диалога %.1f вместо %.1f — диалог раздулся или сжался",
-			f.name, rep.size, rep.theme, rep.bounds.size.Width, f.width)
-	}
 	used := make([]bool, len(f.known))
+	// Ширина рамки — такая же находка, как вылезание: разрешается только
+	// ПОИМЁННО полной строкой (Д3, задание НЕЗНАНИЕ-ТРАФИК), и
+	// неиспользованное разрешение ширины роняет прогон так же.
+	if f.width > 0 && (rep.bounds.size.Width < f.width-0.5 || rep.bounds.size.Width > f.width+0.5) {
+		line := fmt.Sprintf("ширина рамки диалога %.1f вместо %.1f", rep.bounds.size.Width, f.width)
+		ok := false
+		for i, k := range f.known {
+			if strings.HasPrefix(size, k.size) && line == k.match {
+				used[i], ok = true, true
+			}
+		}
+		if !ok {
+			errf("%s | %s | %s: %s — диалог раздулся или сжался", f.name, rep.size, rep.theme, line)
+		}
+	}
 	check := func(what string, lines []string) {
 		for _, l := range lines {
 			ok := false
@@ -874,10 +885,10 @@ var osmotrForms = []osmotrForm{
 	{name: "(в) удаление", open: openDelete, inventory: invDelete, width: 452, known: knownDeleteD1},
 	{name: "(г) главное окно", open: openMain, inventory: invMain},
 	{name: "(г) главное окно, отключённый клиент", open: openMainDisabled, inventory: invMain},
-	{name: "(в) удаление, клиента нет в статистике", open: openDeleteAnswered(2, false),
-		inventory: invDeleteWith(rowZName, deleteAbsentLabel), width: 452, known: knownDeleteAnsweredD1(rowZName, deleteAbsentLabel, "48.3", "88.3", "127.4")},
-	{name: "(в) удаление, клиент отключён", open: openDeleteAnswered(2, true),
-		inventory: invDeleteWith(rowZName, deleteDisabledLabel), width: 452, known: knownDeleteAnsweredD1(rowZName, deleteDisabledLabel, "29.2", "69.2", "108.3")},
+	{name: "(в) удаление, клиента нет в статистике", open: openDeleteAnswered(1, false),
+		inventory: invDeleteWith(rowQName, deleteAbsentLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteAbsentLabel, "29.2", "69.2", "108.3"), knownD3)},
+	{name: "(в) удаление, клиент отключён", open: openDeleteAnswered(1, true),
+		inventory: invDeleteWith(rowQName, deleteDisabledLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteDisabledLabel, "29.2", "69.2", "108.3"), knownD3)},
 }
 
 var osmotrThemes = []struct {
@@ -1214,11 +1225,11 @@ func (s osmotrWgShow) Run(cmd string, _ []byte) (string, error) {
 	return out, nil
 }
 
-// osmotrMainDisabled — главное окно, в котором «Роутер дача» ОТКЛЮЧЁН (в
+// osmotrMainDisabled — главное окно, в котором «Телефон Анны» (ключ из 43 «Q») ОТКЛЮЧЁН (в
 // статистике его нет, как в бою): видно «отключён» в активности и трафике.
 func osmotrMainDisabled(u *ui) {
 	osmotrMain(u)
-	u.clients[2].UserData["disabled"] = true
+	u.clients[1].UserData["disabled"] = true
 	u.table.Refresh()
 }
 
@@ -1257,7 +1268,7 @@ func openDeleteAnswered(row int, disabled bool) func(t *testing.T, u *ui, sized 
 // Первые строки меток новых исходов — как их сокращает прибор (набраны
 // руками по выдаче 25.09.2026, а не взяты из guiview).
 const (
-	rowZName            = "Роутер дача"
+	rowQName            = "Телефон Анны"
 	deleteAbsentLabel   = "Клиента нет в статистике сервера: сейчас…"
 	deleteDisabledLabel = "Клиент отключён: сервер его сейчас не пр…"
 )
@@ -1281,4 +1292,18 @@ func knownDeleteAnsweredD1(name, label, lbl, btn, st string) []osmotrKnown {
 		knownD1("подпись «Имя: " + name + "…» × кнопка «Отмена»: 73x23 = 1677 т²"),
 		knownD1("подпись «" + label + "» × кнопка «Отмена»: 73x9 = 649 т²"),
 	}
+}
+
+// knownD3 — ИЗВЕСТНЫЙ ДЕФЕКТ Д3, найден осмотром 25.09.2026 (задание
+// НЕЗНАНИЕ-ТРАФИК): в диалоге удаления подпись «Имя / Создан / Ключ» не
+// переносится, и ключ из широких знаков (43 «Q» + «=») раздувает рамку с
+// 452 до 570.8 т. — в обоих размерах окна. Формы стоят на строке с таким
+// ключом НАМЕРЕННО: переставить их на удобный ключ значило бы спрятать
+// дефект сменой входных данных. Не чинено: решение владельца вместе с Д1 и
+// Д2. Числа Д1 этих форм сняты при раздутой рамке (метка исхода в две
+// строки): починка Д3 сдвинет и их, и ворота покажут это.
+var knownD3 = osmotrKnown{
+	id:    "ИЗВЕСТНЫЙ ДЕФЕКТ Д3 (подпись с ключом из широких знаков не переносится, диалог удаления раздувается)",
+	size:  "",
+	match: "ширина рамки диалога 570.8 вместо 452.0",
 }
