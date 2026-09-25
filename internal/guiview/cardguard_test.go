@@ -169,7 +169,7 @@ func TestDeleteCardPassesServerError(t *testing.T) {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "DeleteCardActivity" || len(call.Args) != 3 {
+		if !ok || sel.Sel.Name != "DeleteCardActivity" || len(call.Args) != 4 {
 			return true
 		}
 		if id, ok := call.Args[0].(*ast.Ident); ok && id.Name == mapName {

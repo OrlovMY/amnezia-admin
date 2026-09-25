@@ -41,27 +41,34 @@ const (
 	// провалился, и «не удалось получить данные» было бы неправдой.
 	cardActivityAbsent = "Клиента нет в статистике сервера: сейчас сервер его не принимает.\n" +
 		"Были ли подключения раньше — неизвестно."
+	// cardActivityDisabled — клиент отключён, и в ответе его нет: это
+	// штатно, отключение само вырезает peer из рантайма. Текст UX-01: без
+	// него владелец читал cardActivityAbsent — «похоже на неисправность» —
+	// про клиента, которого сам отключил.
+	cardActivityDisabled = "Клиент отключён: сервер его сейчас не принимает.\n" +
+		"Были ли подключения до отключения — неизвестно."
 )
 
 // DeleteCardActivity — строка активности в карточке удаления GUI.
 //
-// err ПЕРЕВЕШИВАЕТ содержимое hs: при отказе сервера карта может прийти
-// пустой или частично заполненной, и читать её означало бы снова выдавать
-// незнание за «нет». Порядок ветвей здесь — часть правила, а не стиль
-// (признак 3 правила П-НЕЗНАНИЕ: частный случай выше общего перехватывает
-// «не знаем»).
-func DeleteCardActivity(hs map[string]string, clientID string, err error) string {
-	if err != nil {
-		return cardActivityUnknown
-	}
-	v, ok := hs[clientID]
-	switch {
-	case !ok:
+// Классификацию делает core.ClassifyLastSeen — единственное место правила
+// для GUI и CLI (ревью QA-01/UX-01, задание НЕЗНАНИЕ-ТРАФИК): ошибка
+// перевешивает карту; отключённый клиент, которого нет в ответе, — своё
+// состояние, ВЫШЕ «нет в ответе» (признак 3); отсутствующий ключ — не
+// «Подключений не было.». Здесь только текст для каждого исхода.
+func DeleteCardActivity(hs map[string]string, clientID string, err error, disabled bool) string {
+	s := core.ClassifyLastSeen(hs, err, clientID, disabled)
+	switch s.State {
+	case core.SeenDisabled:
+		return cardActivityDisabled
+	case core.SeenAbsent:
 		return cardActivityAbsent
-	case v != "" && v != "—":
-		return fmt.Sprintf(cardActivityWas, v)
+	case core.SeenNever:
+		return cardActivityNone
+	case core.SeenWas:
+		return fmt.Sprintf(cardActivityWas, s.When)
 	}
-	return cardActivityNone
+	return cardActivityUnknown
 }
 
 // ActivityText — ячейка колонки «Активность» таблицы пользователей.

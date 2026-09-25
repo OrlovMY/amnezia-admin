@@ -27,10 +27,11 @@ const trafficCol = 4
 // первого клиента не применился, откат вернул файлы, но не рантайм.
 // Возвращает имена включённых клиентов, которых нет в `wg show`, и имя
 // присутствующего с нулевым трафиком.
-func guiDesync(t *testing.T) (*fakesrv.Server, *core.Session, *core.Container, []string, string) {
+func guiDesync(t *testing.T) (*gatedRunner, *core.Session, *core.Container, []string, string) {
 	t.Helper()
 	srv := fakesrv.New()
-	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
+	g := &gatedRunner{inner: srv}
+	sess := core.NewSessionWithRunner(g, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
 	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
 	add, err := sess.PlanAddUser(c, "Carol")
 	if err != nil {
@@ -66,7 +67,7 @@ func guiDesync(t *testing.T) (*fakesrv.Server, *core.Session, *core.Container, [
 		t.Fatal("Apply(рекей): ожидалась ошибка — рассинхрон не воспроизвёлся")
 	}
 	srv.DropPeerOnSync, srv.FailSyncconfFrom = "", 0
-	return srv, sess, c, absent, "Carol"
+	return g, sess, c, absent, "Carol"
 }
 
 // refreshedUI — окно с таблицей, заполненной НАСТОЯЩИМ refresh().
@@ -166,4 +167,112 @@ func TestTrafficDisabledReachesTable(t *testing.T) {
 	if shown, _ := shownAndCopied(t, u, clients[1].Name()); shown != "0 B / 0 B" {
 		t.Errorf("включённый клиент в статистике с нулём: %q, ожидалось \"0 B / 0 B\"", shown)
 	}
+}
+
+// deleteCardText — НАСТОЯЩИЙ диалог удаления строки name: u.deleteSelected()
+// спрашивает сервер (GetHandshakes) в фоне, ответ выставляет метку. Текст
+// снимается с виджетов показанного диалога, а не вызовом
+// guiview.DeleteCardActivity в обход (ревью QA-01: прежний «доезд» до окна
+// не доезжал).
+func deleteCardText(t *testing.T, u *ui, g *gatedRunner, name string) []string {
+	t.Helper()
+	u.selectedRow = -1
+	for row, cl := range u.clients {
+		if cl.Name() == name {
+			u.selectedRow = row
+		}
+	}
+	if u.selectedRow < 0 {
+		t.Fatalf("строки %q в таблице нет", name)
+	}
+	// Ответ сервера держится, пока диалог не показан: тестовый драйвер
+	// исполняет fyne.Do прямо в фоновой горутине (как в осмотре, -race).
+	g.gate = make(chan struct{})
+	u.deleteSelected()
+	pop := topPopup(t, u.win.Canvas())
+	close(g.gate)
+	waitGUIGoroutines(t)
+	g.gate = nil
+	var texts []string
+	var walk func(o fyne.CanvasObject)
+	walk = func(o fyne.CanvasObject) {
+		switch w := o.(type) {
+		case *widget.Label:
+			texts = append(texts, w.Text)
+			return
+		case *fyne.Container:
+			for _, ch := range w.Objects {
+				walk(ch)
+			}
+			return
+		case fyne.Widget:
+			for _, ch := range test.WidgetRenderer(w).Objects() {
+				walk(ch)
+			}
+		}
+	}
+	walk(pop)
+	pop.Hide()
+	return texts
+}
+
+func hasLabel(texts []string, want string) bool {
+	for _, s := range texts {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDeleteDialogAbsentAndDisabled — ТЕСТ ДОЕЗДА до окна удаления: боевые
+// исходы «нет в статистике» (рассинхрон) и «отключён» (настоящее
+// отключение) приходят в метку показанного диалога.
+func TestDeleteDialogAbsentAndDisabled(t *testing.T) {
+	const (
+		wantAbsent   = "Клиента нет в статистике сервера: сейчас сервер его не принимает.\nБыли ли подключения раньше — неизвестно."
+		wantDisabled = "Клиент отключён: сервер его сейчас не принимает.\nБыли ли подключения до отключения — неизвестно."
+		wantNone     = "Подключений не было."
+	)
+	g, sess, c, absent, present := guiDesync(t)
+	u := refreshedUI(t, sess, c)
+	if got := deleteCardText(t, u, g, absent[0]); !hasLabel(got, wantAbsent) {
+		t.Errorf("диалог удаления клиента %q, которого нет в статистике: подписи %q, ожидалась %q", absent[0], got, wantAbsent)
+	}
+	if got := deleteCardText(t, u, g, present); !hasLabel(got, wantNone) {
+		t.Errorf("диалог удаления %q (в ответе, не подключался): подписи %q, ожидалась %q", present, got, wantNone)
+	}
+
+	g2 := &gatedRunner{inner: fakesrv.New()}
+	sess2 := core.NewSessionWithRunner(g2, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
+	clients, err := sess2.LoadClients(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := sess2.PlanSetEnabled(c, clients[0].ClientID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess2.Apply(p); err != nil {
+		t.Fatal(err)
+	}
+	u2 := refreshedUI(t, sess2, c)
+	if got := deleteCardText(t, u2, g2, clients[0].Name()); !hasLabel(got, wantDisabled) {
+		t.Errorf("диалог удаления отключённого %q: подписи %q, ожидалась %q", clients[0].Name(), got, wantDisabled)
+	}
+}
+
+// gatedRunner — fakesrv, у которого ответ на `wg show` можно придержать
+// (gate), пока тест не соберёт показанный диалог. gate меняется только
+// тестовой горутиной до запуска и после завершения фоновых операций.
+type gatedRunner struct {
+	inner *fakesrv.Server
+	gate  chan struct{}
+}
+
+func (g *gatedRunner) Run(cmd string, stdin []byte) (string, error) {
+	if g.gate != nil && strings.Contains(cmd, "wg show wg0 dump") {
+		<-g.gate
+	}
+	return g.inner.Run(cmd, stdin)
 }

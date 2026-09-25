@@ -47,10 +47,11 @@ func wgContainer() *core.Container {
 func TestDeleteCardActivityThreeStates(t *testing.T) {
 	const id = "peer-1"
 	for _, tc := range []struct {
-		name string
-		hs   map[string]string
-		err  error
-		want string
+		name     string
+		hs       map[string]string
+		err      error
+		disabled bool
+		want     string
 	}{
 		{
 			name: "есть активность",
@@ -70,6 +71,12 @@ func TestDeleteCardActivityThreeStates(t *testing.T) {
 			want: "Клиента нет в статистике сервера: сейчас сервер его не принимает.\nБыли ли подключения раньше — неизвестно.",
 		},
 		{
+			name:     "отключённого нет в ответе — отключён, а не «нет в статистике»",
+			hs:       map[string]string{"другой": "—"},
+			disabled: true,
+			want:     "Клиент отключён: сервер его сейчас не принимает.\nБыли ли подключения до отключения — неизвестно.",
+		},
+		{
 			name: "не удалось узнать",
 			hs:   nil,
 			err:  errors.New("wg show wg0 dump: ssh: connection reset"),
@@ -83,7 +90,7 @@ func TestDeleteCardActivityThreeStates(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := guiview.DeleteCardActivity(tc.hs, id, tc.err)
+			got := guiview.DeleteCardActivity(tc.hs, id, tc.err, tc.disabled)
 			if got != tc.want {
 				t.Errorf("DeleteCardActivity = %q\n              want %q", got, tc.want)
 			}
@@ -97,10 +104,14 @@ func TestDeleteCardActivityThreeStates(t *testing.T) {
 // ожидание в таблице выше.
 func TestDeleteCardActivityStatesDiffer(t *testing.T) {
 	const id = "peer-1"
-	was := guiview.DeleteCardActivity(map[string]string{id: "2026-09-18 21:40"}, id, nil)
-	none := guiview.DeleteCardActivity(map[string]string{id: "—"}, id, nil)
-	unknown := guiview.DeleteCardActivity(nil, id, errors.New("boom"))
-	absent := guiview.DeleteCardActivity(map[string]string{}, id, nil)
+	was := guiview.DeleteCardActivity(map[string]string{id: "2026-09-18 21:40"}, id, nil, false)
+	none := guiview.DeleteCardActivity(map[string]string{id: "—"}, id, nil, false)
+	unknown := guiview.DeleteCardActivity(nil, id, errors.New("boom"), false)
+	absent := guiview.DeleteCardActivity(map[string]string{}, id, nil, false)
+	disabled := guiview.DeleteCardActivity(map[string]string{}, id, nil, true)
+	if disabled == absent || disabled == none || disabled == unknown {
+		t.Fatalf("«отключён» неотличимо от другого состояния: отключён=%q нет-в-ответе=%q", disabled, absent)
+	}
 	if was == none || none == unknown || was == unknown {
 		t.Fatalf("состояния карточки удаления неразличимы: было=%q нет=%q не-удалось=%q", was, none, unknown)
 	}
@@ -121,7 +132,7 @@ func TestDeleteCardActivityArrivesFromServer(t *testing.T) {
 		&core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
 
 	hs, err := sess.GetHandshakes(wgContainer())
-	got := guiview.DeleteCardActivity(hs, "peer-1", err)
+	got := guiview.DeleteCardActivity(hs, "peer-1", err, false)
 	const want = "Не удалось получить данные о подключениях.\nНеизвестно, пользуется ли клиент этим доступом прямо сейчас."
 	if got != want {
 		t.Errorf("отказ сервера не доехал до карточки: %q, want %q", got, want)
@@ -147,7 +158,7 @@ func TestDeleteCardActivityFreshDataArrives(t *testing.T) {
 	if anyPeer == "" {
 		t.Fatal("тест перестал что-либо проверять: fakesrv не вернул ни одного peer'а")
 	}
-	if got, want := guiview.DeleteCardActivity(hs, anyPeer, nil), "Подключений не было."; got != want {
+	if got, want := guiview.DeleteCardActivity(hs, anyPeer, nil, false), "Подключений не было."; got != want {
 		t.Errorf("свежий ответ сервера: %q, want %q", got, want)
 	}
 }
@@ -360,10 +371,10 @@ func TestDeleteCardActivityAbsentArrivesFromServer(t *testing.T) {
 	}
 	const want = "Клиента нет в статистике сервера: сейчас сервер его не принимает.\n" +
 		"Были ли подключения раньше — неизвестно."
-	if got := guiview.DeleteCardActivity(hs, subject, nil); got != want {
+	if got := guiview.DeleteCardActivity(hs, subject, nil, false); got != want {
 		t.Errorf("карточка удаления клиента, которого нет в ответе сервера:\n%q\nwant\n%q", got, want)
 	}
-	if got := guiview.DeleteCardActivity(hs, carol, nil); got != "Подключений не было." {
+	if got := guiview.DeleteCardActivity(hs, carol, nil, false); got != "Подключений не было." {
 		t.Errorf("клиент есть в ответе и не подключался: %q, want \"Подключений не было.\"", got)
 	}
 }

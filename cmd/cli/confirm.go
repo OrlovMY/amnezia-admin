@@ -19,36 +19,25 @@ type ActionCard struct {
 	Container string // c.Name
 	Name      string // cl.Name()
 	Created   string // cl.Created(), обрезанный до 19 символов, как в listUsers (main.go)
-	LastSeen  string // значение из GetHandshakes(c) по ClientID; ключа нет в карте → "—"
 	Key       string // cl.ClientID
 
-	// LastSeenUnknown — ТРЕТЬЕ состояние поля «Последнее подключение»
-	// (задание A1, место № 5): статистику с сервера получить НЕ УДАЛОСЬ.
-	// Прежде этот случай был неотличим от «не подключался»: GetHandshakes
-	// глотала ошибку, возвращала пустую карту, и buildCard подставляла
-	// «—» — то есть карточка перед НЕОБРАТИМЫМ действием уверенно говорила
-	// то, чего не знала.
-	//
-	// ОТДЕЛЬНОЕ ПОЛЕ, А НЕ ОСОБОЕ ЗНАЧЕНИЕ LastSeen: состояние, выведенное
-	// из текста («если там написано „не удалось“…»), — тот самый
-	// антипаттерн, против которого написан A1; тест утверждал бы по строке
-	// интерфейса, а не по состоянию.
-	LastSeenUnknown bool
-
-	// LastSeenAbsent — сервер ответил, но этого клиента в ответе нет
-	// (задание НЕЗНАНИЕ-ТРАФИК, место № 4, найдено при сверке). Прежде
-	// buildCard читала отсутствующий ключ пустой строкой и подставляла «—»
-	// — «не подключался». Отдельное поле, а не LastSeenUnknown: запрос
-	// удался, и «не удалось получить данные» было бы неправдой.
-	LastSeenAbsent bool
+	// Seen — поле «Последнее подключение» ОДНИМ значением-исходом
+	// (core.ClassifyLastSeen): не удалось / отключён / нет в ответе / не
+	// подключался / было. Прежде здесь лежали строка LastSeen и два
+	// независимых bool (LastSeenUnknown, LastSeenAbsent) — четыре
+	// комбинации, и противоречие «—» + «нет в ответе» разрешал только
+	// порядок switch при печати (ревью QA-01, задание НЕЗНАНИЕ-ТРАФИК).
+	// Состояние не выводится из текста: тест утверждает по исходу.
+	Seen core.LastSeen
 }
 
-// textLastSeenUnknown — дословный текст третьего состояния в карточке CLI.
-const textLastSeenUnknown = "не удалось получить данные"
-
-// textLastSeenAbsent — клиента нет в ответе сервера: известно, что сейчас
-// сервер его не принимает; неизвестно, подключался ли он раньше.
-const textLastSeenAbsent = "нет в статистике сервера (сейчас сервер его не принимает)"
+// Дословные тексты поля «Последнее подключение» для исходов без даты.
+const (
+	textLastSeenUnknown  = "не удалось получить данные"
+	textLastSeenDisabled = "неизвестно (клиент отключён)"
+	textLastSeenAbsent   = "нет в статистике сервера (сейчас сервер его не принимает)"
+	textLastSeenNever    = "—"
+)
 
 // capitalizeFirst делает первую букву заглавной, по рунам (не по байтам —
 // кириллица многобайтовая, s[:1] отрезал бы половину первой буквы).
@@ -81,24 +70,29 @@ func renderCard(card ActionCard) string {
 	fmt.Fprintln(&b, "  Контейнер:              "+card.Container)
 	fmt.Fprintln(&b, "  Имя:                    "+cHead(card.Name))
 	fmt.Fprintln(&b, "  Создан:                 "+card.Created)
-	lastSeen := card.LastSeen
-	switch {
-	case card.LastSeenUnknown:
-		lastSeen = textLastSeenUnknown
-	case card.LastSeenAbsent:
+	var lastSeen, warn string
+	switch card.Seen.State {
+	case core.SeenWas:
+		lastSeen = card.Seen.When
+		warn = "  ⚠ Внимание: у этого клиента была активность."
+	case core.SeenNever:
+		lastSeen = textLastSeenNever
+	case core.SeenDisabled:
+		lastSeen = textLastSeenDisabled
+	case core.SeenAbsent:
 		lastSeen = textLastSeenAbsent
+		warn = "  ⚠ Клиента нет в статистике сервера — неизвестно, подключался ли он раньше."
+	default: // core.SeenFailed и любое незаполненное значение — незнание
+		lastSeen = textLastSeenUnknown
+		// Незнание печатается ТАМ ЖЕ, где печаталась бы активность, и той
+		// же меткой внимания.
+		warn = "  ⚠ Внимание: статистику с сервера получить не удалось — " +
+			"неизвестно, пользуется ли клиент этим доступом."
 	}
 	fmt.Fprintln(&b, "  Последнее подключение:  "+lastSeen)
 	fmt.Fprintln(&b, "  Публичный ключ:         "+cDim(card.Key))
-	switch {
-	case card.LastSeenUnknown:
-		// Незнание печатается ТАМ ЖЕ, где печаталась бы активность, и той
-		// же меткой внимания: человек перед необратимым действием обязан
-		// увидеть, что «—» в строке выше сейчас ничего не значит.
-		fmt.Fprintln(&b, cWarn("  ⚠ Внимание: статистику с сервера получить не удалось — "+
-			"неизвестно, пользуется ли клиент этим доступом."))
-	case card.LastSeen != "" && card.LastSeen != "—":
-		fmt.Fprintln(&b, cWarn("  ⚠ Внимание: у этого клиента была активность."))
+	if warn != "" {
+		fmt.Fprintln(&b, cWarn(warn))
 	}
 	if card.Action == "перевыпустить конфиг" {
 		// раньше это предупреждение печаталось только в меню (main.go, пункт
@@ -116,20 +110,14 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 	// принятия решения. Ошибка НЕ отбрасывается — она и есть третье
 	// состояние (A1, место № 5).
 	hs, err := sess.GetHandshakes(cur)
-	lastSeen, present := hs[cl.ClientID]
-	if lastSeen == "" {
-		lastSeen = "—"
-	}
 	return ActionCard{
-		Action:          action,
-		Host:            sess.Creds.Host,
-		Container:       cur.Name,
-		Name:            cl.Name(),
-		Created:         trunc19(cl.Created()),
-		LastSeen:        lastSeen,
-		LastSeenUnknown: err != nil,
-		LastSeenAbsent:  err == nil && !present,
-		Key:             cl.ClientID,
+		Action:    action,
+		Host:      sess.Creds.Host,
+		Container: cur.Name,
+		Name:      cl.Name(),
+		Created:   trunc19(cl.Created()),
+		Seen:      core.ClassifyLastSeen(hs, err, cl.ClientID, cl.Disabled()),
+		Key:       cl.ClientID,
 	}
 }
 

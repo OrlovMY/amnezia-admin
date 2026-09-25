@@ -2945,14 +2945,15 @@ func (u *ui) deleteSelected() {
 		hs, hsErr := u.sess.GetHandshakes(cur)
 		fyne.Do(func() {
 			// Сверка снимка — конвенция этого файла (см. refresh()): ответ
-			// про ДРУГОЙ контейнер отвечает не на тот вопрос, а ключа victim
-			// в нём нет, и это напечаталось бы как «Подключений не было».
+			// про ДРУГОЙ контейнер отвечает не на тот вопрос: ключа victim в нём
+			// нет, и карточка сказала бы «нет в статистике сервера» про клиента,
+			// о котором на самом деле не спрашивали (ошибка ниже это исключает).
 			// Сегодня случай недостижим (диалог модальный), но конвенция
 			// стоит двух строк и переживёт снятие модальности.
 			if cur != u.cur {
 				hs, hsErr = nil, errProtoSwitched
 			}
-			activity.SetText(guiview.DeleteCardActivity(hs, victim.ClientID, hsErr))
+			activity.SetText(guiview.DeleteCardActivity(hs, victim.ClientID, hsErr, victim.Disabled()))
 			okBtn.Enable()
 			diffBtn.Enable()
 		})

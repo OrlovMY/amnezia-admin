@@ -873,6 +873,11 @@ var osmotrForms = []osmotrForm{
 		width: 412, known: knownActionD1},
 	{name: "(в) удаление", open: openDelete, inventory: invDelete, width: 452, known: knownDeleteD1},
 	{name: "(г) главное окно", open: openMain, inventory: invMain},
+	{name: "(г) главное окно, отключённый клиент", open: openMainDisabled, inventory: invMain},
+	{name: "(в) удаление, клиента нет в статистике", open: openDeleteAnswered(2, false),
+		inventory: invDeleteWith(rowZName, deleteAbsentLabel), width: 452, known: knownDeleteAnsweredD1(rowZName, deleteAbsentLabel, "48.3", "88.3", "127.4")},
+	{name: "(в) удаление, клиент отключён", open: openDeleteAnswered(2, true),
+		inventory: invDeleteWith(rowZName, deleteDisabledLabel), width: 452, known: knownDeleteAnsweredD1(rowZName, deleteDisabledLabel, "29.2", "69.2", "108.3")},
 }
 
 var osmotrThemes = []struct {
@@ -1183,4 +1188,97 @@ func findParent(root, child fyne.CanvasObject) *fyne.Container {
 		}
 	})
 	return p
+}
+
+// ---------- кадры задания НЕЗНАНИЕ-ТРАФИК (ревью UX-01: новых экранов не видел никто) ----------
+
+// osmotrWgShow — сервер, который ОТВЕЧАЕТ на `wg show wg0 dump` списком
+// peers (без трафика и рукопожатий); остальные команды — «сервера нет».
+// gate, как у osmotrNoServer, держит ответ, пока форма не собрана.
+type osmotrWgShow struct {
+	gate  chan struct{}
+	peers []string
+}
+
+func (s osmotrWgShow) Run(cmd string, _ []byte) (string, error) {
+	if s.gate != nil {
+		<-s.gate
+	}
+	if !strings.HasSuffix(cmd, "wg show wg0 dump") {
+		return "", fmt.Errorf("осмотр: сервера нет")
+	}
+	out := "serverpriv\tserverpub\t51820\toff\n"
+	for _, p := range s.peers {
+		out += p + "\t(none)\t(none)\t0.0.0.0/0\t0\t0\t0\toff\n"
+	}
+	return out, nil
+}
+
+// osmotrMainDisabled — главное окно, в котором «Роутер дача» ОТКЛЮЧЁН (в
+// статистике его нет, как в бою): видно «отключён» в активности и трафике.
+func osmotrMainDisabled(u *ui) {
+	osmotrMain(u)
+	u.clients[2].UserData["disabled"] = true
+	u.table.Refresh()
+}
+
+func openMainDisabled(t *testing.T, u *ui, sized func()) osmotrScene {
+	osmotrMainDisabled(u)
+	sized()
+	c := u.win.Canvas()
+	return osmotrScene{root: c.Content(), canvas: c, mins: osmotrFrame(c.Content(), nil)}
+}
+
+// openDeleteAnswered — диалог удаления строки row, когда сервер ОТВЕТИЛ, а
+// клиента row в ответе нет (в ответе только «Ноутбук»). disabled — сначала
+// отключить строку (исход «отключён»), иначе исход «нет в статистике».
+func openDeleteAnswered(row int, disabled bool) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return func(t *testing.T, u *ui, sized func()) osmotrScene {
+		if disabled {
+			osmotrMainDisabled(u)
+		} else {
+			osmotrMain(u)
+		}
+		sized()
+		t.Cleanup(func() { waitGUIGoroutines(t) })
+		gate := make(chan struct{})
+		u.sess = core.NewSessionWithRunner(osmotrWgShow{gate: gate, peers: []string{testKey}}, u.sess.Creds)
+		u.selectedRow = row
+		u.deleteSelected()
+		c := u.win.Canvas()
+		pop := topPopup(t, c)
+		mins := osmotrFrame(pop, nil)
+		close(gate)
+		waitGUIGoroutines(t)
+		return osmotrScene{root: pop, canvas: c, mins: mins}
+	}
+}
+
+// Первые строки меток новых исходов — как их сокращает прибор (набраны
+// руками по выдаче 25.09.2026, а не взяты из guiview).
+const (
+	rowZName            = "Роутер дача"
+	deleteAbsentLabel   = "Клиента нет в статистике сервера: сейчас…"
+	deleteDisabledLabel = "Клиент отключён: сервер его сейчас не пр…"
+)
+
+// invDeleteWith — опись диалога удаления клиента name с меткой исхода label.
+func invDeleteWith(name, label string) []string {
+	return []string{
+		"подпись:Удалить пользователя?", "подпись:Имя: " + name + "…",
+		"подпись:" + label,
+		"кнопка:Удалить", "кнопка:Показать изменения", "подпись:", "кнопка:Отмена",
+	}
+}
+
+// knownDeleteAnsweredD1 — тот же Д1 (диалог выше окна высотой 161 т.), что
+// у knownDeleteD1; числа по выдаче: метка «нет в статистике» переносится в три строки (как у отказа), «отключён» — в две.
+func knownDeleteAnsweredD1(name, label, lbl, btn, st string) []osmotrKnown {
+	return []osmotrKnown{
+		knownD1("подпись «" + label + "»: снизу " + lbl),
+		knownD1("кнопка «Удалить»: снизу " + btn), knownD1("кнопка «Показать изменения»: снизу " + btn),
+		knownD1("подпись «»: снизу " + st),
+		knownD1("подпись «Имя: " + name + "…» × кнопка «Отмена»: 73x23 = 1677 т²"),
+		knownD1("подпись «" + label + "» × кнопка «Отмена»: 73x9 = 649 т²"),
+	}
 }

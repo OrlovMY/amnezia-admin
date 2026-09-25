@@ -71,3 +71,57 @@ func ReadPeer(stats map[string]PeerStat, failed bool, clientID string) PeerReadi
 	}
 	return PeerReading{State: PeerMeasured, stat: st}
 }
+
+// ---------- «Последнее подключение» в карточке перед необратимым действием ----------
+
+// SeenState — ОДНО значение-исход для поля «Последнее подключение»
+// карточек удаления/перевыпуска/отключения (GUI и CLI). Прежде карточка CLI
+// держала его двумя независимыми bool рядом со строкой — четыре комбинации,
+// противоречие между которыми разрешал только порядок switch при печати
+// (ревью QA-01, задание НЕЗНАНИЕ-ТРАФИК).
+type SeenState int
+
+const (
+	// SeenFailed — запрос не удался. Нулевое значение НАМЕРЕННО: незаполненный
+	// исход — незнание, а не «не подключался».
+	SeenFailed SeenState = iota
+	// SeenDisabled — клиент отключён, и в ответе его нет: штатно, отключение
+	// вырезает peer из рантайма. Стоит ВЫШЕ SeenAbsent (признак 3: частный
+	// случай «отключён» иначе перехватывался общим «нет в ответе», и
+	// владелец читал про неисправность там, где сам отключил клиента).
+	SeenDisabled
+	// SeenAbsent — сервер ответил, включённого клиента в ответе нет.
+	SeenAbsent
+	// SeenNever — клиент в ответе, рукопожатий не было.
+	SeenNever
+	// SeenWas — клиент в ответе, было рукопожатие (When).
+	SeenWas
+)
+
+// LastSeen — исход классификации; When заполнен только при SeenWas.
+type LastSeen struct {
+	State SeenState
+	When  string
+}
+
+// ClassifyLastSeen — ЕДИНСТВЕННОЕ место правила «нет в ответе ≠ не
+// подключался»: и GUI (guiview.DeleteCardActivity), и CLI (buildCard)
+// зовут его. hs и err — ровно то, что вернул Session.GetHandshakes;
+// GetHandshakes кладёт в карту КАЖДЫЙ peer ответа, поэтому отсутствие ключа
+// означает «нет в рантайме сервера». Порядок ветвей — часть правила: ошибка
+// перевешивает карту; «отключён» — выше «нет в ответе».
+func ClassifyLastSeen(hs map[string]string, err error, clientID string, disabled bool) LastSeen {
+	if err != nil {
+		return LastSeen{State: SeenFailed}
+	}
+	v, ok := hs[clientID]
+	switch {
+	case !ok && disabled:
+		return LastSeen{State: SeenDisabled}
+	case !ok:
+		return LastSeen{State: SeenAbsent}
+	case v == "" || v == "—":
+		return LastSeen{State: SeenNever}
+	}
+	return LastSeen{State: SeenWas, When: v}
+}
