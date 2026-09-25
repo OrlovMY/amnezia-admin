@@ -244,6 +244,7 @@ type coverable struct {
 //     Это фон, а не содержимое.
 func coverableObjects(root, popObj fyne.CanvasObject, pop rect) []coverable {
 	var out []coverable
+	labels := formLabels(root)
 	walkVisibleStop(root, func(o fyne.CanvasObject) bool {
 		if o == popObj {
 			return true // сама всплывашка: она не то, что она накрывает
@@ -257,7 +258,7 @@ func coverableObjects(root, popObj fyne.CanvasObject, pop rect) []coverable {
 		case *widget.Check:
 			name, stop = "галка «"+x.Text+"»", true
 		case *widget.Entry:
-			name, stop = fmt.Sprintf("поле ввода (парольное: %v)", x.Password), true
+			name, stop = "поле «"+entryName(x, labels)+"»", true
 		case *canvas.Text:
 			name = x.Text
 		default:
@@ -283,6 +284,33 @@ func coverableObjects(root, popObj fyne.CanvasObject, pop rect) []coverable {
 		return stop
 	})
 	return out
+}
+
+// formLabels — подписи полей из widget.Form («Метка», «Пин-код»…): по ним
+// поле называется в отчётах. Прежде имя строилось из флага Password, и два
+// непарольных поля были в отчёте неразличимы (ревью QA-01).
+func formLabels(root fyne.CanvasObject) map[fyne.CanvasObject]string {
+	out := map[fyne.CanvasObject]string{}
+	walkObjects(root, func(o fyne.CanvasObject) {
+		if f, ok := o.(*widget.Form); ok {
+			for _, it := range f.Items {
+				out[it.Widget] = it.Text
+			}
+		}
+	})
+	return out
+}
+
+// entryName — подпись поля в форме, иначе его подсказка-заглушка, иначе
+// честное «без подписи».
+func entryName(e *widget.Entry, labels map[fyne.CanvasObject]string) string {
+	if l := labels[e]; l != "" {
+		return l
+	}
+	if e.PlaceHolder != "" {
+		return e.PlaceHolder
+	}
+	return "без подписи"
 }
 
 // TestFloatingHintCoversOnlyWhatTheFormAllows — ВСПЛЫВАШКА НЕ НАКРЫВАЕТ
@@ -512,11 +540,16 @@ func TestHintDoesNotChangeDialogHeight(t *testing.T) {
 // TestReservedHintFormsHaveNoPopup — СТОРОЖ НА СПИСОК hintScenes.
 //
 // Всплывашка разрешена только там, где доказано, что она никого не накрывает,
-// а доказывает это TestFloatingHintCoversNothingInteractive по списку
+// а доказывает это TestFloatingHintCoversOnlyWhatTheFormAllows по списку
 // hintScenes. Переведи кто-нибудь диалог пин-кода или сохранения на
 // всплывашку, забыв дописать форму в список, — доказательства не будет, а
 // прогон останется зелёным. Поэтому здесь прямо требуется: в этих двух формах
 // всплывашек нет.
+//
+// ГРАНИЦА (ревью QA-01): список hintScenes этот тест НЕ читает. Он краснеет
+// на всплывашке в этих двух формах, даже если форму в hintScenes добавили, —
+// перевод формы на всплывашку требует правки ОБОИХ мест, и сообщение говорит
+// именно это.
 func TestReservedHintFormsHaveNoPopup(t *testing.T) {
 	for _, c := range []struct {
 		what string
@@ -531,9 +564,10 @@ func TestReservedHintFormsHaveNoPopup(t *testing.T) {
 				t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: подсказка не показана")
 			}
 			if n := len(visibleHintPopups(d)); n != 0 {
-				t.Errorf("в этой форме %d всплывающих подсказок, а в списке hintScenes её нет: "+
-					"никто не проверил, что всплывашка не накрывает орган управления. "+
-					"Добавь форму в hintScenes — или верни ей зарезервированное место", n)
+				t.Errorf("в этой форме %d всплывающих подсказок, а она обязана держать подсказку "+
+					"в зарезервированном месте. Если перевод на всплывашку задуман, добавь форму "+
+					"в hintScenes (там проверят, что всплывашка ничего не накрывает) И убери её "+
+					"из этого теста: сам он hintScenes не читает", n)
 			}
 		})
 	}
