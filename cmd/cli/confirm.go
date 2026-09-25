@@ -34,10 +34,21 @@ type ActionCard struct {
 	// антипаттерн, против которого написан A1; тест утверждал бы по строке
 	// интерфейса, а не по состоянию.
 	LastSeenUnknown bool
+
+	// LastSeenAbsent — сервер ответил, но этого клиента в ответе нет
+	// (задание НЕЗНАНИЕ-ТРАФИК, место № 4, найдено при сверке). Прежде
+	// buildCard читала отсутствующий ключ пустой строкой и подставляла «—»
+	// — «не подключался». Отдельное поле, а не LastSeenUnknown: запрос
+	// удался, и «не удалось получить данные» было бы неправдой.
+	LastSeenAbsent bool
 }
 
 // textLastSeenUnknown — дословный текст третьего состояния в карточке CLI.
 const textLastSeenUnknown = "не удалось получить данные"
+
+// textLastSeenAbsent — клиента нет в ответе сервера: известно, что сейчас
+// сервер его не принимает; неизвестно, подключался ли он раньше.
+const textLastSeenAbsent = "нет в статистике сервера (сейчас сервер его не принимает)"
 
 // capitalizeFirst делает первую букву заглавной, по рунам (не по байтам —
 // кириллица многобайтовая, s[:1] отрезал бы половину первой буквы).
@@ -71,8 +82,11 @@ func renderCard(card ActionCard) string {
 	fmt.Fprintln(&b, "  Имя:                    "+cHead(card.Name))
 	fmt.Fprintln(&b, "  Создан:                 "+card.Created)
 	lastSeen := card.LastSeen
-	if card.LastSeenUnknown {
+	switch {
+	case card.LastSeenUnknown:
 		lastSeen = textLastSeenUnknown
+	case card.LastSeenAbsent:
+		lastSeen = textLastSeenAbsent
 	}
 	fmt.Fprintln(&b, "  Последнее подключение:  "+lastSeen)
 	fmt.Fprintln(&b, "  Публичный ключ:         "+cDim(card.Key))
@@ -102,7 +116,7 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 	// принятия решения. Ошибка НЕ отбрасывается — она и есть третье
 	// состояние (A1, место № 5).
 	hs, err := sess.GetHandshakes(cur)
-	lastSeen := hs[cl.ClientID]
+	lastSeen, present := hs[cl.ClientID]
 	if lastSeen == "" {
 		lastSeen = "—"
 	}
@@ -114,6 +128,7 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 		Created:         trunc19(cl.Created()),
 		LastSeen:        lastSeen,
 		LastSeenUnknown: err != nil,
+		LastSeenAbsent:  err == nil && !present,
 		Key:             cl.ClientID,
 	}
 }

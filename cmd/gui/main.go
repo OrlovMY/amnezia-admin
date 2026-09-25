@@ -1869,9 +1869,8 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 		Disabled:       cl.Disabled(),
 		CanManage:      u.canManage,
 		ActivityFailed: u.activityFailed,
-		StatsFailed:    u.statsFailed,
 		Handshake:      u.handshakes[cl.ClientID],
-		Stats:          u.peerStats[cl.ClientID],
+		Traffic:        core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID),
 	}, true
 }
 
