@@ -77,6 +77,8 @@ const ciLintGuards = `          set -euo pipefail
 
 const goenv = "TestNoToolEnvironmentOverrides"
 
+const keys = "TestWorkflowKeysClosedList"
+
 const canaryLogic = "TestShellcheckCanaryStepLogic"
 
 // toolsStep — шаг «Инструменты» job lint. Добавочные вызовы actionlint
@@ -162,9 +164,9 @@ var plants = []plant{
 	{name: "r2-githubenv-goflags", edits: rel("          echo \"$ImageOS $ImageVersion\"\n", "          echo \"$ImageOS $ImageVersion\"\n          echo \"GOFLAGS=-n\" >> \"$GITHUB_ENV\"\n"),
 		wantTest: goenv, wantMsg: "«echo \"GOFLAGS=-n\" >> \"$GITHUB_ENV\"»"},
 	{name: "r2-step-shell", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        shell: bash --noprofile --norc {0} || true\n"),
-		wantTest: inv, wantMsg: "у шага задан shell: «bash --noprofile --norc {0} || true»"},
+		wantTest: inv, also: []string{keys}, wantMsg: "у шага задан shell: «bash --noprofile --norc {0} || true»"},
 	{name: "r2-job-shell", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    defaults:\n      run:\n        shell: bash {0} || true\n"),
-		wantTest: inv, wantMsg: "у job задан defaults.run.shell"},
+		wantTest: inv, also: []string{keys}, wantMsg: "у job задан defaults.run.shell"},
 	{name: "r2-gotest-env-goflags", edits: []edit{
 		{ciYML, "      - name: go test -race\n", "      - name: go test -race\n        env:\n          GOFLAGS: -run=NOTHING\n"},
 		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        env:\n          GOFLAGS: -run=NOTHING\n"}},
@@ -172,7 +174,7 @@ var plants = []plant{
 	{name: "r2-gotest-shell", edits: []edit{
 		{ciYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"},
 		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"}},
-		wantTest: gtm, wantMsg: "у шага задан shell: «bash {0} || true»"},
+		wantTest: gtm, also: []string{keys}, wantMsg: "у шага задан shell: «bash {0} || true»"},
 	{name: "r2-gotest-subshell", edits: []edit{
 		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
 		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
@@ -187,7 +189,7 @@ var plants = []plant{
 	{name: "r4-sc-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          SHELLCHECK_BIN: /nonexistent\n"),
 		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env SHELLCHECK_BIN=/nonexistent"},
 	{name: "r4-sc-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  SHELLCHECK_BIN: /nonexistent\n\n"),
-		wantTest: goenv, wantMsg: "workflow: env SHELLCHECK_BIN=/nonexistent"},
+		wantTest: goenv, also: []string{keys}, wantMsg: "workflow: env SHELLCHECK_BIN=/nonexistent"},
 	{name: "r4-sc-githubenv", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"\n"),
 		wantTest: goenv, wantMsg: "SHELLCHECK_BIN «echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"»"},
 	{name: "r4-go-env-w", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          go env -w GOFLAGS=-n\n"),
@@ -212,13 +214,34 @@ var plants = []plant{
 	{name: "r6-bash-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          BASH_ENV: /tmp/x\n"),
 		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env BASH_ENV=/tmp/x вне закрытого списка имён"},
 	{name: "r6-bash-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  BASH_ENV: /tmp/x\n\n"),
-		wantTest: goenv, wantMsg: "workflow: env BASH_ENV=/tmp/x вне закрытого списка имён"},
+		wantTest: goenv, also: []string{keys}, wantMsg: "workflow: env BASH_ENV=/tmp/x вне закрытого списка имён"},
 	{name: "r6-foo", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          FOO: 1\n"),
 		wantTest: goenv, wantMsg: "env FOO=1 вне закрытого списка имён"},
 	{name: "r6-shellopts-job", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    env:\n      SHELLOPTS: \"\"\n"),
 		wantTest: goenv, wantMsg: "job lint: env SHELLOPTS= вне закрытого списка имён"},
 	{name: "r6-lowercase-bash-env", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          bash_env: /tmp/x\n"),
 		wantTest: goenv, wantMsg: "env bash_env=/tmp/x вне закрытого списка имён"},
+	// --- раунд 7 QA-01: закрытые списки ключей, runs-on, значения VERSION/COMMIT ---
+	{name: "r7-container-env", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    container:\n      image: golang:1\n      env:\n        BASH_ENV: /tmp/x\n"),
+		wantTest: keys, wantMsg: "job lint: ключ «container» вне закрытого списка"},
+	{name: "r7-container-image", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    container: evil/go-noop:latest\n"),
+		wantTest: keys, wantMsg: "job lint: ключ «container» вне закрытого списка"},
+	{name: "r7-services", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    services:\n      s:\n        image: x\n        env:\n          BASH_ENV: /tmp/x\n"),
+		wantTest: keys, wantMsg: "job lint: ключ «services» вне закрытого списка"},
+	{name: "r7-unknown-workflow-key", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nfoo: 1\n\n"),
+		wantTest: keys, wantMsg: "workflow: ключ «foo» вне закрытого списка"},
+	{name: "r7-unknown-job-key", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    foo: 1\n"),
+		wantTest: keys, wantMsg: "job lint: ключ «foo» вне закрытого списка"},
+	{name: "r7-unknown-step-key", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        foo: 1\n"),
+		wantTest: keys, wantMsg: "job lint, шаг №7: ключ «foo» вне закрытого списка"},
+	{name: "r7-runs-on", edits: ci("    runs-on: ubuntu-24.04\n    # Ревью, З7. Здесь", "    runs-on: ubuntu-latest\n    # Ревью, З7. Здесь"),
+		wantTest: keys, wantMsg: "job lint: runs-on «ubuntu-latest» — метки нет в таблице runnerArch"},
+	{name: "r7-runs-on-matrix", edits: ci("    runs-on: ${{ matrix.runner }}\n", "    runs-on: ubuntu-24.04\n"),
+		wantTest: keys, wantMsg: "job checks: runs-on «ubuntu-24.04» при матрице"},
+	{name: "r7-version-tail", edits: rel("          VERSION: ${{ github.ref_name }}\n", "          VERSION: ${{ github.ref_name }} -extldflags=-x\n"),
+		wantTest: goenv, wantMsg: "env VERSION=\"${{ github.ref_name }} -extldflags=-x\" — значение вне закрытого списка"},
+	{name: "r7-commit-literal", edits: ci("          COMMIT: ${{ github.sha }}\n", "          COMMIT: deadbeef\n"),
+		wantTest: goenv, wantMsg: "env COMMIT=\"deadbeef\" — значение вне закрытого списка"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -228,7 +251,7 @@ var plants = []plant{
 		wantTest: inv, wantMsg: "нет ни одного вызова actionlint, в строке которого названы workflow"},
 	// --- шаг и версия actionlint ---
 	{name: "actionlint-step-coe", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        continue-on-error: true\n"),
-		wantTest: "TestActionlintPinnedInEveryExpectedFile", wantMsg: "найден, но обеззублен"},
+		wantTest: "TestActionlintPinnedInEveryExpectedFile", also: []string{keys}, wantMsg: "найден, но обеззублен"},
 	{name: "actionlint-literal-pin", edits: rel("  test:\n", "  # go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 .github/workflows/release.yml\n  test:\n"),
 		wantTest: "TestActionlintVersionSingleSource", wantMsg: "версия actionlint «v1.7.11» вместо @${ACTIONLINT_VERSION}"},
 	{name: "actionlint-env-override", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          ACTIONLINT_VERSION: v1.7.11\n"),
@@ -256,7 +279,7 @@ var plants = []plant{
 		wantTest: arch, wantMsg: "берёт DECLARED_ARCH не из matrix.arch"},
 	{name: "arch-step-gone", edits: rel("        run: |\n          set -euo pipefail\n          case \"${RUNNER_ARCH:-}\" in\n",
 		"        run: echo пропущено\n        x-old: |\n          set -euo pipefail\n          case \"${RUNNER_ARCH:-}\" in\n"),
-		wantTest: arch, wantMsg: "нет шага, читающего RUNNER_ARCH"},
+		wantTest: arch, also: []string{keys}, wantMsg: "нет шага, читающего RUNNER_ARCH"},
 	{name: "arch-case-positive", edits: rel("            ARM64) actual=arm64 ;;\n", "            ARM64) actual=arm64; exit 1 ;;\n"),
 		wantTest: arch, wantMsg: "RUNNER_ARCH=ARM64, matrix.arch=arm64: шаг упал, а должен пройти"},
 	{name: "arch-case-message", edits: rel("а matrix.arch объявляет $DECLARED_ARCH", "а в матрице $DECLARED_ARCH"),
@@ -302,7 +325,7 @@ var plants = []plant{
 	{name: "attest-subject-path", edits: rel("subject-path: ${{ env.ATTEST_SUBJECTS }}", "subject-path: dist/amnezia-admin-*"),
 		wantTest: att, wantMsg: "проверяется одно множество, подписывается другое"},
 	{name: "attest-step-coe", edits: rel("      - name: Субъекты аттестации\n", "      - name: Субъекты аттестации\n        continue-on-error: true\n"),
-		wantTest: att, wantMsg: "шаг проверки субъектов обеззублен"},
+		wantTest: att, also: []string{keys}, wantMsg: "шаг проверки субъектов обеззублен"},
 	{name: "attest-positive-only", edits: rel("          done\n\n      - uses: actions/attest-build-provenance", "          done\n          exit 3\n\n      - uses: actions/attest-build-provenance"),
 		wantTest: att, wantMsg: "на образце из девяти файлов шаг проверки субъектов не прошёл"},
 	{name: "attest-extra-loop", edits: rel(`          all=(dist/*)
@@ -314,10 +337,10 @@ var plants = []plant{
 	// Весь блок env: job release переименован (x-env: YAML не читает), а не
 	// одно имя: переименованное имя попало бы под закрытый список имён.
 	{name: "attest-env-gone", edits: rel("    env:\n      # Множество субъектов аттестации", "    x-env:\n      # Множество субъектов аттестации"),
-		wantTest: att, wantMsg: "нет env ATTEST_SUBJECTS"},
+		wantTest: att, also: []string{keys}, wantMsg: "нет env ATTEST_SUBJECTS"},
 	{name: "attest-check-gone", edits: rel("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n",
 		"        run: echo пропущено\n        x-old: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n"),
-		wantTest: att, wantMsg: "не найдены шаги: сумм №"},
+		wantTest: att, also: []string{keys}, wantMsg: "не найдены шаги: сумм №"},
 	{name: "attest-order", edits: []edit{
 		{releaseYML, "        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n", "        run: echo суммы-позже\n"},
 		{releaseYML, "\n      - uses: actions/attest-build-provenance", "\n      - name: Суммы поздно\n        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n\n      - uses: actions/attest-build-provenance"}},
@@ -345,6 +368,7 @@ var mainTests = []string{
 	"TestReleaseRunnerArchStep",
 	"TestReleaseTestMatrixMatchesBuild",
 	"TestShellcheckCanaryStepLogic",
+	"TestWorkflowKeysClosedList",
 }
 
 func activePlant(t *testing.T) *plant {

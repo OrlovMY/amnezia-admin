@@ -25,6 +25,26 @@ if [ -z "${COMMIT:-}" ]; then
 	exit 1
 fi
 
+# A6, раунд 7 (ревью QA-01 → SEC-01): VERSION и COMMIT идут в -ldflags без
+# экранирования, и пробел в значении дописал бы флаги компоновщику
+# (`VERSION="v1 -extldflags=-x"`). Закрытая форма значений:
+#   VERSION — тег семвер, как требует шаг «Происхождение тега» в release.yml,
+#             либо v0.0.0-ci — фиктивная версия сборки в ci.yml;
+#   COMMIT  — полный SHA-1 коммита (40 шестнадцатеричных).
+# Сторож internal/ciguard дополнительно держит точные выражения в workflow.
+# Сравнение [[ =~ ]], а не grep -x: grep сверяет построчно, и значение с
+# переводом строки ("v1.2.3\n-extldflags…") прошло бы по первой строке.
+version_re='^(v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?|v0\.0\.0-ci)$'
+commit_re='^[0-9a-f]{40}$'
+if ! [[ "$VERSION" =~ $version_re ]]; then
+	echo "СТОП: VERSION '${VERSION}' не тег vX.Y.Z[-rc.N] и не v0.0.0-ci" >&2
+	exit 1
+fi
+if ! [[ "$COMMIT" =~ $commit_re ]]; then
+	echo "СТОП: COMMIT '${COMMIT}' не полный SHA-1 (40 шестнадцатеричных)" >&2
+	exit 1
+fi
+
 # Код фейкового SSH-сервера (cmd/fakeserver, internal/fakesrv) не должен
 # попасть в релизные бинари ни при каких обстоятельствах (П9): наивный
 # `go list ... | grep ...` под `set -euo pipefail` завершил бы скрипт кодом

@@ -553,18 +553,31 @@ var allowedEnvNames = map[string]string{
 		"субъектов и для attest-build-provenance",
 }
 
-// allowedGitHubPath —ЗАКРЫТЫЙ СПИСОК строк, пишущих в $GITHUB_PATH (ревью
+// allowedEnvValues — закрытый список ЗНАЧЕНИЙ для имён, значение которых
+// уходит в сборку (ревью SEC-01 через QA-01, раунд 7). `VERSION: "v1
+// -extldflags=-x"` дописывал бы флаги компоновщику: scripts/build-release.sh
+// собирает -ldflags без экранирования (скрипт теперь и сам сверяет форму).
+// Значение сравнивается после схлопывания пробелов. Для DECLARED_ARCH и
+// ATTEST_SUBJECTS точного значения здесь нет: их сверяют
+// TestReleaseRunnerArchStep и TestReleaseAttestsChecksums.
+var allowedEnvValues = map[string][]string{
+	// release.yml build — имя тега; ci.yml checks — фиктивная версия CI.
+	"VERSION": {"${{ github.ref_name }}", "v0.0.0-ci"},
+	"COMMIT":  {"${{ github.sha }}"},
+}
+
+// allowedGitHubPath — ЗАКРЫТЫЙ СПИСОК строк, пишущих в $GITHUB_PATH (ревью
 // QA-01, раунд 4). Каталог из $GITHUB_PATH встаёт в PATH следующих шагов
 // ВПЕРЕДИ прочих — свой `go` или `shellcheck` там подменил бы настоящий.
 // Сейчас законна одна строка — mingw64 для cgo на Windows.
 //
-// ГРАНИЦА, названная прямо. Этот каталог добавляется ПОСЛЕ setup-go и
-// потому стоит в PATH впереди go из setup-go. Если в образе windows-2025
-// в C:\msys64\mingw64\bin окажется go.exe (пакет mingw-w64-x86_64-go), он
-// перехватит `go` в шагах vet/test/сборки. На образе это не проверено —
-// сети у исполнителя нет; шаг «Версии инструментов» в ci.yml печатает
-// `go version` после этого шага, и версия, не совпавшая с go.mod, была бы
-// видна в журнале, но не роняет job.
+// Порядок (раунд 5). Шаг mingw стоит ДО setup-go во всех трёх job: каталог
+// из $GITHUB_PATH встаёт впереди уже добавленных, и go из setup-go,
+// добавленный позже, окажется впереди mingw64\bin — go.exe оттуда, если он
+// там когда-нибудь появится, не перехватит `go`. Запись в $GITHUB_PATH после
+// setup-go в том же job — красная (ветка ниже в TestNoToolEnvironmentOverrides).
+// Что раннер действительно так упорядочивает PATH, проверяется только в CI
+// на Windows и на rc-теге.
 var allowedGitHubPath = map[string]bool{
 	`printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"`: true,
 }
@@ -609,6 +622,21 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 				if _, ok := allowedEnvNames[strings.ToUpper(k)]; !ok {
 					hits = append(hits, fmt.Sprintf("%s: env %s=%s вне закрытого списка имён allowedEnvNames — "+
 						"внеси имя строкой с обоснованием, если оно законно", where, k, v))
+					continue
+				}
+				// Закрытый список ЗНАЧЕНИЙ (раунд 7, SEC-01): VERSION и COMMIT
+				// идут в -ldflags без экранирования.
+				if vals, fixed := allowedEnvValues[strings.ToUpper(k)]; fixed {
+					norm := strings.Join(strings.Fields(v), " ")
+					ok := false
+					for _, want := range vals {
+						if norm == want {
+							ok = true
+						}
+					}
+					if !ok {
+						hits = append(hits, fmt.Sprintf("%s: env %s=%q — значение вне закрытого списка %q", where, k, v, vals))
+					}
 				}
 			}
 		}
