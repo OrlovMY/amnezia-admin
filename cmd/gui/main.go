@@ -1155,6 +1155,11 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 	}, u.win)
 	// Рамка 472 т. — как у соседних диалогов ключа сервера (480 − поля):
 	// строка текста около 440 т., адрес с портом помещается целиком.
+	// «Забыть» — необратимое решение о доверии ключу сервера: кнопка красная,
+	// как «Удалить» (okBtn.Importance = DangerImportance в диалоге удаления).
+	// По умолчанию NewCustomConfirm делает её синей HighImportance — вид
+	// обычного подтверждения на самом опасном диалоге программы.
+	forget.SetConfirmImportance(widget.DangerImportance)
 	forget.Resize(fyne.NewSize(480, 1))
 	forget.Show()
 }
