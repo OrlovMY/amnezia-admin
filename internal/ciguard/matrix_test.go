@@ -11,10 +11,8 @@
 // Почему сторож здесь, а не шагом внутри ci.yml. Во-первых, этот тест лежит в
 // ./internal/..., а этот путь входит в команду `go test -race` И в ci.yml, И в
 // release.yml, — значит расхождение ловится ещё и на теге, куда ci.yml не
-// приходит. Сами команды в двух файлах с A4в уже НЕ совпадают: ci.yml гоняет
-// ещё и ./cmd/gui/ (его тесты не исполнялись нигде), а release.yml не тронут,
-// потому что его правка обязывает выпускать сначала rc-тег. Расхождение
-// намеренное и временное; сводит списки и заводит сторожа на них — A6. Во-вторых, шаг внутри ci.yml
+// приходит. Сами команды go test в двух файлах с A6 обязаны совпадать — это
+// стережёт TestGoTestPackagesMatch (releasechain_test.go). Во-вторых, шаг внутри ci.yml
 // самореферентен: ошибка в ci.yml, из-за которой workflow не стартует, унесла
 // бы сторож вместе с собой, а это ровно тот случай, ради которого сторож
 // заводится. Оба workflow-файла здесь только читаются.
@@ -30,7 +28,6 @@
 package ciguard
 
 import (
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -55,10 +52,7 @@ type workflow struct {
 func matrixPairsOf(t *testing.T, path, job string) []string {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("не прочитать %s: %v", path, err)
-	}
+	data := readSource(t, path)
 
 	var wf workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {

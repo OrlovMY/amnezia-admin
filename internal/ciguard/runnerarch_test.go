@@ -34,8 +34,10 @@
 // ниже. Ни одна из них не является измерением. Если GitHub сменит архитектуру
 // образа, обе останутся согласованными и обе будут неверны. Единственная
 // настоящая проверка — на самом раннере: шаг, сверяющий $RUNNER_ARCH с
-// matrix.arch и роняющий job при расхождении. Он требует правки release.yml и
-// потому передан в A6 обязательным следствием. Достижение этого файла
+// matrix.arch и роняющий job при расхождении. Заведён в A6 (шаг
+// «Архитектура раннера против matrix.arch» в job build; его сторож —
+// TestReleaseRunnerArchStep в releasechain_test.go), но ИЗМЕРЯЕТ он только на
+// теге. Достижение этого файла
 // формулируется так и не сильнее: «две наши записи об архитектуре раннера
 // согласованы», а НЕ «поле arch верно».
 //
@@ -54,7 +56,6 @@
 package ciguard
 
 import (
-	"os"
 	"sort"
 	"testing"
 
@@ -91,10 +92,7 @@ var runnerArch = map[string]string{
 func matrixEntriesOf(t *testing.T, path, job string) []map[string]string {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("не прочитать %s: %v", path, err)
-	}
+	data := readSource(t, path)
 
 	var wf workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
