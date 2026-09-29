@@ -43,6 +43,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
 
       # README actions/checkout на закреплённом SHA (см. ссылку у "Происхождение
       # тега" ниже) гарантирует только "fetch all history for all branches and
@@ -162,6 +165,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
 
       - name: Гарантировать origin/main для merge-base
         run: |

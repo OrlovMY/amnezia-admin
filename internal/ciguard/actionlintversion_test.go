@@ -34,6 +34,10 @@ var actionlintPinRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/a
 // Объявление версии в единственном источнике.
 var devToolsVersionRe = regexp.MustCompile(`(?m)^ACTIONLINT_VERSION="(v[0-9]+\.[0-9]+\.[0-9]+)"\s*$`)
 
+// Переопределение версии: YAML-ключ env или присваивание в shell. Форма
+// `${ACTIONLINT_VERSION}` и `${ACTIONLINT_VERSION:-}` сюда не попадает.
+var versionOverrideRe = regexp.MustCompile(`(?m)^\s*ACTIONLINT_VERSION\s*:.*$|(?:^|[^{A-Za-z0-9_])ACTIONLINT_VERSION=\S*`)
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data := readSource(t, path)
@@ -57,6 +61,18 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 			t.Errorf("в %s литеральная версия actionlint %s (scripts/dev-tools.sh объявляет %s).\n"+
 				"  Единственный источник версии — scripts/dev-tools.sh; вызов обязан иметь форму @${ACTIONLINT_VERSION}.",
 				path, pin[1], want)
+		}
+	}
+
+	// Второй источник версии без литерала в вызове (ревью QA-01): ключ
+	// `ACTIONLINT_VERSION:` в env workflow, job или шага, либо присваивание
+	// `ACTIONLINT_VERSION=` в теле run: (включая запись в $GITHUB_ENV).
+	// Любое из них перекрывает значение из dev-tools.sh, а вызов при этом
+	// остаётся формы @${ACTIONLINT_VERSION}, и сторож выше его одобряет.
+	for _, path := range []string{releaseYML, ciYML} {
+		for _, hit := range versionOverrideRe.FindAllString(readFile(t, path), -1) {
+			t.Errorf("в %s переопределяет ACTIONLINT_VERSION: «%s» — второй источник версии; "+
+				"единственный — scripts/dev-tools.sh", path, strings.TrimSpace(hit))
 		}
 	}
 

@@ -10,7 +10,7 @@
 //   - TestReleaseAttestsChecksums — SHA256SUMS входит в субъекты
 //     аттестации; шаг проверки субъектов гоняется настоящим bash над
 //     каталогом-образцом;
-//   - TestWriteJobsDoNotPersistCredentials — checkout в job с правом записи
+//   - TestCheckoutsDoNotPersistCredentials — ни один checkout в обоих файлах
 //     не оставляет токен в рабочем каталоге.
 //
 // ГРАНИЦА. Всё здесь — про ТЕКСТ workflow и про поведение его шагов на
@@ -216,13 +216,19 @@ func TestReleaseRunnerArchStep(t *testing.T) {
 			vars["RUNNER_ARCH"] = c.runner
 		}
 		out, err := runStepBody(t, step.Run, dir, vars)
+		// Одна точка сообщения на три причины: иначе подсадка будит две
+		// ветки сразу, и немота одной прикрыта другой (ревью QA-01).
+		problem := ""
 		switch {
 		case c.ok && err != nil:
-			t.Errorf("RUNNER_ARCH=%s, matrix.arch=%s: шаг упал, а должен пройти (%v):\n%s", c.runner, c.declared, err, out)
+			problem = fmt.Sprintf("шаг упал, а должен пройти (%v)", err)
 		case !c.ok && err == nil:
-			t.Errorf("RUNNER_ARCH=%s, matrix.arch=%s: шаг прошёл, а должен упасть — сверка обеззублена:\n%s", c.runner, c.declared, out)
+			problem = "шаг прошёл, а должен упасть — сверка обеззублена"
 		case !strings.Contains(out, c.msg):
-			t.Errorf("RUNNER_ARCH=%s, matrix.arch=%s: в выводе нет «%s»:\n%s", c.runner, c.declared, c.msg, out)
+			problem = "в выводе нет «" + c.msg + "»"
+		}
+		if problem != "" {
+			t.Errorf("RUNNER_ARCH=%s, matrix.arch=%s: %s:\n%s", c.runner, c.declared, problem, out)
 		}
 	}
 }
@@ -242,15 +248,60 @@ func goTestCommand(t *testing.T, path, job string) []string {
 		if live, why := stepLive(j, s); !live {
 			t.Errorf("в %s (job %s) шаг go test обеззублен: %s", path, job, why)
 		}
-		if strings.Contains(body, "\n") {
-			t.Errorf("в %s (job %s) тело шага go test не одна команда — сторож сравнивает команду целиком:\n%s", path, job, body)
+		first, rest, multi := strings.Cut(body, "\n")
+		words := shellWords(first)
+		p := goTestProblem(words)
+		if multi {
+			p = "тело шага не одна команда (дальше: «" + strings.TrimSpace(rest) + "») — сторож сравнивает команду целиком"
 		}
-		found = append(found, strings.Fields(body))
+		if p != "" {
+			t.Errorf("в %s (job %s) команда go test ничего не гарантирует: %s\n  команда: %s", path, job, p, body)
+		}
+		found = append(found, texts(words))
 	}
 	if len(found) != 1 {
 		t.Fatalf("в %s (job %s) шагов go test %d, ожидался ровно один — тест перестал что-либо проверять", path, job, len(found))
 	}
 	return found[0]
+}
+
+// allowedGoTestFlags — закрытый список флагов go test (ревью QA-01,
+// поднято координатором до обязательного). Одинаковая порча в ОБОИХ файлах
+// (`|| true`, `-run NOTHING`, `-list .`) оставляет команды равными, и
+// сравнение их между собой её не видит. Поэтому смысл команды проверяется
+// отдельно: флаги только отсюда, оба обязательны, после пакетов ничего.
+var allowedGoTestFlags = map[string]bool{"-race": true, "-count=1": true}
+
+// goTestProblem — первая причина, по которой команда go test ничего не
+// гарантирует, или пустая строка. Одна точка сообщения на все причины.
+func goTestProblem(words []shword) string {
+	if len(words) < 2 || words[0].text != "go" || words[1].text != "test" {
+		return "команда не начинается с `go test`"
+	}
+	seen := map[string]bool{}
+	pkgs := 0
+	for _, w := range words[2:] {
+		switch {
+		case w.op:
+			return "после команды стоит «" + w.text + "» — `|| true`, `;`, перенаправление или `&` глушат провал тестов"
+		case strings.HasPrefix(w.text, "./"):
+			pkgs++
+		case allowedGoTestFlags[w.text]:
+			seen[w.text] = true
+		default:
+			return "аргумент «" + w.text + "» вне закрытого списка allowedGoTestFlags и не пакет ./… — " +
+				"`-run`, `-skip`, `-list`, `-short` отключают тесты молча. Законен? Внеси его в список"
+		}
+	}
+	for f := range allowedGoTestFlags {
+		if !seen[f] {
+			return "нет обязательного флага " + f
+		}
+	}
+	if pkgs == 0 {
+		return "нет ни одного пакета"
+	}
+	return ""
 }
 
 // TestGoTestPackagesMatch — команда `go test` на PR (ci.yml, checks) и на
@@ -285,6 +336,11 @@ func TestGoTestPackagesMatch(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("обход репозитория: %v", err)
+	}
+	// Канарейка ветки покрытия подсаживает каталог с тестами сюда, в
+	// результат обхода: файл в дереве репозитория она создавать не вправе.
+	if d := plantedTestDir(t); d != "" {
+		dirs[d] = true
 	}
 	if len(dirs) == 0 {
 		t.Fatalf("не найдено ни одного каталога с *_test.go — тест перестал что-либо проверять")
@@ -411,49 +467,30 @@ func TestReleaseAttestsChecksums(t *testing.T) {
 
 // --- persist-credentials -----------------------------------------------------
 
-func hasContentsWrite(perm interface{}) bool {
-	switch p := perm.(type) {
-	case string:
-		return p == "write-all"
-	case map[string]interface{}:
-		return fmt.Sprint(p["contents"]) == "write"
-	}
-	return false
-}
-
-// TestWriteJobsDoNotPersistCredentials — в каждом job с правом contents:
-// write каждый actions/checkout стоит с persist-credentials: false. Иначе
-// токен с правом записи остаётся в .git/config и доступен любому шагу.
-func TestWriteJobsDoNotPersistCredentials(t *testing.T) {
-	writeJobs := 0
+// TestCheckoutsDoNotPersistCredentials — КАЖДЫЙ actions/checkout в обоих
+// workflow стоит с persist-credentials: false (A6, ревью SEC-01 поднято
+// координатором до обязательного). Даже токен только на чтение, оставленный
+// в .git/config, доступен любому следующему шагу — сборке, cgo, сторонним
+// модулям. Правка дешёвая и закрывает класс целиком, а не job с правом
+// записи.
+func TestCheckoutsDoNotPersistCredentials(t *testing.T) {
+	checkouts := 0
 	for _, path := range []string{releaseYML, ciYML} {
 		wf := loadWorkflow(t, path)
 		for name, j := range wf.Jobs {
-			perm := j.Permissions
-			if perm == nil {
-				perm = wf.Permissions
-			}
-			if !hasContentsWrite(perm) {
-				continue
-			}
-			writeJobs++
-			checkouts := 0
 			for i, s := range j.Steps {
 				if !strings.HasPrefix(s.Uses, "actions/checkout@") {
 					continue
 				}
 				checkouts++
 				if s.With["persist-credentials"] != "false" {
-					t.Errorf("в %s (job %s, право contents: write) checkout шагом №%d без persist-credentials: false — "+
-						"токен с правом записи остаётся в рабочем каталоге", path, name, i+1)
+					t.Errorf("в %s (job %s) checkout шагом №%d без persist-credentials: false — "+
+						"токен остаётся в .git/config и доступен любому следующему шагу", path, name, i+1)
 				}
-			}
-			if checkouts == 0 {
-				t.Errorf("в %s (job %s) нет ни одного actions/checkout — сверять нечего, форма job изменилась", path, name)
 			}
 		}
 	}
-	if writeJobs == 0 {
-		t.Fatalf("ни в %s, ни в %s не найдено job с contents: write — тест перестал что-либо проверять", releaseYML, ciYML)
+	if checkouts == 0 {
+		t.Fatalf("ни в %s, ни в %s не найдено ни одного actions/checkout — тест перестал что-либо проверять", releaseYML, ciYML)
 	}
 }
