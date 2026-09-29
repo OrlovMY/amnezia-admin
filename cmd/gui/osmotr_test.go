@@ -510,6 +510,9 @@ type osmotrForm struct {
 	// mayOverlap — перекрытия ПО ЗАМЫСЛУ (пара имён), каждое — решение.
 	mayOverlap []string
 	known      []osmotrKnown
+	// fyneStd — стандартный диалог Fyne: её слова (OK, Error) сверяются по
+	// роли, а не буквально — они зависят от языка системы (osmotr_lang_test.go).
+	fyneStd bool
 }
 
 // osmotrGate — ВОРОТА: всё, что прибор нашёл, против того, что разрешено.
@@ -565,6 +568,7 @@ func osmotrGate(f osmotrForm, size string, rep *osmotrReport, errf func(string, 
 // в сеть не ходит. Форма «отказ раскладки» переподменяет это сама.
 func osmotrUI(t *testing.T, variant fyne.ThemeVariant) *ui {
 	t.Helper()
+	applyForeignFyneWords() // только в дочернем процессе доказательства языка
 	substituteForceEnglish(t, nil)
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
@@ -880,7 +884,14 @@ func runOsmotr(t *testing.T, f osmotrForm, size, themeName string, v fyne.ThemeV
 		plant(t, s)
 	}
 	sz := u.win.Canvas().Size()
-	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, f.mayOverlap)
+	may := f.mayOverlap
+	if f.fyneStd {
+		may = fyneRolesInPairs(may)
+	}
+	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, may)
+	if f.fyneStd {
+		fyneRoles(rep)
+	}
 	rep.checkInventory(f.inventory)
 	return rep
 }

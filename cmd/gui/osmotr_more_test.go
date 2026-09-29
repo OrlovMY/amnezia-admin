@@ -268,13 +268,16 @@ var moreForms = []osmotrForm{
 			"подпись:" + firstLine("Делайте это, только если сами переустанавливали сервер."),
 			"кнопка:Забыть", "кнопка:Отмена"}},
 	{name: "(ж) не выбран пользователь", open: openInfo,
-		inventory:  []string{"подпись:Не выбран пользователь", "подпись:Выберите строку в таблице.", "изображение:", "кнопка:ОК"},
-		mayOverlap: []string{"|Не выбран пользователь", "|Выберите строку в таблице."},
-		known:      []osmotrKnown{fyneIconOverflow}},
+		inventory: []string{"подпись:Не выбран пользователь", "подпись:Выберите строку в таблице.", "изображение:", "кнопка:" + fyneRoleOK},
+		// Значок Fyne лежит за текстом по замыслу; с кнопкой OK он
+		// пересекается, если слово кнопки на языке системы длиннее
+		// «ОК»/«OK» (доказательство — osmotr_lang_test.go, «Okidoki»).
+		mayOverlap: []string{"|Не выбран пользователь", "|Выберите строку в таблице.", "|" + fyneRoleOK},
+		known:      []osmotrKnown{fyneIconOverflow}, fyneStd: true},
 	{name: "(ж) ошибка", open: openError,
-		inventory:  []string{"подпись:Ошибка", "подпись:План устарел: сервер изменился, пока окн…", "изображение:", "кнопка:ОК"},
-		mayOverlap: []string{"|План устарел: сервер изменился, пока окн…"},
-		known:      []osmotrKnown{fyneIconOverflow}},
+		inventory:  []string{"подпись:" + fyneRoleError, "подпись:План устарел: сервер изменился, пока окн…", "изображение:", "кнопка:" + fyneRoleOK},
+		mayOverlap: []string{"|План устарел: сервер изменился, пока окн…", "|" + fyneRoleOK},
+		known:      []osmotrKnown{fyneIconOverflow}, fyneStd: true},
 }
 
 func init() { osmotrForms = append(osmotrForms, moreForms...) }
