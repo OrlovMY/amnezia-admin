@@ -508,7 +508,7 @@ const (
 // ключа. Отдельный метод, потому что фокус ставится только после SetContent.
 func (u *ui) showConnectScreen(status string) {
 	content, keyEntry := u.connectScreenWithStatus(status)
-	u.win.SetContent(content)
+	u.setContent(content)
 	u.focusField(keyEntry)
 }
 
@@ -959,7 +959,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 					break
 				}
 			}
-			u.win.SetContent(u.mainScreen())
+			u.showMainScreen()
 			u.refresh()
 			if vc == nil {
 				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
@@ -1785,6 +1785,52 @@ func startWindowSize() fyne.Size {
 		width = minStartWindowWidth
 	}
 	return fyne.NewSize(width, mainWindowHeight)
+}
+
+// minWindowHeight — наименьшая высота окна (в точках канвы, с её полями), при
+// которой прибор осмотра (osmotr_test.go) не находит ни одного вылезания,
+// наложения или сжатия ни в одной форме — дефекты Д1 и Д2.
+//
+// ОТКУДА ЧИСЛО. Замер прибором 29.09.2026 по всем формам осмотра, без
+// разрешений Д1–Д3, поиском делением пополам: самую высокую потребность
+// дал диалог «Сохранить ключ?» в состоянии «отказ переключения раскладки» —
+// 517 чисто, 516 уже «кнопка «Сохранить» × кнопка «Не сохранять»». Следом
+// пин-код с отказом раскладки (440) и удаление (379). Число держат два
+// теста: TestOsmotrForms в размере «минимальный» (при 517 чисто) и
+// TestMinWindowHeightIsTight (при 516 прибор краснеет) — запас сверх
+// замера спрятал бы, что число устарело.
+//
+// ШИРИНУ НЕ ОГРАНИЧИВАЕМ: тот же замер при любой запрошенной ширине упирается
+// в минимум содержимого (экран подключения, главное окно), который шире
+// всех диалогов, и находок нет.
+const minWindowHeight = 517
+
+// windowMinLayout — минимум окна ПО ПРАВИЛУ БОЕВОГО ДРАЙВЕРА. В Fyne 2.7.4 у
+// fyne.Window нет SetMinSize; glfw-окно само зовёт SetSizeLimits с минимумом
+// канвы — MinSize содержимого плюс поля (internal/driver/glfw/
+// window_desktop.go:258, window.go:48, canvas.go:209). Поэтому минимум
+// задаётся минимальным размером содержимого, и настоящее окно его соблюдает:
+// уже нельзя стянуть мышью ниже.
+type windowMinLayout struct{}
+
+func (windowMinLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	h := float32(minWindowHeight) - 2*theme.Padding()
+	return objs[0].MinSize().Max(fyne.NewSize(0, h))
+}
+
+func (windowMinLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	objs[0].Move(fyne.NewPos(0, 0))
+	objs[0].Resize(size)
+}
+
+// setContent — ЕДИНСТВЕННЫЙ путь содержимого в окно: с минимумом высоты.
+func (u *ui) setContent(o fyne.CanvasObject) {
+	u.win.SetContent(container.New(windowMinLayout{}, o))
+}
+
+// showMainScreen — главный экран в окне; боевой путь и путь прибора осмотра.
+func (u *ui) showMainScreen() {
+	u.setContent(u.mainScreen())
 }
 
 // tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ОБЕ КНОПКИ.
@@ -2958,8 +3004,13 @@ func (u *ui) deleteSelected() {
 			diffBtn.Enable()
 		})
 	})
+	// Д3 (осмотр 25.09.2026): без переноса ключ из широких знаков раздувал
+	// рамку с 452 до 570.8 т. TextWrapWord в Fyne рвёт слово, которое длиннее
+	// строки, по знакам — ключ без пробелов переносится, имя — по словам.
+	card := widget.NewLabel(msg)
+	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(msg),
+		card,
 		activity,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
