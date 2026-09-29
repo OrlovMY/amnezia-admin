@@ -1284,7 +1284,7 @@ func TestOsmotrCanaryDeleteCardWithoutWrap(t *testing.T) {
 // минимум завышен, и число перестало быть замером (например, форма стала
 // ниже, а константа осталась).
 func TestMinWindowHeightIsTight(t *testing.T) {
-	f := formByName(t, "(д) конфиг готов")
+	f := formByName(t, "(б) сохранение ключа, отказ раскладки")
 	u := osmotrUI(t, theme.VariantLight)
 	s := f.open(t, u, func() {
 		p := 2 * theme.Padding()
