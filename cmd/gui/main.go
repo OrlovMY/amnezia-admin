@@ -508,7 +508,7 @@ const (
 // ключа. Отдельный метод, потому что фокус ставится только после SetContent.
 func (u *ui) showConnectScreen(status string) {
 	content, keyEntry := u.connectScreenWithStatus(status)
-	u.win.SetContent(content)
+	u.setContent(content)
 	u.focusField(keyEntry)
 }
 
@@ -959,7 +959,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 					break
 				}
 			}
-			u.win.SetContent(u.mainScreen())
+			u.showMainScreen()
 			u.refresh()
 			if vc == nil {
 				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
@@ -1003,19 +1003,23 @@ func reseal(vc *vaultCtx, fp string) error {
 // раньше, чем человек его дал.
 func (u *ui) hostKeyPrompt(host, fingerprint string) bool {
 	result := make(chan bool, 1)
-	fyne.Do(func() {
-		body := widget.NewLabel(fmt.Sprintf(
-			"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
-			host, fingerprint,
-		))
-		body.Wrapping = fyne.TextWrapWord
-		d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
-			result <- ok
-		}, u.win)
-		d.Resize(fyne.NewSize(480, 240))
-		d.Show()
-	})
+	fyne.Do(func() { u.showHostKeyPrompt(host, fingerprint, result) })
 	return <-result
+}
+
+// showHostKeyPrompt — сам диалог hostKeyPrompt, без ожидания ответа: так его
+// открывает и прибор осмотра (osmotr_more_test.go), не блокируясь на канале.
+func (u *ui) showHostKeyPrompt(host, fingerprint string, result chan<- bool) {
+	body := widget.NewLabel(fmt.Sprintf(
+		"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
+		host, fingerprint,
+	))
+	body.Wrapping = fyne.TextWrapWord
+	d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
+		result <- ok
+	}, u.win)
+	d.Resize(fyne.NewSize(480, 240))
+	d.Show()
 }
 
 // hostKeyChangedDialog показывает диалог "Ключ сервера изменился" (UI-01,
@@ -1085,13 +1089,23 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 		info.SetText("Пин уже сброшен — откройте сохранённый ключ ещё раз и подключитесь заново.")
 		return
 	}
-	msg := widget.NewLabel(fmt.Sprintf(
-		"Забыть ключ сервера %s? Утилита сотрёт сохранённый отпечаток — в хранилище и в файле known_hosts. "+
-			"Подключение сейчас установлено не будет: при следующем подключении вы увидите новый отпечаток и решите, доверять ли ему. "+
-			"Делайте это, только если сами переустанавливали сервер.", host,
-	))
-	msg.Wrapping = fyne.TextWrapWord
-	dialog.NewCustomConfirm("Забыть ключ сервера?", "Забыть", "Отмена", msg, func(ok bool) {
+	// Три абзаца по предложению UX-01 (осмотр 29.09.2026): без d.Resize Fyne
+	// давал диалогу ширину по кнопкам (~230 т.), текст шёл столбиком в 15
+	// строк, адрес «хост:порт» рвался посередине, а главное — «только если
+	// сами переустанавливали» — терялось в конце. Самый опасный диалог
+	// программы: решение о доверии ключу сервера необратимо.
+	para := func(s string, style fyne.TextStyle) *widget.Label {
+		l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, style)
+		l.Wrapping = fyne.TextWrapWord
+		return l
+	}
+	msg := container.NewVBox(
+		para(fmt.Sprintf("Забыть ключ сервера %s?", host), fyne.TextStyle{Bold: true}),
+		para("Будет стёрт сохранённый отпечаток — в хранилище и в known_hosts. "+
+			"При следующем подключении вы увидите новый отпечаток и решите, доверять ли ему.", fyne.TextStyle{}),
+		para("Делайте это, только если сами переустанавливали сервер.", fyne.TextStyle{Bold: true}),
+	)
+	forget := dialog.NewCustomConfirm("Забыть ключ сервера?", "Забыть", "Отмена", msg, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -1138,7 +1152,16 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 				u.showConnectScreen("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток.")
 			})
 		})
-	}, u.win).Show()
+	}, u.win)
+	// Рамка 472 т. — как у соседних диалогов ключа сервера (480 − поля):
+	// строка текста около 440 т., адрес с портом помещается целиком.
+	// «Забыть» — необратимое решение о доверии ключу сервера: кнопка красная,
+	// как «Удалить» (okBtn.Importance = DangerImportance в диалоге удаления).
+	// По умолчанию NewCustomConfirm делает её синей HighImportance — вид
+	// обычного подтверждения на самом опасном диалоге программы.
+	forget.SetConfirmImportance(widget.DangerImportance)
+	forget.Resize(fyne.NewSize(480, 1))
+	forget.Show()
 }
 
 func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
@@ -1785,6 +1808,62 @@ func startWindowSize() fyne.Size {
 		width = minStartWindowWidth
 	}
 	return fyne.NewSize(width, mainWindowHeight)
+}
+
+// minWindowHeight — наименьшая высота окна (в точках канвы, с её полями), при
+// которой прибор осмотра (osmotr_test.go, osmotr_more_test.go) не находит ни
+// одного вылезания, наложения или сжатия ни в одной форме — дефекты Д1 и Д2.
+//
+// ОТКУДА ЧИСЛО. Замер прибором 29.09.2026 по всем 27 формам осмотра (все
+// диалоги программы), без разрешений, поиском делением пополам — после того,
+// как «Конфиг готов» получил прокрутку содержимого (Д6): до неё он требовал
+// 543 (начальное), 659 (отказ сохранения) и 756 (после сохранения), теперь
+// 187. Самую высокую потребность дал диалог «Сохранить ключ?» в состоянии
+// «отказ переключения раскладки»: 517 чисто, 516 уже «кнопка «Сохранить» ×
+// кнопка «Не сохранять»». Следом «Сохранить ключ?» с подсказкой (478) и
+// пин-код с отказом раскладки (440).
+//
+// Число держат два теста: TestOsmotrForms в размере «минимальный» (при 517
+// чисто) и TestMinWindowHeightIsTight (при 516 прибор краснеет) — запас
+// сверх замера спрятал бы, что число устарело.
+//
+// ШИРИНУ НЕ ОГРАНИЧИВАЕМ: тот же замер при любой запрошенной ширине упирается
+// в минимум содержимого (экран подключения, главное окно), который шире
+// всех диалогов, и находок нет.
+const minWindowHeight = 517
+
+// ОГОВОРКА (ревью QA-01): бой считает минимум канвы как MinSize содержимого
+// + 2·Padding + ВЫСОТА МЕНЮ (glfw canvas.go:209, canvasSize). Меню у нас
+// нет (SetMainMenu не вызывается, menuHeight = 0), и прибор осмотра
+// (sizeWindow) считает без него. Появится главное меню — прибор разойдётся
+// с боем на его высоту, и sizeWindow надо будет править вместе с ним.
+//
+// windowMinLayout — минимум окна ПО ПРАВИЛУ БОЕВОГО ДРАЙВЕРА. В Fyne 2.7.4 у
+// fyne.Window нет SetMinSize; glfw-окно само зовёт SetSizeLimits с минимумом
+// канвы — MinSize содержимого плюс поля (internal/driver/glfw/
+// window_desktop.go:258, window.go:48, canvas.go:209). Поэтому минимум
+// задаётся минимальным размером содержимого, и настоящее окно его соблюдает:
+// уже нельзя стянуть мышью ниже.
+type windowMinLayout struct{}
+
+func (windowMinLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	h := float32(minWindowHeight) - 2*theme.Padding()
+	return objs[0].MinSize().Max(fyne.NewSize(0, h))
+}
+
+func (windowMinLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	objs[0].Move(fyne.NewPos(0, 0))
+	objs[0].Resize(size)
+}
+
+// setContent — ЕДИНСТВЕННЫЙ путь содержимого в окно: с минимумом высоты.
+func (u *ui) setContent(o fyne.CanvasObject) {
+	u.win.SetContent(container.New(windowMinLayout{}, o))
+}
+
+// showMainScreen — главный экран в окне; боевой путь и путь прибора осмотра.
+func (u *ui) showMainScreen() {
+	u.setContent(u.mainScreen())
 }
 
 // tableCell — ячейка таблицы: widget.Label плюс РЕАКЦИЯ НА ОБЕ КНОПКИ.
@@ -2529,6 +2608,11 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	copyBtn.Hide()
 
 	var saveBtn *widget.Button
+	// info — прокрутка текста и QR (Д6, ниже). После сохранения и после
+	// отказа новое (путь, подсказка, совет) появляется В КОНЦЕ прокрутки —
+	// туда её и доводим, иначе при окне ниже 756 т. человек его не увидит.
+	var info *container.Scroll
+	var content *fyne.Container
 	// Совет на случай неудачи — тот же по смыслу, что в CLI, и тем же текстом
 	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
 	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
@@ -2546,6 +2630,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 			// глазами: конфиг существует только в памяти, окно закроется — и
 			// ключи клиента потеряны.
 			failHint.Show()
+			scrollToEnd(content, info)
 			return
 		}
 		failHint.Hide()
@@ -2563,6 +2648,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		if createdDir {
 			moveHint.Show()
 		}
+		scrollToEnd(content, info)
 		if u.status != nil {
 			u.status.SetText(fmt.Sprintf("Конфиг сохранён: %s", abs))
 		}
@@ -2571,22 +2657,43 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
 	hint.Wrapping = fyne.TextWrapWord
 
-	content := container.NewVBox(
+	// Д6 (осмотр 29.09.2026, решение владельца — прокрутка содержимого):
+	// после сохранения (путь, подсказка о новом месте) и после отказа (совет)
+	// диалог требовал 756 и 659 т. — выше даже стартового окна 620, и
+	// «Закрыть» ложилась на «Скопировать путь». Теперь ТЕКСТ и QR — в
+	// вертикальной прокрутке, а КНОПКИ ДЕЙСТВИЯ («Сохранить .conf»,
+	// «Скопировать путь») — под ней, вне прокрутки, как и «Закрыть» самого
+	// диалога: при любом окне они на виду. QR не уменьшается (сканируемость),
+	// путь не сжимается (переносится как был).
+	info = container.NewVScroll(container.NewVBox(
 		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		container.NewCenter(qrObj),
 		hint,
-		saveBtn,
 		savedLabel,
-		copyBtn,
 		moveHint,
 		failHint,
-	)
+	))
+	content = container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
+}
+
+// scrollToEnd доводит прокрутку до конца СРАЗУ после того, как в её
+// содержимом что-то показали. Голый ScrollToBottom здесь не работает ни в
+// бою, ни в тесте: Fyne 2.7.4 (internal/widget/scroller.go, updateOffset)
+// сравнивает с ТЕКУЩИМ размером содержимого, а он обновится только в
+// следующем кадре — и сдвиг сбрасывается в 0. Сначала перекладывается
+// ВНЕШНИЙ контейнер (появившаяся под прокруткой кнопка «Скопировать путь»
+// уменьшает её окно), потом сама прокрутка (содержимое получает новый
+// размер), и только потом сдвиг.
+func scrollToEnd(outer *fyne.Container, s *container.Scroll) {
+	outer.Refresh()
+	s.Refresh()
+	s.ScrollToBottom()
 }
 
 // ---------- переименование ----------
@@ -2753,8 +2860,11 @@ func (u *ui) toggleSelected() {
 			})
 		})
 	})
+	// Д4 (осмотр 29.09.2026): без переноса ключ раздувал рамку — как Д3.
+	card := widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID))
+	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID)),
+		card,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
 	)
@@ -2828,8 +2938,11 @@ func (u *ui) regenerateSelected() {
 			})
 		})
 	})
+	// Д5 (осмотр 29.09.2026): фраза без переноса раздувала рамку до 847 т.
+	question := widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг пользователя «%s»? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
+	question.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name())),
+		question,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
 	)
@@ -2958,8 +3071,13 @@ func (u *ui) deleteSelected() {
 			diffBtn.Enable()
 		})
 	})
+	// Д3 (осмотр 25.09.2026): без переноса ключ из широких знаков раздувал
+	// рамку с 452 до 570.8 т. TextWrapWord в Fyne рвёт слово, которое длиннее
+	// строки, по знакам — ключ без пробелов переносится, имя — по словам.
+	card := widget.NewLabel(msg)
+	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(msg),
+		card,
 		activity,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,

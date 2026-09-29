@@ -278,7 +278,7 @@ func TestResolveClient(t *testing.T) {
 	}
 
 	t.Run("by number", func(t *testing.T) {
-		r := ResolveClient(clients, "2")
+		r := ResolveClient(clients, "#2")
 		if r.Kind != ResolveFound || r.Index != 1 {
 			t.Errorf("r = %+v, want Found index 1", r)
 		}
@@ -358,12 +358,21 @@ func TestResolveClientThreeOutcomes(t *testing.T) {
 		wantKind ResolveKind
 		wantIdx  int
 	}{
-		{"имя из цифр главнее номера строки", many, "12", ResolveFound, 0},
-		{"номер строки без конфликта имён", many, "5", ResolveFound, 4},
+		// Решение владельца 26.09.2026: «12» — всегда имя, «#12» — всегда
+		// номер строки.
+		{"12 — имя, хотя строка 12 есть", many, "12", ResolveFound, 0},
+		{"#12 — строка 12, хотя имя «12» есть", many, "#12", ResolveFound, 11},
+		{"#5 — строка 5", many, "#5", ResolveFound, 4},
+		{"5 без имени «5» — не номер строки", many, "5", ResolveNotFound, -1},
 		{"обычное имя", many, "user5", ResolveFound, 4},
 		{"два одноимённых — неоднозначно", dup, "Дубль", ResolveAmbiguous, -1},
 		{"ничего не совпало", many, "нет-такого", ResolveNotFound, -1},
 		{"число вне списка — не номер строки", many, "999", ResolveNotFound, -1},
+		{"#13 — строки нет", many, "#13", ResolveBadLine, -1},
+		{"#0 — не номер", many, "#0", ResolveBadLine, -1},
+		{"#-1 — не номер", many, "#-1", ResolveBadLine, -1},
+		{"#abc — не номер и не имя", many, "#abc", ResolveBadLine, -1},
+		{"голая решётка", many, "#", ResolveBadLine, -1},
 	}
 	// Канарейка на недозапуск (ревью QA-01 M15): усохшая таблица случаев
 	// зеленеет молча и неотличима от «проверять нечего». Порог по числу
@@ -375,7 +384,7 @@ func TestResolveClientThreeOutcomes(t *testing.T) {
 	for _, tc := range cases {
 		seenKind[tc.wantKind]++
 	}
-	for _, k := range []ResolveKind{ResolveNotFound, ResolveFound, ResolveAmbiguous} {
+	for _, k := range []ResolveKind{ResolveNotFound, ResolveFound, ResolveAmbiguous, ResolveBadLine} {
 		if seenKind[k] == 0 {
 			t.Fatalf("в таблице нет ни одного случая с исходом %v — третье состояние не проверяется", k)
 		}
@@ -546,9 +555,9 @@ func TestSortedSliceRowNumberInvariant(t *testing.T) {
 		t.Fatalf("clients[0] = %s, want c", clients[0].ClientID)
 	}
 	// строка "1" в отрисованном списке должна резолвиться именно в clients[0]
-	r := ResolveClient(clients, "1")
+	r := ResolveClient(clients, "#1")
 	if r.Kind != ResolveFound || r.Index != 0 || clients[r.Index].ClientID != "c" {
-		t.Fatalf("ResolveClient(clients, \"1\") = %+v, want Found index 0 (c)", r)
+		t.Fatalf("ResolveClient(clients, \"#1\") = %+v, want Found index 0 (c)", r)
 	}
 }
 
@@ -1441,7 +1450,7 @@ func TestResolveClientAnnouncesNameOverNumber(t *testing.T) {
 	if note == "" {
 		t.Fatal("Note() пуст: программа молча выбрала между именем и номером строки")
 	}
-	for _, want := range []string{"ИМЯ", `"12"`, "строки 1", "Строка 12 не выбрана"} {
+	for _, want := range []string{"ИМЯ", `"12"`, "строки 1", "Строка 12 не выбрана", "#12"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("Note() = %q, не содержит %q — не сказано, кого поняли", note, want)
 		}
@@ -1449,7 +1458,7 @@ func TestResolveClientAnnouncesNameOverNumber(t *testing.T) {
 
 	// Однозначные случаи молчат: болтовня на каждом вводе обесценивает
 	// предупреждение.
-	if n := ResolveClient(clients, "5").Note(); n != "" {
+	if n := ResolveClient(clients, "#5").Note(); n != "" {
 		t.Errorf("Note() для обычного номера = %q, want пусто", n)
 	}
 	if n := ResolveClient(clients, "user5").Note(); n != "" {

@@ -105,9 +105,9 @@ func TestResolveInteractiveReachesHuman(t *testing.T) {
 		}
 	})
 
-	t.Run("обычный номер — молча и как раньше", func(t *testing.T) {
+	t.Run("номер строки с решёткой — молча", func(t *testing.T) {
 		var buf bytes.Buffer
-		idx := resolveInteractive(&buf, many, "5")
+		idx := resolveInteractive(&buf, many, "#5")
 		if idx != 4 {
 			t.Fatalf("idx = %d, want 4", idx)
 		}
@@ -183,6 +183,104 @@ func TestResolveByFlagReachesHuman(t *testing.T) {
 		var out bytes.Buffer
 		if _, err := resolveByFlag(&out, digits, "2"); err == nil {
 			t.Fatal("номер строки во флаговом режиме резолвиться не должен")
+		}
+	})
+}
+
+// TestResolveInteractiveHashForm — явная форма номера строки (решение
+// владельца 26.09.2026): в интерактивном меню «#12» — ВСЕГДА номер строки,
+// «12» — ВСЕГДА имя; переспроса нет. Идёт через resolveInteractive — ровно
+// то, что зовут четыре пункта меню (седьмая ступень: не разбор в обход).
+//
+// Каждый случай проверяет и индекс, и ДОСЛОВНЫЕ опознаватели вывода:
+// отказ «#abc» обязан говорить о номере строки, а не «не найден» — иначе
+// «#abc» тихо истолкован как имя.
+func TestResolveInteractiveHashForm(t *testing.T) {
+	// 12 строк; на строке 1 — клиент с именем «12», на строке 3 — с именем «#2».
+	var many []core.ClientEntry
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("user%d", i)
+		switch i {
+		case 1:
+			name = "12"
+		case 3:
+			name = "#2"
+		}
+		many = append(many, core.ClientEntry{ClientID: fmt.Sprintf("key%d", i), UserData: map[string]any{"clientName": name}})
+	}
+	cases := []struct {
+		name, ident string
+		wantIdx     int
+		want, not   []string
+	}{
+		{"#12 — строка 12, не имя «12»", "#12", 11, nil, []string{"ИМЯ", "Ошибка"}},
+		{"12 — имя «12» со строки 1, и сказано про #12", "12", 0, []string{"ИМЯ", "Строка 12 не выбрана", "#12"}, []string{"Ошибка"}},
+		{"5 без имени «5» — не строка 5, подсказка про #5", "5", -1, []string{"Ошибка", "#5"}, []string{"не номер строки"}},
+		{"#2 — строка 2, клиент с именем «#2» не выбран вслух", "#2", 1, []string{"НОМЕР СТРОКИ", "строка 3"}, []string{"Ошибка"}},
+		{"#13 — строки нет", "#13", -1, []string{"строки #13 в списке нет", "#12"}, []string{"не найден"}},
+		{"#0 — не номер", "#0", -1, []string{"не номер строки"}, []string{"не найден"}},
+		{"#-1 — не номер", "#-1", -1, []string{"не номер строки"}, []string{"не найден"}},
+		{"#abc — не номер, не имя", "#abc", -1, []string{"не номер строки"}, []string{"не найден"}},
+		{"# — пусто после решётки", "#", -1, []string{"не номер строки"}, []string{"не найден"}},
+	}
+	// Канарейка на недозапуск: усохшая таблица зеленеет молча.
+	if len(cases) < 9 {
+		t.Fatalf("таблица усохла до %d случаев", len(cases))
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var idx int
+			var note bytes.Buffer
+			out := captureStdout(t, func() {
+				idx = resolveInteractive(&note, many, tc.ident)
+			}) + note.String()
+			t.Logf("ввод %q → %d, вывод: %q", tc.ident, idx, out)
+			if idx != tc.wantIdx {
+				t.Errorf("ввод %q: idx = %d, want %d", tc.ident, idx, tc.wantIdx)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("ввод %q: в выводе нет %q: %q", tc.ident, w, out)
+				}
+			}
+			for _, w := range tc.not {
+				if strings.Contains(out, w) {
+					t.Errorf("ввод %q: в выводе лишнее %q: %q", tc.ident, w, out)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveByFlagHashForm — во ФЛАГОВОМ режиме номеров строк нет, и «#2»
+// номером строки не становится: это имя (если такое есть — с объявлением
+// вслух) или отказ, говорящий, где форма «#N» работает.
+func TestResolveByFlagHashForm(t *testing.T) {
+	clients := []core.ClientEntry{
+		{ClientID: "keyA", UserData: map[string]any{"clientName": "Анна"}},
+		{ClientID: "keyB", UserData: map[string]any{"clientName": "Боб"}},
+		{ClientID: "keyC", UserData: map[string]any{"clientName": "#1"}},
+	}
+	t.Run("#2 без такого имени — отказ про интерактивное меню", func(t *testing.T) {
+		var out bytes.Buffer
+		idx, err := resolveByFlag(&out, clients, "#2")
+		if err == nil {
+			t.Fatalf("idx = %d, err = nil — «#2» во флаговом режиме стал номером строки", idx)
+		}
+		t.Logf("отказ: %v", err)
+		if !strings.Contains(err.Error(), "интерактивном меню") {
+			t.Errorf("отказ не говорит, где работает «#N»: %v", err)
+		}
+	})
+	t.Run("#1 — имя «#1», объявлено вслух", func(t *testing.T) {
+		var out bytes.Buffer
+		idx, err := resolveByFlag(&out, clients, "#1")
+		if err != nil || idx != 2 {
+			t.Fatalf("idx = %d, err = %v, want 2 (клиент с именем «#1»), nil", idx, err)
+		}
+		t.Logf("вывод: %q", out.String())
+		if !strings.Contains(out.String(), "ИМЯ") {
+			t.Errorf("не сказано, что «#1» понят как имя: %q", out.String())
 		}
 	})
 }
