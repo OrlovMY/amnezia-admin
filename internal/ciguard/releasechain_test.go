@@ -532,7 +532,28 @@ var (
 	shellcheckAssignRe = regexp.MustCompile(`(^|[^{A-Za-z0-9_$])SHELLCHECK_BIN=`)
 )
 
-// allowedGitHubPath — ЗАКРЫТЫЙ СПИСОК строк, пишущих в $GITHUB_PATH (ревью
+// allowedEnvNames — ЗАКРЫТЫЙ СПИСОК имён в `env:` на уровне workflow, job и
+// шага обоих workflow (ревью QA-01, раунд 6). Сравнение без учёта регистра:
+// ключ здесь в верхнем регистре, имя из файла приводится к нему.
+//
+// Почему список, а не запреты. За три раунда нашлись три имени одного
+// класса: GO* (GOFLAGS=-n), PATH (чужой go впереди), BASH_ENV (файл,
+// исполняемый bash до тела шага, подменяет go функцией). Следующие — ENV,
+// LD_PRELOAD, SHELLOPTS, BASHOPTS, GOTOOLCHAIN — перечислять бесконечно.
+// Прежние отдельные запреты (GO*, PATH, SHELLCHECK_BIN) стали следствием
+// списка; отдельных сообщений для них не оставлено — сообщение и так
+// называет имя и значение.
+var allowedEnvNames = map[string]string{
+	"VERSION": "шаг «Сборка» (ci.yml checks, release.yml build): версия, которую scripts/build-release.sh " +
+		"вшивает в бинарь через -X; скрипт падает без неё",
+	"COMMIT": "там же: коммит для -X ...Commit; скрипт падает без него",
+	"DECLARED_ARCH": "шаг «Архитектура раннера против matrix.arch» (release.yml build): объявленная " +
+		"архитектура, которую шаг сверяет с RUNNER_ARCH",
+	"ATTEST_SUBJECTS": "job release: множество субъектов аттестации — одно место для шага проверки " +
+		"субъектов и для attest-build-provenance",
+}
+
+// allowedGitHubPath —ЗАКРЫТЫЙ СПИСОК строк, пишущих в $GITHUB_PATH (ревью
 // QA-01, раунд 4). Каталог из $GITHUB_PATH встаёт в PATH следующих шагов
 // ВПЕРЕДИ прочих — свой `go` или `shellcheck` там подменил бы настоящий.
 // Сейчас законна одна строка — mingw64 для cgo на Windows.
@@ -583,8 +604,11 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 		envHits := func(where string, env map[string]string) {
 			for k, v := range env {
 				checked++
-				if strings.HasPrefix(k, "GO") || k == "SHELLCHECK_BIN" || strings.EqualFold(k, "PATH") {
-					hits = append(hits, fmt.Sprintf("%s: env %s=%s", where, k, v))
+				// Закрытый список имён (раунд 6): GO*, PATH, BASH_ENV — три
+				// формы одного класса за три раунда; четвёртой не ждём.
+				if _, ok := allowedEnvNames[strings.ToUpper(k)]; !ok {
+					hits = append(hits, fmt.Sprintf("%s: env %s=%s вне закрытого списка имён allowedEnvNames — "+
+						"внеси имя строкой с обоснованием, если оно законно", where, k, v))
 				}
 			}
 		}

@@ -208,6 +208,17 @@ var plants = []plant{
 		wantTest: canaryLogic, wantMsg: "заглушка go в режиме zero: шаг прошёл, а должен упасть — канарейка молчит"},
 	{name: "r5-canary-no-grep", edits: ci(`if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then`, `if [ "$rc" -eq 0 ]; then`),
 		wantTest: canaryLogic, wantMsg: "заглушка go в режиме other: шаг прошёл, а должен упасть — канарейка молчит"},
+	// --- раунд 6 QA-01: закрытый список имён в env: ---
+	{name: "r6-bash-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          BASH_ENV: /tmp/x\n"),
+		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env BASH_ENV=/tmp/x вне закрытого списка имён"},
+	{name: "r6-bash-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  BASH_ENV: /tmp/x\n\n"),
+		wantTest: goenv, wantMsg: "workflow: env BASH_ENV=/tmp/x вне закрытого списка имён"},
+	{name: "r6-foo", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          FOO: 1\n"),
+		wantTest: goenv, wantMsg: "env FOO=1 вне закрытого списка имён"},
+	{name: "r6-shellopts-job", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    env:\n      SHELLOPTS: \"\"\n"),
+		wantTest: goenv, wantMsg: "job lint: env SHELLOPTS= вне закрытого списка имён"},
+	{name: "r6-lowercase-bash-env", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          bash_env: /tmp/x\n"),
+		wantTest: goenv, wantMsg: "env bash_env=/tmp/x вне закрытого списка имён"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -221,7 +232,7 @@ var plants = []plant{
 	{name: "actionlint-literal-pin", edits: rel("  test:\n", "  # go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 .github/workflows/release.yml\n  test:\n"),
 		wantTest: "TestActionlintVersionSingleSource", wantMsg: "версия actionlint «v1.7.11» вместо @${ACTIONLINT_VERSION}"},
 	{name: "actionlint-env-override", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          ACTIONLINT_VERSION: v1.7.11\n"),
-		wantTest: "TestActionlintVersionSingleSource", wantMsg: "переопределяет ACTIONLINT_VERSION"},
+		wantTest: "TestActionlintVersionSingleSource", also: []string{goenv}, wantMsg: "переопределяет ACTIONLINT_VERSION"},
 	// В шаге «Инструменты», а не в шаге разбора: там строка нарушила бы ещё
 	// и закрытый список тела.
 	{name: "actionlint-githubenv-override", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"ACTIONLINT_VERSION=v1.7.11\" >> \"$GITHUB_ENV\"\n"),
@@ -300,7 +311,9 @@ var plants = []plant{
           done
 `, ""),
 		wantTest: att, wantMsg: "образец «лишний файл»: шаг проверки субъектов обязан упасть"},
-	{name: "attest-env-gone", edits: rel("      ATTEST_SUBJECTS: |-\n", "      ATTEST_SUBJECTS_OLD: |-\n"),
+	// Весь блок env: job release переименован (x-env: YAML не читает), а не
+	// одно имя: переименованное имя попало бы под закрытый список имён.
+	{name: "attest-env-gone", edits: rel("    env:\n      # Множество субъектов аттестации", "    x-env:\n      # Множество субъектов аттестации"),
 		wantTest: att, wantMsg: "нет env ATTEST_SUBJECTS"},
 	{name: "attest-check-gone", edits: rel("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n",
 		"        run: echo пропущено\n        x-old: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n"),
