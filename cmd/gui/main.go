@@ -1089,13 +1089,23 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 		info.SetText("Пин уже сброшен — откройте сохранённый ключ ещё раз и подключитесь заново.")
 		return
 	}
-	msg := widget.NewLabel(fmt.Sprintf(
-		"Забыть ключ сервера %s? Утилита сотрёт сохранённый отпечаток — в хранилище и в файле known_hosts. "+
-			"Подключение сейчас установлено не будет: при следующем подключении вы увидите новый отпечаток и решите, доверять ли ему. "+
-			"Делайте это, только если сами переустанавливали сервер.", host,
-	))
-	msg.Wrapping = fyne.TextWrapWord
-	dialog.NewCustomConfirm("Забыть ключ сервера?", "Забыть", "Отмена", msg, func(ok bool) {
+	// Три абзаца по предложению UX-01 (осмотр 29.09.2026): без d.Resize Fyne
+	// давал диалогу ширину по кнопкам (~230 т.), текст шёл столбиком в 15
+	// строк, адрес «хост:порт» рвался посередине, а главное — «только если
+	// сами переустанавливали» — терялось в конце. Самый опасный диалог
+	// программы: решение о доверии ключу сервера необратимо.
+	para := func(s string, style fyne.TextStyle) *widget.Label {
+		l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, style)
+		l.Wrapping = fyne.TextWrapWord
+		return l
+	}
+	msg := container.NewVBox(
+		para(fmt.Sprintf("Забыть ключ сервера %s?", host), fyne.TextStyle{Bold: true}),
+		para("Будет стёрт сохранённый отпечаток — в хранилище и в known_hosts. "+
+			"При следующем подключении вы увидите новый отпечаток и решите, доверять ли ему.", fyne.TextStyle{}),
+		para("Делайте это, только если сами переустанавливали сервер.", fyne.TextStyle{Bold: true}),
+	)
+	forget := dialog.NewCustomConfirm("Забыть ключ сервера?", "Забыть", "Отмена", msg, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -1142,7 +1152,11 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 				u.showConnectScreen("Ключ сервера забыт. Нажмите «Подключиться» — будет показан новый отпечаток.")
 			})
 		})
-	}, u.win).Show()
+	}, u.win)
+	// Рамка 472 т. — как у соседних диалогов ключа сервера (480 − поля):
+	// строка текста около 440 т., адрес с портом помещается целиком.
+	forget.Resize(fyne.NewSize(480, 1))
+	forget.Show()
 }
 
 func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
@@ -1813,6 +1827,12 @@ func startWindowSize() fyne.Size {
 // всех диалогов, и находок нет.
 const minWindowHeight = 517
 
+// ОГОВОРКА (ревью QA-01): бой считает минимум канвы как MinSize содержимого
+// + 2·Padding + ВЫСОТА МЕНЮ (glfw canvas.go:209, canvasSize). Меню у нас
+// нет (SetMainMenu не вызывается, menuHeight = 0), и прибор осмотра
+// (sizeWindow) считает без него. Появится главное меню — прибор разойдётся
+// с боем на его высоту, и sizeWindow надо будет править вместе с ним.
+//
 // windowMinLayout — минимум окна ПО ПРАВИЛУ БОЕВОГО ДРАЙВЕРА. В Fyne 2.7.4 у
 // fyne.Window нет SetMinSize; glfw-окно само зовёт SetSizeLimits с минимумом
 // канвы — MinSize содержимого плюс поля (internal/driver/glfw/
@@ -2914,7 +2934,7 @@ func (u *ui) regenerateSelected() {
 		})
 	})
 	// Д5 (осмотр 29.09.2026): фраза без переноса раздувала рамку до 847 т.
-	question := widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
+	question := widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг пользователя «%s»? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
 	question.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
 		question,

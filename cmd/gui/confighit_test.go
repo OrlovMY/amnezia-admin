@@ -16,6 +16,8 @@ package main
 //     стоил владельцу выделения строки.
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -81,7 +83,19 @@ func checkConfigClicks(t *testing.T, pop *widget.PopUp, buttons []string, errf f
 	r, v := absRect(qr), absRect(sc)
 	top, bottom := max(r.pos.Y, v.pos.Y), min(r.bottom(), v.bottom())
 	if bottom-top < 1 {
-		errf("проверка ничего не значит: QR не виден в прокрутке (%v, окно %v)", r, v)
+		// После сохранения прокрутка доведена до конца, и при длинном пути
+		// (модели путей ОС) QR может уйти за край целиком. Человек, чтобы
+		// кликнуть по QR, сначала прокрутит к нему — так и делаем.
+		inner := sc
+		if m, ok := sc.(mouseScroll); ok {
+			inner = m.Scroll
+		}
+		inner.(*container.Scroll).ScrollToTop()
+		r, v = absRect(qr), absRect(sc)
+		top, bottom = max(r.pos.Y, v.pos.Y), min(r.bottom(), v.bottom())
+	}
+	if bottom-top < 1 {
+		errf("проверка ничего не значит: QR не виден в прокрутке и после прокрутки к началу (%v, окно %v)", r, v)
 		return
 	}
 	c := fyne.NewPos(r.pos.X+r.size.Width/2, (top+bottom)/2)
@@ -136,8 +150,13 @@ func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 	replaceIn(t, pop, sc, ms)
 	var errs []string
 	checkConfigClicks(t, pop, []string{"Закрыть"}, func(f string, a ...any) {
-		errs = append(errs, f)
-		t.Logf("ПРОВЕРКА: "+f, a...)
+		msg := fmt.Sprintf(f, a...)
+		t.Log("ПРОВЕРКА: " + msg)
+		// Засчитывается ТОЛЬКО своя причина (ревью QA-01): «проверка ничего
+		// не значит» и прочее — покраснение не по своей причине.
+		if strings.Contains(msg, "перехвачен") {
+			errs = append(errs, msg)
+		}
 	})
 	if len(errs) == 0 {
 		t.Error("проверка НЕ ПОКРАСНЕЛА на прокрутке, перехватывающей мышь")
@@ -173,6 +192,49 @@ func TestConfigDialogNewTextInView(t *testing.T) {
 				v, r := absRect(sc), absRect(l)
 				if r.pos.Y < v.pos.Y-0.5 || r.bottom() > v.bottom()+0.5 {
 					t.Errorf("подпись «%s…» вне видимой части прокрутки: %v, видно %v", tc.prefix, r, v)
+				}
+			})
+		}
+	}
+}
+
+// TestConfigSavedAcrossOSPathModels — «Конфиг готов» после сохранения на
+// моделях путей трёх ОС CI (ревью QA-01: на macOS путь 1133 т. и с
+// пробелом). На ЛЮБОЙ ОС гоняются все три модели: ворота прибора, боевое
+// правило мыши и видимость нового текста обязаны быть чистыми при любом
+// числе строк пути. Ширина и число строк пути печатаются — видно, что они
+// РАЗНЫЕ, а исход один.
+func TestConfigSavedAcrossOSPathModels(t *testing.T) {
+	f := formByName(t, "(д) конфиг готов, сохранён")
+	saved := osmotrPath
+	t.Cleanup(func() { osmotrPath = saved })
+	for _, m := range []osmotrPathModel{pathLinux, pathWindows, pathMacOS} {
+		for _, size := range osmotrSizes {
+			t.Run(m.name+"/"+size, func(t *testing.T) {
+				osmotrPath = m
+				rep := runOsmotr(t, f, size, "светлая", theme.VariantLight, nil)
+				var errs []string
+				osmotrGate(f, size, rep, func(format string, a ...any) { errs = append(errs, fmt.Sprintf(format, a...)) })
+				for _, e := range errs {
+					t.Errorf("ворота: %s", e)
+				}
+				_, pop := configScene(t, "сохранён", size)
+				checkConfigClicks(t, pop, []string{"Сохранить .conf", "Скопировать путь", "Закрыть"}, t.Errorf)
+				var path *widget.Label
+				walkVisible(pop, func(o fyne.CanvasObject) {
+					if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Конфиг сохранён: ") {
+						path = l
+					}
+				})
+				if path == nil {
+					t.Fatal("проверка ничего не значит: подписи с путём нет")
+				}
+				w := fyne.MeasureText(path.Text, theme.TextSize(), fyne.TextStyle{}).Width
+				line := fyne.MeasureText("Ж", theme.TextSize(), fyne.TextStyle{}).Height
+				t.Logf("модель %s: подпись с путём %.1f т. (не меньше %.0f), строк %.0f",
+					m.name, w, m.atLeast, (path.MinSize().Height-2*theme.InnerPadding())/line)
+				if w < m.atLeast {
+					t.Errorf("модель не достигнута: %.1f < %.0f", w, m.atLeast)
 				}
 			})
 		}

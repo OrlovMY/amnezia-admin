@@ -34,22 +34,46 @@ func osmotrNewUser() *core.NewUser {
 		Config: "[Interface]\nPrivateKey = не-настоящий\nAddress = 10.8.1.5/32\n"}
 }
 
-// configDirEnv — каталог данных пользователя ОС для теста (не настоящий).
-// Путь печатается в диалоге («Конфиг сохранён: …») и переносится; временный
-// каталог на Windows, Linux и macOS разной длины, и без выравнивания число
-// строк и замер зависели бы от ОС (урок PR #20). Поэтому временный каталог
-// добивается ДО ОДНОЙ ШИРИНЫ ТЕКСТА: подпись занимает osmotrPathWidth т. —
-// середина третьей строки при ширине строки ~440 т., так что разница в
-// ширине отдельных знаков числа строк не меняет. Ширина проверяется.
-const osmotrPathWidth = 1000
+// configDirEnv — каталог данных пользователя ОС для теста (не настоящий),
+// по МОДЕЛИ пути одной из трёх ОС CI.
+//
+// ПОЧЕМУ МОДЕЛИ, А НЕ ВЫРАВНИВАНИЕ (ревью QA-01, урок PR #20 в третий раз).
+// Прежняя редакция добивала путь до 1000 т. и падала, если он шире 1020, —
+// а на macOS базовый путь (/var/folders/…/T/osm…/Library/Application
+// Support/…) уже 1133 т., да ещё с пробелом, который меняет перенос по
+// словам. Выровнять путь на трёх ОС нельзя: хвост каталога данных у каждой
+// ОС свой. И не нужно: после Д6 путь живёт ВНУТРИ прокрутки, прибор мерит её
+// одним атомом, и ни одна находка ворот от числа строк пути не зависит.
+// Поэтому вместо выравнивания — худший случай по умолчанию (модель macOS:
+// самый широкий путь, с пробелом) и отдельный тест
+// TestConfigSavedAcrossOSPathModels, который гоняет ворота и боевое правило
+// мыши на всех трёх моделях на ЛЮБОЙ ОС.
+type osmotrPathModel struct {
+	name    string
+	sub     string  // подкаталоги поверх временного, как у этой ОС
+	atLeast float32 // ширина подписи «Конфиг сохранён: <путь>» не меньше (т.)
+}
 
-func configDirEnv(t *testing.T) {
+var (
+	pathLinux = osmotrPathModel{"Linux (/tmp/osm…)", "", 0}
+	// Windows runner: C:\Users\runneradmin\AppData\Local\Temp\osm… — 883 т.
+	pathWindows = osmotrPathModel{"Windows runner", "", 883}
+	// macOS runner: /var/folders/xx/…/T/osm…/Library/Application Support/… —
+	// 1133 т., с пробелом в «Application Support».
+	pathMacOS = osmotrPathModel{"macOS runner", filepath.Join("folders", "xx", "yy", "T", "Library", "Application Support"), 1133}
+)
+
+// osmotrPath — модель для форм прибора; по умолчанию худшая.
+var osmotrPath = pathMacOS
+
+func configDirEnv(t *testing.T) (width float32) {
 	t.Helper()
 	base, err := os.MkdirTemp("", "osm")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(base) })
+	m := osmotrPath
 	set := func(b string) float32 {
 		t.Setenv("LOCALAPPDATA", b)
 		t.Setenv("XDG_CONFIG_HOME", b)
@@ -59,22 +83,19 @@ func configDirEnv(t *testing.T) {
 			t.Fatalf("каталог данных: %v", err)
 		}
 		abs := filepath.Join(d, core.SanitizeName(osmotrNewUser().Name)+".conf")
-		osmotrSavedLabel = firstLine("Конфиг сохранён: " + abs)
 		return fyne.MeasureText("Конфиг сохранён: "+abs, theme.TextSize(), fyne.TextStyle{}).Width
 	}
-	pad := base
-	for n := 1; set(pad) < osmotrPathWidth; n++ {
-		if n > 200 {
-			t.Fatal("путь не добивается до нужной ширины")
+	dir := filepath.Join(base, m.sub)
+	for n := 1; set(dir) < m.atLeast; n++ {
+		if n > 300 {
+			t.Fatal("путь не добивается до ширины модели")
 		}
-		pad = filepath.Join(base, padName(n))
+		dir = filepath.Join(base, m.sub, padName(n))
 	}
-	if w := set(pad); w < osmotrPathWidth || w > osmotrPathWidth+20 {
-		t.Fatalf("ширина подписи с путём %.1f, ожидалось %d..%d", w, osmotrPathWidth, osmotrPathWidth+20)
-	}
-	if err := os.MkdirAll(pad, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return set(dir)
 }
 
 func padName(n int) string {
@@ -186,13 +207,6 @@ func openError(t *testing.T, u *ui, sized func()) osmotrScene {
 	return scenePopup(t, u)
 }
 
-// osmotrSavedLabel — как прибор сокращает подпись «Конфиг сохранён: <путь>»
-// в этом прогоне. Путь начинается с временного каталога ОС, поэтому в описи и
-// в строках находок он заменяется на osmotrSavedToken (runOsmotr).
-var osmotrSavedLabel string
-
-const osmotrSavedToken = "Конфиг сохранён: <путь>"
-
 // Описи новых форм (прогон 29.09.2026, сверены с main.go и снимками).
 var (
 	// «Конфиг готов» после Д6: текст и QR — в прокрутке (прибор мерит её как
@@ -213,8 +227,19 @@ var (
 var moreForms = []osmotrForm{
 	{name: "(в) вкл/выкл", open: openAction(func(u *ui) { u.toggleSelected() }), width: 412,
 		inventory: cat([]string{"подпись:Отключить пользователя?", "подпись:Пользователь: Ноутбук…", "кнопка:Да"}, invActionTail)},
+	// Д3–Д4 НА ДЕЛЕ (ревью UX-01): строка «Телефон Анны» с ключом из 43 «Q»
+	// — широкие знаки, без пробелов. Снимки этих форм — доказательство, что
+	// ключ переносится и его конец виден.
+	{name: "(в) вкл/выкл, ключ из «Q»", open: openActionRow(1, func(u *ui) { u.toggleSelected() }), width: 412,
+		inventory: cat([]string{"подпись:Отключить пользователя?", "подпись:Пользователь: Телефон Анны…", "кнопка:Да"}, invActionTail)},
+	{name: "(в) удаление, ключ из «Q», статистики нет", open: openDeleteRow(1), width: 452,
+		inventory: []string{"подпись:Удалить пользователя?", "подпись:Имя: Телефон Анны…",
+			"подпись:Не удалось получить данные о подключения…",
+			"кнопка:Удалить", "кнопка:Показать изменения", "подпись:", "кнопка:Отмена"}},
 	{name: "(в) перевыпуск", open: openAction(func(u *ui) { u.regenerateSelected() }), width: 452,
-		inventory: cat([]string{"подпись:Перевыпустить конфиг?", "подпись:Перевыпустить конфиг для Ноутбук? Старый…", "кнопка:Перевыпустить"}, invActionTail)},
+		inventory: cat([]string{"подпись:Перевыпустить конфиг?",
+			"подпись:" + firstLine("Перевыпустить конфиг пользователя «Ноутбук»? Старый конфиг перестанет работать."),
+			"кнопка:Перевыпустить"}, invActionTail)},
 	// Д6 закрыт прокруткой (решение владельца 29.09.2026): разрешения
 	// knownD6 сняты, прибор показал их НЕИСПОЛЬЗОВАННЫМИ.
 	{name: "(д) конфиг готов", open: openConfig(""), width: 472, inventory: invConfigBase},
@@ -236,10 +261,11 @@ var moreForms = []osmotrForm{
 	{name: "(е) ключ сервера изменился, из хранилища", open: openHostKeyChanged(true), width: 472,
 		inventory: []string{"подпись:Ключ сервера изменился", "подпись:Сервер 203.0.113.10:22.…",
 			"кнопка:Забыть ключ сервера…", "кнопка:Закрыть"}},
-	// Без d.Resize: Fyne даёт диалогу ширину по заголовку и кнопкам (229 т.),
-	// ширину рамки не проверяем — заказанной нет.
-	{name: "(е) забыть ключ сервера", open: openForgetHostKey,
-		inventory: []string{"подпись:Забыть ключ сервера?", "подпись:Забыть ключ сервера 203.0.113.10:22? Ути…",
+	// Три абзаца, рамка 472 (ревью UX-01, 29.09.2026; было 229 т. столбиком).
+	{name: "(е) забыть ключ сервера", open: openForgetHostKey, width: 472,
+		inventory: []string{"подпись:Забыть ключ сервера?", "подпись:Забыть ключ сервера 203.0.113.10:22?",
+			"подпись:" + firstLine("Будет стёрт сохранённый отпечаток — в хранилище и в known_hosts."),
+			"подпись:" + firstLine("Делайте это, только если сами переустанавливали сервер."),
 			"кнопка:Забыть", "кнопка:Отмена"}},
 	{name: "(ж) не выбран пользователь", open: openInfo,
 		inventory:  []string{"подпись:Не выбран пользователь", "подпись:Выберите строку в таблице.", "изображение:", "кнопка:ОК"},

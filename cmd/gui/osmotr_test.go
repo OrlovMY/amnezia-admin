@@ -723,10 +723,15 @@ func openSave(layoutFail bool) func(t *testing.T, u *ui, sized func()) osmotrSce
 }
 
 func openAction(action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return openActionRow(0, action)
+}
+
+// openActionRow — то же для строки row (1 — «Телефон Анны», ключ из 43 «Q»).
+func openActionRow(row int, action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmotrScene {
 	return func(t *testing.T, u *ui, sized func()) osmotrScene {
 		osmotrMain(u)
 		sized()
-		u.selectedRow = 0
+		u.selectedRow = row
 		action(u)
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
@@ -735,12 +740,23 @@ func openAction(action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmo
 }
 
 func openDelete(t *testing.T, u *ui, sized func()) osmotrScene {
+	return openDeleteRow(0)(t, u, sized)
+}
+
+// openDeleteRow — диалог удаления строки row, статистики нет.
+func openDeleteRow(row int) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return func(t *testing.T, u *ui, sized func()) osmotrScene {
+		return openDeleteRowAt(t, u, sized, row)
+	}
+}
+
+func openDeleteRowAt(t *testing.T, u *ui, sized func(), row int) osmotrScene {
 	osmotrMain(u)
 	sized()
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	gate := make(chan struct{})
 	u.sess = core.NewSessionWithRunner(osmotrNoServer{gate: gate}, u.sess.Creds)
-	u.selectedRow = 0
+	u.selectedRow = row
 	u.deleteSelected()
 	c := u.win.Canvas()
 	pop := topPopup(t, c)
@@ -865,20 +881,6 @@ func runOsmotr(t *testing.T, f osmotrForm, size, themeName string, v fyne.ThemeV
 	}
 	sz := u.win.Canvas().Size()
 	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, f.mayOverlap)
-	if osmotrSavedLabel != "" {
-		// Путь сохранения зависит от ОС (временный каталог) — в описи и
-		// находках он заменён меткой (osmotr_more_test.go).
-		r := strings.NewReplacer(osmotrSavedLabel, osmotrSavedToken)
-		for i := range rep.atoms {
-			rep.atoms[i].name = r.Replace(rep.atoms[i].name)
-		}
-		for _, l := range [][]string{rep.overflow, rep.overlaps, rep.squeezed} {
-			for i := range l {
-				l[i] = r.Replace(l[i])
-			}
-		}
-		osmotrSavedLabel = ""
-	}
 	rep.checkInventory(f.inventory)
 	return rep
 }
