@@ -49,7 +49,13 @@ type plant struct {
 	edits    []edit
 	extraDir string
 	wantTest string // единственный тест, который обязан упасть
-	wantMsg  string // что обязано быть в его выводе
+	wantMsg  string // что обязано быть в блоке провала с меткой failMark
+	// also — тесты, которые по существу обязаны упасть ВМЕСТЕ с wantTest:
+	// одна подсадка нарушает два правила сразу (например, export GOFLAGS в
+	// теле разбирающего шага — и «не из закрытого списка», и «GO* в
+	// окружении»). Разведение для каждого правила порознь — отдельными
+	// подсадками без also.
+	also []string
 }
 
 const alCall = `go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"`
@@ -68,6 +74,11 @@ const ciLintGuards = `          set -euo pipefail
           test -n "${SHELLCHECK_BIN:-}" || { echo "СТОП: SHELLCHECK_BIN пуста" >&2; exit 1; }
           test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста" >&2; exit 1; }
 `
+
+// canaryEnd — последняя строка шага канарейки shellcheck в ci.yml.
+const canaryEnd = "          echo \"Канарейка сработала: shellcheck применён к bash внутри run:\"\n"
+
+const goenv = "TestNoGoEnvironmentOverrides"
 
 func ci(old, new string) []edit  { return []edit{{ciYML, old, new}} }
 func rel(old, new string) []edit { return []edit{{releaseYML, old, new}} }
@@ -91,9 +102,11 @@ var plants = []plant{
 	{name: "actionlint-noargs", edits: ci(ciRealLint, ciLintEcho+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN"`+"\n"),
 		wantTest: inv, wantMsg: "без файлов"},
 	// --- смысл вызова actionlint: по одной ветке ---
-	{name: "al-extra-version", edits: ci(ciRealLint, ciRealLint+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN" --version "$canary"`+"\n"),
+	// Добавочный вызов — в конец шага канарейки, а не рядом с настоящим:
+	// рядом с настоящим он нарушил бы ещё и закрытый список тела шага.
+	{name: "al-extra-version", edits: ci(canaryEnd, canaryEnd+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN" --version "$canary"`+"\n"),
 		wantTest: inv, wantMsg: "флаг --version вне закрытого списка"},
-	{name: "al-extra-noargs", edits: ci(ciRealLint, ciRealLint+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN"`+"\n"),
+	{name: "al-extra-noargs", edits: ci(canaryEnd, canaryEnd+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN"`+"\n"),
 		wantTest: inv, wantMsg: "вызов actionlint без файлов — разбирать нечего"},
 	{name: "al-ignore", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck "$SHELLCHECK_BIN" -ignore '.*' \`),
 		wantTest: inv, wantMsg: "флаг -ignore вне закрытого списка"},
@@ -115,13 +128,53 @@ var plants = []plant{
 		".github/workflows/ci.yml\n", ".github/workflows/ci.yml; then :; fi\n", 1)),
 		wantTest: inv, wantMsg: "перед вызовом в строке стоит «if go run»"},
 	{name: "al-set-plus", edits: ci(ciRealLint, "          set +e\n"+ciRealLint+"          echo done\n"),
-		wantTest: inv, wantMsg: "выше вызова стоит «set +e»"},
+		wantTest: inv, wantMsg: "строка «set +e» выше вызова — вне закрытого списка"},
 	{name: "al-no-set", edits: ci(ciLintGuards+ciRealLint, strings.Replace(ciLintGuards, "          set -euo pipefail\n", "", 1)+ciRealLint),
 		wantTest: inv, wantMsg: "нет `set -euo pipefail`"},
 	{name: "al-exit", edits: ci(ciRealLint, "          exit 0\n"+ciRealLint),
-		wantTest: inv, wantMsg: "выше вызова стоит «exit 0»"},
+		wantTest: inv, wantMsg: "строка «exit 0» выше вызова"},
 	{name: "al-func", edits: ci(ciRealLint, "          lint() {\n"+ciRealLint+"          }\n"),
-		wantTest: inv, wantMsg: "после объявления функции «lint() {»"},
+		wantTest: inv, wantMsg: "строка «lint() {» выше вызова"},
+	// --- раунд 2 QA-01: строка вызова цела, меняется окружение ---
+	{name: "r2-subshell", edits: ci(ciRealLint, "          (\n"+ciRealLint+"          ) || true\n"),
+		wantTest: inv, wantMsg: "строка «(» выше вызова — вне закрытого списка"},
+	{name: "r2-if-false", edits: ci(ciRealLint, "          if false; then\n"+ciRealLint+"          fi\n"),
+		wantTest: inv, wantMsg: "строка «if false; then» выше вызова"},
+	{name: "r2-while-false", edits: ci(ciRealLint, "          while false; do\n"+ciRealLint+"          done\n"),
+		wantTest: inv, wantMsg: "строка «while false; do» выше вызова"},
+	{name: "r2-case", edits: ci(ciRealLint, "          case x in\n            y)\n"+ciRealLint+"            ;;\n          esac\n"),
+		wantTest: inv, wantMsg: "строка «case x in» выше вызова"},
+	{name: "r2-heredoc", edits: ci(ciRealLint, "          cat >/dev/null <<'X'\n"+ciRealLint+"          X\n"),
+		wantTest: inv, wantMsg: "строка «cat >/dev/null <<'X'» выше вызова"},
+	{name: "r2-literal", edits: ci(ciRealLint, "          : '\n"+ciRealLint+"          '\n"),
+		wantTest: inv, wantMsg: "строка «: '» выше вызова"},
+	{name: "r2-trailing-line", edits: ci(ciRealLint, ciRealLint+"          echo готово\n"),
+		wantTest: inv, wantMsg: "после вызова стоит строка «echo готово»"},
+	{name: "r2-env-goflags", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          GOFLAGS: -n\n"),
+		wantTest: goenv, wantMsg: "env GOFLAGS=-n"},
+	{name: "r2-export-goflags", edits: ci(ciRealLint, "          export GOFLAGS=-n\n"+ciRealLint),
+		wantTest: inv, also: []string{goenv}, wantMsg: "строка «export GOFLAGS=-n» выше вызова"},
+	{name: "r2-githubenv-goflags", edits: rel("          echo \"$ImageOS $ImageVersion\"\n", "          echo \"$ImageOS $ImageVersion\"\n          echo \"GOFLAGS=-n\" >> \"$GITHUB_ENV\"\n"),
+		wantTest: goenv, wantMsg: "«echo \"GOFLAGS=-n\" >> \"$GITHUB_ENV\"»"},
+	{name: "r2-step-shell", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        shell: bash --noprofile --norc {0} || true\n"),
+		wantTest: inv, wantMsg: "у шага задан shell: «bash --noprofile --norc {0} || true»"},
+	{name: "r2-job-shell", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    defaults:\n      run:\n        shell: bash {0} || true\n"),
+		wantTest: inv, wantMsg: "у job задан defaults.run.shell"},
+	{name: "r2-gotest-env-goflags", edits: []edit{
+		{ciYML, "      - name: go test -race\n", "      - name: go test -race\n        env:\n          GOFLAGS: -run=NOTHING\n"},
+		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        env:\n          GOFLAGS: -run=NOTHING\n"}},
+		wantTest: goenv, wantMsg: "env GOFLAGS=-run=NOTHING"},
+	{name: "r2-gotest-shell", edits: []edit{
+		{ciYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"},
+		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"}},
+		wantTest: gtm, wantMsg: "у шага задан shell: «bash {0} || true»"},
+	{name: "r2-gotest-subshell", edits: []edit{
+		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
+		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
+		wantTest: gtm, wantMsg: "строка «if false; then» выше вызова"},
+	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
+		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
+		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
 	{name: "al-extra-file", edits: realWith(".github/workflows/ci.yml\n", ".github/workflows/ci.yml /dev/null\n"),
 		wantTest: inv, wantMsg: "не ровно оба workflow"},
 	{name: "al-real-gone", edits: ci(ciRealLint, ciLintEcho+strings.Replace(ciRealLint, ".github/workflows/release.yml \\\n            .github/workflows/ci.yml\n", "\"$canary\"\n", 1)),
@@ -130,10 +183,12 @@ var plants = []plant{
 	{name: "actionlint-step-coe", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        continue-on-error: true\n"),
 		wantTest: "TestActionlintPinnedInEveryExpectedFile", wantMsg: "найден, но обеззублен"},
 	{name: "actionlint-literal-pin", edits: rel("  test:\n", "  # go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 .github/workflows/release.yml\n  test:\n"),
-		wantTest: "TestActionlintVersionSingleSource", wantMsg: "литеральная версия actionlint v1.7.11"},
+		wantTest: "TestActionlintVersionSingleSource", wantMsg: "версия actionlint «v1.7.11» вместо @${ACTIONLINT_VERSION}"},
 	{name: "actionlint-env-override", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          ACTIONLINT_VERSION: v1.7.11\n"),
 		wantTest: "TestActionlintVersionSingleSource", wantMsg: "переопределяет ACTIONLINT_VERSION"},
-	{name: "actionlint-githubenv-override", edits: ci(ciLintGuards, ciLintGuards+`          echo "ACTIONLINT_VERSION=v1.7.11" >> "$GITHUB_ENV"`+"\n"),
+	// В шаге «Инструменты», а не в шаге разбора: там строка нарушила бы ещё
+	// и закрытый список тела.
+	{name: "actionlint-githubenv-override", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"ACTIONLINT_VERSION=v1.7.11\" >> \"$GITHUB_ENV\"\n"),
 		wantTest: "TestActionlintVersionSingleSource", wantMsg: "переопределяет ACTIONLINT_VERSION"},
 	// --- матрицы ---
 	{name: "checks-matrix", edits: ci("          - os: macos\n            runner: macos-26\n", "          - os: macos\n            runner: macos-15\n"),
@@ -173,7 +228,7 @@ var plants = []plant{
 			"        run: |\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"},
 		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
 			"        run: |\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
-		wantTest: gtm, wantMsg: "тело шага не одна команда (дальше: «echo ok»)"},
+		wantTest: gtm, wantMsg: "после вызова стоит строка «echo ok»"},
 	{name: "packages", edits: rel("./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/\n"),
 		wantTest: gtm, wantMsg: "списки go test разошлись"},
 	{name: "packages-order", edits: rel("-count=1 ./core/ ./internal/...", "-count=1 ./internal/... ./core/"),
@@ -235,6 +290,7 @@ var mainTests = []string{
 	"TestCIMatrixMatchesReleaseBuild",
 	"TestCheckoutsDoNotPersistCredentials",
 	"TestGoTestPackagesMatch",
+	"TestNoGoEnvironmentOverrides",
 	"TestReleaseAttestsChecksums",
 	"TestReleaseMatrixArchMatchesRunnerTable",
 	"TestReleaseRunnerArchStep",
@@ -303,6 +359,41 @@ func runChild(plantName string) (string, error) {
 	return string(out), err
 }
 
+// logLineRe — начало сообщения testing: «    файл.go:NN: текст».
+var logLineRe = regexp.MustCompile(`^\s+[A-Za-z0-9_]+\.go:\d+: `)
+
+// failBlocks — сообщения с меткой failMark вместе с их продолжением
+// (строки продолжения testing печатает с дополнительным отступом, до
+// следующего сообщения или строки ===/---). Текст t.Logf сюда не попадает.
+func failBlocks(out string) []string {
+	var blocks []string
+	cur, in := "", false
+	for _, l := range strings.Split(out, "\n") {
+		trim := strings.TrimSpace(l)
+		switch {
+		case logLineRe.MatchString(l):
+			if in {
+				blocks = append(blocks, cur)
+			}
+			in = strings.Contains(l, ": "+failMark)
+			cur = l
+		case strings.HasPrefix(trim, "---") || strings.HasPrefix(trim, "===") || trim == "FAIL" || trim == "PASS":
+			if in {
+				blocks = append(blocks, cur)
+			}
+			in = false
+		default:
+			if in {
+				cur += "\n" + l
+			}
+		}
+	}
+	if in {
+		blocks = append(blocks, cur)
+	}
+	return blocks
+}
+
 func uniqSorted(ms [][]string) []string {
 	set := map[string]bool{}
 	for _, m := range ms {
@@ -335,17 +426,22 @@ func TestCanaryPlantsReachMainTests(t *testing.T) {
 			t.Parallel() // дочерние процессы независимы; без этого прогон — минута
 			out, err := runChild(p.name)
 			failed := uniqSorted(failLineRe.FindAllStringSubmatch(out, -1))
-			if err == nil || len(failed) != 1 || failed[0] != p.wantTest || !strings.Contains(out, p.wantMsg) {
-				t.Errorf("подсадка %s: ждали провала ровно %s с «%s» (err=%v), упали: %v\n%s",
-					p.name, p.wantTest, p.wantMsg, err, failed, out)
-				return
-			}
-			for _, l := range strings.Split(out, "\n") {
-				if strings.Contains(l, p.wantMsg) {
-					t.Log("ДОЧЕРНИЙ: " + strings.TrimSpace(l))
+			wantFailed := append([]string{p.wantTest}, p.also...)
+			sort.Strings(wantFailed)
+			blocks := failBlocks(out)
+			hit := ""
+			for _, b := range blocks {
+				if strings.Contains(b, p.wantMsg) {
+					hit = b
 					break
 				}
 			}
+			if err == nil || strings.Join(failed, " ") != strings.Join(wantFailed, " ") || hit == "" {
+				t.Errorf("подсадка %s: ждали провала ровно %v с «%s» в блоке с меткой %q (err=%v), упали: %v\n%s",
+					p.name, wantFailed, p.wantMsg, failMark, err, failed, out)
+				return
+			}
+			t.Log("ДОЧЕРНИЙ: " + strings.TrimSpace(strings.SplitN(hit, "\n", 2)[0]))
 		})
 	}
 }

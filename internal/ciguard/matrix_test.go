@@ -56,7 +56,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 
 	var wf workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 
 	j, ok := wf.Jobs[job]
@@ -66,7 +66,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		t.Fatalf("в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
+		fatal(t, "в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
 	}
 
 	var pairs []string
@@ -74,7 +74,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 		osName, hasOS := entry["os"]
 		runner, hasRunner := entry["runner"]
 		if !hasOS || !hasRunner {
-			t.Errorf("в %s (job %s) элемент матрицы №%d не содержит пары os/runner: %v", path, job, i+1, entry)
+			fail(t, "в %s (job %s) элемент матрицы №%d не содержит пары os/runner: %v", path, job, i+1, entry)
 			continue
 		}
 		pairs = append(pairs, osName+"/"+runner)
@@ -84,7 +84,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 	// перестал находить пары (переименовали ключ, перенесли матрицу, сменили
 	// форму записи), сторож обязан покраснеть, а не отрапортовать совпадение.
 	if len(pairs) == 0 {
-		t.Fatalf("в %s не найдено ни одной пары os/runner — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одной пары os/runner — тест перестал что-либо проверять", path)
 	}
 	sort.Strings(pairs)
 	return pairs
@@ -95,7 +95,7 @@ func TestCIMatrixMatchesReleaseBuild(t *testing.T) {
 	inCI := matrixPairsOf(t, ciYML, "checks")
 
 	if strings.Join(inRelease, " ") != strings.Join(inCI, " ") {
-		t.Fatalf("матрицы ОС разошлись — на теге исполнится то, чего не видел ни один PR:\n"+
+		fatal(t, "матрицы ОС разошлись — на теге исполнится то, чего не видел ни один PR:\n"+
 			"  release.yml, job build:  %v\n"+
 			"  ci.yml, job checks:      %v", inRelease, inCI)
 	}

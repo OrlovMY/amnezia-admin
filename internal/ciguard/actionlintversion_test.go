@@ -26,10 +26,9 @@ const (
 	actionlintM = "github.com/rhysd/actionlint"
 )
 
-// Литеральная версия в вызове `go run github.com/rhysd/actionlint/...@vX.Y.Z`.
-// Форма `@${ACTIONLINT_VERSION}` под это выражение не подходит и правильно не
-// считается вхождением: там версии нет, там ссылка на единый источник.
-var actionlintPinRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@(v[0-9]+\.[0-9]+\.[0-9]+)`)
+// Любая ссылка на версию после `actionlint@` — до пробела, кавычки или
+// обратной косой.
+var actionlintRefRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@([^\s"'\\]+)`)
 
 // Объявление версии в единственном источнике.
 var devToolsVersionRe = regexp.MustCompile(`(?m)^ACTIONLINT_VERSION="(v[0-9]+\.[0-9]+\.[0-9]+)"\s*$`)
@@ -47,7 +46,7 @@ func readFile(t *testing.T, path string) string {
 func TestActionlintVersionSingleSource(t *testing.T) {
 	m := devToolsVersionRe.FindStringSubmatch(readFile(t, devToolsSH))
 	if m == nil {
-		t.Fatalf("в %s не найдено объявление ACTIONLINT_VERSION=\"vX.Y.Z\" — тест перестал что-либо проверять", devToolsSH)
+		fatal(t, "в %s не найдено объявление ACTIONLINT_VERSION=\"vX.Y.Z\" — тест перестал что-либо проверять", devToolsSH)
 	}
 	want := m[1]
 
@@ -56,11 +55,18 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 	// источник версии, то есть ровно тот дефект, ради которого заведён пакет.
 	// Поиск идёт по сырому тексту, включая комментарии: вызов, «временно»
 	// спрятанный в комментарий, — тоже второй источник, который разойдётся.
+	//
+	// Закрытый список (ревью QA-01, раунд 2): после `actionlint@` допустимо
+	// РОВНО `${ACTIONLINT_VERSION}`. Литерал, `@latest`, `@main`, `@$V` — всё
+	// красное: плавающая версия раньше ловилась только немой веткой соседа.
 	for _, path := range []string{releaseYML, ciYML} {
-		for _, pin := range actionlintPinRe.FindAllStringSubmatch(readFile(t, path), -1) {
-			t.Errorf("в %s литеральная версия actionlint %s (scripts/dev-tools.sh объявляет %s).\n"+
-				"  Единственный источник версии — scripts/dev-tools.sh; вызов обязан иметь форму @${ACTIONLINT_VERSION}.",
-				path, pin[1], want)
+		for _, ref := range actionlintRefRe.FindAllStringSubmatch(readFile(t, path), -1) {
+			if ref[1] == "${ACTIONLINT_VERSION}" {
+				continue
+			}
+			fail(t, "в %s версия actionlint «%s» вместо @${ACTIONLINT_VERSION} (scripts/dev-tools.sh объявляет %s).\n"+
+				"  Единственный источник версии — scripts/dev-tools.sh; литерал — второй источник, @latest — плавающая версия.",
+				path, ref[1], want)
 		}
 	}
 
@@ -71,7 +77,7 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 	// остаётся формы @${ACTIONLINT_VERSION}, и сторож выше его одобряет.
 	for _, path := range []string{releaseYML, ciYML} {
 		for _, hit := range versionOverrideRe.FindAllString(readFile(t, path), -1) {
-			t.Errorf("в %s переопределяет ACTIONLINT_VERSION: «%s» — второй источник версии; "+
+			fail(t, "в %s переопределяет ACTIONLINT_VERSION: «%s» — второй источник версии; "+
 				"единственный — scripts/dev-tools.sh", path, strings.TrimSpace(hit))
 		}
 	}
@@ -81,7 +87,7 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 	// обязателен хотя бы один вызов через единый источник: без него
 	// «литералов не найдено» ничего не значит.
 	if !actionlintVarRe.MatchString(readFile(t, ciYML)) {
-		t.Fatalf("в %s не найдено ни одного вызова %s/cmd/actionlint@${ACTIONLINT_VERSION} — "+
+		fatal(t, "в %s не найдено ни одного вызова %s/cmd/actionlint@${ACTIONLINT_VERSION} — "+
 			"тест перестал что-либо проверять", ciYML, actionlintM)
 	}
 }
@@ -348,10 +354,10 @@ func runStepsOf(t *testing.T, path string) []runStep {
 
 	var wf wfSteps
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 	if len(wf.Jobs) == 0 {
-		t.Fatalf("в %s не найдено ни одного job — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одного job — тест перестал что-либо проверять", path)
 	}
 
 	var out []runStep
@@ -387,7 +393,7 @@ func runStepsOf(t *testing.T, path string) []runStep {
 		}
 	}
 	if total == 0 {
-		t.Fatalf("в %s не найдено ни одного шага — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одного шага — тест перестал что-либо проверять", path)
 	}
 	return out
 }
@@ -409,10 +415,10 @@ func (r actionlintRequirement) matches(body string) bool {
 
 func TestActionlintPinnedInEveryExpectedFile(t *testing.T) {
 	if len(actionlintRequirements) == 0 {
-		t.Fatalf("таблица требуемых шагов actionlintRequirements пуста — тест перестал что-либо проверять")
+		fatal(t, "таблица требуемых шагов actionlintRequirements пуста — тест перестал что-либо проверять")
 	}
 	if len(allowedActionlintGates) == 0 {
-		t.Fatalf("закрытый список allowedActionlintGates пуст — тест перестал что-либо проверять")
+		fatal(t, "закрытый список allowedActionlintGates пуст — тест перестал что-либо проверять")
 	}
 
 	steps := map[string][]runStep{}
@@ -439,14 +445,14 @@ func TestActionlintPinnedInEveryExpectedFile(t *testing.T) {
 
 		switch {
 		case len(blocked) > 0:
-			t.Errorf("в %s шаг «%s» найден, но обеззублен — сторож считает его отсутствующим:\n%s\n  %s",
+			fail(t, "в %s шаг «%s» найден, но обеззублен — сторож считает его отсутствующим:\n%s\n  %s",
 				req.path, req.what, strings.Join(blocked, "\n"), req.why)
 		case actionlintAnyRe.MatchString(readFile(t, req.path)):
-			t.Errorf("в %s нет исполняемого шага «%s»: вызовы actionlint в файле есть, но ни один не стоит "+
+			fail(t, "в %s нет исполняемого шага «%s»: вызовы actionlint в файле есть, но ни один не стоит "+
 				"в одном теле run: вместе с %v — шаг удалён, переписан или перенесён в комментарий.\n  %s",
 				req.path, req.what, req.mustContain, req.why)
 		default:
-			t.Errorf("в %s не найдено ни одного вызова %s/cmd/actionlint@ — шаг «%s» исчез целиком, "+
+			fail(t, "в %s не найдено ни одного вызова %s/cmd/actionlint@ — шаг «%s» исчез целиком, "+
 				"и тест по этой строке перестал что-либо проверять.\n  %s",
 				req.path, actionlintM, req.what, req.why)
 		}

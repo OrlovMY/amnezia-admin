@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -37,6 +38,7 @@ type fullStep struct {
 	Name            string            `yaml:"name"`
 	Uses            string            `yaml:"uses"`
 	Run             string            `yaml:"run"`
+	Shell           string            `yaml:"shell"`
 	If              interface{}       `yaml:"if"`
 	ContinueOnError interface{}       `yaml:"continue-on-error"`
 	Env             map[string]string `yaml:"env"`
@@ -47,6 +49,7 @@ type fullJob struct {
 	If              interface{}       `yaml:"if"`
 	ContinueOnError interface{}       `yaml:"continue-on-error"`
 	Permissions     interface{}       `yaml:"permissions"`
+	Defaults        wfDefaults        `yaml:"defaults"`
 	Env             map[string]string `yaml:"env"`
 	Strategy        struct {
 		Matrix struct {
@@ -56,8 +59,16 @@ type fullJob struct {
 	Steps []fullStep `yaml:"steps"`
 }
 
+type wfDefaults struct {
+	Run struct {
+		Shell string `yaml:"shell"`
+	} `yaml:"run"`
+}
+
 type fullWorkflow struct {
 	Permissions interface{}        `yaml:"permissions"`
+	Env         map[string]string  `yaml:"env"`
+	Defaults    wfDefaults         `yaml:"defaults"`
 	Jobs        map[string]fullJob `yaml:"jobs"`
 }
 
@@ -65,10 +76,10 @@ func loadWorkflow(t *testing.T, path string) fullWorkflow {
 	t.Helper()
 	var wf fullWorkflow
 	if err := yaml.Unmarshal(readSource(t, path), &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 	if len(wf.Jobs) == 0 {
-		t.Fatalf("в %s не найдено ни одного job — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одного job — тест перестал что-либо проверять", path)
 	}
 	return wf
 }
@@ -77,10 +88,10 @@ func jobOf(t *testing.T, wf fullWorkflow, path, name string) fullJob {
 	t.Helper()
 	j, ok := wf.Jobs[name]
 	if !ok {
-		t.Fatalf("в %s нет job %q — тест перестал что-либо проверять", path, name)
+		fatal(t, "в %s нет job %q — тест перестал что-либо проверять", path, name)
 	}
 	if len(j.Steps) == 0 {
-		t.Fatalf("в %s у job %s нет шагов — тест перестал что-либо проверять", path, name)
+		fatal(t, "в %s у job %s нет шагов — тест перестал что-либо проверять", path, name)
 	}
 	return j
 }
@@ -110,7 +121,7 @@ func TestReleaseTestMatrixMatchesBuild(t *testing.T) {
 	inTest := matrixPairsOf(t, releaseYML, "test")
 	inBuild := matrixPairsOf(t, releaseYML, "build")
 	if strings.Join(inTest, " ") != strings.Join(inBuild, " ") {
-		t.Fatalf("матрица job test разошлась с job build в %s — релиз соберётся там, где тесты не шли:\n"+
+		fatal(t, "матрица job test разошлась с job build в %s — релиз соберётся там, где тесты не шли:\n"+
 			"  job test:  %v\n  job build: %v", releaseYML, inTest, inBuild)
 	}
 }
@@ -128,11 +139,11 @@ func bashPath(t *testing.T) string {
 				return p
 			}
 		}
-		t.Fatalf("не найден bash из Git for Windows — шаги workflow гонять нечем, тест не может ничего проверить")
+		fatal(t, "не найден bash из Git for Windows — шаги workflow гонять нечем, тест не может ничего проверить")
 	}
 	p, err := exec.LookPath("bash")
 	if err != nil {
-		t.Fatalf("не найден bash — шаги workflow гонять нечем, тест не может ничего проверить: %v", err)
+		fatal(t, "не найден bash — шаги workflow гонять нечем, тест не может ничего проверить: %v", err)
 	}
 	return p
 }
@@ -182,18 +193,18 @@ func TestReleaseRunnerArchStep(t *testing.T) {
 		}
 	}
 	if archIdx < 0 {
-		t.Fatalf("в %s (job build) нет шага, читающего RUNNER_ARCH — поле matrix.arch снова справочное, "+
+		fatal(t, "в %s (job build) нет шага, читающего RUNNER_ARCH — поле matrix.arch снова справочное, "+
 			"его не сверяет с раннером ничто (следствие A5 № 1)", releaseYML)
 	}
 	if buildIdx < 0 || archIdx > buildIdx {
-		t.Fatalf("в %s (job build) шаг сверки архитектуры (№%d) обязан стоять ДО сборки (№%d)", releaseYML, archIdx+1, buildIdx+1)
+		fatal(t, "в %s (job build) шаг сверки архитектуры (№%d) обязан стоять ДО сборки (№%d)", releaseYML, archIdx+1, buildIdx+1)
 	}
 	step := build.Steps[archIdx]
 	if live, why := stepLive(build, step); !live {
-		t.Fatalf("в %s шаг сверки архитектуры обеззублен: %s", releaseYML, why)
+		fatal(t, "в %s шаг сверки архитектуры обеззублен: %s", releaseYML, why)
 	}
 	if got := strings.Join(strings.Fields(step.Env["DECLARED_ARCH"]), ""); got != "${{matrix.arch}}" {
-		t.Fatalf("в %s шаг сверки архитектуры берёт DECLARED_ARCH не из matrix.arch: %q", releaseYML, step.Env["DECLARED_ARCH"])
+		fatal(t, "в %s шаг сверки архитектуры берёт DECLARED_ARCH не из matrix.arch: %q", releaseYML, step.Env["DECLARED_ARCH"])
 	}
 
 	dir := t.TempDir()
@@ -228,7 +239,7 @@ func TestReleaseRunnerArchStep(t *testing.T) {
 			problem = "в выводе нет «" + c.msg + "»"
 		}
 		if problem != "" {
-			t.Errorf("RUNNER_ARCH=%s, matrix.arch=%s: %s:\n%s", c.runner, c.declared, problem, out)
+			fail(t, "RUNNER_ARCH=%s, matrix.arch=%s: %s:\n%s", c.runner, c.declared, problem, out)
 		}
 	}
 }
@@ -239,28 +250,41 @@ func TestReleaseRunnerArchStep(t *testing.T) {
 func goTestCommand(t *testing.T, path, job string) []string {
 	t.Helper()
 	j := jobOf(t, loadWorkflow(t, path), path, job)
+	wf := loadWorkflow(t, path)
 	var found [][]string
 	for _, s := range j.Steps {
-		body := strings.TrimSpace(stripShellComments(s.Run))
-		if !strings.HasPrefix(body, "go test") {
+		body := strings.ReplaceAll(stripShellComments(s.Run), "\\\n", " ")
+		lines := strings.Split(body, "\n")
+		li := -1
+		for i, l := range lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "go test") {
+				li = i
+				break
+			}
+		}
+		if li < 0 {
 			continue
 		}
 		if live, why := stepLive(j, s); !live {
-			t.Errorf("в %s (job %s) шаг go test обеззублен: %s", path, job, why)
+			fail(t, "в %s (job %s) шаг go test обеззублен: %s", path, job, why)
 		}
-		first, rest, multi := strings.Cut(body, "\n")
-		words := shellWords(first)
-		p := goTestProblem(words)
-		if multi {
-			p = "тело шага не одна команда (дальше: «" + strings.TrimSpace(rest) + "») — сторож сравнивает команду целиком"
+		words := shellWords(strings.TrimSpace(lines[li]))
+		// Закрытые списки (ревью QA-01, раунд 2): тело шага, shell:, затем
+		// смысл самой команды. Одна точка сообщения на все причины.
+		p := shellProblem([3]string{s.Shell, j.Defaults.Run.Shell, wf.Defaults.Run.Shell})
+		if p == "" {
+			p = stepBodyProblem(lines[:li], lines[li+1:], false)
+		}
+		if p == "" {
+			p = goTestProblem(words)
 		}
 		if p != "" {
-			t.Errorf("в %s (job %s) команда go test ничего не гарантирует: %s\n  команда: %s", path, job, p, body)
+			fail(t, "в %s (job %s) команда go test ничего не гарантирует: %s\n  команда: %s", path, job, p, body)
 		}
 		found = append(found, texts(words))
 	}
 	if len(found) != 1 {
-		t.Fatalf("в %s (job %s) шагов go test %d, ожидался ровно один — тест перестал что-либо проверять", path, job, len(found))
+		fatal(t, "в %s (job %s) шагов go test %d, ожидался ровно один — тест перестал что-либо проверять", path, job, len(found))
 	}
 	return found[0]
 }
@@ -312,7 +336,7 @@ func TestGoTestPackagesMatch(t *testing.T) {
 	inCI := goTestCommand(t, ciYML, "checks")
 	inRelease := goTestCommand(t, releaseYML, "test")
 	if strings.Join(inCI, " ") != strings.Join(inRelease, " ") {
-		t.Errorf("списки go test разошлись — на теге проверяется не то, что на PR:\n"+
+		fail(t, "списки go test разошлись — на теге проверяется не то, что на PR:\n"+
 			"  ci.yml, job checks:   %s\n  release.yml, job test: %s", strings.Join(inCI, " "), strings.Join(inRelease, " "))
 	}
 
@@ -335,7 +359,7 @@ func TestGoTestPackagesMatch(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("обход репозитория: %v", err)
+		fatal(t, "обход репозитория: %v", err)
 	}
 	// Канарейка ветки покрытия подсаживает каталог с тестами сюда, в
 	// результат обхода: файл в дереве репозитория она создавать не вправе.
@@ -343,7 +367,7 @@ func TestGoTestPackagesMatch(t *testing.T) {
 		dirs[d] = true
 	}
 	if len(dirs) == 0 {
-		t.Fatalf("не найдено ни одного каталога с *_test.go — тест перестал что-либо проверять")
+		fatal(t, "не найдено ни одного каталога с *_test.go — тест перестал что-либо проверять")
 	}
 	var sorted []string
 	for d := range dirs {
@@ -353,7 +377,7 @@ func TestGoTestPackagesMatch(t *testing.T) {
 	for name, cmd := range map[string][]string{"ci.yml": inCI, "release.yml": inRelease} {
 		for _, d := range sorted {
 			if !covered(d, cmd) {
-				t.Errorf("списки go test разошлись с репозиторием: каталог %s с тестами не входит в go test файла %s: %s",
+				fail(t, "списки go test разошлись с репозиторием: каталог %s с тестами не входит в go test файла %s: %s",
 					d, name, strings.Join(cmd, " "))
 			}
 		}
@@ -414,7 +438,7 @@ func TestReleaseAttestsChecksums(t *testing.T) {
 
 	subjects := rel.Env["ATTEST_SUBJECTS"]
 	if strings.TrimSpace(subjects) == "" {
-		t.Fatalf("в %s (job release) нет env ATTEST_SUBJECTS — множество субъектов аттестации не в одном месте", releaseYML)
+		fatal(t, "в %s (job release) нет env ATTEST_SUBJECTS — множество субъектов аттестации не в одном месте", releaseYML)
 	}
 
 	sumsIdx, checkIdx, attestIdx := -1, -1, -1
@@ -427,28 +451,28 @@ func TestReleaseAttestsChecksums(t *testing.T) {
 		case strings.HasPrefix(s.Uses, "actions/attest-build-provenance@"):
 			attestIdx = i
 			if got := strings.Join(strings.Fields(s.With["subject-path"]), ""); got != "${{env.ATTEST_SUBJECTS}}" {
-				t.Errorf("attest-build-provenance берёт subject-path %q, а не ${{ env.ATTEST_SUBJECTS }} — "+
+				fail(t, "attest-build-provenance берёт subject-path %q, а не ${{ env.ATTEST_SUBJECTS }} — "+
 					"проверяется одно множество, подписывается другое", s.With["subject-path"])
 			}
 		}
 	}
 	if sumsIdx < 0 || checkIdx < 0 || attestIdx < 0 {
-		t.Fatalf("в %s (job release) не найдены шаги: сумм №%d, проверки субъектов №%d, аттестации №%d (0 — нет)",
+		fatal(t, "в %s (job release) не найдены шаги: сумм №%d, проверки субъектов №%d, аттестации №%d (0 — нет)",
 			releaseYML, sumsIdx+1, checkIdx+1, attestIdx+1)
 	}
 	if !(sumsIdx < checkIdx && checkIdx < attestIdx) {
-		t.Errorf("порядок шагов нарушен: суммы №%d, проверка субъектов №%d, аттестация №%d — "+
+		fail(t, "порядок шагов нарушен: суммы №%d, проверка субъектов №%d, аттестация №%d — "+
 			"аттестация обязана идти после сумм, проверка — между ними", sumsIdx+1, checkIdx+1, attestIdx+1)
 	}
 	check := rel.Steps[checkIdx]
 	if live, why := stepLive(rel, check); !live {
-		t.Errorf("шаг проверки субъектов обеззублен: %s", why)
+		fail(t, "шаг проверки субъектов обеззублен: %s", why)
 	}
 
 	vars := map[string]string{"ATTEST_SUBJECTS": subjects}
 	out, err := runStepBody(t, check.Run, sampleDist(t, releaseAssets), vars)
 	if err != nil || !strings.Contains(out, "субъект: dist/SHA256SUMS") {
-		t.Errorf("на образце из девяти файлов шаг проверки субъектов не прошёл (err=%v):\n%s", err, out)
+		fail(t, "на образце из девяти файлов шаг проверки субъектов не прошёл (err=%v):\n%s", err, out)
 	}
 	for _, bad := range []struct {
 		name  string
@@ -460,7 +484,7 @@ func TestReleaseAttestsChecksums(t *testing.T) {
 	} {
 		out, err := runStepBody(t, check.Run, sampleDist(t, bad.files), vars)
 		if err == nil || !strings.Contains(out, bad.msg) {
-			t.Errorf("образец «%s»: шаг проверки субъектов обязан упасть с «%s» (err=%v):\n%s", bad.name, bad.msg, err, out)
+			fail(t, "образец «%s»: шаг проверки субъектов обязан упасть с «%s» (err=%v):\n%s", bad.name, bad.msg, err, out)
 		}
 	}
 }
@@ -484,13 +508,68 @@ func TestCheckoutsDoNotPersistCredentials(t *testing.T) {
 				}
 				checkouts++
 				if s.With["persist-credentials"] != "false" {
-					t.Errorf("в %s (job %s) checkout шагом №%d без persist-credentials: false — "+
+					fail(t, "в %s (job %s) checkout шагом №%d без persist-credentials: false — "+
 						"токен остаётся в .git/config и доступен любому следующему шагу", path, name, i+1)
 				}
 			}
 		}
 	}
 	if checkouts == 0 {
-		t.Fatalf("ни в %s, ни в %s не найдено ни одного actions/checkout — тест перестал что-либо проверять", releaseYML, ciYML)
+		fatal(t, "ни в %s, ни в %s не найдено ни одного actions/checkout — тест перестал что-либо проверять", releaseYML, ciYML)
+	}
+}
+
+// Присваивание GO*-переменной в теле run: — строкой `GOFLAGS=…` или
+// `export GOFLAGS=…`, либо запись в $GITHUB_ENV.
+var (
+	goAssignRe    = regexp.MustCompile(`^\s*(export\s+)?GO[A-Z0-9_]*=`)
+	goGitHubEnvRe = regexp.MustCompile(`GO[A-Z0-9_]*=.*GITHUB_ENV`)
+)
+
+// TestNoGoEnvironmentOverrides — ни в одном из двух workflow нет GO*-
+// переменных окружения (ревью QA-01, раунд 2): ни в env: workflow, job или
+// шага, ни присваиванием в теле run:, ни записью в $GITHUB_ENV.
+// `GOFLAGS=-n` превращает `go run` в печать команд без запуска, а
+// `GOFLAGS=-run=NOTHING` — go test в пустой прогон; строка вызова при этом
+// цела, и остальные сторожа её одобряют.
+//
+// ГРАНИЦА. Переменные, которые кладёт сам раннер или setup-go во время
+// прогона, в тексте workflow не видны. Присваивание, собранное из частей
+// (`G=GO; export "${G}FLAGS=-n"`), не опознаётся.
+func TestNoGoEnvironmentOverrides(t *testing.T) {
+	checked := 0
+	for _, path := range []string{releaseYML, ciYML} {
+		wf := loadWorkflow(t, path)
+		var hits []string
+		envHits := func(where string, env map[string]string) {
+			for k, v := range env {
+				checked++
+				if strings.HasPrefix(k, "GO") {
+					hits = append(hits, fmt.Sprintf("%s: env %s=%s", where, k, v))
+				}
+			}
+		}
+		envHits("workflow", wf.Env)
+		for name, j := range wf.Jobs {
+			envHits("job "+name, j.Env)
+			for i, s := range j.Steps {
+				where := fmt.Sprintf("job %s, шаг №%d «%s»", name, i+1, s.Name)
+				envHits(where, s.Env)
+				for _, l := range strings.Split(stripShellComments(s.Run), "\n") {
+					checked++
+					if goAssignRe.MatchString(l) || goGitHubEnvRe.MatchString(l) {
+						hits = append(hits, where+": «"+strings.TrimSpace(l)+"»")
+					}
+				}
+			}
+		}
+		sort.Strings(hits)
+		for _, h := range hits {
+			fail(t, "в %s переменная GO* задана в workflow — %s; `GOFLAGS=-n` или `-run=NOTHING` "+
+				"выключают проверку, не тронув строку вызова", path, h)
+		}
+	}
+	if checked == 0 {
+		fatal(t, "не найдено ни одной строки run: и ни одного env — тест перестал что-либо проверять")
 	}
 }

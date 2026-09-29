@@ -17,12 +17,20 @@
 //   - перед вызовом в строке ничего, кроме `go run` (ни `!`, ни `true ||`,
 //     ни `if`, ни `echo`, ни присваивания);
 //   - после аргументов ничего: ни `|| true`, ни `>/dev/null`, ни `&`, ни `;`;
-//   - выше в теле run: стоит `set -euo pipefail`, и между ним и вызовом нет
-//     `set +…`;
-//   - выше нет строки, начинающейся с `exit` или `return`;
-//   - выше нет объявления функции (вызов в теле функции, которую никто не
-//     зовёт, не исполняется);
+//   - ТЕЛО ШАГА — ЗАКРЫТЫЙ СПИСОК (ревью QA-01, раунд 2): выше вызова только
+//     `set -euo pipefail` (обязателен) и строки
+//     `test -n "${X:-}" || { echo "…"; exit 1; }`; вызов — последняя строка.
+//     Любая другая строка красная: подоболочка, if/while/case, heredoc,
+//     литерал `: '…'`, export, set +e, exit, функция. Раньше здесь
+//     перечислялись плохие строки — это и было перечисление лжи, и шесть
+//     форм окружения проходили зелёными;
+//   - у шага нет shell:, у job нет defaults.run.shell, у workflow
+//     defaults.run.shell ровно `bash`;
 //   - файлы — ровно оба настоящих workflow.
+//
+// Те же закрытые списки тела и shell применяются к шагу go test
+// (releasechain_test.go). GO*-переменные в env и $GITHUB_ENV стережёт
+// TestNoGoEnvironmentOverrides.
 //
 // Плюс отдельно: такой вызов обязан существовать.
 //
@@ -33,11 +41,15 @@
 // Смотрятся все шаги, включая стоящие под if: и continue-on-error:
 // исполняемость — предмет соседнего сторожа.
 //
-// ГРАНИЦА. Разбор shell упрощённый: кавычки, продолжение строки обратной
-// косой, операторы ; & | < >. Он не раскрывает переменных, массивов, eval,
-// alias, не видит `trap`, `exec >файл` и вызов через переменную с именем
-// команды. Вызов, который канарейка ci.yml гоняет на своём временном файле,
-// разбирающим не считается: его код возврата проверяет сам шаг.
+// ГРАНИЦА. Закрытый список тела делает большую часть прежних границ
+// неважной: `trap`, `exec >файл`, alias, eval в теле разбирающего шага —
+// строки вне списка, они красные. Остаётся то, что не видно в теле шага:
+// окружение, которое кладёт раннер или предыдущий шаг способом, отличным от
+// env: и строки `GO…=` с GITHUB_ENV (например, собранное из частей имя
+// переменной или файл в $GITHUB_PATH, подменяющий `go`); `trap` в ДРУГОМ
+// шаге на него не действует. Вызов, который канарейка ci.yml гоняет на своём
+// временном файле, разбирающим не считается: его код возврата проверяет сам
+// шаг.
 package ciguard
 
 import (
@@ -131,7 +143,8 @@ type actionlintCall struct {
 	path, job, step string
 	line            string
 	pre, args, tail []string
-	before          []string
+	before, after   []string
+	shells          [3]string // шаг, defaults job, defaults workflow
 	real            bool
 }
 
@@ -157,7 +170,7 @@ func actionlintCalls(t *testing.T, path string) []actionlintCall {
 					continue
 				}
 				c := actionlintCall{path: path, job: jobName, step: s.Name, line: strings.TrimSpace(line),
-					before: lines[:li], real: strings.Contains(line, ".github/workflows/")}
+					before: lines[:li], after: lines[li+1:], shells: [3]string{s.Shell, j.Defaults.Run.Shell, wf.Defaults.Run.Shell}, real: strings.Contains(line, ".github/workflows/")}
 				scan := line
 				// Вызов внутри подстановки команды: out="$(go run … 2>&1)" —
 				// только у канарейки. Разбирается содержимое подстановки.
@@ -188,13 +201,6 @@ func actionlintCalls(t *testing.T, path string) []actionlintCall {
 	return calls
 }
 
-var (
-	setStrictRe = regexp.MustCompile(`^set\s+-[a-z]*e[a-z]*o\s+pipefail$`)
-	setPlusRe   = regexp.MustCompile(`^set\s+(\+[a-z]*|.*\+o\s)`)
-	exitRe      = regexp.MustCompile(`^(exit|return)(\s|$)`)
-	funcRe      = regexp.MustCompile(`^(function\s+\S+|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))`)
-)
-
 // callProblem — первая причина, по которой вызов ничего не проверяет, или
 // пустая строка. Одна точка сообщения на все причины — см. шапку файла.
 func callProblem(c actionlintCall, want []string) string {
@@ -207,22 +213,11 @@ func callProblem(c actionlintCall, want []string) string {
 			return "после аргументов вызова стоит хвост «" + strings.Join(c.tail, " ") + "» — " +
 				"`|| true`, перенаправление, `&` или `;` глушат код возврата линтера"
 		}
-		strict := -1
-		for i, l := range c.before {
-			l = strings.TrimSpace(l)
-			switch {
-			case setStrictRe.MatchString(l):
-				strict = i
-			case setPlusRe.MatchString(l):
-				return "выше вызова стоит «" + l + "» — падение линтера больше не роняет шаг"
-			case exitRe.MatchString(l):
-				return "выше вызова стоит «" + l + "» — до вызова шаг не доходит"
-			case funcRe.MatchString(l):
-				return "вызов стоит после объявления функции «" + l + "» — тело функции не исполняется, пока её не позвали"
-			}
+		if sp := shellProblem(c.shells); sp != "" {
+			return sp
 		}
-		if strict < 0 {
-			return "в теле шага выше вызова нет `set -euo pipefail` — обязателен явно"
+		if bp := stepBodyProblem(c.before, c.after, true); bp != "" {
+			return bp
 		}
 	}
 
@@ -277,7 +272,7 @@ func TestActionlintInvocationMeaning(t *testing.T) {
 		calls = append(calls, actionlintCalls(t, path)...)
 	}
 	if len(calls) == 0 {
-		t.Fatalf("ни в %s, ни в %s не найдено ни одного вызова actionlint — тест перестал что-либо проверять", releaseYML, ciYML)
+		fatal(t, "ни в %s, ни в %s не найдено ни одного вызова actionlint — тест перестал что-либо проверять", releaseYML, ciYML)
 	}
 
 	want := append([]string{}, realWorkflows...)
@@ -290,11 +285,71 @@ func TestActionlintInvocationMeaning(t *testing.T) {
 			realFound = true
 		}
 		if p := callProblem(c, want); p != "" {
-			t.Errorf("%s (job %s, шаг «%s»): %s\n  строка: %s", c.path, c.job, c.step, p, c.line)
+			fail(t, "%s (job %s, шаг «%s»): %s\n  строка: %s", c.path, c.job, c.step, p, c.line)
 		}
 	}
 	if !realFound {
-		t.Errorf("нет ни одного вызова actionlint, в строке которого названы workflow %v — настоящий разбор "+
+		fail(t, "нет ни одного вызова actionlint, в строке которого названы workflow %v — настоящий разбор "+
 			"исчез или лишился предмета", want)
 	}
+}
+
+// --- закрытый список тела разбирающего шага (ревью QA-01, раунд 2) -------
+//
+// Прежние правила перечисляли ПЛОХИЕ строки выше вызова (set +, exit,
+// функция) — то есть перечисляли ложь, от чего шапка этого файла сама
+// отказывается. Вызов в подоболочке, под `if false`, в `while false`, в
+// `case`, в heredoc, в строковом литерале `: '…'`, после `export GOFLAGS=-n`
+// оставался зелёным. Теперь список закрыт с другой стороны: тело шага
+// состоит ТОЛЬКО из допущенных строк, вызов — последняя строка.
+
+var (
+	setStrictRe = regexp.MustCompile(`^set\s+-euo\s+pipefail$`)
+	// test -n "${ИМЯ:-}" || { echo "текст без $ и `"; exit 1; } — проверка,
+	// что scripts/dev-tools.sh отдал переменную.
+	guardRe = regexp.MustCompile(`^test -n "\$\{[A-Z_][A-Z0-9_]*:-\}" \|\| \{ echo "[^"$` + "`" + `]*" >&2; exit 1; \}$`)
+)
+
+// stepBodyProblem — строки тела шага вне закрытого списка: до вызова только
+// `set -euo pipefail` и строки-проверки guardRe, после вызова — ничего.
+func stepBodyProblem(before, after []string, requireSet bool) string {
+	hasSet := false
+	for _, l := range before {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == "":
+		case setStrictRe.MatchString(l):
+			hasSet = true
+		case guardRe.MatchString(l):
+		default:
+			return "строка «" + l + "» выше вызова — вне закрытого списка тела шага " +
+				"(только `set -euo pipefail` и `test -n \"${X:-}\" || { echo …; exit 1; }`): " +
+				"блок, подоболочка, heredoc, литерал, export или условие могут не дать вызову исполниться"
+		}
+	}
+	if requireSet && !hasSet {
+		return "в теле шага выше вызова нет `set -euo pipefail` — обязателен явно"
+	}
+	for _, l := range after {
+		if l = strings.TrimSpace(l); l != "" {
+			return "после вызова стоит строка «" + l + "» — вызов обязан быть последней строкой шага"
+		}
+	}
+	return ""
+}
+
+// shellProblem — ключ shell: у шага или defaults.run.shell у job запрещены;
+// у workflow defaults.run.shell обязан быть ровно `bash` (раннер исполняет
+// его как `bash --noprofile --norc -eo pipefail {0}`). Своя строка shell:
+// может выключить -e или добавить `|| true` к самому запуску скрипта.
+func shellProblem(sh [3]string) string {
+	switch {
+	case sh[0] != "":
+		return "у шага задан shell: «" + sh[0] + "» — закрытый список: shell у шага не задаётся"
+	case sh[1] != "":
+		return "у job задан defaults.run.shell: «" + sh[1] + "» — закрытый список: только defaults workflow"
+	case sh[2] != "bash":
+		return "defaults.run.shell workflow «" + sh[2] + "», а не bash — закрытый список"
+	}
+	return ""
 }

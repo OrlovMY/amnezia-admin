@@ -96,7 +96,7 @@ func matrixEntriesOf(t *testing.T, path, job string) []map[string]string {
 
 	var wf workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 
 	j, ok := wf.Jobs[job]
@@ -106,7 +106,7 @@ func matrixEntriesOf(t *testing.T, path, job string) []map[string]string {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		t.Fatalf("в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
+		fatal(t, "в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
 	}
 
 	entries := j.Strategy.Matrix.Include
@@ -116,7 +116,7 @@ func matrixEntriesOf(t *testing.T, path, job string) []map[string]string {
 	// записи), сторож обязан покраснеть, а не отрапортовать, что сверять
 	// нечего и всё в порядке.
 	if len(entries) == 0 {
-		t.Fatalf("в %s (job %s) не найдено ни одного элемента матрицы — тест перестал что-либо проверять", path, job)
+		fatal(t, "в %s (job %s) не найдено ни одного элемента матрицы — тест перестал что-либо проверять", path, job)
 	}
 	return entries
 }
@@ -140,21 +140,21 @@ func TestReleaseMatrixArchMatchesRunnerTable(t *testing.T) {
 	for i, entry := range matrixEntriesOf(t, releaseYML, job) {
 		runner, hasRunner := entry["runner"]
 		if !hasRunner {
-			t.Errorf("в %s (job %s) элемент матрицы №%d не содержит runner — сверять нечего: %v",
+			fail(t, "в %s (job %s) элемент матрицы №%d не содержит runner — сверять нечего: %v",
 				releaseYML, job, i+1, entry)
 			continue
 		}
 
 		declared, hasArch := entry["arch"]
 		if !hasArch {
-			t.Errorf("в %s (job %s) элемент матрицы №%d не содержит arch — сравнивать нечего (раннер %s)",
+			fail(t, "в %s (job %s) элемент матрицы №%d не содержит arch — сравнивать нечего (раннер %s)",
 				releaseYML, job, i+1, runner)
 			continue
 		}
 
 		want, known := runnerArch[runner]
 		if !known {
-			t.Errorf("метка раннера %s не описана в таблице runnerArch — сверять не с чем; "+
+			fail(t, "метка раннера %s не описана в таблице runnerArch — сверять не с чем; "+
 				"добавь строку с ссылкой на Image Definitions.\n"+
 				"  Это не «совпало»: тест по этому элементу перестал что-либо проверять.\n"+
 				"  %s (job %s), элемент матрицы №%d, объявлено arch: %s",
@@ -163,7 +163,7 @@ func TestReleaseMatrixArchMatchesRunnerTable(t *testing.T) {
 		}
 
 		if declared != want {
-			t.Errorf("в %s (job %s) для раннера %s объявлено arch: %s, таблица runnerArch говорит %s.\n"+
+			fail(t, "в %s (job %s) для раннера %s объявлено arch: %s, таблица runnerArch говорит %s.\n"+
 				"  Либо поле в матрице разошлось с тем, что проект знает о метке, либо устарела таблица —\n"+
 				"  и тогда правится таблица вместе с ссылкой на Image Definitions, откуда взято новое значение.",
 				releaseYML, job, runner, declared, want)
