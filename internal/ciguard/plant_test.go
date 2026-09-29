@@ -78,7 +78,7 @@ const ciLintGuards = `          set -euo pipefail
 // canaryEnd — последняя строка шага канарейки shellcheck в ci.yml.
 const canaryEnd = "          echo \"Канарейка сработала: shellcheck применён к bash внутри run:\"\n"
 
-const goenv = "TestNoGoEnvironmentOverrides"
+const goenv = "TestNoToolEnvironmentOverrides"
 
 func ci(old, new string) []edit  { return []edit{{ciYML, old, new}} }
 func rel(old, new string) []edit { return []edit{{releaseYML, old, new}} }
@@ -172,6 +172,25 @@ var plants = []plant{
 		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
 		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
 		wantTest: gtm, wantMsg: "строка «if false; then» выше вызова"},
+	// --- раунд 4 QA-01: значение -shellcheck и окружение инструментов ---
+	{name: "r4-sc-nonexistent", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck /nonexistent \`),
+		wantTest: inv, wantMsg: "значение -shellcheck «/nonexistent» вне закрытого списка"},
+	{name: "r4-sc-true", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck true \`),
+		wantTest: inv, wantMsg: "значение -shellcheck «true» вне закрытого списка"},
+	{name: "r4-sc-subst", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck "$(echo /nonexistent)" \`),
+		wantTest: inv, wantMsg: "значение -shellcheck «$(echo /nonexistent)» вне закрытого списка"},
+	{name: "r4-sc-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          SHELLCHECK_BIN: /nonexistent\n"),
+		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env SHELLCHECK_BIN=/nonexistent"},
+	{name: "r4-sc-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  SHELLCHECK_BIN: /nonexistent\n\n"),
+		wantTest: goenv, wantMsg: "workflow: env SHELLCHECK_BIN=/nonexistent"},
+	{name: "r4-sc-githubenv", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"\n"),
+		wantTest: goenv, wantMsg: "SHELLCHECK_BIN «echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"»"},
+	{name: "r4-go-env-w", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          go env -w GOFLAGS=-n\n"),
+		wantTest: goenv, wantMsg: "go env -w «go env -w GOFLAGS=-n»"},
+	{name: "r4-github-path", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"),
+		wantTest: goenv, wantMsg: "$GITHUB_PATH вне закрытого списка «echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"»"},
+	{name: "r4-canary-missing", edits: ci(`-shellcheck "$SHELLCHECK_BIN" "$canary" 2>&1`, `-shellcheck "$SHELLCHECK_BIN" "$RUNNER_TEMP/other.yml" 2>&1`),
+		wantTest: inv, wantMsg: "выше в том же job нет канарейки"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -290,7 +309,7 @@ var mainTests = []string{
 	"TestCIMatrixMatchesReleaseBuild",
 	"TestCheckoutsDoNotPersistCredentials",
 	"TestGoTestPackagesMatch",
-	"TestNoGoEnvironmentOverrides",
+	"TestNoToolEnvironmentOverrides",
 	"TestReleaseAttestsChecksums",
 	"TestReleaseMatrixArchMatchesRunnerTable",
 	"TestReleaseRunnerArchStep",

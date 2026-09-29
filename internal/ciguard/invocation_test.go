@@ -30,7 +30,7 @@
 //
 // Те же закрытые списки тела и shell применяются к шагу go test
 // (releasechain_test.go). GO*-переменные в env и $GITHUB_ENV стережёт
-// TestNoGoEnvironmentOverrides.
+// TestNoToolEnvironmentOverrides.
 //
 // Плюс отдельно: такой вызов обязан существовать.
 //
@@ -64,6 +64,11 @@ import (
 var allowedActionlintFlags = map[string]bool{
 	"-shellcheck": true,
 }
+
+// shellcheckValue — единственное допустимое значение -shellcheck (после
+// снятия кавычек). Саму переменную нигде, кроме scripts/dev-tools.sh, задать
+// нельзя — это стережёт TestNoToolEnvironmentOverrides.
+const shellcheckValue = "$SHELLCHECK_BIN"
 
 var realWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
@@ -141,6 +146,7 @@ func shellWords(line string) []shword {
 // оператора и строки тела run: выше строки вызова.
 type actionlintCall struct {
 	path, job, step string
+	stepIdx         int
 	line            string
 	pre, args, tail []string
 	before, after   []string
@@ -161,7 +167,7 @@ func actionlintCalls(t *testing.T, path string) []actionlintCall {
 	wf := loadWorkflow(t, path)
 	var calls []actionlintCall
 	for jobName, j := range wf.Jobs {
-		for _, s := range j.Steps {
+		for si, s := range j.Steps {
 			body := strings.ReplaceAll(stripShellComments(s.Run), "\\\n", " ")
 			lines := strings.Split(body, "\n")
 			for li, line := range lines {
@@ -169,7 +175,7 @@ func actionlintCalls(t *testing.T, path string) []actionlintCall {
 				if loc == nil {
 					continue
 				}
-				c := actionlintCall{path: path, job: jobName, step: s.Name, line: strings.TrimSpace(line),
+				c := actionlintCall{path: path, job: jobName, stepIdx: si, step: s.Name, line: strings.TrimSpace(line),
 					before: lines[:li], after: lines[li+1:], shells: [3]string{s.Shell, j.Defaults.Run.Shell, wf.Defaults.Run.Shell}, real: strings.Contains(line, ".github/workflows/")}
 				scan := line
 				// Вызов внутри подстановки команды: out="$(go run … 2>&1)" —
@@ -242,9 +248,17 @@ func callProblem(c actionlintCall, want []string) string {
 			}
 		}
 		if name == "-shellcheck" {
-			if strings.TrimSpace(val) == "" {
+			switch {
+			case strings.TrimSpace(val) == "":
 				shellcheckEmpty = true
-			} else {
+			case val != shellcheckValue:
+				// Закрытый список значения (ревью QA-01, раунд 4). actionlint,
+				// не найдя бинарь по пути, МОЛЧА отключает shellcheck — ровно
+				// исторический дефект, с которого началась история CI.
+				return "значение -shellcheck «" + val + "» вне закрытого списка — допустимо только " +
+					shellcheckValue + ": путь, который отдал scripts/dev-tools.sh и исправность которого " +
+					"доказала канарейка; с несуществующим путём actionlint молча отключает shellcheck"
+			default:
 				shellcheck = true
 			}
 		}
@@ -292,6 +306,34 @@ func TestActionlintInvocationMeaning(t *testing.T) {
 		fail(t, "нет ни одного вызова actionlint, в строке которого названы workflow %v — настоящий разбор "+
 			"исчез или лишился предмета", want)
 	}
+
+	// Исправность $SHELLCHECK_BIN доказывает канарейка — вызов с тем же
+	// значением -shellcheck на файле "$canary" с заведомым SC2086. Она обязана
+	// стоять в ТОМ ЖЕ job и РАНЬШЕ каждого разбирающего вызова: иначе
+	// разбирающий вызов опирается на путь, который никто не проверил.
+	for _, r := range calls {
+		if !r.real {
+			continue
+		}
+		proven := false
+		for _, c := range calls {
+			if !c.real && c.path == r.path && c.job == r.job && c.stepIdx < r.stepIdx &&
+				canaryCall(c) {
+				proven = true
+			}
+		}
+		if !proven {
+			fail(t, "%s (job %s, шаг «%s»): выше в том же job нет канарейки — вызова с -shellcheck %s "+
+				"на файле \"$canary\"; путь к shellcheck в разбирающем вызове никто не проверил",
+				r.path, r.job, r.step, shellcheckValue)
+		}
+	}
+}
+
+// canaryCall — вызов канарейки: -shellcheck $SHELLCHECK_BIN и единственный
+// файл $canary.
+func canaryCall(c actionlintCall) bool {
+	return strings.Join(c.args, " ") == "-shellcheck "+shellcheckValue+" $canary"
 }
 
 // --- закрытый список тела разбирающего шага (ревью QA-01, раунд 2) -------

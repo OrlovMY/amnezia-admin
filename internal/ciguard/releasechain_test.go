@@ -524,9 +524,31 @@ func TestCheckoutsDoNotPersistCredentials(t *testing.T) {
 var (
 	goAssignRe    = regexp.MustCompile(`^\s*(export\s+)?GO[A-Z0-9_]*=`)
 	goGitHubEnvRe = regexp.MustCompile(`GO[A-Z0-9_]*=.*GITHUB_ENV`)
+	// go env -w/-u пишет в файл настроек go (GOENV) — действует на все
+	// следующие шаги job в обход env: и $GITHUB_ENV (ревью QA-01, раунд 4).
+	goEnvWriteRe = regexp.MustCompile(`(^|[\s;&|(])go\s+env\s+(-w|-u)\b`)
+	// SHELLCHECK_BIN задаёт только scripts/dev-tools.sh (через $GITHUB_ENV из
+	// своего процесса). Присваивание или запись в workflow — подмена пути.
+	shellcheckAssignRe = regexp.MustCompile(`(^|[^{A-Za-z0-9_$])SHELLCHECK_BIN=`)
 )
 
-// TestNoGoEnvironmentOverrides — ни в одном из двух workflow нет GO*-
+// allowedGitHubPath — ЗАКРЫТЫЙ СПИСОК строк, пишущих в $GITHUB_PATH (ревью
+// QA-01, раунд 4). Каталог из $GITHUB_PATH встаёт в PATH следующих шагов
+// ВПЕРЕДИ прочих — свой `go` или `shellcheck` там подменил бы настоящий.
+// Сейчас законна одна строка — mingw64 для cgo на Windows.
+//
+// ГРАНИЦА, названная прямо. Этот каталог добавляется ПОСЛЕ setup-go и
+// потому стоит в PATH впереди go из setup-go. Если в образе windows-2025
+// в C:\msys64\mingw64\bin окажется go.exe (пакет mingw-w64-x86_64-go), он
+// перехватит `go` в шагах vet/test/сборки. На образе это не проверено —
+// сети у исполнителя нет; шаг «Версии инструментов» в ci.yml печатает
+// `go version` после этого шага, и версия, не совпавшая с go.mod, была бы
+// видна в журнале, но не роняет job.
+var allowedGitHubPath = map[string]bool{
+	`printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"`: true,
+}
+
+// TestNoToolEnvironmentOverrides — ни в одном из двух workflow нет GO*-
 // переменных окружения (ревью QA-01, раунд 2): ни в env: workflow, job или
 // шага, ни присваиванием в теле run:, ни записью в $GITHUB_ENV.
 // `GOFLAGS=-n` превращает `go run` в печать команд без запуска, а
@@ -536,7 +558,10 @@ var (
 // ГРАНИЦА. Переменные, которые кладёт сам раннер или setup-go во время
 // прогона, в тексте workflow не видны. Присваивание, собранное из частей
 // (`G=GO; export "${G}FLAGS=-n"`), не опознаётся.
-func TestNoGoEnvironmentOverrides(t *testing.T) {
+//
+// Раунд 4 добавил в тот же тест: SHELLCHECK_BIN в env: и присваиванием,
+// `go env -w/-u`, и закрытый список строк с $GITHUB_PATH.
+func TestNoToolEnvironmentOverrides(t *testing.T) {
 	checked := 0
 	for _, path := range []string{releaseYML, ciYML} {
 		wf := loadWorkflow(t, path)
@@ -544,7 +569,7 @@ func TestNoGoEnvironmentOverrides(t *testing.T) {
 		envHits := func(where string, env map[string]string) {
 			for k, v := range env {
 				checked++
-				if strings.HasPrefix(k, "GO") {
+				if strings.HasPrefix(k, "GO") || k == "SHELLCHECK_BIN" {
 					hits = append(hits, fmt.Sprintf("%s: env %s=%s", where, k, v))
 				}
 			}
@@ -557,16 +582,24 @@ func TestNoGoEnvironmentOverrides(t *testing.T) {
 				envHits(where, s.Env)
 				for _, l := range strings.Split(stripShellComments(s.Run), "\n") {
 					checked++
-					if goAssignRe.MatchString(l) || goGitHubEnvRe.MatchString(l) {
-						hits = append(hits, where+": «"+strings.TrimSpace(l)+"»")
+					tl := strings.TrimSpace(l)
+					switch {
+					case goAssignRe.MatchString(l) || goGitHubEnvRe.MatchString(l):
+						hits = append(hits, where+": GO* «"+tl+"»")
+					case goEnvWriteRe.MatchString(l):
+						hits = append(hits, where+": go env -w «"+tl+"»")
+					case shellcheckAssignRe.MatchString(l):
+						hits = append(hits, where+": SHELLCHECK_BIN «"+tl+"»")
+					case strings.Contains(l, "GITHUB_PATH") && !allowedGitHubPath[tl]:
+						hits = append(hits, where+": $GITHUB_PATH вне закрытого списка «"+tl+"»")
 					}
 				}
 			}
 		}
 		sort.Strings(hits)
 		for _, h := range hits {
-			fail(t, "в %s переменная GO* задана в workflow — %s; `GOFLAGS=-n` или `-run=NOTHING` "+
-				"выключают проверку, не тронув строку вызова", path, h)
+			fail(t, "в %s окружение инструментов подменено в workflow — %s; `GOFLAGS=-n`, `-run=NOTHING`, "+
+				"чужой SHELLCHECK_BIN или каталог впереди PATH выключают проверку, не тронув строку вызова", path, h)
 		}
 	}
 	if checked == 0 {
