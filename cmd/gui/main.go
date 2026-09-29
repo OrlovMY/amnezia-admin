@@ -1003,19 +1003,23 @@ func reseal(vc *vaultCtx, fp string) error {
 // раньше, чем человек его дал.
 func (u *ui) hostKeyPrompt(host, fingerprint string) bool {
 	result := make(chan bool, 1)
-	fyne.Do(func() {
-		body := widget.NewLabel(fmt.Sprintf(
-			"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
-			host, fingerprint,
-		))
-		body.Wrapping = fyne.TextWrapWord
-		d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
-			result <- ok
-		}, u.win)
-		d.Resize(fyne.NewSize(480, 240))
-		d.Show()
-	})
+	fyne.Do(func() { u.showHostKeyPrompt(host, fingerprint, result) })
 	return <-result
+}
+
+// showHostKeyPrompt — сам диалог hostKeyPrompt, без ожидания ответа: так его
+// открывает и прибор осмотра (osmotr_more_test.go), не блокируясь на канале.
+func (u *ui) showHostKeyPrompt(host, fingerprint string, result chan<- bool) {
+	body := widget.NewLabel(fmt.Sprintf(
+		"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
+		host, fingerprint,
+	))
+	body.Wrapping = fyne.TextWrapWord
+	d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
+		result <- ok
+	}, u.win)
+	d.Resize(fyne.NewSize(480, 240))
+	d.Show()
 }
 
 // hostKeyChangedDialog показывает диалог "Ключ сервера изменился" (UI-01,
@@ -1788,22 +1792,28 @@ func startWindowSize() fyne.Size {
 }
 
 // minWindowHeight — наименьшая высота окна (в точках канвы, с её полями), при
-// которой прибор осмотра (osmotr_test.go) не находит ни одного вылезания,
-// наложения или сжатия ни в одной форме — дефекты Д1 и Д2.
+// которой прибор осмотра (osmotr_test.go, osmotr_more_test.go) не находит ни
+// одного вылезания, наложения или сжатия ни в одной форме — дефекты Д1 и Д2.
 //
-// ОТКУДА ЧИСЛО. Замер прибором 29.09.2026 по всем формам осмотра, без
-// разрешений Д1–Д3, поиском делением пополам: самую высокую потребность
-// дал диалог «Сохранить ключ?» в состоянии «отказ переключения раскладки» —
-// 517 чисто, 516 уже «кнопка «Сохранить» × кнопка «Не сохранять»». Следом
-// пин-код с отказом раскладки (440) и удаление (379). Число держат два
-// теста: TestOsmotrForms в размере «минимальный» (при 517 чисто) и
-// TestMinWindowHeightIsTight (при 516 прибор краснеет) — запас сверх
-// замера спрятал бы, что число устарело.
+// ОТКУДА ЧИСЛО. Замер прибором 29.09.2026 по всем 27 формам осмотра (все
+// диалоги программы), без разрешений, поиском делением пополам. Самую высокую
+// потребность дал диалог «Конфиг готов» в начальном состоянии: 543 чисто,
+// 542 уже «подпись «» × кнопка «Закрыть»». Следом «Сохранить ключ?» с отказом
+// раскладки (517) и пин-код с отказом раскладки (440).
+//
+// ИСКЛЮЧЕНЫ ДВА СОСТОЯНИЯ, И ЭТО НЕ ЗАБЫТОЕ: «Конфиг готов» после сохранения
+// (756) и после отказа сохранения (659) выше даже стартового окна (620).
+// Поднять минимум до них или уменьшить диалог — развилка владельцу (Д6,
+// osmotr_more_test.go); до решения они разрешены в приборе поимённо.
+//
+// Число держат два теста: TestOsmotrForms в размере «минимальный» (при 543
+// чисто) и TestMinWindowHeightIsTight (при 542 прибор краснеет) — запас
+// сверх замера спрятал бы, что число устарело.
 //
 // ШИРИНУ НЕ ОГРАНИЧИВАЕМ: тот же замер при любой запрошенной ширине упирается
 // в минимум содержимого (экран подключения, главное окно), который шире
 // всех диалогов, и находок нет.
-const minWindowHeight = 517
+const minWindowHeight = 543
 
 // windowMinLayout — минимум окна ПО ПРАВИЛУ БОЕВОГО ДРАЙВЕРА. В Fyne 2.7.4 у
 // fyne.Window нет SetMinSize; glfw-окно само зовёт SetSizeLimits с минимумом
@@ -2799,8 +2809,11 @@ func (u *ui) toggleSelected() {
 			})
 		})
 	})
+	// Д4 (осмотр 29.09.2026): без переноса ключ раздувал рамку — как Д3.
+	card := widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID))
+	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID)),
+		card,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
 	)
@@ -2874,8 +2887,11 @@ func (u *ui) regenerateSelected() {
 			})
 		})
 	})
+	// Д5 (осмотр 29.09.2026): фраза без переноса раздувала рамку до 847 т.
+	question := widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
+	question.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
-		widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг для %s? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name())),
+		question,
 		container.NewHBox(okBtn, diffBtn),
 		planStatus,
 	)

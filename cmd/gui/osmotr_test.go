@@ -141,6 +141,11 @@ func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (k
 		// (пункт 1 стандарта: «внутри прокручиваемого родителя не мерится по
 		// построению; смотрит снимок»).
 		return "таблица", "", true
+	case *container.Scroll:
+		// Содержимое прокрутки законно больше её окна и обрезается ею —
+		// внутрь не идём, мерится сама прокрутка (та же граница, что у
+		// таблицы; добавлено с окном изменений 29.09.2026).
+		return "прокрутка", "", true
 	case *widget.TextGrid:
 		return "текстовая сетка", "", true
 	case *widget.Hyperlink:
@@ -860,6 +865,20 @@ func runOsmotr(t *testing.T, f osmotrForm, size, themeName string, v fyne.ThemeV
 	}
 	sz := u.win.Canvas().Size()
 	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, f.mayOverlap)
+	if osmotrSavedLabel != "" {
+		// Путь сохранения зависит от ОС (временный каталог) — в описи и
+		// находках он заменён меткой (osmotr_more_test.go).
+		r := strings.NewReplacer(osmotrSavedLabel, osmotrSavedToken)
+		for i := range rep.atoms {
+			rep.atoms[i].name = r.Replace(rep.atoms[i].name)
+		}
+		for _, l := range [][]string{rep.overflow, rep.overlaps, rep.squeezed} {
+			for i := range l {
+				l[i] = r.Replace(l[i])
+			}
+		}
+		osmotrSavedLabel = ""
+	}
 	rep.checkInventory(f.inventory)
 	return rep
 }
@@ -1265,7 +1284,7 @@ func TestOsmotrCanaryDeleteCardWithoutWrap(t *testing.T) {
 // минимум завышен, и число перестало быть замером (например, форма стала
 // ниже, а константа осталась).
 func TestMinWindowHeightIsTight(t *testing.T) {
-	f := formByName(t, "(б) сохранение ключа, отказ раскладки")
+	f := formByName(t, "(д) конфиг готов")
 	u := osmotrUI(t, theme.VariantLight)
 	s := f.open(t, u, func() {
 		p := 2 * theme.Padding()
