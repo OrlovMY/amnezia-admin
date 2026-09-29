@@ -555,9 +555,23 @@ var allowedGitHubPath = map[string]bool{
 // `GOFLAGS=-run=NOTHING` — go test в пустой прогон; строка вызова при этом
 // цела, и остальные сторожа её одобряют.
 //
-// ГРАНИЦА. Переменные, которые кладёт сам раннер или setup-go во время
-// прогона, в тексте workflow не видны. Присваивание, собранное из частей
-// (`G=GO; export "${G}FLAGS=-n"`), не опознаётся.
+// ГРАНИЦА (расширена по ревью QA-01, раунд 5). Сторож читает текст, а не
+// исполняет его, поэтому не опознаёт:
+//   - имя переменной, собранное из частей: `G=GO; export "${G}FLAGS=-n"`;
+//   - запись в $GITHUB_ENV или $GITHUB_PATH, у которой собрано из частей и
+//     ИМЯ ФАЙЛА: `v=GITHUB_E; v=${v}NV; echo … >> "${!v}"` или путь, добытый
+//     из `env | sed …`. Строка, где $GITHUB_ENV назван прямо, красная целиком,
+//     что бы в неё ни писалось (`printf 'SHELLCHECK%s=…' _BIN` тоже);
+//   - запись в файл настроек go в обход `go env -w`:
+//     `printf 'GOFLAGS=-n\n' >> "$(go env GOENV)"`;
+//   - любой `uses:` стороннего action: action вправе менять PATH и
+//     окружение, закрытого списка `uses:` в этих job нет;
+//   - промежуточный шаг, переписывающий сам файл по пути $SHELLCHECK_BIN
+//     между канарейкой и разбором (сейчас между ними шагов нет);
+//   - переменные, которые кладёт сам раннер или setup-go во время прогона.
+//
+// Все эти формы — намеренная косвенная запись, а не правдоподобная
+// случайная правка.
 //
 // Раунд 4 добавил в тот же тест: SHELLCHECK_BIN в env: и присваиванием,
 // `go env -w/-u`, и закрытый список строк с $GITHUB_PATH.
@@ -569,7 +583,7 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 		envHits := func(where string, env map[string]string) {
 			for k, v := range env {
 				checked++
-				if strings.HasPrefix(k, "GO") || k == "SHELLCHECK_BIN" {
+				if strings.HasPrefix(k, "GO") || k == "SHELLCHECK_BIN" || strings.EqualFold(k, "PATH") {
 					hits = append(hits, fmt.Sprintf("%s: env %s=%s", where, k, v))
 				}
 			}
@@ -577,9 +591,19 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 		envHits("workflow", wf.Env)
 		for name, j := range wf.Jobs {
 			envHits("job "+name, j.Env)
+			setupGo := -1
 			for i, s := range j.Steps {
 				where := fmt.Sprintf("job %s, шаг №%d «%s»", name, i+1, s.Name)
 				envHits(where, s.Env)
+				if strings.HasPrefix(s.Uses, "actions/setup-go@") && setupGo < 0 {
+					setupGo = i
+				}
+				// Порядок (раунд 5): каталог из $GITHUB_PATH встаёт впереди уже
+				// добавленных. Добавленный ПОСЛЕ setup-go окажется впереди её go.
+				if setupGo >= 0 && strings.Contains(s.Run, "GITHUB_PATH") {
+					hits = append(hits, where+": запись в $GITHUB_PATH после setup-go (шаг №"+
+						fmt.Sprint(setupGo+1)+") — каталог встанет в PATH впереди go из setup-go")
+				}
 				for _, l := range strings.Split(stripShellComments(s.Run), "\n") {
 					checked++
 					tl := strings.TrimSpace(l)
@@ -592,6 +616,12 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 						hits = append(hits, where+": SHELLCHECK_BIN «"+tl+"»")
 					case strings.Contains(l, "GITHUB_PATH") && !allowedGitHubPath[tl]:
 						hits = append(hits, where+": $GITHUB_PATH вне закрытого списка «"+tl+"»")
+					case strings.Contains(l, "GITHUB_ENV"):
+						// Закрытый список записей в $GITHUB_ENV ПУСТ (раунд 5):
+						// из workflow туда не пишет никто, SHELLCHECK_BIN кладёт
+						// scripts/dev-tools.sh. Любая строка — подмена окружения
+						// следующих шагов, включая PATH.
+						hits = append(hits, where+": $GITHUB_ENV вне закрытого списка (он пуст) «"+tl+"»")
 					}
 				}
 			}
@@ -604,5 +634,87 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 	}
 	if checked == 0 {
 		fatal(t, "не найдено ни одной строки run: и ни одного env — тест перестал что-либо проверять")
+	}
+}
+
+// canaryStub — заглушка `go` для прогона тела шага канарейки. Подсовывается
+// через BASH_ENV: тело шага исполняется без единой правки, а функция go
+// перекрывает настоящий go и в подоболочке $(…). Каждый вызов оставляет
+// отметку в $STUB_LOG — иначе тест не отличил бы «шаг повёл себя верно» от
+// «заглушка не была вызвана вовсе».
+const canaryStub = `go() {
+  echo "вызов: $*" >> "$STUB_LOG"
+  case "${STUB_MODE:-}" in
+    sc2086) echo "canary-workflow.yml:7:9: shellcheck reported issue in this script: SC2086:info:2:6: Double quote"; return 1 ;;
+    zero) return 0 ;;
+    other) echo "canary-workflow.yml:1:1: some other error [syntax-check]"; return 1 ;;
+  esac
+  echo "STUB_MODE не задан" >&2
+  return 97
+}
+`
+
+// TestShellcheckCanaryStepLogic — шаг канарейки shellcheck в ci.yml ПАДАЕТ,
+// когда actionlint не сообщил SC2086 (ревью QA-01, раунд 5). Правило раунда 4
+// «выше разбирающего вызова стоит канарейка» опирается на то, что канарейка
+// не умеет молчать; раньше `exit 0` сразу после её вызова проходил зелёным.
+// Тело шага гоняется настоящим bash с заглушкой go в трёх исходах:
+//   - код 1 и SC2086 в выводе — шаг проходит;
+//   - код 0 — шаг падает;
+//   - код 1 без SC2086 — шаг падает.
+func TestShellcheckCanaryStepLogic(t *testing.T) {
+	var canary *actionlintCall
+	calls := actionlintCalls(t, ciYML)
+	for i := range calls {
+		if !calls[i].real && canaryCall(calls[i]) {
+			canary = &calls[i]
+			break
+		}
+	}
+	if canary == nil {
+		fatal(t, "в %s нет вызова канарейки (-shellcheck %s на \"$canary\") — тест перестал что-либо проверять", ciYML, shellcheckValue)
+	}
+	wf := loadWorkflow(t, ciYML)
+	step := jobOf(t, wf, ciYML, canary.job).Steps[canary.stepIdx]
+
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "stub.sh")
+	if err := os.WriteFile(stub, []byte(canaryStub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		mode string
+		ok   bool
+		msg  string
+	}{
+		{"sc2086", true, "Канарейка сработала"},
+		{"zero", false, "СТОП: actionlint не видит shellcheck"},
+		{"other", false, "СТОП: actionlint не видит shellcheck"},
+	}
+	for _, c := range cases {
+		log := filepath.Join(dir, "calls-"+c.mode+".log")
+		out, err := runStepBody(t, step.Run, dir, map[string]string{
+			"BASH_ENV":           filepath.ToSlash(stub),
+			"STUB_MODE":          c.mode,
+			"STUB_LOG":           filepath.ToSlash(log),
+			"SHELLCHECK_BIN":     "/заглушка/shellcheck",
+			"ACTIONLINT_VERSION": "v0.0.0-заглушка",
+			"RUNNER_TEMP":        filepath.ToSlash(dir),
+		})
+		_, logErr := os.Stat(log)
+		problem := ""
+		switch {
+		case logErr != nil:
+			problem = "заглушка go не была вызвана — шаг не дошёл до вызова канарейки или вызывает не go"
+		case c.ok && err != nil:
+			problem = fmt.Sprintf("шаг упал, а должен пройти (%v)", err)
+		case !c.ok && err == nil:
+			problem = "шаг прошёл, а должен упасть — канарейка молчит"
+		case !strings.Contains(out, c.msg):
+			problem = "в выводе нет «" + c.msg + "»"
+		}
+		if problem != "" {
+			fail(t, "канарейка shellcheck, заглушка go в режиме %s: %s:\n%s", c.mode, problem, out)
+		}
 	}
 }

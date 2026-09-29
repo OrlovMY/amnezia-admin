@@ -80,6 +80,22 @@ jobs:
           # читает любой следующий шаг, включая сборку сторонних модулей.
           persist-credentials: false
 
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
+        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
+        # ронять job, иначе -race тихо выключится вместе с cgo.
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         # До любого шага, печатающего или вызывающего go: на macos-26 нет
         # предустановленного go, и `go version` до setup-go падал бы
@@ -95,17 +111,6 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
-          gcc --version
-
-      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
-        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
-        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
-        # ронять job, иначе -race тихо выключится вместе с cgo.
-        if: matrix.os == 'windows'
-        run: |
-          set -euo pipefail
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
-          export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
       - name: Версии инструментов (раннер предъявляет себя)

@@ -75,10 +75,15 @@ const ciLintGuards = `          set -euo pipefail
           test -n "${ACTIONLINT_VERSION:-}" || { echo "СТОП: ACTIONLINT_VERSION пуста" >&2; exit 1; }
 `
 
-// canaryEnd — последняя строка шага канарейки shellcheck в ci.yml.
-const canaryEnd = "          echo \"Канарейка сработала: shellcheck применён к bash внутри run:\"\n"
-
 const goenv = "TestNoToolEnvironmentOverrides"
+
+const canaryLogic = "TestShellcheckCanaryStepLogic"
+
+// toolsStep — шаг «Инструменты» job lint. Добавочные вызовы actionlint
+// подсаживаются сюда: в шаге канарейки они сломали бы её логику (раунд 5),
+// рядом с настоящим вызовом — закрытый список тела.
+const toolsStep = "        run: bash scripts/dev-tools.sh\n"
+const toolsStepMulti = "        run: |\n          bash scripts/dev-tools.sh\n"
 
 func ci(old, new string) []edit  { return []edit{{ciYML, old, new}} }
 func rel(old, new string) []edit { return []edit{{releaseYML, old, new}} }
@@ -104,9 +109,9 @@ var plants = []plant{
 	// --- смысл вызова actionlint: по одной ветке ---
 	// Добавочный вызов — в конец шага канарейки, а не рядом с настоящим:
 	// рядом с настоящим он нарушил бы ещё и закрытый список тела шага.
-	{name: "al-extra-version", edits: ci(canaryEnd, canaryEnd+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN" --version "$canary"`+"\n"),
+	{name: "al-extra-version", edits: ci(toolsStep, toolsStepMulti+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN" --version "$canary"`+"\n"),
 		wantTest: inv, wantMsg: "флаг --version вне закрытого списка"},
-	{name: "al-extra-noargs", edits: ci(canaryEnd, canaryEnd+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN"`+"\n"),
+	{name: "al-extra-noargs", edits: ci(toolsStep, toolsStepMulti+"          "+alCall+` -shellcheck "$SHELLCHECK_BIN"`+"\n"),
 		wantTest: inv, wantMsg: "вызов actionlint без файлов — разбирать нечего"},
 	{name: "al-ignore", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck "$SHELLCHECK_BIN" -ignore '.*' \`),
 		wantTest: inv, wantMsg: "флаг -ignore вне закрытого списка"},
@@ -190,7 +195,19 @@ var plants = []plant{
 	{name: "r4-github-path", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"),
 		wantTest: goenv, wantMsg: "$GITHUB_PATH вне закрытого списка «echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"»"},
 	{name: "r4-canary-missing", edits: ci(`-shellcheck "$SHELLCHECK_BIN" "$canary" 2>&1`, `-shellcheck "$SHELLCHECK_BIN" "$RUNNER_TEMP/other.yml" 2>&1`),
-		wantTest: inv, wantMsg: "выше в том же job нет канарейки"},
+		wantTest: inv, also: []string{canaryLogic}, wantMsg: "выше в том же job нет канарейки"},
+	// --- раунд 5 QA-01: PATH и логика канарейки ---
+	{name: "r5-path-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          PATH: /tmp/f:/usr/bin:/bin\n"),
+		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env PATH=/tmp/f:/usr/bin:/bin"},
+	{name: "r5-path-githubenv", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"PATH=/tmp/f:$PATH\" >> \"$GITHUB_ENV\"\n"),
+		wantTest: goenv, wantMsg: "$GITHUB_ENV вне закрытого списка (он пуст) «echo \"PATH=/tmp/f:$PATH\" >> \"$GITHUB_ENV\"»"},
+	{name: "r5-githubpath-after-setup-go", edits: ci("      - name: Linux GUI deps\n",
+		"      - name: Поздний mingw\n        run: printf '%s\\n' 'C:\\msys64\\mingw64\\bin' >> \"$GITHUB_PATH\"\n\n      - name: Linux GUI deps\n"),
+		wantTest: goenv, wantMsg: "запись в $GITHUB_PATH после setup-go"},
+	{name: "r5-canary-exit0", edits: ci("2>&1)\" || rc=$?\n", "2>&1)\" || rc=$?\n          exit 0\n"),
+		wantTest: canaryLogic, wantMsg: "заглушка go в режиме zero: шаг прошёл, а должен упасть — канарейка молчит"},
+	{name: "r5-canary-no-grep", edits: ci(`if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then`, `if [ "$rc" -eq 0 ]; then`),
+		wantTest: canaryLogic, wantMsg: "заглушка go в режиме other: шаг прошёл, а должен упасть — канарейка молчит"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -208,7 +225,7 @@ var plants = []plant{
 	// В шаге «Инструменты», а не в шаге разбора: там строка нарушила бы ещё
 	// и закрытый список тела.
 	{name: "actionlint-githubenv-override", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"ACTIONLINT_VERSION=v1.7.11\" >> \"$GITHUB_ENV\"\n"),
-		wantTest: "TestActionlintVersionSingleSource", wantMsg: "переопределяет ACTIONLINT_VERSION"},
+		wantTest: "TestActionlintVersionSingleSource", also: []string{goenv}, wantMsg: "переопределяет ACTIONLINT_VERSION"},
 	// --- матрицы ---
 	{name: "checks-matrix", edits: ci("          - os: macos\n            runner: macos-26\n", "          - os: macos\n            runner: macos-15\n"),
 		wantTest: "TestCIMatrixMatchesReleaseBuild", wantMsg: "матрицы ОС разошлись"},
@@ -314,6 +331,7 @@ var mainTests = []string{
 	"TestReleaseMatrixArchMatchesRunnerTable",
 	"TestReleaseRunnerArchStep",
 	"TestReleaseTestMatrixMatchesBuild",
+	"TestShellcheckCanaryStepLogic",
 }
 
 func activePlant(t *testing.T) *plant {

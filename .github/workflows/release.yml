@@ -76,20 +76,12 @@ jobs:
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      - name: Linux GUI deps
-        # go vet ./... ниже разбирает и cmd/gui (Fyne/glfw/GL) — без этих
-        # заголовков он не соберёт даже типы.
-        if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev xorg-dev
-          gcc --version
-
       - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
         # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH —
         # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md
         # ("MSYS2 is pre-installed on image but not added to PATH").
@@ -105,6 +97,19 @@ jobs:
       # ci.yml, job lint: оба workflow, пиновый shellcheck, канарейка — на
       # каждом PR, то есть ДО тега. Смысл того вызова (оба файла, без
       # отключённых правил) стережёт internal/ciguard.
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Linux GUI deps
+        # go vet ./... ниже разбирает и cmd/gui (Fyne/glfw/GL) — без этих
+        # заголовков он не соберёт даже типы.
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev
+          gcc --version
 
       - name: go vet
         run: go vet ./...
@@ -184,6 +189,18 @@ jobs:
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
+      - name: Windows mingw (gcc для CGO GUI-сборки)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
+        if: matrix.os == 'windows'
+        run: |
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -210,13 +227,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
-          gcc --version
-
-      - name: Windows mingw (gcc для CGO GUI-сборки)
-        if: matrix.os == 'windows'
-        run: |
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
-          export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
       - name: Сборка
