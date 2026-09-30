@@ -507,7 +507,10 @@ func TestGateIncludesToolsAndTiming(t *testing.T) {
 	for _, broken := range []string{"К2.5", "К2.6", "К2.9", "К2.10"} {
 		t.Run(broken, func(t *testing.T) {
 			f := emptyFake(t, false)
-			f.env.MakeSudoKey = noopSudoKey
+			undone := 0
+			f.env.MakeSudoKey = func() ([]string, func() error, error) {
+				return []string{"AMNEZIA_KEY=vpn://подставной"}, func() error { undone++; return nil }, nil
+			}
 			real := f.env.Remote
 			f.env.Remote = scriptedPre(real, broken)
 			f.env.NewBin = "не-вызывается"
@@ -538,6 +541,11 @@ func TestGateIncludesToolsAndTiming(t *testing.T) {
 			}
 			if _, ok := seen["К3"]; !ok {
 				t.Errorf("К3 нет в выводе — шлюз не проверен")
+			}
+			// временный пользователь создан в К2.10 до шлюза — удаляется и при
+			// закрытом шлюзе (шаг «У2»)
+			if undone != 1 || seen["У2"] != Pass {
+				t.Errorf("временный пользователь: удалений %d, У2 %v", undone, seen["У2"])
 			}
 		})
 	}
