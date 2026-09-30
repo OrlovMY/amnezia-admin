@@ -640,7 +640,7 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 // счётчик попыток — это anti-casual слой, не защита от целенаправленной
 // атаки на файловую систему.
 func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, info *widget.Label) {
-	vaultDir := core.DefaultVaultDir()
+	vaultDir := pinVaultDir()
 	vaultName := filepath.Base(path)
 
 	pinEntry := widget.NewEntry()
@@ -874,12 +874,19 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	retryBtn = widget.NewButtonWithIcon("Повторить", theme.ViewRefreshIcon(), func() { acquireOnlineTime() })
 	retryBtn.Hide()
 
+	// В1 (раунд 2 долгов, UX-01): подпись состояния — в прокручиваемой
+	// полосе постоянной высоты, кнопки — вне прокрутки (как «Конфиг готов»,
+	// Д6). Текст о закрытом вводе пина несёт ПОЛНЫЙ путь throttle.json
+	// (решение владельца 19.09 — печатать абсолютный путь); длинный путь на
+	// минимальном окне раздувал диалог, и «Повторить» ложилась на «Отмена».
+	statusScroll := container.NewVScroll(statusLabel)
+	statusScroll.SetMinSize(fyne.NewSize(0, pinStatusHeight))
 	content := container.NewVBox(
 		widget.NewLabel(label),
 		pinEntry,
 		pinHint.box,
 		layoutNotice,
-		statusLabel,
+		statusScroll,
 		openBtn,
 		retryBtn,
 	)
@@ -893,6 +900,17 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	acquireOnlineTime()
 }
+
+// pinVaultDir — каталог хранилищ для диалога пин-кода (и throttle.json в
+// нём). Переменная, а не прямой вызов, — шов прибора осмотра: сцена с
+// длинным путём (~170 знаков) иначе недостижима, каталог тестового
+// бинарника короткий.
+var pinVaultDir = core.DefaultVaultDir
+
+// pinStatusHeight — высота полосы состояния диалога пин-кода: две строки
+// текста (предел TestDialogsStayCompact — 400 т. на весь диалог). Длиннее —
+// прокрутка, диалог не растёт.
+const pinStatusHeight = 48
 
 // vaultCtx — контекст открытого хранилища (.avlt), нужный attemptConnect для
 // (1) подстановки ExpectedFingerprint из payload.HostKeyFingerprint, (2)

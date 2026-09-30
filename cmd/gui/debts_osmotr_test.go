@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,36 +65,62 @@ func invMainWithStatus(status string) []string {
 
 // ---------- Н8: диалог пин-кода, счётчик попыток не читается ----------
 
-func openPinThrottleUnknown(t *testing.T, u *ui, sized func()) osmotrScene {
-	localNetworkTime(t)
-	dir := vaultDirForTest(t)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// longVaultDir — каталог хранилищ с путём не короче 170 знаков без
+// пробелов (постоянная сцена В1, раунд 2 долгов): глубокий профиль или
+// «Загрузки» дают такие пути в бою, а каталог тестового бинарника короткий.
+func longVaultDir(t *testing.T) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "osmotr")
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	if err := os.WriteFile(filepath.Join(dir, "throttle.json"), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { os.RemoveAll(base) })
+	dir := base
+	for i := 0; len([]rune(dir)) < 170; i++ {
+		dir = filepath.Join(dir, fmt.Sprintf("очень_глубокая_папка_%02d", i))
 	}
-	t.Cleanup(func() { waitGUIGoroutines(t) })
-	u.showConnectScreen("")
-	sized()
-	u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
-	waitGUIGoroutines(t)
-	c := u.win.Canvas()
-	pop := topPopup(t, c)
-	mins := osmotrFrame(pop, nil)
-	passwordEntry(t, pop, 0).SetText(typedCyrillicPin)
-	return osmotrScene{root: pop, canvas: c, mins: mins}
+	if strings.ContainsAny(dir, " \t") {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: в пути есть пробел: %s", dir)
+	}
+	return dir
 }
 
-func invPinThrottleUnknown() []string {
-	inv := append([]string(nil), invPinBase...)
-	for i, s := range inv {
-		if s == "подпись:Подключение к интернету не обнаружено." {
-			inv[i] = "подпись:" + firstLine(guiview.PinThrottleUnknown(&core.ThrottleError{Op: "прочитать", Err: errors.New("x")}))
+// openPinThrottleUnknown — диалог пин-кода, throttle.json повреждён; long —
+// каталог хранилищ с длинным путём (через шов pinVaultDir).
+func openPinThrottleUnknown(long bool) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return func(t *testing.T, u *ui, sized func()) osmotrScene {
+		localNetworkTime(t)
+		var dir string
+		if long {
+			dir = longVaultDir(t)
+			saved := pinVaultDir
+			pinVaultDir = func() string { return dir }
+			t.Cleanup(func() { pinVaultDir = saved })
+		} else {
+			dir = vaultDirForTest(t)
+			t.Cleanup(func() { os.RemoveAll(dir) })
 		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "throttle.json"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { waitGUIGoroutines(t) })
+		u.showConnectScreen("")
+		sized()
+		u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+		waitGUIGoroutines(t)
+		c := u.win.Canvas()
+		pop := topPopup(t, c)
+		// Сцена значит что-то, только если путь действительно на экране.
+		if texts := strings.Join(visibleTexts(pop), " "); !strings.Contains(texts, filepath.Join(dir, "throttle.json")) {
+			t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: полного пути нет в диалоге: %s", texts)
+		}
+		mins := osmotrFrame(pop, nil)
+		passwordEntry(t, pop, 0).SetText(typedCyrillicPin)
+		return osmotrScene{root: pop, canvas: c, mins: mins}
 	}
-	return inv
 }
 
 func init() {
@@ -102,7 +129,9 @@ func init() {
 			inventory: invMainWithStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера")},
 		osmotrForm{name: "(г) главное окно, причина «?» в строке состояния", open: openMainLongStatus,
 			inventory: invMainWithStatus(debtsLoadedStatus(nil))},
-		osmotrForm{name: "(б) пин-код, счётчик попыток не читается", open: openPinThrottleUnknown,
-			inventory: invPinThrottleUnknown(), width: 412},
+		osmotrForm{name: "(б) пин-код, счётчик попыток не читается", open: openPinThrottleUnknown(false),
+			inventory: invPinBase, width: 412},
+		osmotrForm{name: "(б) пин-код, счётчик попыток не читается, путь 170+ знаков", open: openPinThrottleUnknown(true),
+			inventory: invPinBase, width: 412},
 	)
 }
