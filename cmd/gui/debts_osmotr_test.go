@@ -123,6 +123,36 @@ func openPinThrottleUnknown(long bool) func(t *testing.T, u *ui, sized func()) o
 	}
 }
 
+// TestDebtsPinClosedHeadFirst — раунд 3 (UX-01, В1-б): полоса состояния
+// диалога пина показывает две строки, около 100 знаков. При пути 170+ в них
+// обязаны быть «Ввод пина закрыт» и «Повторить», а путь — в конце. Боевой
+// путь: настоящий диалог, настоящий повреждённый throttle.json.
+func TestDebtsPinClosedHeadFirst(t *testing.T) {
+	u := focusTestUI(t)
+	openPinThrottleUnknown(true)(t, u, func() { u.win.Resize(startWindowSize()) })
+	var status string
+	for _, s := range visibleTexts(topPopup(t, u.win.Canvas())) {
+		if strings.Contains(s, "throttle.json") {
+			status = s
+		}
+	}
+	if status == "" {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: текста с путём в диалоге нет")
+	}
+	head := []rune(status)
+	if len(head) > 100 {
+		head = head[:100]
+	}
+	for _, w := range []string{"Ввод пина закрыт", "Повторить"} {
+		if !strings.Contains(string(head), w) {
+			t.Errorf("в первых 100 знаках нет %q: %q", w, string(head))
+		}
+	}
+	if !strings.HasSuffix(status, "throttle.json.") {
+		t.Errorf("путь не в конце текста: %q", status)
+	}
+}
+
 func init() {
 	osmotrForms = append(osmotrForms,
 		osmotrForm{name: "(г) главное окно, включён ли клиент — неизвестно", open: openMainEnabledUnknown,
