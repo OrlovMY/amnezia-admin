@@ -93,7 +93,7 @@ func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
 		{"штатно", func() core.Runner { return fakesrv.New() }, nil},
 		{"статистика не получена", func() core.Runner {
 			return &countingRunner{inner: fakesrv.New(), okWgShow: 0}
-		}, []string{failNote, "имитированный обрыв связи"}},
+		}, []string{failNote, "нажмите «Обновить» позже", "имитированный обрыв связи"}},
 		{"клиента нет в ответе", func() core.Runner {
 			srv := fakesrv.New()
 			addTableEntry(t, srv, map[string]any{"clientId": "GHOSTPUB", "userData": map[string]any{"clientName": "Призрак"}})

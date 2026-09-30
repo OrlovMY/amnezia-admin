@@ -152,6 +152,46 @@ func TestDebtsActivityCellFits(t *testing.T) {
 	}
 }
 
+// TestDebtsStatusStatsFailShort — раунд 4 (AU-UX Low): при отказе
+// статистики строка состояния начинается с того, что делать, а сырая
+// ошибка (здесь ~770 знаков, как в зонде аудитора) сжата до 120 знаков с
+// сохранённым концом. Числа — высота строки состояния главного окна на
+// 1194×517 и 1229×620 — печатаются в лог для отчёта.
+func TestDebtsStatusStatsFailShort(t *testing.T) {
+	raw := `команда "docker exec -i amnezia-awg sh -c 'wg show wg0 dump'": ` +
+		strings.Repeat("ssh: handshake failed: read tcp 192.0.2.1:50123->203.0.113.10:22: ", 10) + "connection reset by peer"
+	if n := len([]rune(raw)); n < 700 {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: ошибка всего %d знаков", n)
+	}
+	st := guiview.LoadedStatus("Пользователей: 3", nil, nil, errors.New(raw))
+	i := strings.Index(st, "Статистику с сервера получить не удалось — нажмите «Обновить» позже")
+	if i < 0 {
+		t.Fatalf("первым не сказано, что делать: %q", st)
+	}
+	reason := st[strings.Index(st, "Причина: ")+len("Причина: "):]
+	if n := len([]rune(reason)); n > 121 {
+		t.Errorf("причина %d знаков, ожидалось не больше 120: %q", n, reason)
+	}
+	if !strings.HasSuffix(reason, "connection reset by peer.") {
+		t.Errorf("конец причины потерян: %q", reason)
+	}
+	for _, size := range []fyne.Size{{Width: 1194.2, Height: 517}, {Width: 1229, Height: 620}} {
+		u := focusTestUI(t)
+		osmotrMain(u)
+		// состав зонда аудитора: два клиента с неизвестным состоянием и
+		// длинными именами плюс отказ статистики с ~770-знаковой ошибкой
+		u.clients[0].UserData["disabled"] = "yes"
+		u.clients[0].UserData["clientName"] = "Ноутбук бухгалтерии второго этажа Иванова"
+		u.clients[1].UserData["disabled"] = "yes"
+		u.clients[1].UserData["clientName"] = "Телефон Анны Сергеевны служебный резервный"
+		u.status.SetText(guiview.LoadedStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера",
+			u.clients, nil, errors.New(raw)))
+		u.win.Resize(size)
+		t.Logf("окно %.1f×%.0f: строка состояния %d знаков, высота %.1f т., таблица %.1f т.",
+			size.Width, size.Height, len([]rune(u.status.Text)), u.status.Size().Height, u.table.Size().Height)
+	}
+}
+
 // TestDebtsPinClosedHeadFirst — раунд 3 (UX-01, В1-б): полоса состояния
 // диалога пина показывает две строки, около 100 знаков. При пути 170+ в них
 // обязаны быть «Ввод пина закрыт» и «Повторить», а путь — в конце. Боевой
