@@ -65,6 +65,11 @@ type Server struct {
 	// прочитала файл, а проверка после отката — прочитала.
 	FailReadTimes map[string]int
 
+	// FailWgShowFrom — если > 0, `wg show … dump` падает начиная с N-го
+	// вызова (счёт с 1). Раунд 6: «рантайм неизвестен» после отката.
+	FailWgShowFrom int
+	wgShowCalls    int
+
 	// FailBackup — если задана, команда резервной копии вернёт эту ошибку,
 	// ничего не скопировав (A3б PR-3, раунд 4: исход «запись не начиналась»).
 	FailBackup error
@@ -377,6 +382,10 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return "", nil
 
 	case reWgShow.MatchString(cmd):
+		s.wgShowCalls++
+		if s.FailWgShowFrom > 0 && s.wgShowCalls >= s.FailWgShowFrom {
+			return "", fmt.Errorf("fakesrv: имитированный отказ wg show (вызов №%d)", s.wgShowCalls)
+		}
 		var b strings.Builder
 		b.WriteString("serverpriv\tserverpub\t51820\toff\n") // строка интерфейса — parsePeerStats её пропускает
 		for pub := range s.peers {

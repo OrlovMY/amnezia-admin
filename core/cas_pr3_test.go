@@ -132,6 +132,34 @@ func TestPR3ReadFailAfterRollbackIsNotRuntime(t *testing.T) {
 	}
 }
 
+// TestPR3ForeignFilesNoRestartAdvice — раунд 6 (AU-LOGIC Н-5), проба
+// аудитора, ДОЕЗД: проверка после записи не прочитала wg0.conf (один раз),
+// повторный syncconf при откате упал (рантайм остался новым), и сразу после
+// отката другой записал clientsTable. Файлы после отката НЕ прежние —
+// совет «перезапустите» применил бы чужие файлы, «файлы восстановлены» —
+// неправда. Только API a25d961 — там падает поведением (NotApplied).
+func TestPR3ForeignFilesNoRestartAdvice(t *testing.T) {
+	srv := fakesrv.New()
+	sess := pr3Session(srv)
+	plan, err := sess.PlanAddUser(pr3Container(), "Mallory")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	srv.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1}
+	srv.FailSyncconfFrom = 2
+	srv.ForeignWriteAfter = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
+	_, err = sess.Apply(plan)
+	if err == nil {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: Apply прошёл")
+	}
+	if errors.Is(err, core.ErrRolledBackNotApplied) {
+		t.Errorf("файлы после отката чужие, а исход «сервер нужно перезапустить»: %v", err)
+	}
+	if msg := strings.ToLower(err.Error()); strings.Contains(msg, "файлы восстановлены") || strings.Contains(msg, "перезапуск") {
+		t.Errorf("в тексте утверждение о файлах, которые не совпали с прежними: %v", err)
+	}
+}
+
 // TestPR3BusyDoesNotBlameOurCopy — Low аудита PR-1: замок /run/lock/ может
 // держать и посторонняя программа; текст не утверждает, что это наша копия.
 func TestPR3BusyDoesNotBlameOurCopy(t *testing.T) {

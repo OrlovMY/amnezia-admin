@@ -1665,96 +1665,110 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		syncErr = s.syncWg(c)
 	}
 
-	wgNow, wgReadErr := s.catIn(c, c.Dir+"/wg0.conf")
-	tblNow, tblReadErr := s.catIn(c, c.Dir+"/clientsTable")
-	filesVerified := wgReadErr == nil && tblReadErr == nil &&
-		wgNow == string(p.wgBefore) && tblNow == string(tblBefore)
+	files, filesWhy := s.measureFilesAfterRollback(c, p.wgBefore, tblBefore)
+	runtime, runtimeWhy := s.measureRuntimeAfterRollback(c, p.wgBefore, wgChanged, syncErr)
 
-	runtimeVerified := true
-	var runtimeErr error
-	if wgChanged {
-		stats, err := s.GetPeerStats(c)
-		if err != nil {
-			runtimeVerified, runtimeErr = false, err
-		} else {
-			want := peerPubKeysFromBytes(p.wgBefore)
-			if len(stats) != len(want) {
-				runtimeVerified = false
-			} else {
-				for pk := range want {
-					if _, ok := stats[pk]; !ok {
-						runtimeVerified = false
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Код возврата повторного syncconf (syncErr) сам по себе НЕ решает исход —
-	// решает то, что реально проверено ниже (filesVerified/runtimeVerified):
-	// syncconf может вернуть ошибку и тем не менее оставить рантайм таким,
-	// каким он уже был (совпадающим с wgBefore), и наоборот — вернуть 0 и
-	// разойтись. syncErr используется только как дополнительный контекст в
-	// тексте (б), когда runtimeVerified уже и так ложно.
-	// A3б PR-3, раунд 5 (AU-LOGIC Н-4): итог проверки после отката — ТРИ
-	// разных состояния, а не одно «не применено». Порядок — часть решения
-	// (признак 3): ИЗМЕРЕННЫЙ отказ рантайма (статистика прочитана и не
-	// совпала) стоит ВЫШЕ незнания — ошибка чтения файлов его не
-	// перекрывает; незнание (не прочитали файлы или статистику) — выше
-	// «файлы не совпали»: без чтения сравнивать нечего.
-	var verifyErr error
-	verifyKind := ErrRolledBackNotApplied
-	switch {
-	case runtimeErr == nil && !runtimeVerified && syncErr != nil:
-		verifyErr = fmt.Errorf("набор активных подключений не совпадает с ожидаемым (повторный syncconf: %w)", syncErr)
-	case runtimeErr == nil && !runtimeVerified:
-		verifyErr = fmt.Errorf("набор активных подключений на сервере после отката не совпадает с ожидаемым")
-	case wgReadErr != nil:
-		verifyErr, verifyKind = fmt.Errorf("проверка wg0.conf после отката: %w", wgReadErr), ErrRollbackUnverified
-	case tblReadErr != nil:
-		verifyErr, verifyKind = fmt.Errorf("проверка clientsTable после отката: %w", tblReadErr), ErrRollbackUnverified
-	case runtimeErr != nil:
-		verifyErr, verifyKind = fmt.Errorf("проверка активных подключений после отката: %w", runtimeErr), ErrRollbackUnverified
-	case !filesVerified:
-		verifyErr, verifyKind = fmt.Errorf("содержимое файлов после отката не совпадает с прочитанным состоянием"), ErrRolledBackFilesDiffer
-	}
-
-	if verifyErr == nil {
+	// A3б PR-3, раунд 6 (AU-LOGIC Н-5 — третья находка порядка ветвей в этой
+	// функции подряд): исход — не цепочка if, а ЯВНАЯ таблица 3×3 по двум
+	// ИЗМЕРЕННЫМ признакам. Утверждать что-либо о файлах (или о сервере)
+	// можно, только если соответствующий признак = «совпал». Код 0 команды
+	// отката — знание о ЗАПИСИ, не о том, что лежит сейчас.
+	kind := rollbackOutcome[rollbackCell{files, runtime}]
+	switch kind {
+	case ErrRolledBack:
 		// A8 п.2: слово «проверено» обязано нести границу проверки — иначе
 		// оно означает «проверено частично», выданное за полное. Границу
-		// выносим ОТДЕЛЬНЫМИ строками ПОСЛЕ причины (ревью UX-01, круг 2):
-		// человек читает это в момент сбоя, и причина должна быть раньше
-		// служебного текста, а не за скобкой в середине фразы.
+		// выносим ОТДЕЛЬНЫМИ строками ПОСЛЕ причины (ревью UX-01, круг 2).
 		const scope = "\nПроверено: содержимое обоих файлов байт в байт; набор активных подключений на сервере." +
 			"\nНе проверялись: AllowedIPs и PSK в работающем сервере (только в файлах)."
 		// A8 п.3: «вернул прежний файл» и «создал новый, прежнего не было» —
-		// разные вещи, и во второй формулировке слова «восстановлено» нет.
-		//
-		// Файл clientsTable создаёт запись (casWrite пишет оба файла
-		// всегда), откат оставляет его пустым: отката «не было файла» у
-		// нас нет. Поведенчески это равнозначно отсутствию (LoadClients:
-		// пустой файл → пустой список, как и отсутствующий), но молчать о
-		// подмене отсутствия пустотой нельзя.
-		//
-		// Тон — спокойный (ревью UX-01): случай доказанно безобидный,
-		// капслок здесь обесценивал бы настоящие предупреждения. Факт при
-		// этом не прячется.
+		// разные вещи. clientsTable, которой не было, откат оставляет пустой:
+		// для утилиты это равнозначно отсутствию, но молчать об этом нельзя.
 		if !p.tblExisted {
-			return &restoreError{kind: ErrRolledBack, cause: cause, msg: fmt.Sprintf("операция отменена, откат выполнен и проверен. Исходная причина: %v"+
+			return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("операция отменена, откат выполнен и проверен. Исходная причина: %v"+
 				"\nПримечание: clientsTable до операции не существовала — вернуть отсутствие файла нечем, он оставлен пустым."+
 				" Для этой утилиты пустая таблица и отсутствующая равнозначны: список пользователей пуст и там, и там.%s", cause, scope)}
 		}
-		return &restoreError{kind: ErrRolledBack, cause: cause, msg: fmt.Sprintf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)}
-	}
-	switch verifyKind {
-	case ErrRollbackUnverified:
-		return &restoreError{kind: verifyKind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но проверить его итог не удалось (%v) — вернулся ли сервер к прежнему состоянию, неизвестно; исходная причина: %v", verifyErr, cause)}
+		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)}
+	case ErrRolledBackNotApplied:
+		// только клетка «файлы совпали с прежними × рантайм не совпал»
+		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены и проверены, но применить их не удалось — работающий сервер к прежнему состоянию не вернулся (%s): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v", runtimeWhy, cause)}
 	case ErrRolledBackFilesDiffer:
-		return &restoreError{kind: verifyKind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но файлы на сервере после него не совпали с прежними (%v) — возможно, их изменили в другом месте; исходная причина: %v", verifyErr, cause)}
+		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но файлы на сервере после него не совпали с прежними (%s; работающий сервер: %s) — возможно, их изменили в другом месте; исходная причина: %v", filesWhy, runtimeWhy, cause)}
 	}
-	return &restoreError{kind: ErrRolledBackNotApplied, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены, но применить их не удалось (%v): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v",
-		verifyErr, cause)}
+	return &restoreError{kind: ErrRollbackUnverified, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но проверить его итог не удалось (файлы: %s; работающий сервер: %s) — что сейчас на сервере, неизвестно; исходная причина: %v", filesWhy, runtimeWhy, cause)}
+}
+
+// checkState — измеренный признак после отката: три состояния.
+type checkState int
+
+const (
+	checkSame    checkState = iota // совпал с прежним
+	checkDiffer                    // прочитан и не совпал
+	checkUnknown                   // прочитать не удалось
+)
+
+type rollbackCell struct{ files, runtime checkState }
+
+// rollbackOutcome — ЯВНАЯ таблица исходов отката: по одной строке на каждую
+// из 9 клеток (сторож TestRollbackOutcomeTableComplete). Правило строк:
+// «сервер нужно перезапустить» (NotApplied) — только когда файлы ПРОВЕРЕНЫ
+// и совпали: перезапуск применит именно их. Файлы не совпали — ни «вернулись»,
+// ни «перезапустите»: перезапуск применил бы чужие файлы. Файлы не прочитаны
+// — ничего не утверждаем, какой бы ни был рантайм.
+var rollbackOutcome = map[rollbackCell]error{
+	{checkSame, checkSame}:       ErrRolledBack,
+	{checkSame, checkDiffer}:     ErrRolledBackNotApplied,
+	{checkSame, checkUnknown}:    ErrRollbackUnverified,
+	{checkDiffer, checkSame}:     ErrRolledBackFilesDiffer,
+	{checkDiffer, checkDiffer}:   ErrRolledBackFilesDiffer,
+	{checkDiffer, checkUnknown}:  ErrRolledBackFilesDiffer,
+	{checkUnknown, checkSame}:    ErrRollbackUnverified,
+	{checkUnknown, checkDiffer}:  ErrRollbackUnverified,
+	{checkUnknown, checkUnknown}: ErrRollbackUnverified,
+}
+
+// measureFilesAfterRollback — совпали ли оба файла с прежними байтами.
+func (s *Session) measureFilesAfterRollback(c *Container, wgBefore, tblBefore []byte) (checkState, string) {
+	wgNow, wgErr := s.catIn(c, c.Dir+"/wg0.conf")
+	if wgErr != nil {
+		return checkUnknown, fmt.Sprintf("wg0.conf не прочитан: %v", wgErr)
+	}
+	tblNow, tblErr := s.catIn(c, c.Dir+"/clientsTable")
+	if tblErr != nil {
+		return checkUnknown, fmt.Sprintf("clientsTable не прочитана: %v", tblErr)
+	}
+	if wgNow != string(wgBefore) || tblNow != string(tblBefore) {
+		return checkDiffer, "содержимое файлов после отката не совпадает с прочитанным состоянием"
+	}
+	return checkSame, "файлы совпали с прежними"
+}
+
+// measureRuntimeAfterRollback — совпал ли набор активных peer'ов с прежним.
+// wg0.conf не менялся — рантайм не трогали, он «совпал» по построению.
+// syncErr — только контекст в тексте: исход решает измерение.
+func (s *Session) measureRuntimeAfterRollback(c *Container, wgBefore []byte, wgChanged bool, syncErr error) (checkState, string) {
+	if !wgChanged {
+		return checkSame, "не менялся"
+	}
+	stats, err := s.GetPeerStats(c)
+	if err != nil {
+		return checkUnknown, fmt.Sprintf("статистика не прочитана: %v", err)
+	}
+	want := peerPubKeysFromBytes(wgBefore)
+	same := len(stats) == len(want)
+	for pk := range want {
+		if _, ok := stats[pk]; !ok {
+			same = false
+		}
+	}
+	if same {
+		return checkSame, "совпал с прежним"
+	}
+	if syncErr != nil {
+		return checkDiffer, fmt.Sprintf("набор активных подключений не совпадает с ожидаемым (повторный syncconf: %v)", syncErr)
+	}
+	return checkDiffer, "набор активных подключений не совпадает с ожидаемым"
 }
 
 // ErrRollbackUnverified — откат записан, но проверить его итог не удалось

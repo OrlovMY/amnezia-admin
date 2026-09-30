@@ -29,6 +29,7 @@ package writeoutcome_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"amnezia-admin/core"
@@ -103,41 +104,59 @@ func TestApplyErrorsClassified(t *testing.T) {
 			}
 		})
 	}
-	// Проверка после отката — три состояния (раунд 5, AU-LOGIC Н-4). Раньше
-	// здесь стоял случай «прочитать нельзя» с ожиданием RolledBackNotApplied —
-	// тест ЗАКРЕПЛЯЛ неверный исход: незнание выдавалось за измеренный отказ
-	// работающего сервера.
-	after := []struct {
-		name string
+	// Проверка после отката — ТАБЛИЦА 3×3 (раунд 6, AU-LOGIC Н-5): файлы
+	// (совпали / не совпали / не прочитаны) × работающий сервер (совпал / не
+	// совпал / не прочитан). Каждая клетка — боевым путём через fakesrv.
+	// Сторож: клеток ровно 9, пропуск — красный. Проверяются исход И
+	// отсутствие ложных утверждений: «перезапуст…» — только в клетке
+	// (совпали, не совпал); «файлы восстановлены»/«возвращены к прежнему» —
+	// только где файлы совпали; «проверено» — только в (совпали, совпал).
+	syncFail := func(s *fakesrv.Server) { s.FailSyncconf = errors.New("имитированный отказ syncconf") }
+	rtDiffer := func(s *fakesrv.Server) {
+		s.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1} // проверка после записи
+		s.FailSyncconfFrom = 2                                           // повторный syncconf при откате
+	}
+	filesDiffer := func(s *fakesrv.Server) {
+		s.ForeignWriteAfter = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
+	}
+	filesUnknown := func(s *fakesrv.Server) {
+		s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
+	}
+	rtUnknown := func(s *fakesrv.Server) { s.FailWgShowFrom = 1 }
+	all := func(fs ...func(*fakesrv.Server)) func(*fakesrv.Server) {
+		return func(s *fakesrv.Server) {
+			for _, f := range fs {
+				f(s)
+			}
+		}
+	}
+	type cell struct{ files, runtime string }
+	grid := map[cell]struct {
 		prep func(*fakesrv.Server)
 		want writeoutcome.Kind
 	}{
-		// сценарий аудитора: только FailRead на wg0.conf — проверка после
-		// записи и после отката не читает файл; рантайм при этом совпал.
-		{"после отката не прочитать (сценарий аудитора)", func(s *fakesrv.Server) {
-			s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
-		}, writeoutcome.RollbackUnverified},
-		// измеренный отказ рантайма: проверка после записи не прочитала файл
-		// (один раз), повторный syncconf при откате упал — рантайм остался
-		// новым, файлы после отката прочитаны и совпали.
-		{"рантайм не вернулся", func(s *fakesrv.Server) {
-			s.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1}
-			s.FailSyncconfFrom = 2
-		}, writeoutcome.RolledBackNotApplied},
-		// измеренный отказ рантайма И не прочитать файлы: рантайм стоит
-		// ВЫШЕ незнания о файлах — ошибка чтения его не перекрывает.
-		{"рантайм не вернулся, файлы не прочитать", func(s *fakesrv.Server) {
-			s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
-			s.FailSyncconfFrom = 2
-		}, writeoutcome.RolledBackNotApplied},
-		// файлы после отката прочитаны, но не совпали с прежними.
-		{"файлы после отката не совпали", func(s *fakesrv.Server) {
-			s.FailSyncconf = errors.New("имитированный отказ syncconf")
-			s.ForeignWriteAfter = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
-		}, writeoutcome.RolledBackFilesDiffer},
+		{"совпали", "совпал"}:        {syncFail, writeoutcome.RolledBack},
+		{"совпали", "не совпал"}:     {rtDiffer, writeoutcome.RolledBackNotApplied},
+		{"совпали", "неизвестно"}:    {all(syncFail, rtUnknown), writeoutcome.RollbackUnverified},
+		{"не совпали", "совпал"}:     {all(syncFail, filesDiffer), writeoutcome.RolledBackFilesDiffer},
+		{"не совпали", "не совпал"}:  {all(rtDiffer, filesDiffer), writeoutcome.RolledBackFilesDiffer}, // проба аудитора Н-5
+		{"не совпали", "неизвестно"}: {all(syncFail, filesDiffer, rtUnknown), writeoutcome.RolledBackFilesDiffer},
+		{"неизвестно", "совпал"}:     {all(syncFail, filesUnknown), writeoutcome.RollbackUnverified},
+		{"неизвестно", "не совпал"}:  {all(filesUnknown, func(s *fakesrv.Server) { s.FailSyncconfFrom = 2 }), writeoutcome.RollbackUnverified},
+		{"неизвестно", "неизвестно"}: {all(syncFail, filesUnknown, rtUnknown), writeoutcome.RollbackUnverified},
 	}
-	for _, c := range after {
-		t.Run(c.name, func(t *testing.T) {
+	if len(grid) != 9 {
+		t.Fatalf("клеток таблицы отката %d, должно быть ровно 9", len(grid))
+	}
+	for _, f := range []string{"совпали", "не совпали", "неизвестно"} {
+		for _, r := range []string{"совпал", "не совпал", "неизвестно"} {
+			if _, ok := grid[cell{f, r}]; !ok {
+				t.Errorf("клетка (файлы %s, сервер %s) не проверена", f, r)
+			}
+		}
+	}
+	for c, g := range grid {
+		t.Run("файлы "+c.files+", сервер "+c.runtime, func(t *testing.T) {
 			srv := fakesrv.New()
 			sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
 			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
@@ -145,11 +164,25 @@ func TestApplyErrorsClassified(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PlanAddUser: %v", err)
 			}
-			c.prep(srv)
+			g.prep(srv)
 			_, err = sess.Apply(plan)
-			got := writeoutcome.Classify(err)
-			if got != c.want {
-				t.Fatalf("исход %d, ожидался %d: %v", got, c.want, err)
+			if got := writeoutcome.Classify(err); got != g.want {
+				t.Fatalf("исход %d, ожидался %d: %v", got, g.want, err)
+			}
+			tx, _ := writeoutcome.Describe(err)
+			text := strings.ToLower(tx.Title + " " + writeoutcome.Message(tx, err))
+			if strings.Contains(text, "перезапуст") != (c == cell{"совпали", "не совпал"}) {
+				t.Errorf("«перезапуск» сказан не в той клетке: %s", text)
+			}
+			if c.files != "совпали" {
+				for _, bad := range []string{"файлы восстановлены", "возвращены к прежнему", "состояние восстановлено"} {
+					if strings.Contains(text, bad) {
+						t.Errorf("файлы не проверены как прежние, а сказано %q: %s", bad, text)
+					}
+				}
+			}
+			if (c != cell{"совпали", "совпал"}) && strings.Contains(text, "восстановлено и проверено") {
+				t.Errorf("«проверено» при непроверенном: %s", text)
 			}
 		})
 	}
