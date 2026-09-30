@@ -16,12 +16,17 @@
 package canary
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"debug/buildinfo"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +98,9 @@ type Env struct {
 	// RaceRounds — сколько добавлений делает каждый из двух писателей в К4.
 	RaceRounds int
 
+	// SelfBuild — сведения о сборке самой канарейки (nil — debug.ReadBuildInfo).
+	SelfBuild func() (*debug.BuildInfo, bool)
+
 	cleanMu  sync.Mutex
 	cleanups []func() error
 
@@ -130,6 +138,11 @@ func Run(e *Env) ([]Result, error) {
 	// (SEC S1): «clientsTable пуста или её нет» ≠ «клиентов нет». Пусто должно
 	// быть ВСЁ: таблица, [Peer] в wg0.conf и работающий сервер. Любое
 	// непрочитанное — СТОП.
+	// П2 (раунд 4, AU-LOGIC M2): чья сборка проверяется. Грязное дерево,
+	// разные ревизии канарейки и -new, текст команды записи не найден в -new —
+	// НЕ ПРОВЕРЕНО, а значит, и итог не ПРОЙДЕН.
+	add(e.buildCheck())
+
 	if r := e.serverEmpty(); r.Status != Pass {
 		add(r)
 		return rs, fmt.Errorf("%w: не удалось убедиться, что на сервере нет клиентов", ErrStop)
@@ -179,8 +192,91 @@ func Run(e *Env) ([]Result, error) {
 		r.ID, r.Name = w.id, w.name
 		add(r)
 	}
-	e.cleanup()
+	// Раунд 4 (AU-LOGIC L2): неубранные canary-* — не строка в журнале, а
+	// шаг итога.
+	u := Result{ID: "У", Name: "уборка canary-*"}
+	if !gateOK {
+		u.Detail = "записей не было — убирать нечего проверять"
+	} else if err := e.cleanup(); err != nil {
+		u.Status, u.Detail = Fail, err.Error()
+	} else {
+		u.Status, u.Detail = Pass, "canary-* удалены, пользователь из приложения Amnezia оставлен"
+	}
+	add(u)
 	return rs, nil
+}
+
+// buildCheck — П2: ревизия и чистота сборки -new, совпадение с ревизией
+// канарейки, sha256 текста команды записи (core.CASWriteScript) и его
+// наличие в -new дословно.
+func (e *Env) buildCheck() Result {
+	self := e.SelfBuild
+	if self == nil {
+		self = debug.ReadBuildInfo
+	}
+	si, sok := self()
+	var ni *debug.BuildInfo
+	var nerr error
+	var bin []byte
+	if e.NewBin != "" {
+		ni, nerr = buildinfo.ReadFile(e.NewBin)
+		bin, _ = os.ReadFile(e.NewBin)
+	}
+	return judgeBuild(ni, nerr, si, sok, bin, core.CASWriteScript)
+}
+
+func vcsOf(bi *debug.BuildInfo) (rev, modified string) {
+	if bi == nil {
+		return "", ""
+	}
+	for _, kv := range bi.Settings {
+		switch kv.Key {
+		case "vcs.revision":
+			rev = kv.Value
+		case "vcs.modified":
+			modified = kv.Value
+		}
+	}
+	return rev, modified
+}
+
+// judgeBuild — чистая часть П2 (таблица в тестах).
+func judgeBuild(ni *debug.BuildInfo, nerr error, si *debug.BuildInfo, sok bool, bin []byte, script string) Result {
+	r := Result{ID: "П2", Name: "сборка -new: ревизия и текст команды записи"}
+	sum := sha256.Sum256([]byte(script))
+	hsum := hex.EncodeToString(sum[:])
+	if ni == nil {
+		r.Detail = fmt.Sprintf("сведения о сборке -new не прочитаны: %v; sha256(CASWriteScript канарейки)=%s", nerr, hsum)
+		return r
+	}
+	rev, mod := vcsOf(ni)
+	srev, smod := "", ""
+	if sok {
+		srev, smod = vcsOf(si)
+	}
+	head := fmt.Sprintf("-new: vcs.revision=%s vcs.modified=%s; канарейка: vcs.revision=%s vcs.modified=%s; sha256(CASWriteScript)=%s", orQ(rev), orQ(mod), orQ(srev), orQ(smod), hsum)
+	switch {
+	case rev == "" || mod == "":
+		r.Detail = head + " — ревизия -new неизвестна (собрано без git?)"
+	case mod != "false":
+		r.Detail = head + " — -new собрана из ИЗМЕНЁННОГО дерева: что проверено, не совпадёт ни с одной ревизией"
+	case srev == "" || smod != "false":
+		r.Detail = head + " — ревизия канарейки неизвестна или дерево изменено"
+	case srev != rev:
+		r.Detail = head + " — канарейка и -new из РАЗНЫХ ревизий"
+	case !bytes.Contains(bin, []byte(script)):
+		r.Detail = head + " — текст команды записи канарейки в -new не найден дословно"
+	default:
+		r.Status, r.Detail = Pass, head+"; текст команды записи в -new найден дословно"
+	}
+	return r
+}
+
+func orQ(s string) string {
+	if s == "" {
+		return "?"
+	}
+	return s
 }
 
 // Summary — итоговая строка: ПРОЙДЕН только без НЕ ПРОЙДЕН и НЕ ПРОВЕРЕНО.
@@ -385,7 +481,7 @@ func (e *Env) traces() Result {
 		r.Detail = "хост не проверен: " + fmt.Sprint(err)
 		return r
 	}
-	ctr, err := e.dexec(`p=$(command -v wg-quick) || { echo NOWGQ; exit 0; }; test -e "$p.canary-orig" && echo ORIG; echo DONE`)
+	ctr, err := e.dexec(`for t in wg wg-quick; do p=$(command -v $t) && test -e "$p.canary-orig" && echo "ORIG $p"; done; echo DONE`)
 	if err != nil || !strings.Contains(ctr, "DONE") {
 		r.Detail = "контейнер не проверен: " + fmt.Sprint(err)
 		return r
@@ -398,7 +494,7 @@ func (e *Env) traces() Result {
 		found = append(found, "/etc/sudoers.d/"+TempUser+" уже есть (rm -f /etc/sudoers.d/"+TempUser+")")
 	}
 	if strings.Contains(ctr, "ORIG") {
-		found = append(found, "в контейнере лежит wg-quick.canary-orig — wg-quick, возможно, подменён (верните: mv <путь>.canary-orig <путь>)")
+		found = append(found, "в контейнере лежит *.canary-orig ("+oneLine(strings.ReplaceAll(ctr, "DONE", ""))+") — wg или wg-quick, возможно, подменён (верните: mv <путь>.canary-orig <путь>)")
 	}
 	if len(found) > 0 {
 		r.Status, r.Detail = Fail, strings.Join(found, "; ")+" — запись НЕ выполняется"
@@ -566,6 +662,7 @@ func (e *Env) names() (map[string]core.ClientEntry, error) {
 // удалить новой версией; после каждого — состав списка по серверу. Сверка с
 // приложением Amnezia и подключение с .conf — вопросы человеку.
 func (e *Env) k3() Result {
+	lastID := "" // ключ canary-k3r до перевыпуска
 	steps := []struct {
 		args  []string
 		check func(map[string]core.ClientEntry) bool
@@ -582,7 +679,11 @@ func (e *Env) k3() Result {
 			c, ok := m["canary-k3r"]
 			return ok && c.EnabledState() == core.EnabledActive
 		}, "включить"},
-		{[]string{"rekey", "-name", "canary-k3r", "-yes"}, func(m map[string]core.ClientEntry) bool { _, ok := m["canary-k3r"]; return ok }, "перевыпустить"},
+		// раунд 4 (AU-LOGIC L1): перевыпуск обязан сменить ключ
+		{[]string{"rekey", "-name", "canary-k3r", "-yes"}, func(m map[string]core.ClientEntry) bool {
+			c, ok := m["canary-k3r"]
+			return ok && lastID != "" && c.ClientID != lastID
+		}, "перевыпустить"},
 	}
 	var log []string
 	conf := ""
@@ -601,6 +702,7 @@ func (e *Env) k3() Result {
 		if !s.check(m) {
 			return Result{Status: Fail, Detail: s.what + ": состав списка на сервере не тот"}
 		}
+		lastID = m["canary-k3r"].ClientID
 		log = append(log, s.what)
 	}
 	// удаление — после вопросов, чтобы человек успел проверить подключение
@@ -667,32 +769,63 @@ func (e *Env) fileSums() (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-// rollback — ОТЧЁТ PR1, п. 1: применение ломается (wg-quick → exit 1),
-// ожидается «Не применено: изменения отменены», файлы байт в байт прежние.
-// wg-quick возвращается ВСЕГДА.
+// rollback — ОТЧЁТ PR1, п. 1; раунд 4 (AU-LOGIC M1). Проверяет ИМЕННО
+// ветку отката ядра:
+//   - перед шагом на сервере нет canary-* (иначе исход зависел бы от
+//     оставшихся от PR4.4 клиентов); затем добавляется опорный canary-rb0 —
+//     работающий сервер НЕ пуст, и «вернулся к прежнему» не выполняется
+//     тривиально;
+//   - ломается `wg`, а не wg-quick: обёртка отвечает `exit 1` ТОЛЬКО на
+//     `wg syncconf` и передаёт всё прочее (`wg show` для проверки) настоящему
+//     wg. Прежняя подмена wg-quick отдавала syncconf ПУСТОЙ ввод, и настоящий
+//     wg мог принять его и снять с сервера всех peer'ов — тогда откат не
+//     возвращает рабочее состояние, и исход не «отменено», хотя продукт прав;
+//   - путь ядра при этом: casWrite записал → syncconf упал, рантайм не тронут
+//     (обёртка не доходит до ядра wg) → restore: casWrite отката по нашим
+//     байтам → повторный syncconf снова упал → файлы измерены «совпали»,
+//     рантайм измерен «совпал» → клетка {Same, Same} → ErrRolledBack →
+//     «Не применено: изменения отменены».
+//
+// wg возвращается ВСЕГДА (defer и уборка по сигналу).
 func (e *Env) rollback() (res Result) {
-	p, err := e.dexec(`command -v wg-quick`)
+	if err := e.cleanup(); err != nil {
+		return Result{Detail: "перед откатом canary-* не убраны: " + err.Error()}
+	}
+	if m, err := e.names(); err != nil || len(m) != 0 {
+		return Result{Detail: fmt.Sprintf("перед откатом список не пуст (%d) или не прочитан (%v)", len(m), err)}
+	}
+	if r := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-rb0"); r.code != 0 {
+		return Result{Status: Fail, Detail: "опорный клиент canary-rb0: код " + strconv.Itoa(r.code) + ": " + r.title}
+	}
+	peersBefore, err := e.Sess.GetPeerStats(e.Ctr)
+	if err != nil {
+		return Result{Detail: "работающий сервер до отката не опрошен: " + err.Error()}
+	}
+	if len(peersBefore) != 1 {
+		return Result{Status: Fail, Detail: fmt.Sprintf("после «готово» для canary-rb0 peer'ов в работающем сервере %d, ожидался 1", len(peersBefore))}
+	}
+	p, err := e.dexec(`command -v wg`)
 	p = strings.TrimSpace(p)
-	if err != nil || p == "" || strings.ContainsAny(p, " '\"") {
-		return Result{Detail: "wg-quick в контейнере не найден: " + fmt.Sprint(err)}
+	if err != nil || p == "" || strings.ContainsAny(p, " '\"$`\\") {
+		return Result{Detail: "wg в контейнере не найден: " + fmt.Sprint(err)}
 	}
 	before, err := e.fileSums()
 	if err != nil {
 		return Result{Detail: "суммы файлов до не получены: " + err.Error()}
 	}
-	if _, err := e.dexec(`cp ` + p + ` ` + p + `.canary-orig`); err != nil {
-		return Result{Detail: "копия wg-quick не сделана: " + err.Error()}
+	// mv, а не cp: если wg — символическая ссылка, запись поверх неё
+	// испортила бы настоящий файл.
+	if _, err := e.dexec(`mv ` + p + ` ` + p + `.canary-orig`); err != nil {
+		return Result{Detail: "wg не отодвинут: " + err.Error()}
 	}
-	// Возврат регистрируется СРАЗУ после копии (раунд 2, SEC S4): и при
-	// обычном конце шага, и по Ctrl+C / kill (RunCleanups из обработчика
-	// сигнала в cmd/canary-a3b).
+	// Возврат регистрируется СРАЗУ (SEC S4): и в конце шага, и по сигналу.
 	restoreDone := false
 	restore := func() error {
 		if restoreDone {
 			return nil
 		}
 		if _, err := e.dexec(`mv -f ` + p + `.canary-orig ` + p); err != nil {
-			return fmt.Errorf("ВНИМАНИЕ: wg-quick НЕ возвращён — верните вручную в контейнере: mv %s.canary-orig %s (%v)", p, p, err)
+			return fmt.Errorf("ВНИМАНИЕ: wg НЕ возвращён — верните вручную в контейнере: mv -f %s.canary-orig %s (%v)", p, p, err)
 		}
 		restoreDone = true
 		return nil
@@ -704,23 +837,50 @@ func (e *Env) rollback() (res Result) {
 			res.Detail += "; " + err.Error()
 		}
 	}()
-	if _, err := e.dexec(`echo "#!/bin/sh" > ` + p + ` && echo "exit 1" >> ` + p + ` && chmod +x ` + p); err != nil {
-		return Result{Detail: "подмена wg-quick не удалась: " + err.Error()}
+	if _, err := e.dexec(wgWrapper(p)); err != nil {
+		return Result{Detail: "обёртка wg не установлена: " + err.Error()}
 	}
 	r := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-rb")
 	after, err := e.fileSums()
 	if err != nil {
 		return Result{Detail: "суммы файлов после не получены: " + err.Error()}
 	}
+	peersAfter, perr := e.Sess.GetPeerStats(e.Ctr)
+	want, _ := writeoutcome.TextFor(writeoutcome.RolledBack)
 	switch {
 	case r.code == 0:
-		return Result{Status: Fail, Detail: "добавление прошло, хотя wg-quick сломан — откат не проверен"}
-	case !strings.Contains(r.errText, "Не применено: изменения отменены"):
-		return Result{Status: Fail, Detail: "исход не «Не применено: изменения отменены»: " + r.title}
+		return Result{Status: Fail, Detail: "добавление прошло, хотя wg syncconf сломан — откат не проверен"}
+	case r.code != 1 || want.Title == "" || r.title != want.Title:
+		return Result{Status: Fail, Detail: fmt.Sprintf("исход не «%s»: код %d: %s", want.Title, r.code, r.title)}
 	case after != before:
 		return Result{Status: Fail, Detail: "файлы после отката не совпали с прежними"}
+	case perr != nil:
+		return Result{Detail: "исход верный, файлы прежние; работающий сервер после не опрошен: " + perr.Error()}
+	case !samePeers(peersBefore, peersAfter):
+		return Result{Status: Fail, Detail: fmt.Sprintf("работающий сервер после отката не прежний: peer'ов было %d, стало %d", len(peersBefore), len(peersAfter))}
 	}
-	return Result{Status: Pass, Detail: "«Не применено: изменения отменены», файлы байт в байт прежние; wg-quick возвращён"}
+	return Result{Status: Pass, Detail: "«" + want.Title + "», файлы байт в байт прежние, работающий сервер прежний (canary-rb0 на месте); wg возвращён"}
+}
+
+// wgWrapper — команда установки обёртки: `wg syncconf` → exit 1, всё прочее
+// — настоящему wg (он лежит рядом как *.canary-orig).
+func wgWrapper(p string) string {
+	return `echo "#!/bin/sh" > ` + p +
+		` && echo "[ \"\$1\" = syncconf ] && { echo canary: syncconf disabled >&2; exit 1; }" >> ` + p +
+		` && echo "exec ` + p + `.canary-orig \"\$@\"" >> ` + p +
+		` && chmod +x ` + p
+}
+
+func samePeers(a, b map[string]core.PeerStat) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // sudoOrders — ОТЧЁТ PR1, п. 2: запись от root, затем от пользователя с
@@ -783,7 +943,9 @@ func (e *Env) race() Result {
 	if err != nil {
 		return Result{Detail: "новая версия: " + err.Error()}
 	}
-	e.cleanup()
+	if err := e.cleanup(); err != nil {
+		return Result{Detail: "после гонки новой версии canary-* не убраны: " + err.Error()}
+	}
 	if r, ok := judgeNew(st, 2*e.RaceRounds); !ok {
 		return r
 	}
@@ -791,7 +953,9 @@ func (e *Env) race() Result {
 		return Result{Detail: "новая версия: " + st.summary() + "; контроль на v0.2.0 не выполнен — программа v0.2.0 не задана"}
 	}
 	old, err := e.raceWith(e.OldBin, "canary-o")
-	e.cleanup()
+	if cerr := e.cleanup(); cerr != nil && err == nil {
+		err = fmt.Errorf("canary-* не убраны: %w", cerr)
+	}
 	if err != nil {
 		return Result{Detail: "контроль v0.2.0: " + err.Error()}
 	}
@@ -942,10 +1106,17 @@ func (e *Env) breakWrite() Result {
 		return Result{Detail: detail + " — держателя замка на /run/lock узнать не удалось: ожидание второй записи не проверено"}
 	case len(holders) == 0:
 		return Result{Detail: detail + " — обрыв пришёлся не на запись под замком (или lslocks нет): ожидание второй записи не проверено"}
-	case second.code != 0 && !strings.Contains(second.errText, "сервер занят"):
+	case second.code != 0 && !isBusy(second):
 		return Result{Status: Fail, Detail: detail + " — вторая запись не прошла и не «занято»"}
 	}
 	return Result{Status: Pass, Detail: detail}
+}
+
+// isBusy — «занято» так же, как в К4: код 1 и заголовок дословно (раунд 4,
+// AU-LOGIC L3).
+func isBusy(r cliRun) bool {
+	b, _ := writeoutcome.TextFor(writeoutcome.Busy)
+	return r.code == 1 && b.Title != "" && r.title == b.Title
 }
 
 // consistent — файлы согласованы: каждый включённый клиент таблицы есть в
@@ -1034,12 +1205,12 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	return Result{Status: Pass, Detail: "v0.2.0 list/add/del прошли; /run/lock не изменился"}
 }
 
-// cleanup — удаляет всех «canary-*», кроме добавленного в приложении Amnezia.
-func (e *Env) cleanup() {
+// cleanup — удаляет всех «canary-*», кроме добавленного в приложении
+// Amnezia. Раунд 4 (AU-LOGIC L2): ошибка — не только в журнал, а наружу.
+func (e *Env) cleanup() error {
 	cl, err := e.Sess.LoadClients(e.Ctr)
 	if err != nil {
-		fmt.Fprintln(e.Out, "уборка: список не прочитан:", err)
-		return
+		return fmt.Errorf("уборка: список не прочитан: %w", err)
 	}
 	var left []string
 	for _, c := range cl {
@@ -1051,8 +1222,9 @@ func (e *Env) cleanup() {
 	}
 	if len(left) > 0 {
 		sort.Strings(left)
-		fmt.Fprintln(e.Out, "уборка: не удалены:", strings.Join(left, ", "))
+		return fmt.Errorf("уборка: не удалены: %s", strings.Join(left, ", "))
 	}
+	return nil
 }
 
 func firstLine(s string) string {

@@ -7,7 +7,10 @@ package canary
 // не ПРОЙДЕН. Разбор ответов сервера — таблицами на подставных ответах.
 
 import (
+	"crypto/sha256"
+	"debug/buildinfo"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -127,7 +131,7 @@ func TestRefusesServerWithClients(t *testing.T) {
 	if !errors.Is(err, ErrStop) {
 		t.Fatalf("ожидался СТОП, получено %v", err)
 	}
-	if len(rs) != 1 || rs[0].ID != "П0" || rs[0].Status != Fail {
+	if len(rs) != 2 || rs[0].ID != "П2" || rs[1].ID != "П0" || rs[1].Status != Fail {
 		t.Fatalf("после П0 выполнялось ещё что-то: %+v", rs)
 	}
 	for _, c := range f.exec.Commands() {
@@ -164,7 +168,7 @@ func TestFakesrvIsNeverPass(t *testing.T) {
 			t.Errorf("шаг %s «пройден» на fakesrv, который его не моделирует", id)
 		}
 	}
-	for _, id := range []string{"К2.1", "К2.2", "К2.3", "К2.4", "К2.9", "К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
+	for _, id := range []string{"П2", "К2.1", "К2.2", "К2.3", "К2.4", "К2.9", "К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
 		found := false
 		for _, r := range rs {
 			if r.ID == id {
@@ -324,6 +328,10 @@ func serialCLI() int {
 	if err != nil {
 		return 97
 	}
+	// .norekey рядом — rekey «готово» без действия (TestK3RekeyMustChangeKey)
+	if _, err := os.Stat(self + ".norekey"); err == nil && len(os.Args) > 1 && os.Args[1] == "rekey" {
+		return 0
+	}
 	lock := self + ".lock"
 	for {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL, 0o600)
@@ -399,7 +407,7 @@ func TestTableMissingPeersPresentStops(t *testing.T) {
 			c.prep(f.exec)
 			f.env.NewBin = "не-вызывается"
 			rs, err := Run(f.env)
-			if !errors.Is(err, ErrStop) || len(rs) != 1 || rs[0].Status == Pass {
+			if !errors.Is(err, ErrStop) || len(rs) != 2 || rs[1].ID != "П0" || rs[1].Status == Pass {
 				t.Fatalf("ожидался СТОП на П0: err=%v, %+v", err, rs)
 			}
 			for _, cmd := range f.exec.Commands() {
@@ -491,40 +499,7 @@ func TestGateIncludesToolsAndTiming(t *testing.T) {
 		t.Run(broken, func(t *testing.T) {
 			f := emptyFake(t, false)
 			real := f.env.Remote
-			f.env.Remote = func(cmd string) (string, error) {
-				switch {
-				case strings.Contains(cmd, "ls -ld /run/lock"):
-					return "drwxrwxrwt 3 root root 60 Oct 1 /run/lock", nil
-				case strings.Contains(cmd, "busybox"):
-					return "BusyBox v1.36.1 (2023) multi-call binary.", nil
-				case strings.Contains(cmd, `timeout 50 sh -c true; echo "rc=$?"`):
-					return "rc=0", nil
-				case strings.Contains(cmd, "timeout --help"):
-					return "Usage: timeout", nil
-				case strings.Contains(cmd, "lslocks"):
-					return "rc=0\nCOMMAND PID TYPE PATH\n", nil
-				case strings.Contains(cmd, "echo DONE") && strings.Contains(cmd, "id "+TempUser):
-					return "DONE", nil
-				case strings.Contains(cmd, "canary-orig"):
-					return "DONE", nil
-				case strings.Contains(cmd, "for t in flock"):
-					if broken == "К2.5" {
-						return "MISSING flock\nDONE", nil
-					}
-					return "/usr/bin/flock\n/usr/bin/timeout\nDONE", nil
-				case strings.Contains(cmd, "for t in sha256sum"):
-					if broken == "К2.6" {
-						return "MISSING base64\nDONE", nil
-					}
-					return "/bin/sha256sum\nDONE", nil
-				case strings.Contains(cmd, "date +%s%N"):
-					if broken == "К2.9" {
-						return "12000000000", nil
-					}
-					return "100000000", nil
-				}
-				return real(cmd)
-			}
+			f.env.Remote = scriptedPre(real, broken)
 			f.env.NewBin = "не-вызывается"
 			rs, err := Run(f.env)
 			if err != nil {
@@ -646,5 +621,291 @@ func TestClassifyRace(t *testing.T) {
 	classifyRace(&st, 1, "")
 	if st.changed != 1 || st.busy != 1 || st.otherCount() != 4 {
 		t.Errorf("изменили=%d занято=%d иные=%d, ожидалось 1/1/4", st.changed, st.busy, st.otherCount())
+	}
+}
+
+// TestWgWrapperRealShell — раунд 4 (M1): обёртка wg исполняется настоящим
+// POSIX sh так же, как в контейнере (`sh -c '<команда>'`): syncconf → код 1
+// и настоящий wg НЕ вызывается; прочие подкоманды уходят настоящему wg с
+// аргументами как есть. В команде нет одинарных кавычек (она едет внутри
+// '…' на хосте). Без sh (Windows без Git) — тест падает, а не пропускается:
+// в CI (Linux) sh есть.
+func TestWgWrapperRealShell(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("sh не найден — обёртку проверить нечем: %v", err)
+	}
+	dir := t.TempDir()
+	p := filepath.ToSlash(filepath.Join(dir, "wg"))
+	log := filepath.ToSlash(filepath.Join(dir, "called"))
+	real := "#!/bin/sh\necho \"$@\" >> " + log + "\necho real-ok\n"
+	if err := os.WriteFile(p+".canary-orig", []byte(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := wgWrapper(p)
+	if strings.Contains(cmd, "'") {
+		t.Fatalf("в команде одинарная кавычка — сломает sh -c '…': %s", cmd)
+	}
+	if out, err := exec.Command(sh, "-c", cmd).CombinedOutput(); err != nil {
+		t.Fatalf("установка обёртки: %v %s", err, out)
+	}
+	if out, err := exec.Command(sh, p, "syncconf", "wg0", "/dev/null").CombinedOutput(); err == nil {
+		t.Errorf("syncconf прошёл через обёртку: %s", out)
+	}
+	if b, _ := os.ReadFile(log); len(b) != 0 {
+		t.Errorf("настоящий wg вызван на syncconf: %q", b)
+	}
+	out, err := exec.Command(sh, p, "show", "wg0", "dump").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "real-ok") {
+		t.Fatalf("wg show не дошёл до настоящего wg: %v %s", err, out)
+	}
+	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "show wg0 dump" {
+		t.Errorf("аргументы переданы не как есть: %q", b)
+	}
+}
+
+// scriptedPre — подставной сервер: все предусловия К2/П1 ПРОЙДЕН, кроме
+// broken ("" — ничего не сломано); прочее — настоящему fakesrv.
+func scriptedPre(real func(string) (string, error), broken string) func(string) (string, error) {
+	return func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "ls -ld /run/lock"):
+			return "drwxrwxrwt 3 root root 60 Oct 1 /run/lock", nil
+		case strings.Contains(cmd, "busybox"):
+			return "BusyBox v1.36.1 (2023) multi-call binary.", nil
+		case strings.Contains(cmd, `timeout 50 sh -c true; echo "rc=$?"`):
+			return "rc=0", nil
+		case strings.Contains(cmd, "timeout --help"):
+			return "Usage: timeout", nil
+		case strings.Contains(cmd, "lslocks"):
+			return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+		case strings.Contains(cmd, "echo DONE") && strings.Contains(cmd, "id "+TempUser):
+			return "DONE", nil
+		case strings.Contains(cmd, "canary-orig"):
+			return "DONE", nil
+		case strings.Contains(cmd, "for t in flock"):
+			if broken == "К2.5" {
+				return "MISSING flock\nDONE", nil
+			}
+			return "/usr/bin/flock\n/usr/bin/timeout\nDONE", nil
+		case strings.Contains(cmd, "for t in sha256sum"):
+			if broken == "К2.6" {
+				return "MISSING base64\nDONE", nil
+			}
+			return "/bin/sha256sum\nDONE", nil
+		case strings.Contains(cmd, "date +%s%N"):
+			if broken == "К2.9" {
+				return "12000000000", nil
+			}
+			return "100000000", nil
+		}
+		return real(cmd)
+	}
+}
+
+// TestRollbackModelOnFakesrv — раунд 4 (M1): МОДЕЛЬ шага PR4.1 на fakesrv.
+// Установка обёртки wg моделируется хуком FailSyncconf (syncconf падает,
+// рантайм не тронут — ровно то, что делает обёртка), возврат wg — снятием
+// хука. Всё остальное — настоящее: новая версия CLI по SSH, ядро,
+// restore, таблица исходов. Остаток PR4.4 (canary-perm) перед шагом есть —
+// шаг обязан его убрать.
+func TestRollbackModelOnFakesrv(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		install bool
+		want    Status
+		why     string
+	}{
+		{"обёртка действует: откат ядра, «изменения отменены»", true, Pass, "изменения отменены"},
+		{"обёртка не действует: запись проходит — НЕ ПРОЙДЕН", false, Fail, "добавление прошло"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := emptyFake(t, false)
+			f.env.NewBin = newCLI(t)
+			f.env.docker = "docker"
+			if r := f.env.cli(f.env.NewBin, f.env.KeyEnv, "add", "-name", "canary-perm"); r.code != 0 {
+				t.Fatalf("остаток PR4.4: %d %s", r.code, r.title)
+			}
+			real := f.env.Remote
+			restored := false
+			sum := func(path string) string {
+				b, _ := f.exec.File(path)
+				h := sha256.Sum256(b)
+				return hex.EncodeToString(h[:]) + "  " + path
+			}
+			f.env.Remote = func(cmd string) (string, error) {
+				switch {
+				case strings.HasSuffix(cmd, "sh -c 'command -v wg'"):
+					return "/usr/bin/wg\n", nil
+				case strings.HasSuffix(cmd, "sh -c 'mv /usr/bin/wg /usr/bin/wg.canary-orig'"):
+					return "", nil
+				case strings.Contains(cmd, "syncconf ] &&"):
+					if c.install {
+						f.exec.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
+					}
+					return "", nil
+				case strings.HasSuffix(cmd, "sh -c 'mv -f /usr/bin/wg.canary-orig /usr/bin/wg'"):
+					f.exec.FailSyncconf = nil
+					restored = true
+					return "", nil
+				case strings.Contains(cmd, "sha256sum "):
+					return sum("/opt/amnezia/awg/wg0.conf") + "\n" + sum("/opt/amnezia/awg/clientsTable") + "\n", nil
+				}
+				return real(cmd)
+			}
+			r := f.env.rollback()
+			if r.Status != c.want || !strings.Contains(r.Detail, c.why) {
+				t.Fatalf("PR4.1: %s — %s", r.Status, r.Detail)
+			}
+			if !restored {
+				t.Errorf("wg не возвращён")
+			}
+			m, err := f.env.names()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := m["canary-perm"]; ok {
+				t.Errorf("остаток PR4.4 не убран перед откатом")
+			}
+			if _, ok := m["canary-rb0"]; !ok {
+				t.Errorf("опорного canary-rb0 нет")
+			}
+			if _, ok := m["canary-rb"]; ok == c.install {
+				t.Errorf("canary-rb: есть=%v при действующей обёртке=%v", ok, c.install)
+			}
+		})
+	}
+}
+
+// TestJudgeBuildTable — П2 (раунд 4, M2): ПРОЙДЕН только при чистой сборке
+// -new той же ревизии, что канарейка, и тексте команды записи в -new.
+func TestJudgeBuildTable(t *testing.T) {
+	bi := func(rev, mod string) *debug.BuildInfo {
+		b := &debug.BuildInfo{}
+		if rev != "" {
+			b.Settings = append(b.Settings, debug.BuildSetting{Key: "vcs.revision", Value: rev})
+		}
+		if mod != "" {
+			b.Settings = append(b.Settings, debug.BuildSetting{Key: "vcs.modified", Value: mod})
+		}
+		return b
+	}
+	const script = "umask 077\nСКРИПТ"
+	bin := []byte("...." + script + "....")
+	for _, c := range []struct {
+		name string
+		ni   *debug.BuildInfo
+		si   *debug.BuildInfo
+		sok  bool
+		bin  []byte
+		want Status
+		why  string
+	}{
+		{"чисто, та же ревизия, текст есть", bi("abc", "false"), bi("abc", "false"), true, bin, Pass, "найден дословно"},
+		{"-new не прочитана", nil, bi("abc", "false"), true, bin, NotChecked, "не прочитаны"},
+		{"-new без ревизии", bi("", ""), bi("abc", "false"), true, bin, NotChecked, "неизвестна"},
+		{"-new из изменённого дерева", bi("abc", "true"), bi("abc", "false"), true, bin, NotChecked, "ИЗМЕНЁННОГО"},
+		{"канарейка без сведений", bi("abc", "false"), nil, false, bin, NotChecked, "ревизия канарейки"},
+		{"канарейка из изменённого дерева", bi("abc", "false"), bi("abc", "true"), true, bin, NotChecked, "ревизия канарейки"},
+		{"разные ревизии", bi("abc", "false"), bi("def", "false"), true, bin, NotChecked, "РАЗНЫХ"},
+		{"текста команды в -new нет", bi("abc", "false"), bi("abc", "false"), true, []byte("umask 077"), NotChecked, "не найден"},
+	} {
+		r := judgeBuild(c.ni, nil, c.si, c.sok, c.bin, script)
+		if r.Status != c.want || !strings.Contains(r.Detail, c.why) || !strings.Contains(r.Detail, "sha256(CASWriteScript") {
+			t.Errorf("%s: %s — %s", c.name, r.Status, r.Detail)
+		}
+	}
+}
+
+// TestBuildCheckRealBinary — П2 доездом: сведения читаются из настоящей
+// сборки cmd/cli, текст core.CASWriteScript в ней находится дословно.
+// Чистое дерево — ПРОЙДЕН; изменённое — НЕ ПРОВЕРЕНО (оба исхода — по факту
+// сборки, а не присваиванием).
+func TestBuildCheckRealBinary(t *testing.T) {
+	bin := newCLI(t)
+	ni, err := buildinfo.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, mod := vcsOf(ni)
+	if rev == "" || mod == "" {
+		t.Fatalf("сборка без vcs.revision/vcs.modified: %q %q", rev, mod)
+	}
+	e := &Env{NewBin: bin, SelfBuild: func() (*debug.BuildInfo, bool) { return ni, true }}
+	r := e.buildCheck()
+	switch mod {
+	case "false":
+		if r.Status != Pass {
+			t.Errorf("чистая сборка: %s — %s", r.Status, r.Detail)
+		}
+	default:
+		if r.Status != NotChecked || !strings.Contains(r.Detail, "ИЗМЕНЁННОГО") {
+			t.Errorf("изменённое дерево: %s — %s", r.Status, r.Detail)
+		}
+	}
+	// чужой бинарь (тестовый) — текста команды записи в нём... есть (core
+	// импортирован), поэтому различение по ревизии: канарейка «другая».
+	e.SelfBuild = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "0000"}, {Key: "vcs.modified", Value: "false"}}}, true
+	}
+	if r := e.buildCheck(); r.Status == Pass {
+		t.Errorf("разные ревизии дали ПРОЙДЕН: %s", r.Detail)
+	}
+}
+
+// TestCleanupFailureInSummary — раунд 4 (L2): неубранные canary-* — шаг «У»
+// НЕ ПРОЙДЕН, а не строка в журнале. Доезд через Run: шлюз открыт
+// (подставные предусловия), после П0 на сервер добавлен canary-left, затем
+// замок «занят» — удалить его нельзя.
+func TestCleanupFailureInSummary(t *testing.T) {
+	f := emptyFake(t, false)
+	cli := newCLI(t)
+	real := f.env.Remote
+	pre := scriptedPre(real, "")
+	planted := false
+	f.env.Remote = func(cmd string) (string, error) {
+		if !planted && strings.Contains(cmd, "lslocks") {
+			planted = true
+			if r := f.env.cli(cli, f.env.KeyEnv, "add", "-name", "canary-left"); r.code != 0 {
+				t.Errorf("canary-left: %d %s", r.code, r.title)
+			}
+			f.exec.LockBusy = true
+		}
+		return pre(cmd)
+	}
+	f.env.NewBin = fakeCLI(t, "fakecli-fail")
+	f.env.RaceRounds = 1
+	rs, err := Run(f.env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var u *Result
+	for i := range rs {
+		if rs[i].ID == "У" {
+			u = &rs[i]
+		}
+	}
+	if u == nil || u.Status != Fail || !strings.Contains(u.Detail, "canary-left") {
+		t.Fatalf("уборка: %+v", u)
+	}
+	if st, _ := Summary(rs, nil); st != Fail {
+		t.Errorf("итог при неубранных canary-*: %s", st)
+	}
+}
+
+// TestK3RekeyMustChangeKey — раунд 4 (L1): «перевыпуск», не сменивший ключ,
+// — НЕ ПРОЙДЕН. Новая версия подменена обёрткой, которая на rekey отвечает
+// «готово», ничего не делая; прочее — настоящей программе.
+func TestK3RekeyMustChangeKey(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = serialFake(t, newCLI(t))
+	if err := os.WriteFile(f.env.NewBin+".norekey", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env.docker = "docker"
+	f.env.Ask = func(string) Answer { return AnswerYes }
+	r := f.env.k3()
+	if r.Status != Fail || !strings.Contains(r.Detail, "перевыпустить") {
+		t.Fatalf("К3 при пустом перевыпуске: %s — %s", r.Status, r.Detail)
 	}
 }
