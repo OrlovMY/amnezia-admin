@@ -483,10 +483,16 @@ func TestParsePeerStats(t *testing.T) {
 	now := time.Now().Unix()
 	dump := "serverpriv\tserverpub\t51820\toff\n" +
 		"peer1pub\t(none)\t1.2.3.4:12345\t10.8.1.2/32\t" + strconv.FormatInt(now, 10) + "\t1000\t2000\toff\n" +
-		"peer2pub\t(none)\t(none)\t10.8.1.3/32\t0\t0\t0\toff\n" +
-		"garbage line with too few fields\n"
+		"peer2pub\t(none)\t(none)\t10.8.1.3/32\t0\t0\t0\toff\n"
+	// Строка «garbage line with too few fields» отсюда УБРАНА (A1б): прежде
+	// тест закреплял, что непонятая строка молча пропускается, то есть что
+	// peer из неё становится «нет в статистике». Теперь непонятый ответ —
+	// ошибка; это проверяет core/a1b_test.go.
 
-	stats := parsePeerStats(dump)
+	stats, err := parsePeerStats(dump)
+	if err != nil {
+		t.Fatalf("parsePeerStats: %v", err)
+	}
 	if len(stats) != 2 {
 		t.Fatalf("stats len = %d, want 2", len(stats))
 	}

@@ -438,14 +438,15 @@ var rowFieldSource = map[string]string{
 	// оставляла оба пакета зелёными, а на экране у отключённого клиента в
 	// «Активности» показалось бы и скопировалось рукопожатие, и имя
 	// перестало бы быть курсивом.
-	"Disabled":       "cl.Disabled()",
-	"CanManage":      "u.canManage",
-	"ActivityFailed": "u.activityFailed",
-	"Handshake":      "u.handshakes[cl.ClientID]",
-	// Traffic — задание НЕЗНАНИЕ-ТРАФИК: прежняя пара StatsFailed/Stats
+	"Disabled":  "cl.Disabled()",
+	"CanManage": "u.canManage",
+	// Peer — задание НЕЗНАНИЕ-ТРАФИК: прежняя пара StatsFailed/Stats
 	// (`u.peerStats[cl.ClientID]`) отдавала отсутствующего в ответе
 	// клиента нулём. Признак отказа едет внутрь ReadPeer вторым аргументом.
-	"Traffic":  "core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID)",
+	// A1б: то же показание питает и колонку «Активность» — прежние поля
+	// ActivityFailed/Handshake (`u.handshakes[cl.ClientID]`, пустая строка
+	// = «нет в ответе» по договорённости) убраны из Row вовсе.
+	"Peer":     "core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID)",
 	"ClientID": "cl.ClientID",
 }
 
@@ -544,8 +545,15 @@ func TestCellTextComesFromRowFor(t *testing.T) {
 // бы поле, в которое никто не пишет.
 func TestRefreshFeedsTheFailureFlags(t *testing.T) {
 	body := guiBody(t, "refresh")
+	// A1б: обе колонки таблицы — одно показание одного `wg show`. Второй
+	// запрос (GetHandshakes) в refresh() вернул бы строку таблицы, собранную
+	// из двух разных ответов сервера, и договорённость «пустая строка = нет
+	// в ответе» вместо типа.
+	if strings.Contains(body, "GetHandshakes(") {
+		t.Errorf("refresh(): снова вызывается GetHandshakes — колонка «Активность» читается " +
+			"из второго запроса `wg show`, а не из того же показания, что трафик")
+	}
 	for _, want := range []string{
-		"u.activityFailed = hsErr != nil",
 		"u.statsFailed = statsErr != nil",
 	} {
 		if !strings.Contains(body, want) {

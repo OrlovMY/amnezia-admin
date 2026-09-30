@@ -36,18 +36,21 @@ type ui struct {
 	containers []core.Container
 	cur        *core.Container
 
-	clients    []core.ClientEntry
-	handshakes map[string]string
-	peerStats  map[string]core.PeerStat
+	clients   []core.ClientEntry
+	peerStats map[string]core.PeerStat
 
-	// activityFailed, statsFailed — ТРЕТЬЕ СОСТОЯНИЕ колонок «Активность» и
-	// «Трафик» (задание A1, место № 2): последний запрос `wg show` за этими
-	// данными не удался. Без отдельных признаков пустая карта неотличима от
-	// «у всех клиентов ноль», и человек читает «0 B / 0 B» как измеренную
-	// величину. Обновляются там же, где handshakes/peerStats, — то есть при
-	// ошибке чтения списка остаются от прошлого чтения, как и сами данные.
-	activityFailed bool
-	statsFailed    bool
+	// statsFailed — ТРЕТЬЕ СОСТОЯНИЕ колонок «Активность» и «Трафик»
+	// (задание A1, место № 2): последний запрос `wg show` не удался. Без
+	// отдельного признака пустая карта неотличима от «у всех клиентов
+	// ноль», и человек читает «0 B / 0 B» как измеренную величину.
+	// Обновляется там же, где peerStats, — то есть при ошибке чтения списка
+	// остаётся от прошлого чтения, как и сами данные.
+	//
+	// A1б: прежде рядом жили handshakes map[string]string и activityFailed —
+	// колонка «Активность» читалась из ВТОРОГО запроса `wg show`
+	// (GetHandshakes), «нет в ответе» было договорённостью о пустой строке.
+	// Теперь обе колонки — одно показание core.ReadPeer из peerStats.
+	statsFailed bool
 
 	table       *clientTable
 	status      *widget.Label
@@ -569,7 +572,14 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 // Настоящие метки серверов зашифрованы и неизвестны до ввода пина, поэтому
 // в списке показываются только порядковые "Сервер N" (порядок — по имени файла).
 func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyne.CanvasObject {
-	vaults := core.ListVaults(core.DefaultVaultDir())
+	vaults, listErr := core.ListVaults(core.DefaultVaultDir())
+	if listErr != nil {
+		// A1б, признак 2: прежде отказ чтения каталога давал пустой список,
+		// и экран выглядел так, будто сохранённых ключей нет вовсе.
+		l := widget.NewLabel(guiview.VaultListUnreadable(listErr))
+		l.Wrapping = fyne.TextWrapWord
+		return l
+	}
 	if len(vaults) == 0 {
 		return nil
 	}
@@ -1272,8 +1282,9 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 				HostKeyFingerprint: hostKeyFingerprint,
 			}
 			data, err := core.SealVault(pin, payload, core.ProdArgonParams, machineBind)
+			var savedPath string
 			if err == nil {
-				_, err = core.SaveVault(core.DefaultVaultDir(), data)
+				savedPath, err = core.SaveVault(core.DefaultVaultDir(), data)
 			}
 			fyne.Do(func() {
 				busy = false
@@ -1283,9 +1294,13 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 					return
 				}
 				d.Hide()
-				n := len(core.ListVaults(core.DefaultVaultDir()))
+				// Номер — позиция ИМЕННО ЭТОГО файла в списке, под которой он
+				// будет виден на экране подключения, а не число файлов (A1б,
+				// признак 2): имена случайные, и новый файл встаёт в любое
+				// место списка.
+				vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 				if u.status != nil {
-					u.status.SetText(fmt.Sprintf("Ключ сохранён (Сервер %d).", n))
+					u.status.SetText(guiview.SavedKeyStatus(vaults, listErr, savedPath))
 				}
 			})
 		})
@@ -1417,8 +1432,14 @@ func sortDirFromName(s string) core.SortDir {
 	return core.Asc
 }
 
+// uiStateDir — каталог ui.json. В бою — каталог хранилищ рядом с exe; тесты
+// пакета подменяют его своим временным каталогом (TestMain), чтобы ui.json
+// не ложился в общий каталог рядом с тестовым бинарником и порядок
+// прогона ни на что не влиял (ревью QA-01 A1б).
+var uiStateDir = core.DefaultVaultDir
+
 func uiStatePath() string {
-	return uiStatePathIn(core.DefaultVaultDir())
+	return uiStatePathIn(uiStateDir())
 }
 
 // uiStatePathIn — то же имя файла, но в заданном каталоге: чтобы запись и
@@ -1461,7 +1482,7 @@ func saveSortState(primary core.SortColumn, primaryDir core.SortDir, secondary c
 		Secondary:    sortColumnNames[secondary],
 		SecondaryDir: sortDirName(secondaryDir),
 	}
-	saveSortStateTo(core.DefaultVaultDir(), st)
+	saveSortStateTo(uiStateDir(), st)
 }
 
 // saveSortStateTo вынесена из saveSortState с явным каталогом ровно затем,
@@ -1941,15 +1962,13 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 	}
 	cl := u.clients[row]
 	return guiview.Row{
-		Num:            row + 1,
-		Name:           cl.Name(),
-		Created:        cl.Created(),
-		ClientID:       cl.ClientID,
-		Disabled:       cl.Disabled(),
-		CanManage:      u.canManage,
-		ActivityFailed: u.activityFailed,
-		Handshake:      u.handshakes[cl.ClientID],
-		Traffic:        core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID),
+		Num:       row + 1,
+		Name:      cl.Name(),
+		Created:   cl.Created(),
+		ClientID:  cl.ClientID,
+		Disabled:  cl.Disabled(),
+		CanManage: u.canManage,
+		Peer:      core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID),
 	}, true
 }
 
@@ -2176,15 +2195,17 @@ func (u *ui) refresh() {
 		clients, existed, err := u.sess.LoadClientsView(cur)
 		view := guiview.ViewState(*cur, clients, existed, err)
 
-		// Ошибки обоих запросов статистики НЕ ОТБРАСЫВАЮТСЯ (A1, место № 2):
+		// Ошибка запроса статистики НЕ ОТБРАСЫВАЕТСЯ (A1, место № 2):
 		// прежде `if s, statErr := …; statErr == nil { stats = s }` не имел
 		// ветви на ошибку, stats оставалась пустой картой, и ниже она
 		// читалась как измеренный нуль трафика.
-		var hs map[string]string
-		var hsErr, statsErr error
+		//
+		// ОДИН запрос на обе колонки (A1б): прежде «Активность» бралась из
+		// отдельного GetHandshakes, и строка таблицы сочетала два ответа
+		// сервера — время из одного, трафик и порядок сортировки из другого.
+		var statsErr error
 		stats := map[string]core.PeerStat{}
 		if view.LoadStats {
-			hs, hsErr = u.sess.GetHandshakes(cur)
 			if s, peerErr := u.sess.GetPeerStats(cur); peerErr != nil {
 				statsErr = peerErr
 			} else {
@@ -2221,9 +2242,7 @@ func (u *ui) refresh() {
 				return
 			}
 			u.clients = clients
-			u.handshakes = hs
 			u.peerStats = stats
-			u.activityFailed = hsErr != nil
 			u.statsFailed = statsErr != nil
 			// применяем текущую (сохранённую/выбранную кликом по заголовку)
 			// сортировку — переключение протокола не должно сбрасывать её на дефолт

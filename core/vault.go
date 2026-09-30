@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -487,11 +488,27 @@ func DefaultVaultDir() string {
 	return filepath.Join(filepath.Dir(exe), "Настройки")
 }
 
-// ListVaults возвращает пути к файлам *.avlt в каталоге, отсортированные по имени
-func ListVaults(dir string) []string {
+// ListVaults возвращает пути к файлам *.avlt в каталоге, отсортированные по имени.
+//
+// ТРИ ИСХОДА (A1б, признак 2). «Каталога нет» — сохранённых ключей нет,
+// это штатно (nil, nil). «Каталог есть, а прочитать его не удалось» (нет
+// прав, по этому пути лежит файл) — ошибка: прежде она превращалась в nil,
+// экран подключения показывался так, будто сохранённых ключей нет вовсе,
+// а подпись «Ключ сохранён (Сервер N)» получала N = 0.
+func ListVaults(dir string) ([]string, error) {
+	fi, statErr := os.Stat(dir)
+	if errors.Is(statErr, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if statErr != nil {
+		return nil, fmt.Errorf("каталог сохранённых ключей %s: %w", dir, statErr)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("каталог сохранённых ключей %s: по этому пути лежит файл, а не каталог", dir)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("каталог сохранённых ключей %s: %w", dir, err)
 	}
 	var out []string
 	for _, e := range entries {
@@ -503,7 +520,7 @@ func ListVaults(dir string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // SaveVault сохраняет данные под случайным именем (8 hex-символов + .avlt)

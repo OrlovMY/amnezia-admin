@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -22,6 +23,11 @@ import (
 // проверить без виджетов, вынесена в internal/guiview и проверена там.
 
 const testKey = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/aBcD1="
+
+// testSeen — последнее рукопожатие testKey. A1б: колонка «Активность»
+// читается из того же показания, что и трафик (u.peerStats), а не из
+// отдельной карты строк u.handshakes.
+var testSeen = time.Date(2026, 9, 22, 12, 30, 0, 0, time.Local)
 
 // Дословные ожидания подписей и подтверждений. НАБРАНЫ ЗДЕСЬ РУКАМИ, а не
 // взяты из guiview (ревью QA-01): иначе переименование константы в продукте
@@ -44,10 +50,9 @@ func testUI(t *testing.T) *ui {
 				"clientName": "Ноутбук", "creationDate": "2026-09-22T12:34:56.789Z",
 			}},
 		},
-		handshakes: map[string]string{testKey: "2 минуты назад"},
-		peerStats:  map[string]core.PeerStat{testKey: {RxBytes: 1200000, TxBytes: 900000}},
-		canManage:  true,
-		status:     widget.NewLabel(""),
+		peerStats: map[string]core.PeerStat{testKey: {LastHandshake: testSeen, RxBytes: 1200000, TxBytes: 900000}},
+		canManage: true,
+		status:    widget.NewLabel(""),
 	}
 	t.Cleanup(func() { u.win.Close() })
 	u.buildTable()
@@ -85,7 +90,7 @@ func TestCellMenuCopiesValueAndRow(t *testing.T) {
 	}
 
 	m.Items[1].Action()
-	wantRow := "Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2 минуты назад | " +
+	wantRow := "Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2026-09-22 12:30 | " +
 		"Трафик ↓/↑: 1.2 MB / 900.0 KB | Ключ: " + testKey
 	if got := fyne.CurrentApp().Clipboard().Content(); got != wantRow {
 		t.Errorf("«Копировать строку» положило в буфер\n%q\nожидалось\n%q", got, wantRow)

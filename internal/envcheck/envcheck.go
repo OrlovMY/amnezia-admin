@@ -57,8 +57,20 @@ const (
 	// тоже. Редакция ожидает подтверждения UI-01 (см. .ask, п. 1).
 	textMaybeMissingLibs = "Графический интерфейс, скорее всего, запустится, но может и не открыться: не видно библиотек — %s. Установите их, так надёжнее: Debian/Ubuntu — `%s`; Fedora — `%s`."
 	textNoGUIPlatform    = "Графической версии для этой системы нет. Пользуйтесь консольной версией — она работает везде."
-	textSSHSession       = "Это нормально, если вы работаете по SSH: графическую версию запускают на своём компьютере."
-	textUnknown          = "определить не удалось"
+	// textMissingLibsLibcUnknown — не хватает жёсткой зависимости, а какая в
+	// системе библиотека C, определить не удалось (A1б, долг A1-II). Совет
+	// textMissingLibs называет пакеты Debian/Fedora, то есть утверждает, что
+	// система на glibc; на Alpine (musl) их установка бесполезна — там
+	// графическая версия не запустится вовсе. «Не знаем, какая система» не
+	// имеет права звучать как «Debian». Редакция UI-01 (РЕВЬЮ-A1Б-UX.md, Р1).
+	textMissingLibsLibcUnknown = "Графический интерфейс не запустится: не хватает библиотек — %s. Какая у вас система, определить не удалось, поэтому совет зависит от неё (узнать: `cat /etc/os-release`). Alpine — графическая версия там не работает вовсе, установка библиотек не поможет; пользуйтесь консольной. Debian или Ubuntu — установите `%s`; Fedora — `%s`; затем выполните проверку ещё раз."
+	textSSHSession             = "Это нормально, если вы работаете по SSH: графическую версию запускают на своём компьютере."
+	textUnknown                = "определить не удалось"
+
+	// textWillRunNonLinux — итог для Windows и macOS, где проверять нечего
+	// (A1б, Р2). Прежде здесь стояло textWillRun — обещание запуска без
+	// единой проверки.
+	textWillRunNonLinux = "Для Windows и macOS проверять нечего: графической версии не нужны дополнительные библиотеки, она должна запуститься. Если не откроется — пользуйтесь консольной версией."
 )
 
 // Классы графических библиотек.
@@ -551,7 +563,10 @@ func verdict(r Result) string {
 		return textNoGUIPlatform
 	}
 	if r.GOOS != "linux" {
-		return textWillRun
+		// A1б, Р2 (У4): на Windows и macOS проверять нечего — и «запустится»
+		// без проверки было бы обещанием. Текст говорит, что проверки не
+		// было и что делать, если не откроется (редакция UI-01).
+		return textWillRunNonLinux
 	}
 	if r.Libc.Kind == "musl" {
 		return textMusl
@@ -573,7 +588,15 @@ func verdict(r Result) string {
 	if r.Graph.Known && len(r.Graph.MissingHard) > 0 {
 		// Жёсткая зависимость: без неё динамический компоновщик убьёт
 		// процесс до первой строки Go-кода.
-		return fmt.Sprintf(textMissingLibs,
+		//
+		// Какие пакеты советовать, зависит от библиотеки C: имена
+		// Debian/Fedora верны только для glibc. Неопознанная libc — третье
+		// состояние, а не «glibc по умолчанию» (A1б, признак 1).
+		tmpl := textMissingLibs
+		if r.Libc.Kind == "" {
+			tmpl = textMissingLibsLibcUnknown
+		}
+		return fmt.Sprintf(tmpl,
 			strings.Join(r.Graph.MissingHard, ", "),
 			packagesFor(r.Graph.MissingHard, false),
 			packagesFor(r.Graph.MissingHard, true))

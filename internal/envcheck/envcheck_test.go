@@ -464,8 +464,8 @@ func TestGUITargets(t *testing.T) {
 // нет — обещать её нельзя.
 func TestNonLinuxVerdict(t *testing.T) {
 	cases := []struct{ goos, goarch, want string }{
-		{"windows", "amd64", textWillRun},
-		{"darwin", "arm64", textWillRun},
+		{"windows", "amd64", textWillRunNonLinux},
+		{"darwin", "arm64", textWillRunNonLinux},
 		{"darwin", "amd64", textNoGUIPlatform},
 	}
 	for _, c := range cases {
@@ -600,17 +600,28 @@ func TestUnknownLibcBeatsMaybeMissingLibsArrives(t *testing.T) {
 // покрыт ни одним тестом ни в какую сторону. Если A1б выберет исход (в) из
 // `.ask` (не печатать имена пакетов, когда libc неизвестна), этот случай
 // придётся обновить — и это к лучшему: изменение станет видимым.
+//
+// A1б ОБНОВИЛ ЕГО (долг A1-II). Приговор «не запустится» остался выше
+// незнания, как и требует этот сторож; поменялся СОВЕТ: при неопознанной
+// libc он больше не утверждает Debian/Fedora, а называет развилку «Alpine —
+// не поможет; иначе — пакеты». Второй случай таблицы теперь и есть тест
+// различения: «libc неизвестна» ≠ «libc — glibc».
 func TestMissingHardBeatsUnknownLibc(t *testing.T) {
 	const missingGL = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
 		"Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
 		"После установки выполните проверку ещё раз."
+	const missingGLLibcUnknown = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
+		"Какая у вас система, определить не удалось, поэтому совет зависит от неё (узнать: `cat /etc/os-release`). " +
+		"Alpine — графическая версия там не работает вовсе, установка библиотек не поможет; пользуйтесь консольной. " +
+		"Debian или Ubuntu — установите `libgl1`; Fedora — `mesa-libGL`; затем выполните проверку ещё раз."
 	cases := []struct {
 		name string
 		libc Libc
 		want string
 	}{
 		{"библиотека C известна", Libc{Kind: "glibc", Version: "2.36"}, missingGL},
-		{"библиотеку C определить не удалось", Libc{}, missingGL},
+		{"glibc без разобранной версии — всё равно glibc", Libc{Kind: "glibc", Version: "x"}, missingGL},
+		{"библиотеку C определить не удалось", Libc{}, missingGLLibcUnknown},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -748,7 +759,7 @@ func TestReportGolden(t *testing.T) {
 			"Проверка компьютера\n" +
 				"ОС: Windows\n" +
 				"Архитектура: amd64\n" +
-				"Графический интерфейс запустится.\n",
+				"Для Windows и macOS проверять нечего: графической версии не нужны дополнительные библиотеки, она должна запуститься. Если не откроется — пользуйтесь консольной версией.\n",
 		},
 		{
 			"е) Linux, под который GUI не собирается (linux/arm64)",

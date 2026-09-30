@@ -31,7 +31,7 @@ const CreatedCellRunes = 19
 // табуляция: строка вставляется в переписку и в заметку, где табуляция либо
 // съедается, либо превращается в невидимый прыжок. Пример дословно:
 //
-//	Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2 минуты назад | Трафик ↓/↑: 1.2 MB / 900.0 KB | Ключ: aBcD…=
+//	Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2026-09-22 12:30 | Трафик ↓/↑: 1.2 MB / 900.0 KB | Ключ: aBcD…=
 //
 // ДВА РЕШЕНИЯ ПО СОСТАВУ (ревью UX-01, второй круг):
 //   - НОМЕРА СТРОКИ В НЕЙ НЕТ. Он презентационный: зависит от сортировки и к
@@ -75,17 +75,17 @@ type Row struct {
 	Disabled bool
 	// CanManage — управляемый протокол: статистика вообще запрашивалась.
 	CanManage bool
-	// ActivityFailed — запрос активности был и НЕ УДАЛСЯ.
-	ActivityFailed bool
-	// Handshake — значение активности из ответа сервера ("" — ключа в
-	// ответе нет).
-	Handshake string
-	// Traffic — показание трафика: измерено / клиента нет в ответе /
-	// запрос не удался (core.ReadPeer). Прежде здесь стояли два поля —
-	// StatsFailed bool и Stats core.PeerStat, — и отсутствующий в ответе
-	// клиент приезжал нулевой Stats при StatsFailed=false, то есть
-	// измеренным нулём (задание НЕЗНАНИЕ-ТРАФИК).
-	Traffic core.PeerReading
+	// (A1б) Поля ActivityFailed и Handshake УБРАНЫ: «нет в ответе» было в
+	// них договорённостью о пустой строке, а данные — вторым запросом `wg
+	// show`. Обе колонки теперь читают Peer.
+	//
+	// Peer — показание клиента из ОДНОГО ответа `wg show` для колонок
+	// «Активность» и «Трафик»: измерено / клиента нет в ответе / запрос не
+	// удался (core.ReadPeer). Прежде трафик стоял парой полей StatsFailed
+	// bool и Stats core.PeerStat, и отсутствующий в ответе клиент приезжал
+	// нулевой Stats при StatsFailed=false, то есть измеренным нулём
+	// (задание НЕЗНАНИЕ-ТРАФИК).
+	Peer core.PeerReading
 }
 
 // CellText — текст ячейки (row, col) таблицы пользователей, ровно тот, что
@@ -102,9 +102,9 @@ func CellText(r Row, col int) string {
 		}
 		return r.Created
 	case 3:
-		return ActivityText(r.CanManage, r.ActivityFailed, r.Disabled, r.Handshake)
+		return ActivityText(r.CanManage, r.Disabled, r.Peer)
 	case 4:
-		return TrafficText(r.CanManage, r.Disabled, r.Traffic)
+		return TrafficText(r.CanManage, r.Disabled, r.Peer)
 	case 5:
 		return r.ClientID
 	}
