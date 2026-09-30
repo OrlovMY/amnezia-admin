@@ -18,8 +18,10 @@ package core
 //     (disable его убирает), поэтому без этого источника резерв невидим.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // hostIP достаёт хост-адрес без маски из строки вида "10.8.1.5/32" или
@@ -124,8 +126,10 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 		used[n] = true
 	}
 	if subnet == "" {
-		subnet = "10.8.1"
-		used[1] = true
+		// Долг У3 (30.09.2026): прежде здесь подставлялась 10.8.1 — наугад.
+		// Клиент с адресом не из подсети сервера не подключится, а человек
+		// уверен, что доступ выдан.
+		return "", ErrNoSubnet
 	}
 	next := 2
 	for used[next] {
@@ -135,4 +139,26 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 		return "", fmt.Errorf("свободных адресов в подсети %s.0/24 не осталось", subnet)
 	}
 	return fmt.Sprintf("%s.%d", subnet, next), nil
+}
+
+// ErrNoSubnet — в wg0.conf нет Address (и подсеть не видна ни по одному
+// peer'у): выдавать адрес наугад нельзя (долг У3).
+var ErrNoSubnet = errors.New("В wg0.conf сервера не указан Address — подсеть клиентов. " +
+	"Угадывать её нельзя: клиент с неверным адресом не подключится. Ничего не изменено. " +
+	"Проверьте сервер в приложении Amnezia.")
+
+// ErrNoListenPort — в wg0.conf нет ListenPort (долг У2). Amnezia пишет его
+// всегда, поэтому пустое значение — признак неизвестного состояния
+// сервера, а не повод подставить 51820.
+var ErrNoListenPort = errors.New("В wg0.conf сервера не указан ListenPort — порт, к которому подключаются клиенты. " +
+	"Угадывать его нельзя: клиент с неверным портом не подключится. Ничего не изменено. " +
+	"Проверьте сервер в приложении Amnezia.")
+
+// serverListenPort — порт сервера для конфига клиента; нет его — отказ.
+func serverListenPort(conf *wgConf) (string, error) {
+	p := strings.TrimSpace(conf.iface["ListenPort"])
+	if p == "" {
+		return "", ErrNoListenPort
+	}
+	return p, nil
 }

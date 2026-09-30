@@ -1011,9 +1011,9 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
+	listenPort, err := serverListenPort(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// allocateIP (Г1, core/ipalloc.go) — резерв отключённых учитывается через
@@ -1159,9 +1159,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	if err != nil {
 		return nil, err
 	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
+	listenPort, err := serverListenPort(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// IP всегда берётся из уже существующего блока peer'а (Г3) — ветка

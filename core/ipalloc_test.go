@@ -10,20 +10,20 @@ package core
 // которая гоняет тот же путь через Session/fakesrv.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestAllocateIPSkipsInterfaceAndPeers(t *testing.T) {
-	t.Run("пустой конфиг — 10.8.1.2", func(t *testing.T) {
+	// Долг У3 (30.09.2026): прежде здесь ожидалось 10.8.1.2 — тест
+	// закреплял угаданную подсеть. Теперь пустой конфиг — отказ.
+	t.Run("пустой конфиг — отказ, подсеть не угадывается", func(t *testing.T) {
 		conf := parseWgConf("")
 		ip, err := allocateIP(conf, nil)
-		if err != nil {
-			t.Fatalf("allocateIP: %v", err)
-		}
-		if ip != "10.8.1.2" {
-			t.Errorf("ip = %q, want 10.8.1.2", ip)
+		if !errors.Is(err, ErrNoSubnet) {
+			t.Fatalf("allocateIP на пустом конфиге = %q, err=%v — подсеть угадана", ip, err)
 		}
 	})
 
