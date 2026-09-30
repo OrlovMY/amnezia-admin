@@ -42,6 +42,10 @@ func TestClassifyDistinguishes(t *testing.T) {
 		{"нет утилиты", wrapped(core.ErrServerToolMissing), ToolMissing},
 		{"замок не открыт", wrapped(core.ErrLockUnavailable, core.ErrServerToolMissing), LockUnavailable},
 		{"запись не начиналась", wrapped(core.ErrWriteNotStarted), NotStarted},
+		{"sudo не разрешил docker", wrapped(core.ErrSudoDenied), SudoDenied},
+		// «выше общих случаев» (SEC-01 У1): вместе с общими признаками — всё равно отказ sudo
+		{"sudo не разрешил docker + неизвестно", wrapped(core.ErrSudoDenied, core.ErrWriteUnknown), SudoDenied},
+		{"sudo не разрешил docker + не начиналась", wrapped(core.ErrSudoDenied, core.ErrWriteNotStarted), SudoDenied},
 		{"неизвестно", wrapped(core.ErrWriteUnknown), Unknown},
 		{"частично", wrapped(core.ErrWritePartial, core.ErrWriteUnknown), Partial},
 		{"откат не тронул чужое", fmt.Errorf("x: %w", core.ErrRollbackForeign), RollbackForeign},
@@ -70,6 +74,7 @@ func TestTextsGolden(t *testing.T) {
 		Busy:                  {"Не записано: сервер занят", "Сервер сейчас выполняет другую запись — возможно, из другой копии этой программы. Ничего не записано.", "Повторите через минуту."},
 		ToolMissing:           {"Не записано: на сервере не хватает программы", "На сервере не установлена программа, без которой запись невозможна (её название — в подробностях). Ничего не записано.", "Передайте подробности ниже тому, кто настраивал сервер; после её установки повторите."},
 		LockUnavailable:       {"Не записано: сервер не дал начать запись", "Перед записью программа ставит на сервере отметку «идёт запись», чтобы две программы не писали одновременно. Поставить её не удалось. Ничего не записано.", "Передайте подробности ниже тому, кто настраивал сервер (для него: каталог /run/lock должен существовать). После исправления повторите."},
+		SudoDenied:            {"Не записано: sudo не разрешил запуск docker", "Программа входит на сервер под пользователем, которому docker доступен только через sudo, а sudo запустить docker не разрешил. Ничего не записано. Повтор не поможет, пока на сервере не поправят настройку sudo.", "Для того, кто настраивал сервер: нужна строка sudoers вида «<пользователь> ALL=(root) NOPASSWD: /usr/bin/docker». Передайте подробности ниже тому, кто настраивал сервер."},
 		NotStarted:            {"Не записано: не удалось подготовить запись", "Программа не смогла подготовить запись (например, сделать резервную копию на сервере). Ничего не записано.", "Повторите; если снова не получится — передайте подробности ниже тому, кто настраивал сервер."},
 		Unknown:               {"Неизвестно, записаны ли изменения", "Сервер не подтвердил ни запись, ни отказ: изменения могли записаться, а могли и нет.", "Не повторяйте сразу: обновите список и проверьте, что на сервере. Если не совпадает с тем, что вы делали, — передайте подробности ниже тому, кто настраивал сервер."},
 		Partial:               {"Записано частично", "Настройки WireGuard (wg0.conf) записаны, а список пользователей (clientsTable) — нет.", "Не повторяйте. " + hand},
@@ -95,7 +100,7 @@ func TestTextsGolden(t *testing.T) {
 // TestUnknownNeverClaimed — правило CLAUDE.md: «Ничего не записано» и
 // заголовок «Не записано» — РОВНО там, где запись точно не шла.
 func TestUnknownNeverClaimed(t *testing.T) {
-	nothingWritten := map[Kind]bool{Changed: true, Busy: true, ToolMissing: true, LockUnavailable: true, NotStarted: true}
+	nothingWritten := map[Kind]bool{Changed: true, Busy: true, ToolMissing: true, LockUnavailable: true, NotStarted: true, SudoDenied: true}
 	for k, tx := range texts {
 		says := strings.Contains(tx.What, "Ничего не записано") || strings.HasPrefix(tx.Title, "Не записано")
 		if says != nothingWritten[k] {
