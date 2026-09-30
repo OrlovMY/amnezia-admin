@@ -42,6 +42,10 @@ const (
 	// состояния; «не проверено» и «файлы не совпали» — отдельно.
 	RollbackUnverified
 	RolledBackFilesDiffer
+	// SudoDenied — H1 (раунд 6 ядра): docker без sudo недоступен, sudo не
+	// разрешил запустить docker; запись не начиналась, но повтор без правки
+	// sudoers бесполезен — Retry=false (SEC-01 У1).
+	SudoDenied
 )
 
 // Classify — исход по ошибке. Порядок ветвей — часть решения (признак 3):
@@ -67,6 +71,9 @@ func Classify(err error) Kind {
 		return RolledBackFilesDiffer
 	case errors.Is(err, core.ErrRolledBack):
 		return RolledBack
+	// H1 (SEC-01 У1): отказ sudo — свой исход, выше общих случаев записи.
+	case errors.Is(err, core.ErrSudoDenied):
+		return SudoDenied
 	case errors.Is(err, core.ErrWritePartial):
 		return Partial
 	case errors.Is(err, core.ErrWriteUnknown):
@@ -133,6 +140,11 @@ var texts = map[Kind]Text{
 		Title: "Не записано: сервер не дал начать запись",
 		What:  "Перед записью программа ставит на сервере отметку «идёт запись», чтобы две программы не писали одновременно. Поставить её не удалось. Ничего не записано.",
 		Next:  "Передайте подробности ниже тому, кто настраивал сервер (для него: каталог /run/lock должен существовать). После исправления повторите.",
+	},
+	SudoDenied: {
+		Title: "Не записано: sudo не разрешил запуск docker",
+		What:  "Программа входит на сервер под пользователем, которому docker доступен только через sudo, а sudo запустить docker не разрешил. Ничего не записано. Повтор не поможет, пока на сервере не поправят настройку sudo.",
+		Next:  "Для того, кто настраивал сервер: нужна строка sudoers вида «<пользователь> ALL=(root) NOPASSWD: /usr/bin/docker». Передайте подробности ниже тому, кто настраивал сервер.",
 	},
 	NotStarted: {
 		Title: "Не записано: не удалось подготовить запись",

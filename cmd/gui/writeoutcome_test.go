@@ -145,6 +145,7 @@ func pr3KindErr(k writeoutcome.Kind) error {
 		core.ErrWriteUnknown, errors.Join(core.ErrWritePartial, core.ErrWriteUnknown), core.ErrRollbackForeign,
 		errors.Join(core.ErrRollbackNotDone, core.ErrServerBusy), errors.Join(core.ErrRollbackUnknown, core.ErrWriteUnknown),
 		core.ErrRolledBack, core.ErrRolledBackNotApplied, core.ErrRollbackUnverified, core.ErrRolledBackFilesDiffer, core.ErrWriteNotStarted,
+		core.ErrSudoDenied,
 	} {
 		if writeoutcome.Classify(e) == k {
 			return e

@@ -14,6 +14,8 @@ package writeoutcome_test
 //	casWrite(apply): 4               → Busy
 //	casWrite(apply): 5, 127          → ToolMissing
 //	casWrite(apply): 66              → LockUnavailable
+//	casWrite(apply): docker без sudo
+//	                 отказан, sudo тоже → SudoDenied, Retry=false (TestApplySudoDeniedClassified)
 //	casWrite(apply): 6               → Partial
 //	casWrite(apply): иное / нет кода → Unknown
 //	casWrite(apply): CASWriteCommand → NotStarted     (недостижим: контейнер и
@@ -21,7 +23,8 @@ package writeoutcome_test
 //	                                                    проверку при чтении; тот же
 //	                                                    сентинел, проверен в core)
 //	restore: откат 3                 → RollbackForeign
-//	restore: откат 4 / 5,127 / 66    → RollbackNotDone
+//	restore: откат 4 / 5,127 / 66 /
+//	         sudo отказал            → RollbackNotDone
 //	restore: откат иное / 6          → RollbackUnknown
 //	restore: откат прошёл, проверено → RolledBack
 //	restore: откат прошёл, не
@@ -187,3 +190,79 @@ func TestApplyErrorsClassified(t *testing.T) {
 		})
 	}
 }
+
+// TestApplySudoDeniedClassified — H1 (раунд 6 ядра), БОЕВЫМ путём: docker без
+// sudo не пускает к сокету, повтор под sudo отказан самим sudo. На записи —
+// SudoDenied («ничего не записано», повтор НЕ разрешён); на откате — откат не
+// выполнен (RollbackNotDone), а не «неизвестно».
+func TestApplySudoDeniedClassified(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		denyFrom int // с какой по счёту команды записи (flock) отказывать
+		syncFail bool
+		want     writeoutcome.Kind
+	}{
+		{"запись: sudo отказал", 1, false, writeoutcome.SudoDenied},
+		{"откат: sudo отказал", 2, true, writeoutcome.RollbackNotDone},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			r := &sudoDenyRunner{srv: srv, from: c.denyFrom}
+			sess := core.NewSessionWithRunner(r, &core.ServerCreds{Host: "203.0.113.10", User: "u", Password: "x"})
+			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+			plan, err := sess.PlanAddUser(ct, "Mallory")
+			if err != nil {
+				t.Fatalf("PlanAddUser: %v", err)
+			}
+			if c.syncFail {
+				srv.FailSyncconf = errors.New("имитированный отказ syncconf")
+			}
+			_, err = sess.Apply(plan)
+			if err == nil {
+				t.Fatal("Apply прошёл")
+			}
+			if got := writeoutcome.Classify(err); got != c.want {
+				t.Errorf("исход %d, ожидался %d: %v", got, c.want, err)
+			}
+			if tx, _ := writeoutcome.Describe(err); tx.Retry {
+				t.Errorf("повтор разрешён при отказе sudo: %+v", tx)
+			}
+			if r.sudoTried == 0 {
+				t.Error("повтор под sudo не выполнялся — путь не доехал")
+			}
+		})
+	}
+}
+
+// sudoDenyRunner — команды записи (flock) с номера from: без sudo — отказ
+// сокета docker, с sudo — отказ sudo (его настоящий текст). Прочее — fakesrv.
+type sudoDenyRunner struct {
+	srv       *fakesrv.Server
+	from, n   int
+	sudoTried int
+}
+
+func (r *sudoDenyRunner) Run(cmd string, stdin []byte) (string, error) {
+	if !strings.Contains(cmd, "flock") {
+		return r.srv.Run(cmd, stdin)
+	}
+	if !strings.Contains(cmd, "sudo") {
+		r.n++
+	}
+	if r.n < r.from {
+		return r.srv.Run(cmd, stdin)
+	}
+	if strings.Contains(cmd, "sudo") {
+		r.sudoTried++
+		return "", exitErr{code: 1, msg: "exit status 1; stderr: sudo: a password is required"}
+	}
+	return "", exitErr{code: 1, msg: "exit status 1; stderr: permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"}
+}
+
+type exitErr struct {
+	code int
+	msg  string
+}
+
+func (e exitErr) Error() string   { return e.msg }
+func (e exitErr) ExitStatus() int { return e.code }
