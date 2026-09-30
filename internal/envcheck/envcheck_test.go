@@ -600,9 +600,20 @@ func TestUnknownLibcBeatsMaybeMissingLibsArrives(t *testing.T) {
 // покрыт ни одним тестом ни в какую сторону. Если A1б выберет исход (в) из
 // `.ask` (не печатать имена пакетов, когда libc неизвестна), этот случай
 // придётся обновить — и это к лучшему: изменение станет видимым.
+//
+// A1б ОБНОВИЛ ЕГО (долг A1-II). Приговор «не запустится» остался выше
+// незнания, как и требует этот сторож; поменялся СОВЕТ: при неопознанной
+// libc он больше не утверждает Debian/Fedora, а называет развилку «Alpine —
+// не поможет; иначе — пакеты». Второй случай таблицы теперь и есть тест
+// различения: «libc неизвестна» ≠ «libc — glibc».
 func TestMissingHardBeatsUnknownLibc(t *testing.T) {
 	const missingGL = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
 		"Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
+		"После установки выполните проверку ещё раз."
+	const missingGLLibcUnknown = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
+		"Какая в системе библиотека C, определить не удалось: если это Alpine (musl), графическая версия " +
+		"там не запустится и после установки — пользуйтесь консольной. " +
+		"Если нет — установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
 		"После установки выполните проверку ещё раз."
 	cases := []struct {
 		name string
@@ -610,7 +621,8 @@ func TestMissingHardBeatsUnknownLibc(t *testing.T) {
 		want string
 	}{
 		{"библиотека C известна", Libc{Kind: "glibc", Version: "2.36"}, missingGL},
-		{"библиотеку C определить не удалось", Libc{}, missingGL},
+		{"glibc без разобранной версии — всё равно glibc", Libc{Kind: "glibc", Version: "x"}, missingGL},
+		{"библиотеку C определить не удалось", Libc{}, missingGLLibcUnknown},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
