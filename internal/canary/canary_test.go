@@ -367,18 +367,23 @@ func fakeCLI(t *testing.T, name string) string {
 // сервере) — это НЕ «пустой сервер»: СТОП без единой записи.
 func TestTableMissingPeersPresentStops(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		prep func(*fakesrv.Server)
+		name    string
+		clients bool
+		prep    func(*fakesrv.Server)
 	}{
-		{"таблицы нет, [Peer] в wg0.conf есть", func(s *fakesrv.Server) { s.DeleteFile("/opt/amnezia/awg/clientsTable") }},
-		{"файлы пусты, peer'ы в работающем сервере", func(s *fakesrv.Server) {
+		{"таблицы нет, [Peer] в wg0.conf есть", true, func(s *fakesrv.Server) { s.DeleteFile("/opt/amnezia/awg/clientsTable") }},
+		{"таблицы нет, работающий сервер пуст, [Peer] только в wg0.conf", false, func(s *fakesrv.Server) {
+			wg, _ := s.File("/opt/amnezia/awg/wg0.conf")
+			s.SetFile("/opt/amnezia/awg/wg0.conf", append(wg, []byte("\n[Peer]\nPublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAllowedIPs = 10.8.1.9/32\n")...))
+		}},
+		{"файлы пусты, peer'ы в работающем сервере", true, func(s *fakesrv.Server) {
 			wg, _ := s.File("/opt/amnezia/awg/wg0.conf")
 			s.SetFile("/opt/amnezia/awg/wg0.conf", []byte(string(wg)[:strings.Index(string(wg), "[Peer]")]))
 			s.DeleteFile("/opt/amnezia/awg/clientsTable")
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := emptyFake(t, true)
+			f := emptyFake(t, c.clients)
 			c.prep(f.exec)
 			f.env.NewBin = "не-вызывается"
 			rs, err := Run(f.env)
