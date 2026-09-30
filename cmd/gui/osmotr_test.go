@@ -141,6 +141,11 @@ func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (k
 		// (пункт 1 стандарта: «внутри прокручиваемого родителя не мерится по
 		// построению; смотрит снимок»).
 		return "таблица", "", true
+	case *container.Scroll:
+		// Содержимое прокрутки законно больше её окна и обрезается ею —
+		// внутрь не идём, мерится сама прокрутка (та же граница, что у
+		// таблицы; добавлено с окном изменений 29.09.2026).
+		return "прокрутка", "", true
 	case *widget.TextGrid:
 		return "текстовая сетка", "", true
 	case *widget.Hyperlink:
@@ -493,14 +498,6 @@ type osmotrKnown struct {
 	id, size, match string
 }
 
-// knownD1 — Д1 из осмотра 25.09.2026: при минимальной высоте главного окна
-// (161 т.) диалог не помещается, Fyne сжимает его по окну, и «Отмена»
-// ложится поверх содержимого. Не чинено: решение ядра и владельца.
-func knownD1(match string) osmotrKnown {
-	return osmotrKnown{id: "ИЗВЕСТНЫЙ ДЕФЕКТ Д1 (диалог не помещается в окно высотой 161 т.)",
-		size: "минимальный", match: match}
-}
-
 // osmotrForm — форма: как открыть, что в ней обязано быть и что известно.
 type osmotrForm struct {
 	name string
@@ -513,6 +510,9 @@ type osmotrForm struct {
 	// mayOverlap — перекрытия ПО ЗАМЫСЛУ (пара имён), каждое — решение.
 	mayOverlap []string
 	known      []osmotrKnown
+	// fyneStd — стандартный диалог Fyne: её слова (OK, Error) сверяются по
+	// роли, а не буквально — они зависят от языка системы (osmotr_lang_test.go).
+	fyneStd bool
 }
 
 // osmotrGate — ВОРОТА: всё, что прибор нашёл, против того, что разрешено.
@@ -568,6 +568,7 @@ func osmotrGate(f osmotrForm, size string, rep *osmotrReport, errf func(string, 
 // в сеть не ходит. Форма «отказ раскладки» переподменяет это сама.
 func osmotrUI(t *testing.T, variant fyne.ThemeVariant) *ui {
 	t.Helper()
+	applyForeignFyneWords() // только в дочернем процессе доказательства языка
 	substituteForceEnglish(t, nil)
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
@@ -589,7 +590,7 @@ func osmotrMain(u *ui) {
 	u.handshakes = map[string]string{testKey: "2 минуты назад"}
 	u.peerStats = map[string]core.PeerStat{testKey: {RxBytes: 1200000, TxBytes: 900000}}
 	u.canManage = true
-	u.win.SetContent(u.mainScreen())
+	u.showMainScreen()
 	// Выбор протокола — БЕЗ обработчика: он пошёл бы на сервер (refresh). В
 	// бою выбор делается внутри mainScreen, до показа.
 	u.cur = &u.containers[0]
@@ -726,10 +727,15 @@ func openSave(layoutFail bool) func(t *testing.T, u *ui, sized func()) osmotrSce
 }
 
 func openAction(action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return openActionRow(0, action)
+}
+
+// openActionRow — то же для строки row (1 — «Телефон Анны», ключ из 43 «Q»).
+func openActionRow(row int, action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmotrScene {
 	return func(t *testing.T, u *ui, sized func()) osmotrScene {
 		osmotrMain(u)
 		sized()
-		u.selectedRow = 0
+		u.selectedRow = row
 		action(u)
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
@@ -738,12 +744,23 @@ func openAction(action func(u *ui)) func(t *testing.T, u *ui, sized func()) osmo
 }
 
 func openDelete(t *testing.T, u *ui, sized func()) osmotrScene {
+	return openDeleteRow(0)(t, u, sized)
+}
+
+// openDeleteRow — диалог удаления строки row, статистики нет.
+func openDeleteRow(row int) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	return func(t *testing.T, u *ui, sized func()) osmotrScene {
+		return openDeleteRowAt(t, u, sized, row)
+	}
+}
+
+func openDeleteRowAt(t *testing.T, u *ui, sized func(), row int) osmotrScene {
 	osmotrMain(u)
 	sized()
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	gate := make(chan struct{})
 	u.sess = core.NewSessionWithRunner(osmotrNoServer{gate: gate}, u.sess.Creds)
-	u.selectedRow = 0
+	u.selectedRow = row
 	u.deleteSelected()
 	c := u.win.Canvas()
 	pop := topPopup(t, c)
@@ -819,50 +836,10 @@ func cat(parts ...[]string) []string {
 
 var connectMayOverlap = []string{"подсказка про раскладку|" + firstLine(connectKeyExplain)}
 
-// Д1 поимённо: какие строки выдачи известны в минимальном окне.
-var (
-	knownSaveD1 = []osmotrKnown{
-		knownD1("текст «Пин-код»: снизу 3.1"), knownD1("поле «Пин-код»: снизу 11.1"),
-		knownD1("текст «Повтор пина»: снизу 42.2"), knownD1("поле «Повтор пина»: снизу 50.2"),
-		knownD1("подпись «Похоже, включена не английская раскладка…»: снизу 127.4"),
-		knownD1("галка «Привязать к этой учётке Windows (файл не…»: снизу 166.5"),
-		knownD1("текст «Рекомендуется: украденный файл будет бес…»: снизу 185.5"),
-		knownD1("подпись «»: снизу 224.5"), knownD1("кнопка «Сохранить»: снизу 264.5"),
-		knownD1("поле «Метка» × кнопка «Не сохранять»: 114x24 = 2731 т²"),
-		knownD1("поле «Пин-код» × кнопка «Не сохранять»: 114x8 = 910 т²"),
-	}
-	// В состоянии отказа раскладки подпись об отказе стоит выше галки, и всё
-	// ниже неё уезжает на её высоту (39 т.): числа свои.
-	knownSaveFailD1 = []osmotrKnown{
-		knownD1("текст «Пин-код»: снизу 3.1"), knownD1("поле «Пин-код»: снизу 11.1"),
-		knownD1("текст «Повтор пина»: снизу 42.2"), knownD1("поле «Повтор пина»: снизу 50.2"),
-		knownD1("подпись «Похоже, включена не английская раскладка…»: снизу 127.4"),
-		knownD1("подпись «" + firstLine(wantLayoutSwitchFailed) + "»: снизу 166.5"),
-		knownD1("галка «Привязать к этой учётке Windows (файл не…»: снизу 205.5"),
-		knownD1("текст «Рекомендуется: украденный файл будет бес…»: снизу 224.5"),
-		knownD1("подпись «»: снизу 263.6"), knownD1("кнопка «Сохранить»: снизу 303.6"),
-		knownD1("поле «Метка» × кнопка «Не сохранять»: 114x24 = 2731 т²"),
-		knownD1("поле «Пин-код» × кнопка «Не сохранять»: 114x8 = 910 т²"),
-	}
-	// knownPinFailD2 — Д2, найден осмотром 25.09.2026 (второй круг): диалог
-	// пин-кода в состоянии «отказ переключения раскладки» выше окна
-	// минимального размера (408 т.), и «Отмена» ложится на «Повторить».
-	knownPinFailD2 = []osmotrKnown{{
-		id:   "ИЗВЕСТНЫЙ ДЕФЕКТ Д2 (пин-код с отказом раскладки не помещается в окно высотой 408 т.)",
-		size: "минимальный", match: "кнопка «Повторить» × кнопка «Отмена»: 73x32 = 2304 т²"}}
-	knownActionD1 = []osmotrKnown{
-		knownD1("подпись «»: снизу 12.0"),
-		knownD1("кнопка «Показать изменения» × кнопка «Отмена»: 73x25 = 1812 т²"),
-		knownD1("подпись «» × кнопка «Отмена»: 73x7 = 514 т²"),
-	}
-	knownDeleteD1 = []osmotrKnown{
-		knownD1("подпись «Не удалось получить данные о подключения…»: снизу 48.3"),
-		knownD1("кнопка «Удалить»: снизу 88.3"), knownD1("кнопка «Показать изменения»: снизу 88.3"),
-		knownD1("подпись «»: снизу 127.4"),
-		knownD1("подпись «Имя: Ноутбук…» × кнопка «Отмена»: 73x23 = 1677 т²"),
-		knownD1("подпись «Не удалось получить данные о подключения…» × кнопка «Отмена»: 73x9 = 649 т²"),
-	}
-)
+// Разрешений Д1–Д3 больше нет (29.09.2026): Д1 и Д2 закрыты минимумом
+// высоты окна (minWindowHeight в main.go), Д3 — переносом подписи в диалоге
+// удаления. Прибор сам доказал закрытие: их разрешения стали
+// НЕИСПОЛЬЗОВАННЫМИ.
 
 var osmotrForms = []osmotrForm{
 	{name: "(а) экран подключения, подсказка вкл", open: openConnect(false, false),
@@ -872,23 +849,21 @@ var osmotrForms = []osmotrForm{
 	{name: "(а) экран подключения, отказ раскладки", open: openConnect(false, true),
 		inventory: cat(invConnect, invFail), mayOverlap: connectMayOverlap},
 	{name: "(б) пин-код, подсказка вкл", open: openPin(false), inventory: invPinBase, width: 412},
-	{name: "(б) пин-код, отказ раскладки", open: openPin(true), inventory: cat(invPinBase, invFail), width: 412,
-		known: knownPinFailD2},
-	{name: "(б) сохранение ключа, подсказка вкл", open: openSave(false), inventory: invSaveBase, width: 712,
-		known: knownSaveD1},
+	{name: "(б) пин-код, отказ раскладки", open: openPin(true), inventory: cat(invPinBase, invFail), width: 412},
+	{name: "(б) сохранение ключа, подсказка вкл", open: openSave(false), inventory: invSaveBase, width: 712},
 	{name: "(б) сохранение ключа, отказ раскладки", open: openSave(true), inventory: cat(invSaveBase, invFail),
-		width: 712, known: knownSaveFailD1},
+		width: 712},
 	{name: "(в) новый пользователь", open: openAction(func(u *ui) { u.addDialog() }), inventory: invAdd,
-		width: 412, known: knownActionD1},
+		width: 412},
 	{name: "(в) переименование", open: openAction(func(u *ui) { u.renameSelected() }), inventory: invRename,
-		width: 412, known: knownActionD1},
-	{name: "(в) удаление", open: openDelete, inventory: invDelete, width: 452, known: knownDeleteD1},
+		width: 412},
+	{name: "(в) удаление", open: openDelete, inventory: invDelete, width: 452},
 	{name: "(г) главное окно", open: openMain, inventory: invMain},
 	{name: "(г) главное окно, отключённый клиент", open: openMainDisabled, inventory: invMain},
 	{name: "(в) удаление, клиента нет в статистике", open: openDeleteAnswered(1, false),
-		inventory: invDeleteWith(rowQName, deleteAbsentLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteAbsentLabel, "29.2", "69.2", "108.3"), knownD3)},
+		inventory: invDeleteWith(rowQName, deleteAbsentLabel), width: 452},
 	{name: "(в) удаление, клиент отключён", open: openDeleteAnswered(1, true),
-		inventory: invDeleteWith(rowQName, deleteDisabledLabel), width: 452, known: append(knownDeleteAnsweredD1(rowQName, deleteDisabledLabel, "29.2", "69.2", "108.3"), knownD3)},
+		inventory: invDeleteWith(rowQName, deleteDisabledLabel), width: 452},
 }
 
 var osmotrThemes = []struct {
@@ -909,7 +884,14 @@ func runOsmotr(t *testing.T, f osmotrForm, size, themeName string, v fyne.ThemeV
 		plant(t, s)
 	}
 	sz := u.win.Canvas().Size()
-	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, f.mayOverlap)
+	may := f.mayOverlap
+	if f.fyneStd {
+		may = fyneRolesInPairs(may)
+	}
+	rep := osmotrProbe(f.name, fmt.Sprintf("%s %.0fx%.0f", size, sz.Width, sz.Height), themeName, s, may)
+	if f.fyneStd {
+		fyneRoles(rep)
+	}
 	rep.checkInventory(f.inventory)
 	return rep
 }
@@ -1062,21 +1044,25 @@ func TestOsmotrCanaryFormsGateWired(t *testing.T) {
 	}
 }
 
-// К9 — РАЗРЕШЕНИЕ НЕ ШИРЕ ДЕФЕКТА: в диалог нового пользователя добавлена
-// ещё одна пустая подпись. При минимальном окне она вылезает снизу — строка
+// К9 — РАЗРЕШЕНИЕ НЕ ШИРЕ ДЕФЕКТА: в диалог нового пользователя добавлены
+// пустые подписи — столько, чтобы диалог перерос и окно минимальной высоты
+// (minWindowHeight; до 29.09.2026 хватало одной, пока окно было в 161 т.).
+// Нижние вылезают снизу — строка
 // «подпись «»: снизу …» с ДРУГИМ числом. Подстрочное сопоставление проглотило
 // бы её разрешением вида «подпись «»: снизу» — такое, укороченное, форма и
 // получает здесь нарочно. Полное сопоставление обязано показать находку.
 func TestOsmotrCanaryAllowanceNotWider(t *testing.T) {
 	f := formByName(t, "(в) новый пользователь")
-	f.known = append(append([]osmotrKnown{}, f.known...), knownD1("подпись «»: снизу"))
+	f.known = append(append([]osmotrKnown{}, f.known...), osmotrKnown{id: "ИЗВЕСТНЫЙ ДЕФЕКТ Д0 (канарейка К9)", size: "минимальный", match: "подпись «»: снизу"})
 	gateCanary(t, f, "минимальный", func(t *testing.T, s osmotrScene) {
 		row := findParent(s.root, buttonByText(t, s.root, "Показать изменения"))
 		col := findParent(s.root, row)
 		if col == nil {
 			t.Fatal("канарейка ничего не значит: у ряда кнопок нет столбца")
 		}
-		col.Add(widget.NewLabel(""))
+		for range 10 {
+			col.Add(widget.NewLabel(""))
+		}
 	}, "вылезание: подпись «»: снизу")
 }
 
@@ -1282,78 +1268,14 @@ func invDeleteWith(name, label string) []string {
 	}
 }
 
-// knownDeleteAnsweredD1 — тот же Д1 (диалог выше окна высотой 161 т.), что
-// у knownDeleteD1; числа по выдаче: метка «нет в статистике» переносится в три строки (как у отказа), «отключён» — в две.
-func knownDeleteAnsweredD1(name, label, lbl, btn, st string) []osmotrKnown {
-	return []osmotrKnown{
-		knownD1("подпись «" + label + "»: снизу " + lbl),
-		knownD1("кнопка «Удалить»: снизу " + btn), knownD1("кнопка «Показать изменения»: снизу " + btn),
-		knownD1("подпись «»: снизу " + st),
-		knownD1("подпись «Имя: " + name + "…» × кнопка «Отмена»: 73x23 = 1677 т²"),
-		knownD1("подпись «" + label + "» × кнопка «Отмена»: 73x9 = 649 т²"),
-	}
-}
+// ---------- канарейка Д3: подпись карточки удаления без переноса ----------
 
-// knownD3 — ИЗВЕСТНЫЙ ДЕФЕКТ Д3, найден осмотром 25.09.2026 (задание
-// НЕЗНАНИЕ-ТРАФИК): в диалоге удаления подпись «Имя / Создан / Ключ» не
-// переносится, и ключ из широких знаков (43 «Q» + «=») раздувает рамку с
-// 452 до 570.8 т. — в обоих размерах окна. Формы стоят на строке с таким
-// ключом НАМЕРЕННО: переставить их на удобный ключ значило бы спрятать
-// дефект сменой входных данных. Не чинено: решение владельца вместе с Д1 и
-// Д2. Числа Д1 этих форм сняты при раздутой рамке (метка исхода в две
-// строки): починка Д3 сдвинет и их, и ворота покажут это.
-var knownD3 = osmotrKnown{
-	id:    "ИЗВЕСТНЫЙ ДЕФЕКТ Д3 (подпись с ключом из широких знаков не переносится, диалог удаления раздувается)",
-	size:  "",
-	match: "ширина рамки диалога 570.8 вместо 452.0",
-}
-
-// ---------- канарейки разрешения Д3 (ширина рамки) ----------
-
-// formD3 — форма, в которой известен Д3, без разрешения Д3 или с заменой.
-func formD3(t *testing.T, replace *osmotrKnown) osmotrForm {
-	t.Helper()
-	f := formByName(t, "(в) удаление, клиента нет в статистике")
-	var known []osmotrKnown
-	found := false
-	for _, k := range f.known {
-		if k.id == knownD3.id {
-			found = true
-			if replace == nil {
-				continue
-			}
-			k = *replace
-		}
-		known = append(known, k)
-	}
-	if !found {
-		t.Fatal("канарейка ничего не значит: в форме нет разрешения Д3")
-	}
-	f.known = known
-	return f
-}
-
-// К-Д3а — без разрешения Д3 ворота краснеют на раздутой рамке.
-func TestOsmotrCanaryD3Unallowed(t *testing.T) {
-	gateCanary(t, formD3(t, nil), "стартовый", nil,
-		"ширина рамки диалога 570.8 вместо 452.0 — диалог раздулся или сжался")
-}
-
-// К-Д3б — разрешение Д3 с чужим числом не покрывает находку и само
-// остаётся неиспользованным.
-func TestOsmotrCanaryD3OtherNumber(t *testing.T) {
-	other := knownD3
-	other.match = "ширина рамки диалога 570.9 вместо 452.0"
-	gateCanary(t, formD3(t, &other), "стартовый", nil, "НЕИСПОЛЬЗОВАННОЕ РАЗРЕШЕНИЕ «"+knownD3.id)
-}
-
-// К-Д3в — разрешение ширины НЕ ШИРЕ дефекта: подпись с ключом удлинена, и
-// рамка раздувается иначе, чем на 570.8. Настоящее разрешение Д3 на месте,
-// и ворота обязаны покраснеть на новой ширине. Ослабление сравнения до
-// «любая строка про ширину» (ревью QA-01, подмена X4) прошло бы зелёным.
-func TestOsmotrCanaryD3AllowanceNotWider(t *testing.T) {
-	f := formByName(t, "(в) удаление, клиента нет в статистике")
-	gateCanary(t, f, "стартовый", func(t *testing.T, s osmotrScene) {
+// К-Д3 — ВОЗВРАТ Д3 (задание ДЕФЕКТЫ-ВИДА-И-12): у подписи «Имя / Создан /
+// Ключ» диалога удаления снят перенос — ровно то, что было до починки. Строка
+// «Телефон Анны» с ключом из 43 «Q» стоит в форме НАМЕРЕННО: на удобном ключе
+// дефект не виден. Ворота обязаны сказать, что рамка раздулась.
+func TestOsmotrCanaryDeleteCardWithoutWrap(t *testing.T) {
+	gateCanary(t, formByName(t, "(в) удаление, клиента нет в статистике"), "стартовый", func(t *testing.T, s osmotrScene) {
 		var l *widget.Label
 		walkVisible(s.root, func(o fyne.CanvasObject) {
 			if w, ok := o.(*widget.Label); ok && strings.HasPrefix(w.Text, "Имя: ") {
@@ -1363,6 +1285,38 @@ func TestOsmotrCanaryD3AllowanceNotWider(t *testing.T) {
 		if l == nil {
 			t.Fatal("канарейка ничего не значит: подписи «Имя: …» нет")
 		}
-		l.SetText(l.Text + "QQQQQQ")
-	}, "— диалог раздулся или сжался")
+		l.Wrapping = fyne.TextWrapOff
+		l.Refresh()
+	}, "ширина рамки диалога 570.8 вместо 452.0 — диалог раздулся или сжался")
+}
+
+// TestMinWindowHeightIsTight — minWindowHeight ВЫВЕДЕН ЗАМЕРОМ, и тест держит
+// замер с обеих сторон. Сверху держит TestOsmotrForms («минимальный» — это
+// ровно minWindowHeight, и там чисто). Здесь — снизу: окно на одну точку
+// ниже минимума обязано дать прибору находку в самой высокой форме. Иначе
+// минимум завышен, и число перестало быть замером (например, форма стала
+// ниже, а константа осталась).
+func TestMinWindowHeightIsTight(t *testing.T) {
+	f := formByName(t, "(б) сохранение ключа, отказ раскладки")
+	u := osmotrUI(t, theme.VariantLight)
+	s := f.open(t, u, func() {
+		p := 2 * theme.Padding()
+		m := u.win.Content().MinSize().AddWidthHeight(p, p)
+		if m.Height != minWindowHeight {
+			t.Fatalf("минимум окна по правилу glfw %.1f, а не minWindowHeight %d — минимум до окна не доехал", m.Height, minWindowHeight)
+		}
+		u.win.Resize(fyne.NewSize(m.Width, m.Height-1))
+	})
+	sz := u.win.Canvas().Size()
+	rep := osmotrProbe(f.name, fmt.Sprintf("минимум-1 %.0fx%.0f", sz.Width, sz.Height), "светлая", s, f.mayOverlap)
+	rep.checkInventory(f.inventory)
+	t.Log("\n" + rep.String())
+	var errs []string
+	osmotrGate(f, "минимум-1", rep, func(format string, a ...any) { errs = append(errs, fmt.Sprintf(format, a...)) })
+	for _, e := range errs {
+		t.Log("ВОРОТА: " + e)
+	}
+	if len(errs) == 0 {
+		t.Errorf("при высоте окна %d (minWindowHeight−1) прибор ничего не нашёл — минимум завышен, пересними замер", minWindowHeight-1)
+	}
 }
