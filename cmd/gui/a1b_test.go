@@ -23,8 +23,11 @@ import (
 )
 
 // vaultDirForTest — каталог хранилищ ТЕСТОВОГО бинарника (рядом с ним, во
-// временном каталоге сборки). Чужого не трогаем: если там уже что-то есть,
-// тест останавливается, а не портит.
+// временном каталоге сборки), гарантированно отсутствующий на время теста.
+// Работает только во временном каталоге. Если там уже что-то есть (его
+// оставляют другие тесты пакета — например, клик по заголовку таблицы
+// сохраняет ui.json), оно откладывается в сторону и возвращается после
+// теста, а не удаляется: итог не должен зависеть от порядка прогона.
 func vaultDirForTest(t *testing.T) string {
 	t.Helper()
 	dir := core.DefaultVaultDir()
@@ -33,7 +36,19 @@ func vaultDirForTest(t *testing.T) string {
 		t.Fatalf("каталог хранилищ %s не во временном каталоге — тест его не трогает", dir)
 	}
 	if _, err := os.Stat(dir); err == nil {
-		t.Fatalf("%s уже существует — тест его не трогает", dir)
+		aside := dir + ".a1b-aside"
+		if _, err := os.Stat(aside); err == nil {
+			t.Fatalf("%s уже существует — отложить %s некуда", aside, dir)
+		}
+		if err := os.Rename(dir, aside); err != nil {
+			t.Fatalf("не удалось отложить %s: %v", dir, err)
+		}
+		t.Cleanup(func() {
+			os.RemoveAll(dir)
+			if err := os.Rename(aside, dir); err != nil {
+				t.Errorf("не удалось вернуть %s: %v", dir, err)
+			}
+		})
 	}
 	return dir
 }
