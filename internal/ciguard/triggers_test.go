@@ -17,8 +17,9 @@
 // второй — образ по изменяемой метке. Комментарий версии (`# v7.0.1`) YAML
 // отрезает сам — он допустим.
 //
-// ГРАНИЦА. Что внутри закреплённого SHA — не проверяется; SHA берётся с
-// тега релиза action при обновлении (Dependabot/руками). `uses:` на уровне
+// ГРАНИЦА. Что внутри закреплённого SHA — не проверяется: SHA сверяется с
+// таблицей allowedActions, а таблица правится человеком вместе с workflow
+// (связная правка, см. комментарий к ней). `uses:` на уровне
 // job (переиспользуемый workflow) закрыт списком ключей job
 // (TestWorkflowKeysClosedList), но и здесь проверяется, если появится.
 package ciguard
@@ -100,18 +101,22 @@ func TestWorkflowTriggersClosedList(t *testing.T) {
 // локальный action из проверяемой ветки — проходил как «закреплённый»).
 var pinnedUsesRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*((?:/[A-Za-z0-9_.-]+)*))@[0-9a-f]{40}$`)
 
-// allowedActions — ЗАКРЫТЫЙ список источников (ревью QA-01, рек. 3): SHA
-// защищает от подмены тега у того же владельца, но не от смены владельца
-// (`evil-org/setup-go@<тот же sha>`). SHA внутри пары не закреплён — его
-// обновляет Dependabot. Любой action может писать в $GITHUB_ENV и
-// $GITHUB_PATH, поэтому новый источник — только видимой строкой здесь.
-var allowedActions = map[string]string{
-	"actions/checkout":                "выгрузка репозитория (оба workflow)",
-	"actions/setup-go":                "Go по go.mod (оба workflow)",
-	"actions/upload-artifact":         "передача сборок build → release",
-	"actions/download-artifact":       "приём сборок в job release",
-	"actions/attest-build-provenance": "аттестация происхождения релиза",
-	"softprops/action-gh-release":     "публикация релиза на GitHub",
+// allowedActions — ЗАКРЫТЫЙ список источников и их SHA (QA-01 рек. 3,
+// AU-LOGIC F4). Пара owner/repo защищает от смены владельца
+// (`evil-org/setup-go@…`), SHA — от коммита из форка под разрешённым
+// именем (impostor commit: GitHub разрешает `owner/repo@<sha>` и для
+// коммита из форка) и от подмены тега. Любой другой SHA — красный.
+//
+// СВЯЗНАЯ ПРАВКА (CLAUDE.md, «Выпуск»): PR Dependabot, обновляющий action,
+// обязан в том же PR поменять строку здесь — иначе CI красный. Это
+// намеренно: новый SHA проходит ревью человеком, а не только бота.
+var allowedActions = map[string]struct{ sha, why string }{
+	"actions/checkout":                {"3d3c42e5aac5ba805825da76410c181273ba90b1", "выгрузка репозитория (оба workflow), v7.0.1"},
+	"actions/setup-go":                {"b7ad1dad31e06c5925ef5d2fc7ad053ef454303e", "Go по go.mod (оба workflow), v7.0.0"},
+	"actions/upload-artifact":         {"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "передача сборок build → release, v7.0.1"},
+	"actions/download-artifact":       {"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "приём сборок в job release, v8.0.1"},
+	"actions/attest-build-provenance": {"4d101475d8b20a2381f78447822ac1eab6504dd8", "аттестация происхождения релиза, v4.2.2"},
+	"softprops/action-gh-release":     {"efb35369e0ad2afab669f228072c1b0d510eae64", "публикация релиза на GitHub, v3.0.3"},
 }
 
 // usesProblem — пусто, если ссылка закреплена по SHA и источник из списка.
@@ -127,8 +132,13 @@ func usesProblem(v interface{}) string {
 			return fmt.Sprintf("uses «%v»: сегмент «%s» в пути — выход из репозитория action запрещён", v, seg)
 		}
 	}
-	if _, ok := allowedActions[m[1]]; !ok {
+	a, ok := allowedActions[m[1]]
+	if !ok {
 		return fmt.Sprintf("uses «%v»: источник «%s» вне закрытого списка allowedActions", v, m[1])
+	}
+	if sha := s[strings.LastIndexByte(s, '@')+1:]; sha != a.sha {
+		return fmt.Sprintf("uses «%v»: SHA %s не совпадает с закреплённым %s для %s — обновите таблицу "+
+			"allowedActions в internal/ciguard вместе с workflow", v, sha, a.sha, m[1])
 	}
 	return ""
 }
@@ -161,6 +171,9 @@ func TestActionsPinnedBySHA(t *testing.T) {
 	}
 	// Точное число: исчезновение шагов uses: (или разбор, переставший их
 	// видеть) — тоже сигнал.
+	if checked == 0 {
+		fatal(t, "не найдено ни одной ссылки uses: — разбор пуст, тест ничего не проверил")
+	}
 	if checked != wantUses {
 		fail(t, "ссылок uses: найдено %d, ожидалось %d — законно изменилось — поправь wantUses", checked, wantUses)
 	}
@@ -193,19 +206,42 @@ func TestWorkflowFilesClosedList(t *testing.T) {
 		for _, e := range ents {
 			names = append(names, e.Name())
 		}
-		// Подсадка канарейки — лишний файл в результате обхода.
+		// Подсадки канарейки — лишний или пропавший файл в результате обхода.
 		for _, f := range plantedExtraFiles(t) {
 			if filepath.ToSlash(filepath.Dir(f)) == filepath.ToSlash(dir) {
 				names = append(names, filepath.Base(f))
 			}
 		}
-		sort.Strings(names)
-		return names
+		hidden := map[string]bool{}
+		for _, f := range plantedHiddenFiles(t) {
+			if filepath.ToSlash(filepath.Dir(f)) == filepath.ToSlash(dir) {
+				hidden[filepath.Base(f)] = true
+			}
+		}
+		var kept []string
+		for _, n := range names {
+			if !hidden[n] {
+				kept = append(kept, n)
+			}
+		}
+		sort.Strings(kept)
+		return kept
 	}
+	// Сравнение множествами в обе стороны, без счёта и без сравнения строк:
+	// ослабить его подменой оператора нельзя (AU-LOGIC F3).
 	wf := list(githubDir + "/workflows")
-	if strings.Join(wf, " ") != strings.Join(wantWorkflowFiles, " ") {
-		fail(t, "состав .github/workflows %v, допустимо ровно %v — файл вне списка не проверяет ни один сторож "+
-			"(триггеры, uses:, ключи, тела run:)", wf, wantWorkflowFiles)
+	got := map[string]bool{}
+	for _, n := range wf {
+		got[n] = true
+		if !contains(wantWorkflowFiles, n) {
+			fail(t, "в .github/workflows лишний файл %s, допустимо ровно %v — файл вне списка не проверяет ни один сторож "+
+				"(триггеры, uses:, ключи, тела run:)", n, wantWorkflowFiles)
+		}
+	}
+	for _, n := range wantWorkflowFiles {
+		if !got[n] {
+			fail(t, "в .github/workflows нет %s — сторожа читали бы несуществующий файл", n)
+		}
 	}
 	top := list(githubDir)
 	for _, n := range top {
@@ -216,4 +252,13 @@ func TestWorkflowFilesClosedList(t *testing.T) {
 	if len(top) == 0 {
 		fatal(t, "каталог .github пуст — тест перестал что-либо проверять")
 	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }

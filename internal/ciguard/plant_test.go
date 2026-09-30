@@ -51,6 +51,8 @@ type plant struct {
 	// extraFiles — лишние файлы в результате обхода .github (путь от
 	// каталога пакета, например ../../.github/workflows/evil.yml).
 	extraFiles []string
+	// hideFiles — файлы, которые подсадка убирает из результата обхода .github.
+	hideFiles []string
 	// parseRow — строка, добавляемая в таблицу лексера (TestShellParserTable).
 	parseRow *parseCase
 	wantTest string // единственный тест, который обязан упасть
@@ -371,19 +373,63 @@ var plants = []plant{
 		wantTest: usesT, wantMsg: "источник «evil-org/setup-go» вне закрытого списка allowedActions"},
 	// --- раунд 2: SEC-01 С-2 — состав .github ---
 	{name: "wf-extra-file", extraFiles: []string{githubDir + "/workflows/evil.yml"},
-		wantTest: "TestWorkflowFilesClosedList", wantMsg: "состав .github/workflows [ci.yml evil.yml release.yml]"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: "в .github/workflows лишний файл evil.yml"},
+	{name: "wf-missing-file", hideFiles: []string{githubDir + "/workflows/ci.yml"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: "в .github/workflows нет ci.yml"},
 	{name: "wf-actions-dir", extraFiles: []string{githubDir + "/actions"},
 		wantTest: "TestWorkflowFilesClosedList", wantMsg: ".github/actions вне закрытого списка содержимого .github"},
 	// --- раунд 2: QA-01 рек. 1 — eval / sh -c ---
 	{name: "cs-eval", edits: sh(`eval "printf x | grep -q y"`),
-		wantTest: pipes, wantMsg: "«eval» — строку как код лексер не разбирает"},
+		wantTest: pipes, wantMsg: "«eval» — код, переданный оболочке, лексер не разбирает"},
 	{name: "cs-bash-c", edits: sh(`bash -c "printf x | grep -q y"`),
-		wantTest: pipes, wantMsg: "«bash -c» — строку как код"},
+		wantTest: pipes, wantMsg: "вызов оболочки «bash -c"},
 	{name: "cs-sh-lc", edits: sh(`/bin/sh -lc "printf x | grep -q y"`),
-		wantTest: pipes, wantMsg: "«sh -lc» — строку как код"},
+		wantTest: pipes, wantMsg: "вызов оболочки «/bin/sh -lc"},
 	{name: "cs-workflow-eval", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`,
 		`            eval "grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< \"\$info\"" ||`),
-		wantTest: pipes, wantMsg: "«eval» — строку как код"},
+		wantTest: pipes, wantMsg: "«eval» — код, переданный оболочке"},
+	// --- раунд 3: AU-LOGIC F1 — код в оболочку в обход лексера ---
+	{name: "sc-heredoc", edits: sh("bash <<'E'\nprintf x | grep -q y\nE"),
+		wantTest: pipes, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	{name: "sc-herestring", edits: sh(`bash <<< "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	{name: "sc-source-procsub", edits: sh(`source <(printf 'printf x | grep -q y')`),
+		wantTest: pipes, wantMsg: "вызов оболочки «source <(printf 'printf x | grep -q y')»"},
+	{name: "sc-dot-stdin", edits: sh(`. /dev/stdin <<< "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "вызов оболочки «. /dev/stdin» вне закрытого списка"},
+	{name: "sc-bash-var", edits: sh(`"$BASH" -c "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: `команда с подстановкой в имени «"$BASH" -c`},
+	{name: "sc-shell-var", edits: sh(`$SHELL -c "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "команда с подстановкой в имени «$SHELL -c"},
+	{name: "sc-allowed-redirected", edits: sh(`bash scripts/dev-tools.sh <<< x`),
+		wantTest: pipes, wantMsg: "вход оболочки перенаправлен «<<< x»"},
+	{name: "sc-wrapped", edits: sh(`env bash scripts/dev-tools.sh`),
+		wantTest: pipes, wantMsg: "вызов оболочки «bash scripts/dev-tools.sh» вне закрытого списка"},
+	{name: "sc-shell-arg", edits: sh(`find . -name x -exec sh {} +`),
+		wantTest: pipes, wantMsg: "оболочка «sh» аргументом"},
+	// Воспроизведение аудитора на настоящей строке build-release.sh:55;
+	// законный `| wc -l` держит счёт звеньев 30, как в аудите.
+	{name: "sc-audit-line55", edits: []edit{{buildReleaseSH, "if printf '%s\\n' \"$deps\" | grep -E 'fakesrv|fakeserver'; then\n",
+		"if bash <<'E'\nprintf '%s\\n' \"$deps\" | grep -qE 'fakesrv|fakeserver'\nE\nthen\nprintf x | wc -l\n"}},
+		wantTest: pipes, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	// --- раунд 3: AU-LOGIC F2 — переопределение имени читателя ---
+	{name: "fn-function-kw", edits: sh("function grep { head -n1; }"),
+		wantTest: pipes, wantMsg: "«function grep» переопределяет имя из закрытого списка"},
+	{name: "fn-subshell-body", edits: sh("sort() ( head -n1 )"),
+		wantTest: pipes, wantMsg: "определение функции «sort» переопределяет имя"},
+	{name: "fn-alias", edits: sh(`alias grep="grep -q"`),
+		wantTest: pipes, wantMsg: "«alias» — подмена имени команды"},
+	// --- раунд 3: AU-LOGIC F3 — счёт uses: вниз (подмена != на > немая без неё) ---
+	{name: "us-count-less", edits: rel("      - uses: actions/upload-artifact@", "      - x-uses: actions/upload-artifact@"),
+		wantTest: usesT, also: []string{keys}, wantMsg: "ссылок uses: найдено 12, ожидалось 13"},
+	// Счёт читателей вверх: законный `| wc -l` — без неё подмена != на <
+	// немая (выборка раунда 3).
+	{name: "cl-count-more", edits: sh("printf x | wc -l"),
+		wantTest: pipes, wantMsg: "читателей конвейера найдено 31, ожидалось 30"},
+	// --- раунд 3: AU-LOGIC F4 — чужой SHA под разрешённой парой ---
+	{name: "us-zero-sha", edits: ci("      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:",
+		"      - uses: actions/setup-go@0000000000000000000000000000000000000000 # v7.0.0\n        with:"),
+		wantTest: usesT, wantMsg: "не совпадает с закреплённым b7ad1dad31e06c5925ef5d2fc7ad053ef454303e для actions/setup-go — обновите таблицу"},
 	// --- раунд 2: QA-01 п.2 — вердикт таблицы лексера доходит до go test ---
 	{name: "tbl-wrong", parseRow: &parseCase{src: "a | grep -q y", want: ""},
 		wantTest: "TestShellParserTable", wantMsg: "таблица лексера: \"a | grep -q y\" — читатели «grep», ждали «»"},
@@ -435,7 +481,7 @@ var plants = []plant{
 	{name: "arch-step-defanged", edits: rel(`test "$actual" = "$DECLARED_ARCH" ||`, `test -n "$actual" ||`),
 		wantTest: arch, wantMsg: "RUNNER_ARCH=X64, matrix.arch=arm64: шаг прошёл"},
 	{name: "arch-after-build", edits: rel("    steps:\n      - name: Архитектура раннера против matrix.arch\n",
-		"    steps:\n      - name: Ранняя сборка\n        run: bash scripts/build-release.sh linux\n      - name: Архитектура раннера против matrix.arch\n"),
+		"    steps:\n      - name: Ранняя сборка\n        run: bash scripts/build-release.sh ${{ matrix.os }}\n      - name: Архитектура раннера против matrix.arch\n"),
 		wantTest: arch, wantMsg: "обязан стоять ДО сборки"},
 	{name: "arch-step-if", edits: rel("      - name: Архитектура раннера против matrix.arch\n", "      - name: Архитектура раннера против matrix.arch\n        if: matrix.os != 'nothing'\n"),
 		wantTest: arch, wantMsg: "шаг сверки архитектуры обеззублен"},
@@ -593,6 +639,15 @@ func plantedTestDir(t *testing.T) string {
 		return p.extraDir
 	}
 	return ""
+}
+
+// plantedHiddenFiles — файлы, которые подсадка убирает из обхода .github.
+func plantedHiddenFiles(t *testing.T) []string {
+	t.Helper()
+	if p := activePlant(t); p != nil {
+		return p.hideFiles
+	}
+	return nil
 }
 
 // plantedExtraFiles — файлы, которые подсадка добавляет к результату обхода
