@@ -73,7 +73,7 @@ jobs:
           test "$GITHUB_REF_TYPE" = tag
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
-          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' <<< "$GITHUB_REF_NAME" || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
       - name: Windows mingw (gcc для CGO GUI-сборки и -race)
@@ -186,7 +186,7 @@ jobs:
           test "$GITHUB_REF_TYPE" = tag
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
-          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' <<< "$GITHUB_REF_NAME" || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
       - name: Windows mingw (gcc для CGO GUI-сборки)
@@ -285,17 +285,17 @@ jobs:
             # Признак 3 — -trimpath=true и "(devel)": тег пришёл от нашего -X,
             # а не от авто-vcs-стемпинга Go (то же обоснование, что у GUI).
             info="$(go version -m "$bin")"
-            printf '%s\n' "$info" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: признак 3 — -trimpath=true не подтверждён в $name" >&2; exit 1; }
-            printf '%s\n' "$info" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: признак 3 — версия в $name могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
+            grep -qE 'build[[:space:]]+-trimpath=true' <<< "$info" || { echo "СТОП: признак 3 — -trimpath=true не подтверждён в $name" >&2; exit 1; }
+            grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' <<< "$info" || { echo "СТОП: признак 3 — версия в $name могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
             # Признак 4 — точное равенство ожидаемой паре GOOS/GOARCH, а не
             # поиск подстроки по имени файла.
-            printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOOS=${goos}\$" || { echo "СТОП: признак 4 — в $name нет GOOS=$goos" >&2; exit 1; }
-            printf '%s\n' "$info" | grep -qE "build[[:space:]]+GOARCH=${goarch}\$" || { echo "СТОП: признак 4 — в $name нет GOARCH=$goarch" >&2; exit 1; }
+            grep -qE "build[[:space:]]+GOOS=${goos}\$" <<< "$info" || { echo "СТОП: признак 4 — в $name нет GOOS=$goos" >&2; exit 1; }
+            grep -qE "build[[:space:]]+GOARCH=${goarch}\$" <<< "$info" || { echo "СТОП: признак 4 — в $name нет GOARCH=$goarch" >&2; exit 1; }
             # Признак 5 (ревью, Low-2) — это действительно CLI, а не GUI:
             # признаки 1–4 одинаково зелены на GUI-бинаре, положенном под
             # именем кросс-цели (тег, коммит, -trimpath, (devel) и пара
             # GOOS/GOARCH у него те же). Главный пакет их различает.
-            printf '%s\n' "$info" | grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' || { echo "СТОП: признак 5 — $name собран не из ./cmd/cli (нет 'path amnezia-admin/cmd/cli')" >&2; exit 1; }
+            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" || { echo "СТОП: признак 5 — $name собран не из ./cmd/cli (нет 'path amnezia-admin/cmd/cli')" >&2; exit 1; }
           done
           shopt -s nullglob
           for p in dist/amnezia-admin-*; do
@@ -338,8 +338,12 @@ jobs:
             macos) bin="dist/amnezia-admin-gui-macos-arm64" ;;
           esac
           grep -aF -- "$GITHUB_REF_NAME" "$bin" >/dev/null || { echo "СТОП: версия $GITHUB_REF_NAME не найдена в теле $bin" >&2; exit 1; }
-          go version -m "$bin" | grep -qE 'build[[:space:]]+-trimpath=true' || { echo "СТОП: -trimpath=true не подтверждён в $bin" >&2; exit 1; }
-          go version -m "$bin" | grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' || { echo "СТОП: версия в $bin могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
+          # Раунд SIGPIPE: вывод go version -m сначала в переменную, затем
+          # here-string — без конвейера, где ранний выход grep -q ронял бы
+          # пишущего по SIGPIPE, а pipefail превращал это в «не найдено».
+          gui_info="$(go version -m "$bin")"
+          grep -qE 'build[[:space:]]+-trimpath=true' <<< "$gui_info" || { echo "СТОП: -trimpath=true не подтверждён в $bin" >&2; exit 1; }
+          grep -qE 'mod[[:space:]]+amnezia-admin[[:space:]]+\(devel\)' <<< "$gui_info" || { echo "СТОП: версия в $bin могла прийти из авто-vcs-стемпинга Go, а не из -X (нет 'mod amnezia-admin (devel)')" >&2; exit 1; }
           # Сторож покрытия — симметрично CLI-шагу (ревью, Low-1). Сейчас
           # GUI-цель на job ровно одна, и case выше её покрывает; но стоит
           # позже добавить GUI-цель и забыть строку case — бинарь уехал бы в
@@ -399,7 +403,7 @@ jobs:
           test "$GITHUB_REF_TYPE" = tag
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
-          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
+          grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' <<< "$GITHUB_REF_NAME" || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -461,10 +465,23 @@ jobs:
           uniq_count="$(printf '%s\n' "${subjects[@]}" | sort -u | wc -l)"
           test "${#subjects[@]}" -eq "$uniq_count" || { echo "СТОП: субъекты аттестации повторяются" >&2; exit 1; }
           test "${#subjects[@]}" -eq 9 || { echo "СТОП: субъектов аттестации ${#subjects[@]}, ожидалось 9 (8 бинарей + SHA256SUMS)" >&2; exit 1; }
-          printf '%s\n' "${subjects[@]}" | grep -qx 'dist/SHA256SUMS' || { echo "СТОП: SHA256SUMS не входит в субъекты аттестации — файл сумм уйдёт без подписи" >&2; exit 1; }
+          # Раунд SIGPIPE (main f0febbd, CI Linux красный на удачу):
+          # `printf … | grep -q` — grep выходит на первом совпадении, printf
+          # ловит SIGPIPE, pipefail роняет конвейер, и «входит» читается как
+          # «не входит». Принадлежность — циклом по массиву, без конвейера
+          # (ассоциативный массив не годится: bash 3.2 на macOS, где сторож
+          # internal/ciguard гоняет это тело).
+          in_subjects() {
+            local x
+            for x in "${subjects[@]}"; do
+              [ "$x" = "$1" ] && return 0
+            done
+            return 1
+          }
+          in_subjects 'dist/SHA256SUMS' || { echo "СТОП: SHA256SUMS не входит в субъекты аттестации — файл сумм уйдёт без подписи" >&2; exit 1; }
           all=(dist/*)
           for f in "${all[@]}"; do
-            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" || { echo "СТОП: $f публикуется, но не входит в субъекты аттестации" >&2; exit 1; }
+            in_subjects "$f" || { echo "СТОП: $f публикуется, но не входит в субъекты аттестации" >&2; exit 1; }
           done
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

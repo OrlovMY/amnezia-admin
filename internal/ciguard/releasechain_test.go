@@ -474,6 +474,18 @@ func TestReleaseAttestsChecksums(t *testing.T) {
 	if err != nil || !strings.Contains(out, "субъект: dist/SHA256SUMS") {
 		fail(t, "на образце из девяти файлов шаг проверки субъектов не прошёл (err=%v):\n%s", err, out)
 	}
+	// Тот же образец с медленным printf (раунд SIGPIPE): проверка
+	// принадлежности через `printf … | grep -q` на раннере падала на удачу;
+	// здесь — всегда.
+	slow := filepath.Join(t.TempDir(), "slow-printf.sh")
+	if err := os.WriteFile(slow, []byte(slowPrintf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	slowVars := map[string]string{"ATTEST_SUBJECTS": subjects, "BASH_ENV": filepath.ToSlash(slow)}
+	if out, err := runStepBody(t, check.Run, sampleDist(t, releaseAssets), slowVars); err != nil {
+		fail(t, "с медленным printf шаг проверки субъектов упал на исправном образце (err=%v) — "+
+			"ранний выход читателя конвейера (grep -q) роняет пишущего по SIGPIPE, под pipefail это провал:\n%s", err, out)
+	}
 	for _, bad := range []struct {
 		name  string
 		files []string
@@ -697,12 +709,35 @@ func TestNoToolEnvironmentOverrides(t *testing.T) {
 const canaryStub = `go() {
   echo "вызов: $*" >> "$STUB_LOG"
   case "${STUB_MODE:-}" in
-    sc2086) echo "canary-workflow.yml:7:9: shellcheck reported issue in this script: SC2086:info:2:6: Double quote"; return 1 ;;
+    sc2086) echo "canary-workflow.yml:7:9: shellcheck reported issue in this script: SC2086:info:2:6: Double quote"
+            echo "canary-workflow.yml:8:9: вторая строка вывода — после неё медленный printf пишет в уже закрытый конвейер"
+            return 1 ;;
     zero) return 0 ;;
     other) echo "canary-workflow.yml:1:1: some other error [syntax-check]"; return 1 ;;
   esac
   echo "STUB_MODE не задан" >&2
   return 97
+}
+` + slowPrintf
+
+// slowPrintf — printf, который пишет первую строку, ждёт и пишет остальное
+// (раунд SIGPIPE). Воспроизводит ДЕТЕРМИНИРОВАННО то, что на раннере
+// случалось на удачу: `printf … | grep -q` — grep выходит на первом
+// совпадении, следующая запись printf ловит SIGPIPE (141), и под pipefail
+// конвейер «не нашёл» то, что нашёл. Подсовывается через BASH_ENV, тело
+// шага не правится.
+const slowPrintf = `printf() {
+  local __out __first
+  __out="$(builtin printf "$@"; echo .)"
+  __out="${__out%.}"
+  __first="${__out%%$'\n'*}"
+  if [ "$__first" = "$__out" ] || [ "$__first"$'\n' = "$__out" ]; then
+    builtin printf '%s' "$__out"
+    return
+  fi
+  builtin printf '%s\n' "$__first"
+  sleep 0.3
+  builtin printf '%s' "${__out#*$'\n'}"
 }
 `
 
