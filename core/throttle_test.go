@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -76,7 +77,10 @@ func TestLoadThrottleMissingOrCorrupt(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("missing file", func(t *testing.T) {
-		st := LoadThrottle(dir, "nonexistent.avlt")
+		st, err := LoadThrottle(dir, "nonexistent.avlt")
+		if err != nil {
+			t.Fatalf("LoadThrottle(missing): ошибка %v — отсутствие файла штатно, это ноль попыток", err)
+		}
 		if st != (ThrottleState{}) {
 			t.Errorf("LoadThrottle(missing) = %+v, want zero value", st)
 		}
@@ -93,9 +97,15 @@ func TestLoadThrottleMissingOrCorrupt(t *testing.T) {
 				t.Fatalf("паника на битом throttle.json: %v", r)
 			}
 		}()
-		st := LoadThrottle(badDir, "whatever.avlt")
-		if st != (ThrottleState{}) {
-			t.Errorf("LoadThrottle(corrupt) = %+v, want zero value", st)
+		// Н8 (30.09.2026): прежде здесь ожидался ноль — то есть тест
+		// закреплял сброс блокировки битым файлом. Теперь это «неизвестно».
+		st, err := LoadThrottle(badDir, "whatever.avlt")
+		var te *ThrottleError
+		if !errors.As(err, &te) {
+			t.Fatalf("LoadThrottle(corrupt) = %+v, err=%v — битый файл прочитан как ответ", st, err)
+		}
+		if te.Path != path {
+			t.Errorf("путь в ошибке %q, ожидался %q", te.Path, path)
 		}
 	})
 }
@@ -108,7 +118,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	if err := SaveThrottle(dir, "a1b2c3d4.avlt", st); err != nil {
 		t.Fatalf("SaveThrottle: %v", err)
 	}
-	got := LoadThrottle(dir, "a1b2c3d4.avlt")
+	got := mustLoadThrottle(t, dir, "a1b2c3d4.avlt")
 	if got.Fails != st.Fails {
 		t.Errorf("Fails = %d, want %d", got.Fails, st.Fails)
 	}
@@ -130,11 +140,11 @@ func TestPerVaultIsolation(t *testing.T) {
 		t.Fatalf("SaveThrottle(B): %v", err)
 	}
 
-	gotA := LoadThrottle(dir, "vaultA.avlt")
+	gotA := mustLoadThrottle(t, dir, "vaultA.avlt")
 	if !gotA.BlockedUntil.Equal(stA.BlockedUntil) {
 		t.Errorf("vaultA заблокирован некорректно: %+v", gotA)
 	}
-	gotB := LoadThrottle(dir, "vaultB.avlt")
+	gotB := mustLoadThrottle(t, dir, "vaultB.avlt")
 	if gotB.Fails != 3 || !gotB.BlockedUntil.IsZero() {
 		t.Errorf("vaultB не должен быть затронут блокировкой vaultA: %+v", gotB)
 	}
@@ -144,8 +154,17 @@ func TestPerVaultIsolation(t *testing.T) {
 	if err := SaveThrottle(dir, "vaultA.avlt", stA2); err != nil {
 		t.Fatalf("SaveThrottle(A2): %v", err)
 	}
-	gotB2 := LoadThrottle(dir, "vaultB.avlt")
+	gotB2 := mustLoadThrottle(t, dir, "vaultB.avlt")
 	if gotB2.Fails != 3 {
 		t.Errorf("vaultB испорчен повторной записью vaultA: %+v", gotB2)
 	}
+}
+
+func mustLoadThrottle(t *testing.T, dir, name string) ThrottleState {
+	t.Helper()
+	st, err := LoadThrottle(dir, name)
+	if err != nil {
+		t.Fatalf("LoadThrottle: %v", err)
+	}
+	return st
 }

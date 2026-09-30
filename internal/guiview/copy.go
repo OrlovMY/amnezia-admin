@@ -71,8 +71,10 @@ type Row struct {
 	// WireGuard). Секретом не является: приватный ключ и vpn://-ключ в
 	// таблицу не попадают и в Row не передаются.
 	ClientID string
-	// Disabled — запись отключена.
-	Disabled bool
+	// Enabled — включён ли клиент по записи clientsTable: ТРИ состояния
+	// (раунд 2 долгов, У1). Прежде здесь было `Disabled bool`, и клиент с
+	// испорченным полем disabled выглядел в строке как активный.
+	Enabled core.EnabledState
 	// CanManage — управляемый протокол: статистика вообще запрашивалась.
 	CanManage bool
 	// (A1б) Поля ActivityFailed и Handshake УБРАНЫ: «нет в ответе» было в
@@ -102,9 +104,9 @@ func CellText(r Row, col int) string {
 		}
 		return r.Created
 	case 3:
-		return ActivityText(r.CanManage, r.Disabled, r.Peer)
+		return ActivityText(r.CanManage, r.Enabled, r.Peer)
 	case 4:
-		return TrafficText(r.CanManage, r.Disabled, r.Peer)
+		return TrafficText(r.CanManage, r.Enabled, r.Peer)
 	case 5:
 		return r.ClientID
 	}

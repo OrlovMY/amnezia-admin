@@ -40,7 +40,18 @@ type Plan struct {
 	wgSHA, tblSHA       string // hex sha256 прочитанных байтов (для CAS); tblSHA пуст, если !tblExisted
 
 	result *NewUser // для add/rekey: конфиг клиента (приватный ключ!) — наружу только после Apply
+
+	// note — то, что человек обязан узнать о плане сверх diff (раунд 5
+	// долгов, Н-4): например, что peer уже убран и правится только запись.
+	note string
 }
+
+// Note — пояснение к плану для предпросмотра и итога; пусто — пояснять нечего.
+func (p *Plan) Note() string { return p.note }
+
+// NoteDisableRecordOnly — пояснение к отключению клиента с неизвестным
+// disabled, у которого peer'а в wg0.conf уже нет (Н-4).
+const NoteDisableRecordOnly = "Доступ уже отрезан: клиента нет в wg0.conf. Исправлена только запись в clientsTable (disabled = true)."
 
 // Diff возвращает построчный diff «-/+» по обоим файлам (без unified-формата
 // и контекстных строк — только изменившееся; см. В2 п.7 задания). Пустая
@@ -1011,9 +1022,9 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
+	listenPort, err := serverListenPort(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// allocateIP (Г1, core/ipalloc.go) — резерв отключённых учитывается через
@@ -1141,6 +1152,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	// отключённый пользователь включился бы без ведома администратора.
 	// Проверка — ДО чтения wg0.conf: отказ не должен зависеть от состояния
 	// сервера, раз решение принимается по одной лишь clientsTable.
+	if clients[idx].EnabledState() == EnabledUnknown {
+		return nil, EnabledUnknownError(clients[idx])
+	}
 	if clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q отключён — сначала включите его, затем перевыпускайте конфиг", name)
 	}
@@ -1159,9 +1173,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	if err != nil {
 		return nil, err
 	}
-	listenPort := conf.iface["ListenPort"]
-	if listenPort == "" {
-		listenPort = "51820"
+	listenPort, err := serverListenPort(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	// IP всегда берётся из уже существующего блока peer'а (Г3) — ветка
@@ -1301,6 +1315,10 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
 	}
+	// Раунд 4 долгов (AU-UX High, решение ядра): отключение при неизвестном
+	// disabled РАЗРЕШЕНО — итог «отключён» от прежнего значения не зависит,
+	// и это единственный способ исправить запись в самой программе.
+	// Включение и перевыпуск при неизвестном по-прежнему отказывают.
 	if clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q уже отключён", clients[idx].Name())
 	}
@@ -1317,13 +1335,27 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 			break
 		}
 	}
+	recordOnly := false
 	if peer == nil {
-		return nil, fmt.Errorf("peer с ключом %q не найден в wg0.conf", clientID)
+		// Раунд 5 долгов (AU-LOGIC Н-4, решение ядра): у клиента с
+		// НЕИЗВЕСТНЫМ disabled peer'а в wg0.conf может не быть — самый
+		// вероятный случай, "true" строкой у уже отключённого. Доступ тогда
+		// уже отрезан, и отключение правит ТОЛЬКО запись clientsTable, тем же
+		// путём CAS; wg0.conf не трогается. Для ИЗВЕСТНОГО состояния (поле
+		// false или его нет) отсутствие peer'а — рассинхрон таблицы и
+		// конфига, и отказ остаётся прежним: молча «чинить» его нельзя.
+		if clients[idx].EnabledState() != EnabledUnknown {
+			return nil, fmt.Errorf("peer с ключом %q не найден в wg0.conf", clientID)
+		}
+		recordOnly = true
 	}
 
-	newConf, err := removePeerFromConf(raw, clientID)
-	if err != nil {
-		return nil, err
+	newConf := raw
+	if !recordOnly {
+		newConf, err = removePeerFromConf(raw, clientID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	newClients := make([]ClientEntry, len(clients))
@@ -1333,9 +1365,16 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 		ud[k] = v
 	}
 	ud["disabled"] = true
-	ud["disabledAt"] = time.Now().Format(time.RFC3339)
-	ud["psk"] = peer["PresharedKey"]
-	ud["allowedIP"] = peer["AllowedIPs"]
+	// Раунд 6 (AU-LOGIC Н-5): в ветке «только запись» прежний disabledAt не
+	// затирается — доступ отрезан раньше, и время того отключения — знание,
+	// а «сейчас» было бы выдумкой.
+	if _, had := ud["disabledAt"]; !(recordOnly && had) {
+		ud["disabledAt"] = time.Now().Format(time.RFC3339)
+	}
+	if !recordOnly {
+		ud["psk"] = peer["PresharedKey"]
+		ud["allowedIP"] = peer["AllowedIPs"]
+	} // без peer'а: psk/allowedIP — какие были в записи (резерв прежнего отключения), не выдумываются
 	newClients[idx].UserData = ud
 	tblAfter, err := json.MarshalIndent(newClients, "", "    ")
 	if err != nil {
@@ -1347,10 +1386,13 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 		Action:     "disable",
 		Subject:    clients[idx].Name(),
 		wgBefore:   []byte(raw),
-		wgAfter:    []byte(newConf),
+		wgAfter:    []byte(newConf), // recordOnly: байт-в-байт raw — Apply wg0.conf не пишет и syncconf не зовёт
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
+	}
+	if recordOnly {
+		p.note = NoteDisableRecordOnly
 	}
 	s.fillSHA(p)
 	return p, nil
@@ -1371,6 +1413,9 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 	idx := findClient(clients, clientID)
 	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
+	}
+	if clients[idx].EnabledState() == EnabledUnknown {
+		return nil, EnabledUnknownError(clients[idx])
 	}
 	if !clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q уже активен", clients[idx].Name())

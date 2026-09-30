@@ -18,8 +18,10 @@ package core
 //     (disable его убирает), поэтому без этого источника резерв невидим.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // hostIP достаёт хост-адрес без маски из строки вида "10.8.1.5/32" или
@@ -57,7 +59,9 @@ func usedIPs(conf *wgConf, clients []ClientEntry) map[string]string {
 	// владелец, показанный отказом, должен быть занявшим адрес peer'ом, а не
 	// самим отключённым, чей резерв не должен маскировать конфликт).
 	for _, cl := range clients {
-		if !cl.Disabled() {
+		// Резервируется адрес и ТОЧНО отключённого, и того, про кого
+		// неизвестно (У1): неизвестное не выдаётся за «активен».
+		if cl.EnabledState() == EnabledActive {
 			continue
 		}
 		ip := hostIP(Str(cl.UserData, "allowedIP"))
@@ -107,12 +111,27 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 	// (порядок итерации карты в Go не определён — review круг 2, Low,
 	// AR-01: недетерминизм, внесённый этим PR; nextFreeIP до PR-3 читала
 	// подсеть тем же способом, через conf.peers).
+	//
+	// Раунд 2 ревью долгов (SEC-01, Н-1): подсеть берётся по peer'ам,
+	// только если ВСЕ они в одной подсети. Разошлись — какая из них подсеть
+	// сервера, неизвестно; «первый peer» здесь был бы порядком ветвей
+	// (признак 3), перехватывающим «не знаем».
 	if subnet == "" {
+		var seen []string
 		for _, p := range conf.peers {
 			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-				subnet = m[1]
-				break
+				if subnet == "" {
+					subnet = m[1]
+				}
+				if !containsStr(seen, m[1]) {
+					seen = append(seen, m[1])
+				}
 			}
+		}
+		if len(seen) > 1 {
+			return "", fmt.Errorf("В wg0.conf сервера не указан Address, а клиенты в нём — в разных подсетях (%s). "+
+				"Какая из них подсеть сервера, неизвестно: клиент с неверным адресом не подключится. "+
+				"Ничего не изменено. Проверьте сервер в приложении Amnezia.", strings.Join(seen, ".x, ")+".x")
 		}
 	}
 	for ip := range usedIPs(conf, clients) {
@@ -124,8 +143,10 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 		used[n] = true
 	}
 	if subnet == "" {
-		subnet = "10.8.1"
-		used[1] = true
+		// Долг У3 (30.09.2026): прежде здесь подставлялась 10.8.1 — наугад.
+		// Клиент с адресом не из подсети сервера не подключится, а человек
+		// уверен, что доступ выдан.
+		return "", ErrNoSubnet
 	}
 	next := 2
 	for used[next] {
@@ -135,4 +156,35 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 		return "", fmt.Errorf("свободных адресов в подсети %s.0/24 не осталось", subnet)
 	}
 	return fmt.Sprintf("%s.%d", subnet, next), nil
+}
+
+// ErrNoSubnet — в wg0.conf нет Address (и подсеть не видна ни по одному
+// peer'у): выдавать адрес наугад нельзя (долг У3).
+var ErrNoSubnet = errors.New("В wg0.conf сервера не указан Address — подсеть клиентов. " +
+	"Угадывать её нельзя: клиент с неверным адресом не подключится. Ничего не изменено. " +
+	"Проверьте сервер в приложении Amnezia.")
+
+// ErrNoListenPort — в wg0.conf нет ListenPort (долг У2). Amnezia пишет его
+// всегда, поэтому пустое значение — признак неизвестного состояния
+// сервера, а не повод подставить 51820.
+var ErrNoListenPort = errors.New("В wg0.conf сервера не указан ListenPort — порт, к которому подключаются клиенты. " +
+	"Угадывать его нельзя: клиент с неверным портом не подключится. Ничего не изменено. " +
+	"Проверьте сервер в приложении Amnezia.")
+
+// serverListenPort — порт сервера для конфига клиента; нет его — отказ.
+func serverListenPort(conf *wgConf) (string, error) {
+	p := strings.TrimSpace(conf.iface["ListenPort"])
+	if p == "" {
+		return "", ErrNoListenPort
+	}
+	return p, nil
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

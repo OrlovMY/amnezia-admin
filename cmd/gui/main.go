@@ -616,8 +616,15 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 //
 // Throttle (10 неверных попыток подряд → блокировка на 5 минут, персистентно
 // в throttle.json per-vault) проверяется до расшифровки и обновляется сразу
-// после неё: неудача пишется на диск НЕМЕДЛЕННО (fail-closed), до того, как
-// решаем, показывать ли "осталось попыток" или переключаться в отсчёт блокировки.
+// после неё: неудача пишется на диск НЕМЕДЛЕННО, до того, как решаем,
+// показывать ли "осталось попыток" или переключаться в отсчёт блокировки.
+//
+// Fail-closed по счётчику (долг Н8, решение SEC-01 30.09.2026): если
+// throttle.json не удалось прочитать (не «файла нет», а нечитаем или
+// повреждён) или записать — ввод пина закрыт, человеку названы причина и
+// путь, кнопка «Повторить» проверяет заново. Прежде ошибка записи
+// отбрасывалась (`_ =`) при комментарии «fail-closed», а битый файл читался
+// как ноль попыток — оба пути снимали ограничение молча.
 //
 // Время для throttle — ОНЛАЙН, не локальные часы: при открытии диалога один
 // раз запрашивается сетевое время (core.FetchNetworkTime) и фиксируется в
@@ -633,7 +640,7 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 // счётчик попыток — это anti-casual слой, не защита от целенаправленной
 // атаки на файловую систему.
 func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, info *widget.Label) {
-	vaultDir := core.DefaultVaultDir()
+	vaultDir := pinVaultDir()
 	vaultName := filepath.Base(path)
 
 	pinEntry := widget.NewEntry()
@@ -641,6 +648,10 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	pinEntry.SetPlaceHolder("Пин-код")
 	statusLabel := widget.NewLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
+	// Выделяемая (раунд 4 долгов, AU-UX Low): в тексте о закрытом вводе —
+	// полный путь throttle.json, 170+ знаков; человек копирует его, а не
+	// переписывает.
+	statusLabel.Selectable = true
 	// Подсказка про раскладку — ОТДЕЛЬНАЯ подпись, а не statusLabel: тот
 	// занят обратным отсчётом блокировки и «Расшифровываю…», и подсказка
 	// затирала бы их (или они её).
@@ -672,6 +683,14 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			ticker.Stop()
 			ticker = nil
 		}
+	}
+	// closeInput — счётчик попыток неизвестен (Н8): ввод пина закрыт, пока
+	// не исправлено; «Повторить» заново читает счётчик (acquireOnlineTime).
+	closeInput := func(err error) {
+		stopTicker()
+		openBtn.Disable()
+		statusLabel.SetText(guiview.PinThrottleUnknown(err))
+		retryBtn.Show()
 	}
 
 	// startCountdown переключает диалог в режим обратного отсчёта блокировки:
@@ -739,25 +758,35 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			return
 		}
 		pin := pinEntry.Text
-		if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+		cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+		if lerr != nil {
+			closeInput(lerr)
+			return
+		}
+		if blocked, remaining := core.CheckThrottle(cur, clock.Now()); blocked {
 			startCountdown(clock.Now().Add(remaining))
 			return
 		}
 		openBtn.Disable()
 		statusLabel.SetText("Расшифровываю...")
 		goSafe(func() {
-			data, err := core.LoadVault(path)
-			var payload core.VaultPayload
-			var vinfo core.VaultInfo
-			if err == nil {
-				payload, vinfo, err = core.OpenVaultInfo(pin, data)
-			}
+			payload, vinfo, err := vaultDecrypt(path, pin)
 			if err != nil {
 				now := clock.Now()
-				st := core.RegisterFailure(core.LoadThrottle(vaultDir, vaultName), now)
-				_ = core.SaveThrottle(vaultDir, vaultName, st) // fail-closed: пишем счётчик до любого дальнейшего ветвления
+				prev, cerr := core.LoadThrottle(vaultDir, vaultName)
+				var st core.ThrottleState
+				if cerr == nil {
+					st = core.RegisterFailure(prev, now)
+					// пишем счётчик до любого дальнейшего ветвления; не
+					// записан — «осталось попыток» было бы неправдой (Н8)
+					cerr = core.SaveThrottle(vaultDir, vaultName, st)
+				}
 				fyne.Do(func() {
 					pinEntry.SetText("")
+					if cerr != nil {
+						closeInput(cerr)
+						return
+					}
 					if blocked, remaining := core.CheckThrottle(st, now); blocked {
 						startCountdown(now.Add(remaining))
 						return
@@ -774,6 +803,11 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				})
 				return
 			}
+			// Сброс счётчика после ВЕРНОГО пина. Ошибку здесь не показываем
+			// и вход не закрываем сознательно: пин уже проверен, а
+			// несброшенный счётчик ограничение только ужесточает (в файле
+			// остаются прежние неудачи). Если файл при этом стал нечитаем,
+			// следующее открытие диалога скажет об этом через LoadThrottle.
 			_ = core.SaveThrottle(vaultDir, vaultName, core.RegisterSuccess())
 			// vc — контекст открытого хранилища для attemptConnect (Е1):
 			// ExpectedFingerprint (payload.HostKeyFingerprint), перезапечатывание
@@ -822,7 +856,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				}
 				tc := core.NewTrustedClock(onlineNow)
 				clock = &tc
-				if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+				cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+				if lerr != nil {
+					closeInput(lerr)
+					return
+				}
+				if blocked, remaining := core.CheckThrottle(cur, clock.Now()); blocked {
 					startCountdown(clock.Now().Add(remaining))
 					return
 				}
@@ -834,12 +873,19 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	retryBtn = widget.NewButtonWithIcon("Повторить", theme.ViewRefreshIcon(), func() { acquireOnlineTime() })
 	retryBtn.Hide()
 
+	// В1 (раунд 2 долгов, UX-01): подпись состояния — в прокручиваемой
+	// полосе постоянной высоты, кнопки — вне прокрутки (как «Конфиг готов»,
+	// Д6). Текст о закрытом вводе пина несёт ПОЛНЫЙ путь throttle.json
+	// (решение владельца 19.09 — печатать абсолютный путь); длинный путь на
+	// минимальном окне раздувал диалог, и «Повторить» ложилась на «Отмена».
+	statusScroll := container.NewVScroll(statusLabel)
+	statusScroll.SetMinSize(fyne.NewSize(0, pinStatusHeight))
 	content := container.NewVBox(
 		widget.NewLabel(label),
 		pinEntry,
 		pinHint.box,
 		layoutNotice,
-		statusLabel,
+		statusScroll,
 		openBtn,
 		retryBtn,
 	)
@@ -853,6 +899,29 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	acquireOnlineTime()
 }
+
+// vaultDecrypt — попытка расшифровки хранилища пином: чтение файла и
+// OpenVaultInfo. Переменная — шов для теста (раунд 5 долгов, AU-LOGIC М-4):
+// «при неизвестном счётчике попытки не было» утверждается прямо — числом
+// вызовов, а не косвенным признаком.
+var vaultDecrypt = func(path, pin string) (core.VaultPayload, core.VaultInfo, error) {
+	data, err := core.LoadVault(path)
+	if err != nil {
+		return core.VaultPayload{}, core.VaultInfo{}, err
+	}
+	return core.OpenVaultInfo(pin, data)
+}
+
+// pinVaultDir — каталог хранилищ для диалога пин-кода (и throttle.json в
+// нём). Переменная, а не прямой вызов, — шов прибора осмотра: сцена с
+// длинным путём (~170 знаков) иначе недостижима, каталог тестового
+// бинарника короткий.
+var pinVaultDir = core.DefaultVaultDir
+
+// pinStatusHeight — высота полосы состояния диалога пин-кода: две строки
+// текста (предел TestDialogsStayCompact — 400 т. на весь диалог). Длиннее —
+// прокрутка, диалог не растёт.
+const pinStatusHeight = 48
 
 // vaultCtx — контекст открытого хранилища (.avlt), нужный attemptConnect для
 // (1) подстановки ExpectedFingerprint из payload.HostKeyFingerprint, (2)
@@ -1746,7 +1815,35 @@ func keyColumnCap() float32 {
 func tableColumnWidths(clients []core.ClientEntry) []float32 {
 	out := make([]float32, 0, len(fixedColumnWidths)+1)
 	out = append(out, fixedColumnWidths...)
+	out[activityColumn] = activityColumnWidth(clients)
 	return append(out, keyColumnWidth(clients))
+}
+
+// activityColumn — индекс колонки «Активность».
+const activityColumn = 3
+
+// activityColumnWidth — ширина «Активности». Обычно — постоянная из
+// fixedColumnWidths. Раунд 3 долгов (UX-01, Я1): у клиента с неизвестной
+// включённостью ячейка — «<время> · вкл/откл: ?», она шире 140 т., а Fyne
+// подпись не обрезает: текст налез бы на «Трафик». Тогда колонка
+// расширяется по самому длинному такому тексту — только пока такие
+// записи есть в таблице.
+func activityColumnWidth(clients []core.ClientEntry) float32 {
+	w := fixedColumnWidths[activityColumn]
+	for _, c := range clients {
+		if c.EnabledState() != core.EnabledUnknown {
+			continue
+		}
+		th := fyne.CurrentApp().Settings().Theme()
+		sample := "2026-09-22 12:34 · " + guiview.EnabledUnknownCell
+		need := fyne.MeasureText(sample, th.Size(theme.SizeNameText), fyne.TextStyle{}).Width +
+			2*th.Size(theme.SizeNameInnerPadding)
+		if need > w {
+			w = need
+		}
+		break
+	}
+	return w
 }
 
 // Высота главного окна. Ширина НЕ ЗАДАЁТСЯ ЧИСЛОМ — она считается по
@@ -1966,7 +2063,7 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 		Name:      cl.Name(),
 		Created:   cl.Created(),
 		ClientID:  cl.ClientID,
-		Disabled:  cl.Disabled(),
+		Enabled:   cl.EnabledState(),
 		CanManage: u.canManage,
 		Peer:      core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID),
 	}, true
@@ -2020,7 +2117,7 @@ func (u *ui) buildTable() {
 				return
 			}
 			if id.Col == 1 {
-				c.TextStyle = fyne.TextStyle{Bold: true, Italic: r.Disabled}
+				c.TextStyle = fyne.TextStyle{Bold: true, Italic: r.Enabled == core.EnabledDisabled}
 			}
 			// Текст ячейки — из guiview.CellText: и «?» при неудавшемся
 			// запросе, и всё остальное решается там же, откуда берётся
@@ -2088,6 +2185,9 @@ func (u *ui) applyKeyColumnWidth() {
 		return
 	}
 	u.table.SetColumnWidth(keyColumn, keyColumnWidth(u.clients))
+	// «Активность» тоже зависит от состава (Я1, раунд 3): при записи с
+	// неизвестной включённостью она шире.
+	u.table.SetColumnWidth(activityColumn, activityColumnWidth(u.clients))
 }
 
 // onHeaderTapped обрабатывает клик по заголовку сортируемой колонки: тот же
@@ -2257,7 +2357,12 @@ func (u *ui) refresh() {
 			// таблица выглядит пустой, пока пользователь не проскроллит вручную.
 			u.table.Refresh()
 			u.table.ScrollToTop()
-			u.status.SetText(view.Status)
+			status := view.Status
+			if view.CanManage {
+				// У7: причина «?» в таблице — в строке состояния, как в CLI
+				status = guiview.LoadedStatus(status, clients, stats, statsErr)
+			}
+			u.status.SetText(status)
 		})
 	})
 }
@@ -2347,7 +2452,8 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	wgGrid := newDiffGrid(wgDiff)
 	tblGrid := newDiffGrid(tblDiff)
 
-	statusLabel := widget.NewLabel("")
+	// Пояснение к плану (Н-4, раунд 5) — в предпросмотре сразу, до «Применить».
+	statusLabel := widget.NewLabel(plan.Note())
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	var d dialog.Dialog
@@ -2818,6 +2924,8 @@ func (u *ui) toggleSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ, разрешено
+	// (раунд 4 долгов, решение ядра): итог от прежней записи не зависит.
 	enable := victim.Disabled()
 	title := "Отключить пользователя?"
 	verb := "Отключаю"
@@ -2831,9 +2939,13 @@ func (u *ui) toggleSelected() {
 	}
 
 	var d dialog.Dialog
-	onToggled := func() {
+	onToggled := func(note string) {
 		u.selectedRow = -1
-		u.status.SetText(fmt.Sprintf("Пользователь %q %s.", victim.Name(), verbDone))
+		st := fmt.Sprintf("Пользователь %q %s.", victim.Name(), verbDone)
+		if note != "" {
+			st += " " + note // Н-4, раунд 5: правилась только запись — прямо
+		}
+		u.status.SetText(st)
 		u.refresh()
 	}
 	apply := func() {
@@ -2844,7 +2956,7 @@ func (u *ui) toggleSelected() {
 			u.setBusy(true)
 			u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
 			goSafe(func() {
-				err := u.sess.SetEnabled(u.cur, victim.ClientID, enable)
+				note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
 				fyne.Do(func() {
 					if err != nil {
 						u.setBusy(false)
@@ -2852,7 +2964,7 @@ func (u *ui) toggleSelected() {
 						dialog.ShowError(err, u.win)
 						return
 					}
-					onToggled()
+					onToggled(note)
 				})
 			})
 		})
@@ -2874,7 +2986,7 @@ func (u *ui) toggleSelected() {
 				}
 				u.showDiffWindow(fmt.Sprintf("%s %q", noun, victim.Name()), plan, func(_ *core.NewUser) {
 					d.Hide()
-					onToggled()
+					onToggled(plan.Note())
 				})
 			})
 		})
@@ -2906,6 +3018,11 @@ func (u *ui) regenerateSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if victim.EnabledState() == core.EnabledUnknown {
+		// У1: включён ли — неизвестно; до вопроса, а не после него
+		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
+		return
+	}
 
 	var d dialog.Dialog
 	onRegenerated := func(nu *core.NewUser) {
