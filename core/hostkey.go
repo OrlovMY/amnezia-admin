@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -257,7 +256,7 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 				"адрес %s, ожидался %s, предъявлен %s", addr, pol.ExpectedFingerprint, fp)
 		}
 		if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
-			return false, err
+			return false, fmt.Errorf("%w (%s): %w", ErrKnownHostsWrite, pol.KnownHostsPath, err)
 		}
 		return true, nil
 	}
@@ -268,7 +267,7 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 		return false, newHostKeyError(ErrHostKeyUnknown, addr, "", fp, "адрес %s, отпечаток %s", addr, fp)
 	}
 	if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
-		return false, err
+		return false, fmt.Errorf("%w (%s): %w", ErrKnownHostsWrite, pol.KnownHostsPath, err)
 	}
 	return true, nil
 }
@@ -289,7 +288,20 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 // Отсутствие файла known_hosts — не ошибка, а пустая база (сервер
 // неизвестен): рядом с ещё не созданным файлом "Настройки" его, очевидно,
 // нет при самом первом подключении когда-либо.
-func lookupKnownHost(path, addr string, remote net.Addr, key ssh.PublicKey) (*knownhosts.KeyError, error) {
+func lookupKnownHost(path, addr string, remote net.Addr, key ssh.PublicKey) (keyErr *knownhosts.KeyError, err error) {
+	// Чтение — под тем же замком, что запись: на Windows rename поверх
+	// файла, открытого другим процессом, падает «файл занят».
+	lockErr := withKnownHostsLock(path, func() error {
+		keyErr, err = lookupKnownHostLocked(path, addr, remote, key)
+		return nil
+	})
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	return keyErr, err
+}
+
+func lookupKnownHostLocked(path, addr string, remote net.Addr, key ssh.PublicKey) (*knownhosts.KeyError, error) {
 	if _, statErr := os.Stat(path); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return &knownhosts.KeyError{}, nil
@@ -315,31 +327,22 @@ func lookupKnownHost(path, addr string, remote net.Addr, key ssh.PublicKey) (*kn
 // path атомарно (как SaveVault: tmp + rename), создавая каталог и сам файл
 // при необходимости; права 0600.
 func appendKnownHost(path, addr string, key ssh.PublicKey) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	var buf bytes.Buffer
-	buf.Write(existing)
-	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+	// Под межпроцессным замком: перечитать, дописать, заменить атомарно
+	// через уникальный временный файл (core/knownhostsfile.go).
+	return withKnownHostsLock(path, func() error {
+		existing, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		var buf bytes.Buffer
+		buf.Write(existing)
+		if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString(knownhosts.Line([]string{addr}, key))
 		buf.WriteByte('\n')
-	}
-	buf.WriteString(knownhosts.Line([]string{addr}, key))
-	buf.WriteByte('\n')
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+		return replaceFileAtomic(path, buf.Bytes())
+	})
 }
 
 // ForgetHostKey — «забыть ключ сервера» для записи хранилища vaultPath:
@@ -400,6 +403,10 @@ func ForgetHostKey(pin, vaultPath, knownHostsPath, host string) error {
 // не ошибка (нечего забывать). Запись атомарна (tmp + rename, 0600), как
 // appendKnownHost/SaveVault.
 func removeKnownHostLines(path, host string) error {
+	return withKnownHostsLock(path, func() error { return removeKnownHostLinesLocked(path, host) })
+}
+
+func removeKnownHostLinesLocked(path, host string) error {
 	target := knownhosts.Normalize(host)
 
 	data, err := os.ReadFile(path)
@@ -439,13 +446,5 @@ func removeKnownHostLines(path, host string) error {
 		buf.WriteByte('\n')
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return replaceFileAtomic(path, buf.Bytes())
 }
