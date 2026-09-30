@@ -27,23 +27,44 @@ const (
 // CASAbsent — ожидаемая «сумма» файла, которого не должно быть.
 const CASAbsent = "absent"
 
+// CASTempInfix — часть протокола: временные файлы записи называются
+// <файл>.aa.<pid> в каталоге назначения, и под замком скрипт удаляет ВСЕ
+// такие файлы (остатки убитых писателей). Другой инструмент не вправе
+// создавать там файлы с этим именем.
+const CASTempInfix = ".aa."
+
+// Таймауты: внешний (на хосте) держит клиента flock/docker exec, внутренний
+// (в контейнере) — сам скрипт. Внутренний меньше: скрипт умирает раньше,
+// чем снимется замок, и запись не переживает замок (SEC R2).
+const (
+	casOuterTimeout = 60
+	casInnerTimeout = 50
+)
+
 // CASWriteScript — POSIX sh, исполняется в контейнере: sh -c СКРИПТ МЕТКА
 // КАТАЛОГ СУММА_WG0 СУММА_ТАБЛИЦЫ; stdin — две строки base64 (wg0.conf,
 // clientsTable). Одинарных кавычек в тексте нет (он сам в одинарных).
 //
 // Коды выхода — закрытый список (casOutcomeOf): 0 записано; 3 файл изменён
-// другим, ничего не записано; 5 нет утилиты, ничего не записано. 4 — код
-// flock (-E 4): замок занят. Любой иной код — «неизвестно, записано ли».
+// другим, ничего не записано; 5 нет утилиты, ничего не записано; 6 wg0.conf
+// уже заменён, clientsTable — нет (частичная запись). 4 — код flock (-E 4):
+// замок занят. Любой иной код — «неизвестно, записано ли».
+//
+// umask 077 — временные файлы, а после mv и сами wg0.conf/clientsTable,
+// получают 0600 (в wg0.conf приватный ключ сервера). stderr обоих mv
+// заглушён: после записи в выводе не должно быть слова «denied», по
+// которому когда-то повторяли под sudo.
 //
 // Строка wg0.conf "-" — «не менять wg0.conf» (rename и т.п.): сверка идёт,
 // файл не переписывается. "-" не входит в алфавит base64.
 //
 // read, а не head -c: head на канале читает с запасом и съел бы начало
 // второй строки; read в POSIX sh читает по байту.
-const CASWriteScript = `d=$1; ww=$2; wt=$3
+const CASWriteScript = `umask 077
+d=$1; ww=$2; wt=$3
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
-nw="$d/wg0.conf.aa.$$"; nt="$d/clientsTable.aa.$$"
-rm -f "$d"/wg0.conf.aa.* "$d"/clientsTable.aa.* || exit 1
+nw="$d/wg0.conf` + CASTempInfix + `$$"; nt="$d/clientsTable` + CASTempInfix + `$$"
+rm -f "$d"/wg0.conf` + CASTempInfix + `* "$d"/clientsTable` + CASTempInfix + `* || exit 1
 IFS= read -r W || exit 1
 IFS= read -r T || exit 1
 if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
@@ -53,8 +74,8 @@ hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
 ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
 if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
 if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then mv -f "$nw" "$d/wg0.conf" || exit 1; fi
-mv -f "$nt" "$d/clientsTable" || exit 1
+if [ "$W" != "-" ]; then mv -f "$nw" "$d/wg0.conf" 2>/dev/null || { rm -f "$nw" "$nt"; exit 1; }; fi
+mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && exit 1; exit 6; }
 exit 0`
 
 var (
@@ -80,8 +101,8 @@ func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, err
 	if !reCASSum.MatchString(wantWg) || !reCASSum.MatchString(wantTbl) {
 		return "", fmt.Errorf("недопустимая контрольная сумма")
 	}
-	return fmt.Sprintf("timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin.%s.lock docker exec -i %s sh -c '%s' %s %s %s %s",
-		container, container, CASWriteScript, label, dir, wantWg, wantTbl), nil
+	return fmt.Sprintf("timeout %d flock -w 15 -E 4 /run/lock/amnezia-admin.%s.lock docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
+		casOuterTimeout, container, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
@@ -116,10 +137,13 @@ const (
 	casChanged
 	casBusy
 	casToolMissing
+	casPartial
 	casUnknown
 )
 
-// casOutcomeOf — закрытый список кодов выхода. 127 — «команда не найдена»
+// casOutcomeOf — закрытый список кодов выхода. 6 — частичная запись: для
+// человека это «неизвестно» (ErrWriteUnknown), но с названием, что именно
+// записано. 127 — «команда не найдена»
 // оболочкой (нет timeout/flock на хосте или sh в контейнере): до записи дело
 // не дошло, поэтому это тоже «нет утилиты». Всё прочее, включая ошибку без
 // кода выхода (обрыв связи) и 124 (timeout), — «неизвестно».
@@ -138,6 +162,8 @@ func casOutcomeOf(err error) (casOutcome, int) {
 		return casBusy, code
 	case 5, 127:
 		return casToolMissing, code
+	case 6:
+		return casPartial, code
 	default:
 		return casUnknown, code
 	}
@@ -163,7 +189,7 @@ func (e *casWriteError) Is(target error) bool {
 		return target == ErrServerBusy
 	case casToolMissing:
 		return target == ErrServerToolMissing
-	case casUnknown:
+	case casUnknown, casPartial:
 		return target == ErrWriteUnknown
 	}
 	return false
@@ -173,6 +199,17 @@ var (
 	reCASChanged = regexp.MustCompile(`changed: (wg0\.conf|clientsTable)`)
 	reCASMissing = regexp.MustCompile(`missing tool: (\S+)`)
 )
+
+// casDeniedBeforeWrite — отказ docker в доступе к своему сокету: docker exec
+// не запускался, значит скрипт не начинался и записи не было.
+func casDeniedBeforeWrite(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "permission denied") &&
+		(strings.Contains(s, "docker.sock") || strings.Contains(s, "docker daemon socket"))
+}
 
 // stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
 func stderrTail(err error) string {
@@ -194,18 +231,29 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", err)
 	}
-	_, runErr := s.docker(cmd, CASWriteStdin(wg, tbl))
+	stdin := CASWriteStdin(wg, tbl)
+	// Не через s.docker (SEC F1): общий фолбэк повторяет под sudo любую
+	// команду со словом «denied», в том числе после частичной записи, и
+	// повтор отвечал «изменил другой». Здесь под sudo повторяем, только если
+	// отказ точно случился до записи — docker не пустил к своему сокету.
+	_, runErr := s.run(cmd, stdin)
+	if casDeniedBeforeWrite(runErr) {
+		_, runErr = s.run("sudo "+cmd, stdin)
+	}
 	outcome, code := casOutcomeOf(runErr)
 	switch outcome {
 	case casWritten:
 		return nil
 	case casChanged:
-		file := "wg0.conf"
+		file := "wg0.conf или clientsTable" // какой — неизвестно (SEC F2)
 		if m := reCASChanged.FindStringSubmatch(stderrTail(runErr)); m != nil {
 			file = m[1]
 		}
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/"+file)}
+			msg: fmt.Sprintf("файл %s/%s изменился с момента чтения — обновите список и повторите", c.Dir, file)}
+	case casPartial:
+		return &casWriteError{outcome: outcome, cause: runErr,
+			msg: fmt.Sprintf("записано частично: wg0.conf заменён, clientsTable — нет; обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", c.Dir)}
 	case casBusy:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: "сервер занят другой копией программы — ничего не записано; повторите через минуту"}

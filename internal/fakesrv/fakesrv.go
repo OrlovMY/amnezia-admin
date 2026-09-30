@@ -15,13 +15,19 @@
 package fakesrv
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +56,14 @@ type Server struct {
 	// файлы перед этим всё-таки записываются (A3б: «неизвестно, записано
 	// ли» бывает и после записи).
 	WriteFault map[int]WriteFault
+
+	// FailMvTo — имя файла (wg0.conf или clientsTable): mv на него в
+	// настоящем скрипте падает с «Permission denied» (подменой mv в PATH).
+	FailMvTo string
+
+	// TempLeft — сколько временных файлов *.aa.* скрипт оставил после себя
+	// (сумма по всем командам записи); читать после работы Session.
+	TempLeft int
 
 	// LockBusy — замок на хосте занят: команда записи возвращает код 4
 	// (flock -E 4), ничего не записав.
@@ -211,7 +225,7 @@ var (
 	// скрипта здесь не сверяется (это делает TestServerCommandsUnchanged в
 	// core); fakesrv моделирует его смысл, а не исполняет его — исполнение в
 	// настоящих оболочках — PR-2.
-	reCASWrite = regexp.MustCompile(`^timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin\.(\S+)\.lock docker exec -i (\S+) sh -c '[^']*' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin\.(\S+)\.lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
@@ -390,7 +404,7 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 	if m[1] != m[2] {
 		return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 	}
-	dir, wantWg, wantTbl := m[4], m[5], m[6]
+	dir, wantWg, wantTbl := m[5], m[6], m[7]
 	fail := func(code int, stderr string) (string, error) {
 		return "", &ExitError{Cmd: cmd, Status: code, Stderr: stderr}
 	}
@@ -412,36 +426,104 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(fault.Code, "имитированный отказ записи")
 	}
 
-	lines := strings.Split(string(stdin), "\n")
-	if len(lines) < 2 {
-		return fail(1, "read: нет двух строк")
+	code, stderr, err := s.execScript(m[3], m[4], dir, wantWg, wantTbl, stdin)
+	if err != nil {
+		return "", err
 	}
-	keepWg := lines[0] == "-"
-	wg, err1 := base64.StdEncoding.DecodeString(lines[0])
-	if keepWg {
-		err1 = nil
+	if code != 0 {
+		return fail(code, stderr)
 	}
-	tbl, err2 := base64.StdEncoding.DecodeString(lines[1])
-	if err1 != nil || err2 != nil {
-		return fail(1, "base64: invalid input")
-	}
-	curWg, okWg := s.files[dir+"/wg0.conf"]
-	curTbl, okTbl := s.files[dir+"/clientsTable"]
-	if sumOrAbsent(curWg, okWg) != wantWg {
-		return fail(3, "changed: wg0.conf")
-	}
-	if sumOrAbsent(curTbl, okTbl) != wantTbl {
-		return fail(3, "changed: clientsTable")
-	}
-	if s.files == nil {
-		s.files = map[string][]byte{}
-	}
-	if !keepWg {
-		s.files[dir+"/wg0.conf"] = wg
-	}
-	s.files[dir+"/clientsTable"] = tbl
 	if faulty {
 		return fail(fault.Code, "имитированный отказ после записи")
 	}
 	return "", nil
+}
+
+// execScript исполняет НАСТОЯЩИЙ скрипт из команды (core.CASWriteScript —
+// fakesrv берёт его из текста команды, импортировать core нельзя) настоящим
+// sh на временном каталоге с копией двух файлов, затем забирает результат
+// обратно в память. Замок flock моделирует s.mu: весь Run идёт под ним.
+// Нет sh — громкий отказ с причиной, а не тихая подмена моделью.
+func (s *Server) execScript(script, label, dir, wantWg, wantTbl string, stdin []byte) (int, string, error) {
+	sh, err := FindSh()
+	if err != nil {
+		return 0, "", err
+	}
+	tmp, err := os.MkdirTemp("", "fakesrv-cas-")
+	if err != nil {
+		return 0, "", fmt.Errorf("fakesrv: временный каталог: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	work := filepath.Join(tmp, "d")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		return 0, "", fmt.Errorf("fakesrv: %w", err)
+	}
+	for _, name := range casFiles {
+		if data, ok := s.files[dir+"/"+name]; ok {
+			if err := os.WriteFile(filepath.Join(work, name), data, 0o600); err != nil {
+				return 0, "", fmt.Errorf("fakesrv: %w", err)
+			}
+		}
+	}
+	env := os.Environ()
+	if s.FailMvTo != "" {
+		shim := filepath.Join(tmp, "shim")
+		if err := os.Mkdir(shim, 0o700); err != nil {
+			return 0, "", fmt.Errorf("fakesrv: %w", err)
+		}
+		body := "#!/bin/sh\nfor a; do last=$a; done\ncase \"$last\" in */" + s.FailMvTo +
+			") echo \"mv: cannot move to $last: Permission denied\" >&2; exit 1;; esac\nPATH=${PATH#*:} exec mv \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(shim, "mv"), []byte(body), 0o700); err != nil {
+			return 0, "", fmt.Errorf("fakesrv: %w", err)
+		}
+		env = append(env, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl)
+	cmd.Env = env
+	cmd.Stdin = bytes.NewReader(stdin)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return 0, "", fmt.Errorf("fakesrv: не удалось запустить %s: %w", sh, err)
+		}
+		code = ee.ExitCode()
+	}
+	for _, name := range casFiles {
+		data, err := os.ReadFile(filepath.Join(work, name))
+		switch {
+		case err == nil:
+			if s.files == nil {
+				s.files = map[string][]byte{}
+			}
+			s.files[dir+"/"+name] = data
+		case os.IsNotExist(err):
+			delete(s.files, dir+"/"+name)
+		default:
+			return 0, "", fmt.Errorf("fakesrv: %w", err)
+		}
+	}
+	left, _ := filepath.Glob(filepath.Join(work, "*.aa.*"))
+	s.TempLeft += len(left)
+	return code, strings.TrimSpace(errb.String()), nil
+}
+
+var casFiles = []string{"wg0.conf", "clientsTable"}
+
+// FindSh — путь к POSIX sh: из PATH, а на Windows ещё и из Git for Windows.
+// Ошибка называет причину: без sh fakesrv не может исполнить скрипт записи.
+func FindSh() (string, error) {
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p, nil
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{`C:\Program Files\Git\bin\sh.exe`, `C:\Program Files\Git\usr\bin\sh.exe`} {
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+	return "", errors.New("fakesrv: не найден POSIX sh — скрипт записи (core.CASWriteScript) исполняется настоящей оболочкой, без неё проверка невозможна; на Windows установите Git for Windows (Git\\bin\\sh.exe)")
 }
