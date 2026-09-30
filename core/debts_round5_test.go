@@ -196,8 +196,14 @@ func TestDebtsThrottleFaultDenied(t *testing.T) {
 		{errors.New("битый JSON"), true, FaultCorrupt},
 	}
 	for _, c := range cases {
-		if got := newThrottleError("прочитать", path, c.err, c.corrupt).Fault; got != c.want {
+		got := newThrottleError("прочитать", path, c.err, c.corrupt).Fault
+		if got != c.want {
 			t.Errorf("%v (corrupt=%v): разбор %d, ожидался %d", c.err, c.corrupt, got, c.want)
+		}
+		// Второй, независимый сторож (выборка немоты): «повреждён» — только
+		// когда содержимое действительно не разобрано.
+		if got == FaultCorrupt && !c.corrupt {
+			t.Errorf("%v: разобрано как «повреждён», хотя файл прочитан не был", c.err)
 		}
 	}
 }
