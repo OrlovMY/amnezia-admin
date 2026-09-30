@@ -180,6 +180,19 @@ func TestDebtsPinClosedHeadFirst(t *testing.T) {
 	if !strings.HasSuffix(status, "throttle.json.") {
 		t.Errorf("путь не в конце текста: %q", status)
 	}
+	// Раунд 4 (AU-UX Low): подпись с путём выделяемая — путь копируется.
+	var lbl *widget.Label
+	walkObjects(topPopup(t, u.win.Canvas()), func(o fyne.CanvasObject) {
+		if l, ok := o.(*widget.Label); ok && l.Text == status {
+			lbl = l
+		}
+	})
+	if lbl == nil {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: подписи с путём нет")
+	}
+	if !lbl.Selectable {
+		t.Errorf("путь в диалоге пина нельзя выделить и скопировать")
+	}
 }
 
 func init() {

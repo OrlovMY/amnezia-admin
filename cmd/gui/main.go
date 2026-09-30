@@ -648,6 +648,10 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	pinEntry.SetPlaceHolder("Пин-код")
 	statusLabel := widget.NewLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
+	// Выделяемая (раунд 4 долгов, AU-UX Low): в тексте о закрытом вводе —
+	// полный путь throttle.json, 170+ знаков; человек копирует его, а не
+	// переписывает.
+	statusLabel.Selectable = true
 	// Подсказка про раскладку — ОТДЕЛЬНАЯ подпись, а не statusLabel: тот
 	// занят обратным отсчётом блокировки и «Расшифровываю…», и подсказка
 	// затирала бы их (или они её).
