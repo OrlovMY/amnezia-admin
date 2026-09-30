@@ -311,8 +311,8 @@ func EnabledUnknownNote(names []string) string {
 	for i, n := range names {
 		q[i] = fmt.Sprintf("%q", n)
 	}
-	return fmt.Sprintf("Включён ли пользователь, неизвестно (поле disabled в clientsTable не true/false): %s. "+
-		"Отключать, включать и перевыпускать его утилита не будет, пока запись не исправлена.", strings.Join(q, ", "))
+	return fmt.Sprintf("Неизвестно, включены ли эти пользователи (поле disabled в clientsTable не true/false): %s. "+
+		"Отключать, включать и перевыпускать их программа не будет, пока запись на сервере не исправлена.", strings.Join(q, ", "))
 }
 
 // EnabledUnknownError — отказ действия, зависящего от того, включён ли

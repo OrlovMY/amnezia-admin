@@ -83,7 +83,7 @@ func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
 	const (
 		failNote    = "Статистику с сервера получить не удалось"
 		absentNote  = "Клиентов нет в статистике сервера: 1."
-		unknownNote = "Включён ли пользователь, неизвестно"
+		unknownNote = "Неизвестно, включены ли эти пользователи"
 	)
 	cases := []struct {
 		name   string

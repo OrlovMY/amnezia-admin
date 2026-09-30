@@ -82,6 +82,19 @@ func TestDebtsEnabledUnknownRefused(t *testing.T) {
 	}
 }
 
+// TestDebtsEnabledUnknownNoteText — дословный текст UX-01 (раунд 2, Т1):
+// одна форма для одного и нескольких имён, «программа».
+func TestDebtsEnabledUnknownNoteText(t *testing.T) {
+	if got := EnabledUnknownNote(nil); got != "" {
+		t.Fatalf("имён нет, а строка есть: %q", got)
+	}
+	const want = `Неизвестно, включены ли эти пользователи (поле disabled в clientsTable не true/false): "X", "Y". ` +
+		"Отключать, включать и перевыпускать их программа не будет, пока запись на сервере не исправлена."
+	if got := EnabledUnknownNote([]string{"X", "Y"}); got != want {
+		t.Fatalf("текст:\n%q\nожидался:\n%q", got, want)
+	}
+}
+
 // TestDebtsEnabledUnknownKeepsReservedIP — ДОЕЗД до выдачи адреса: у Carol
 // поле disabled испорчено, peer'а нет, в allowedIP — 10.8.1.4. Она может
 // быть отключённой, и её адрес не выдаётся новому пользователю. На c65420e

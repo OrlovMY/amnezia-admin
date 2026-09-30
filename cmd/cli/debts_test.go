@@ -153,7 +153,7 @@ func TestDebtsListNamesUnknownEnabled(t *testing.T) {
 			if code := run([]string{"list", "-key", key}, strings.NewReader(""), &o, &e, kh); code != 0 {
 				t.Fatalf("list: code=%d %s", code, e.String())
 			}
-			got := strings.Contains(o.String(), "Включён ли пользователь, неизвестно") &&
+			got := strings.Contains(o.String(), "Неизвестно, включены ли эти пользователи") &&
 				strings.Contains(o.String(), `"Alice"`)
 			if got != c.want {
 				t.Fatalf("строка о неизвестном состоянии: есть=%v, ожидалось %v:\n%s", got, c.want, o.String())
