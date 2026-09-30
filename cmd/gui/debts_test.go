@@ -5,6 +5,7 @@ package main
 // компилируются там и падают поведением (см. ОТЧЁТ-ДОЛГИ-ПРОДУКТ.md).
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/fakesrv"
 )
 
 // localNetworkTime подменяет пул хостов сетевого времени локальным
@@ -53,6 +55,78 @@ func pinDialogWith(t *testing.T, prep func(dir string)) (*ui, *widget.Button) {
 func pinDialogTexts(t *testing.T, u *ui) string {
 	t.Helper()
 	return strings.Join(visibleTexts(topPopup(t, u.win.Canvas())), " | ")
+}
+
+// addTableEntry дописывает в clientsTable fakesrv запись (без peer'а в
+// wg0.conf).
+func addTableEntry(t *testing.T, srv *fakesrv.Server, entry map[string]any) {
+	t.Helper()
+	const path = "/opt/amnezia/awg/clientsTable"
+	raw, _ := srv.File(path)
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(append(list, entry))
+	srv.SetFile(path, out)
+}
+
+// TestDebtsStatusNamesCauseOfUnknown — У7 (и У1 в GUI), ТЕСТ РАЗЛИЧЕНИЯ и
+// ДОЕЗДА через настоящий refresh() против fakesrv: строка состояния
+// называет причину «?» — запрос статистики не удался (с причиной) или
+// клиента нет в ответе сервера, — и клиента с испорченным полем disabled.
+// Штатный случай — без этих строк. На c65420e строка состояния во всех
+// случаях была «Пользователей: N · …».
+func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
+	const (
+		failNote    = "Статистику с сервера получить не удалось"
+		absentNote  = "Клиентов нет в статистике сервера: 1."
+		unknownNote = "Включён ли пользователь, неизвестно"
+	)
+	cases := []struct {
+		name   string
+		runner func() core.Runner
+		want   []string
+	}{
+		{"штатно", func() core.Runner { return fakesrv.New() }, nil},
+		{"статистика не получена", func() core.Runner {
+			return &countingRunner{inner: fakesrv.New(), okWgShow: 0}
+		}, []string{failNote, "имитированный обрыв связи"}},
+		{"клиента нет в ответе", func() core.Runner {
+			srv := fakesrv.New()
+			addTableEntry(t, srv, map[string]any{"clientId": "GHOSTPUB", "userData": map[string]any{"clientName": "Призрак"}})
+			return srv
+		}, []string{absentNote}},
+		{"поле disabled испорчено", func() core.Runner {
+			srv := fakesrv.New()
+			addTableEntry(t, srv, map[string]any{"clientId": "ODDPUB", "userData": map[string]any{
+				"clientName": "Странный", "disabled": "yes", "allowedIP": "10.8.1.9/32"}})
+			return srv
+		}, []string{unknownNote, `"Странный"`}},
+	}
+	all := []string{failNote, absentNote, unknownNote}
+	for _, cs := range cases {
+		t.Run(cs.name, func(t *testing.T) {
+			u := refreshedUI(t, core.NewSessionWithRunner(cs.runner(), creds), c)
+			st := u.status.Text
+			for _, w := range cs.want {
+				if !strings.Contains(st, w) {
+					t.Errorf("в строке состояния нет %q: %q", w, st)
+				}
+			}
+			for _, n := range all {
+				wanted := false
+				for _, w := range cs.want {
+					wanted = wanted || w == n
+				}
+				if !wanted && strings.Contains(st, n) {
+					t.Errorf("в строке состояния лишнее %q: %q", n, st)
+				}
+			}
+		})
+	}
 }
 
 // TestDebtsPinThrottleUnreadableClosesInput — Н8, ТЕСТ РАЗЛИЧЕНИЯ и ДОЕЗДА

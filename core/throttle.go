@@ -79,6 +79,9 @@ func (e *ThrottleError) Unwrap() error { return e.Err }
 
 // Reason — причина без пути (у *os.PathError путь уже есть в Path).
 func (e *ThrottleError) Reason() string {
+	if e.Err == nil {
+		return "причина неизвестна"
+	}
 	var pe *os.PathError
 	if errors.As(e.Err, &pe) {
 		return pe.Err.Error()

@@ -2297,7 +2297,12 @@ func (u *ui) refresh() {
 			// таблица выглядит пустой, пока пользователь не проскроллит вручную.
 			u.table.Refresh()
 			u.table.ScrollToTop()
-			u.status.SetText(view.Status)
+			status := view.Status
+			if view.CanManage {
+				// У7: причина «?» в таблице — в строке состояния, как в CLI
+				status = guiview.LoadedStatus(status, clients, stats, statsErr)
+			}
+			u.status.SetText(status)
 		})
 	})
 }
