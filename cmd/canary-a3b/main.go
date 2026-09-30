@@ -14,15 +14,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/canary"
@@ -121,29 +122,51 @@ func run() int {
 		env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
 	} else if creds.User == "root" {
 		// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере; пароль
-		// случайный, нигде не печатается; после шага пользователь удаляется.
-		env.MakeSudoKey = func() ([]string, func(), error) {
+		// случайный, уходит только через stdin chpasswd (SEC S2).
+		remoteIn := func(cmd string, stdin []byte) (string, error) {
+			s, err := sess.Client.NewSession()
+			if err != nil {
+				return "", err
+			}
+			defer s.Close()
+			if stdin != nil {
+				s.Stdin = bytes.NewReader(stdin)
+			}
+			out, err := s.CombinedOutput(cmd)
+			return string(out), err
+		}
+		env.MakeSudoKey = canary.NewSudoKeyMaker(remoteIn, creds.Host, creds.Port, func() (string, error) {
 			buf := make([]byte, 16)
 			if _, err := rand.Read(buf); err != nil {
-				return nil, nil, err
+				return "", err
 			}
-			pw := hex.EncodeToString(buf)
-			const u = "amnezia-canary"
-			undo := func() {
-				_, _ = env.Remote("userdel " + u + " 2>/dev/null; rm -f /etc/sudoers.d/" + u)
-			}
-			if _, err := env.Remote("id " + u + " >/dev/null 2>&1 && exit 1; useradd -M -s /bin/sh " + u +
-				" && echo " + u + ":" + pw + " | chpasswd && d=$(command -v docker) && echo \"" + u +
-				" ALL=(root) NOPASSWD: $d\" > /etc/sudoers.d/" + u + " && chmod 0440 /etc/sudoers.d/" + u); err != nil {
-				undo()
-				return nil, nil, fmt.Errorf("useradd/sudoers (или пользователь %s уже есть): %v", u, err)
-			}
-			raw, _ := json.Marshal(map[string]any{"hostName": creds.Host, "port": creds.Port, "userName": u, "password": pw})
-			return []string{"AMNEZIA_KEY=vpn://" + base64.RawURLEncoding.EncodeToString(raw)}, undo, nil
-		}
+			return hex.EncodeToString(buf), nil
+		})
 	}
+
+	// Уборка по Ctrl+C / kill (SEC S3, S4): вернуть wg-quick, удалить
+	// временного пользователя. Ошибка уборки — громко, с командой вручную.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		fmt.Println("\nПРЕРВАНО — убираю за собой на тестовом сервере…")
+		for _, err := range env.RunCleanups() {
+			fmt.Println(err)
+		}
+		fmt.Println("ИТОГ: НЕ ПРОЙДЕН — проверка прервана. Удалите тестовый сервер у провайдера.")
+		os.Exit(130)
+	}()
+
 	rs, runErr := canary.Run(env)
+	cleanErrs := env.RunCleanups()
+	for _, err := range cleanErrs {
+		fmt.Println(err)
+	}
 	st, line := canary.Summary(rs, runErr)
+	if len(cleanErrs) > 0 {
+		st, line = canary.Fail, "ИТОГ: НЕ ПРОЙДЕН — уборка на тестовом сервере не удалась (см. выше)"
+	}
 	fmt.Println(line)
 	if st != canary.Pass {
 		return 1

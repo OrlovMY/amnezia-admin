@@ -84,13 +84,16 @@ type Env struct {
 	// root, которому docker доступен только через sudo, и отдаёт окружение с
 	// его ключом; undo — удалить пользователя. nil — не умеем (PR4.2 тогда
 	// НЕ ПРОВЕРЕНО).
-	MakeSudoKey func() (env []string, undo func(), err error)
+	MakeSudoKey func() (env []string, undo func() error, err error)
 
 	Ask func(question string) Answer
 	Out io.Writer
 
 	// RaceRounds — сколько добавлений делает каждый из двух писателей в К4.
 	RaceRounds int
+
+	cleanMu  sync.Mutex
+	cleanups []func() error
 
 	docker    string // "docker" или "sudo -n docker"
 	dockerErr error  // docker ps не выполнился — К2.8 НЕ ПРОВЕРЕНО
@@ -122,27 +125,29 @@ func Run(e *Env) ([]Result, error) {
 		e.dockerErr = err
 	}
 
-	// П0. Сервер пуст — иначе это может оказаться боевой сервер.
-	clients, err := e.Sess.LoadClients(e.Ctr)
-	if err != nil {
-		add(Result{"П0", "на сервере нет клиентов", NotChecked, "список не прочитан: " + err.Error()})
+	// П0. Сервер пуст — иначе это может оказаться боевой сервер. Раунд 2
+	// (SEC S1): «clientsTable пуста или её нет» ≠ «клиентов нет». Пусто должно
+	// быть ВСЁ: таблица, [Peer] в wg0.conf и работающий сервер. Любое
+	// непрочитанное — СТОП.
+	if r := e.serverEmpty(); r.Status != Pass {
+		add(r)
 		return rs, fmt.Errorf("%w: не удалось убедиться, что на сервере нет клиентов", ErrStop)
+	} else {
+		add(r)
 	}
-	if len(clients) != 0 {
-		add(Result{"П0", "на сервере нет клиентов", Fail, fmt.Sprintf("клиентов %d — СТОП: канарейка запускается только на пустом тестовом сервере", len(clients))})
-		return rs, fmt.Errorf("%w: на сервере есть клиенты", ErrStop)
-	}
-	add(Result{"П0", "на сервере нет клиентов", Pass, "clientsTable пуста или отсутствует"})
 
-	// К2 — предусловия записи. Любое не ПРОЙДЕН — запись не выполняется.
-	pre := []Result{e.lockDir(), e.busybox(), e.timeoutSyntax(), e.lslocks()}
+	// К2 — предусловия записи. Любое не ПРОЙДЕН — запись не выполняется
+	// (раунд 2, QA блокер 2б: и утилиты, и время docker exec, и следы
+	// прошлого прогона — без них выводы шагов записи бессмысленны).
+	pre := []Result{e.traces(), e.lockDir(), e.busybox(), e.timeoutSyntax(), e.lslocks()}
+	pre = append(pre, e.k2Tools()...)
+	pre = append(pre, e.execTiming())
 	for _, r := range pre {
 		add(r)
 	}
 	for _, r := range e.k2Info() {
 		add(r)
 	}
-	add(e.execTiming())
 	gateOK := true
 	for _, r := range pre {
 		if r.Status != Pass {
@@ -286,26 +291,153 @@ func (e *Env) timeoutSyntax() Result {
 // lslocks — ОТЧЁТ PR1, п. 7: посторонний держатель замка на /run/lock.
 func (e *Env) lslocks() Result {
 	r := Result{ID: "К2.4", Name: "никто не держит замок /run/lock до прогона"}
-	out, err := e.Remote(`command -v lslocks >/dev/null || { echo NO-LSLOCKS; exit 0; }; lslocks -o COMMAND,PID,PATH | grep -F /run/lock || echo NO-HOLDER`)
-	if err != nil {
-		r.Detail = "не выполнилось: " + err.Error()
-		return r
-	}
-	switch s := strings.TrimSpace(out); s {
-	case "NO-LSLOCKS":
-		r.Detail = "lslocks на хосте нет — держателя не узнать"
-	case "NO-HOLDER":
-		r.Status, r.Detail = Pass, "держателей нет"
+	holders, known, why := e.lockHolders()
+	switch {
+	case !known:
+		r.Detail = why
+	case len(holders) == 0:
+		r.Status, r.Detail = Pass, "держателей замка на каталоге /run/lock нет"
 	default:
-		r.Status, r.Detail = Fail, "замок держит: "+oneLine(s)+" — запись будет получать «занято»"
+		r.Status, r.Detail = Fail, "замок держит: "+strings.Join(holders, "; ")+" — запись будет получать «занято»"
 	}
 	return r
 }
 
+// lslocksCmd — вывод lslocks с кодом возврата ОТДЕЛЬНО (раунд 2, QA блокер
+// 2а): прежнее `… | grep … || echo NO-HOLDER` превращало отказ lslocks в
+// «держателей нет».
+const lslocksCmd = `command -v lslocks >/dev/null || { echo NO-LSLOCKS; exit 0; }; out=$(lslocks -o COMMAND,PID,TYPE,PATH 2>&1); echo "rc=$?"; printf '%s\n' "$out"`
+
+// lockHolders — кто держит замок ИМЕННО на каталоге /run/lock (так замок
+// берёт команда записи после PR-1, H1). Замки на файлах ВНУТРИ /run/lock —
+// чужие и нашей записи не мешают. known=false — узнать не удалось.
+func (e *Env) lockHolders() (holders []string, known bool, why string) {
+	out, err := e.Remote(lslocksCmd)
+	if err != nil {
+		return nil, false, "lslocks не выполнился: " + err.Error()
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "NO-LSLOCKS" {
+		return nil, false, "lslocks на хосте нет — держателя не узнать"
+	}
+	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "rc=0" {
+		return nil, false, "lslocks отказал: " + oneLine(out)
+	}
+	head := strings.Fields(lines[1])
+	pathCol := -1
+	for i, h := range head {
+		if h == "PATH" {
+			pathCol = i
+		}
+	}
+	if pathCol < 0 || len(head) < 4 {
+		return nil, false, "заголовок lslocks не разобран: " + oneLine(lines[1])
+	}
+	for _, l := range lines[2:] {
+		f := strings.Fields(l)
+		if len(f) <= pathCol {
+			continue
+		}
+		if p := strings.TrimSuffix(f[len(f)-1], "/"); p == "/run/lock" {
+			holders = append(holders, oneLine(l))
+		}
+	}
+	return holders, true, ""
+}
+
+// serverEmpty — П0: нет записей в clientsTable, нет [Peer] в wg0.conf и нет
+// peer'ов в работающем сервере. Любое непрочитанное — НЕ ПРОВЕРЕНО (СТОП).
+func (e *Env) serverEmpty() Result {
+	r := Result{ID: "П0", Name: "на сервере нет клиентов"}
+	clients, err := e.Sess.LoadClients(e.Ctr)
+	if err != nil {
+		r.Detail = "clientsTable не прочитана: " + err.Error() + " — СТОП"
+		return r
+	}
+	wg, err := e.Remote(e.docker + " exec " + e.Ctr.Name + " cat " + e.Ctr.Dir + "/wg0.conf")
+	if err != nil {
+		r.Detail = "wg0.conf не прочитан: " + err.Error() + " — СТОП"
+		return r
+	}
+	peersInConf := strings.Count(wg, "[Peer]")
+	rt, err := e.Sess.GetPeerStats(e.Ctr)
+	if err != nil {
+		r.Detail = "работающий сервер не опрошен (wg show): " + err.Error() + " — СТОП"
+		return r
+	}
+	if len(clients) != 0 || peersInConf != 0 || len(rt) != 0 {
+		r.Status = Fail
+		r.Detail = fmt.Sprintf("клиентов в таблице %d, [Peer] в wg0.conf %d, peer'ов в работающем сервере %d — СТОП: канарейка запускается только на пустом тестовом сервере", len(clients), peersInConf, len(rt))
+		return r
+	}
+	r.Status, r.Detail = Pass, "таблица, wg0.conf и работающий сервер — без клиентов"
+	return r
+}
+
+// traces — следы прошлого прогона (раунд 2, SEC S3/S4): временный
+// пользователь, его sudoers, подменённый wg-quick. Есть — запись не идёт,
+// пользователя «до нас» НЕ удаляем.
+func (e *Env) traces() Result {
+	r := Result{ID: "П1", Name: "следов прошлого прогона нет"}
+	host, err := e.Remote(`id ` + TempUser + ` >/dev/null 2>&1 && echo USER; test -e /etc/sudoers.d/` + TempUser + ` && echo SUDOERS; echo DONE`)
+	if err != nil || !strings.Contains(host, "DONE") {
+		r.Detail = "хост не проверен: " + fmt.Sprint(err)
+		return r
+	}
+	ctr, err := e.dexec(`p=$(command -v wg-quick) || { echo NOWGQ; exit 0; }; test -e "$p.canary-orig" && echo ORIG; echo DONE`)
+	if err != nil || !strings.Contains(ctr, "DONE") {
+		r.Detail = "контейнер не проверен: " + fmt.Sprint(err)
+		return r
+	}
+	var found []string
+	if strings.Contains(host, "USER") {
+		found = append(found, "пользователь "+TempUser+" уже есть (удалите вручную: userdel "+TempUser+")")
+	}
+	if strings.Contains(host, "SUDOERS") {
+		found = append(found, "/etc/sudoers.d/"+TempUser+" уже есть (rm -f /etc/sudoers.d/"+TempUser+")")
+	}
+	if strings.Contains(ctr, "ORIG") {
+		found = append(found, "в контейнере лежит wg-quick.canary-orig — wg-quick, возможно, подменён (верните: mv <путь>.canary-orig <путь>)")
+	}
+	if len(found) > 0 {
+		r.Status, r.Detail = Fail, strings.Join(found, "; ")+" — запись НЕ выполняется"
+		return r
+	}
+	r.Status, r.Detail = Pass, "нет"
+	return r
+}
+
+// TempUser — временный пользователь PR4.2.
+const TempUser = "amnezia-canary"
+
+// Cleanup — регистрирует уборку (возврат wg-quick, удаление пользователя);
+// RunCleanups выполняет все, в том числе по сигналу (cmd/canary-a3b).
+func (e *Env) Cleanup(f func() error) {
+	e.cleanMu.Lock()
+	e.cleanups = append(e.cleanups, f)
+	e.cleanMu.Unlock()
+}
+
+// RunCleanups — выполнить зарегистрированные уборки (в обратном порядке) и
+// вернуть ошибки. Повторный вызов ничего не делает.
+func (e *Env) RunCleanups() []error {
+	e.cleanMu.Lock()
+	fs := e.cleanups
+	e.cleanups = nil
+	e.cleanMu.Unlock()
+	var errs []error
+	for i := len(fs) - 1; i >= 0; i-- {
+		if err := fs[i](); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
 // k2Info — сведения, которые записываются дословно (К2, ОТЧЁТ PR1 п. 2).
-func (e *Env) k2Info() []Result {
+func (e *Env) k2Tools() []Result {
 	var rs []Result
-	info := func(id, name, cmd string, inCtr bool) {
+	tools := func(id, name, cmd string, inCtr bool) {
 		var out string
 		var err error
 		if inCtr {
@@ -314,18 +446,34 @@ func (e *Env) k2Info() []Result {
 			out, err = e.Remote(cmd)
 		}
 		r := Result{ID: id, Name: name}
-		if err != nil {
+		switch {
+		case err != nil:
 			r.Detail = "не выполнилось: " + err.Error()
-		} else if strings.Contains(out, "MISSING") {
+		case strings.Contains(out, "MISSING"):
 			r.Status, r.Detail = Fail, oneLine(out)
-		} else {
-			r.Status, r.Detail = Pass, oneLine(out)
+		case !strings.Contains(out, "DONE"):
+			r.Detail = "вывод не разобран: " + oneLine(out)
+		default:
+			r.Status, r.Detail = Pass, oneLine(strings.ReplaceAll(out, "DONE", ""))
 		}
 		rs = append(rs, r)
 	}
-	info("К2.5", "flock и timeout на хосте", `for t in flock timeout; do command -v $t || echo "MISSING $t"; done`, false)
-	info("К2.6", "утилиты в контейнере", `for t in sha256sum base64 mv rm sh; do command -v $t || echo "MISSING $t"; done`, true)
-	info("К2.7", "sysctl fs.protected_regular (сведение)", `sysctl fs.protected_regular 2>&1 || echo нет`, false)
+	tools("К2.5", "flock и timeout на хосте", `for t in flock timeout; do command -v $t || echo "MISSING $t"; done; echo DONE`, false)
+	tools("К2.6", "утилиты в контейнере", `for t in sha256sum base64 mv rm sh; do command -v $t || echo "MISSING $t"; done; echo DONE`, true)
+	return rs
+}
+
+// k2Info — сведения, не входящие в шлюз записи (К2, ОТЧЁТ PR1 п. 2).
+func (e *Env) k2Info() []Result {
+	var rs []Result
+	r := Result{ID: "К2.7", Name: "sysctl fs.protected_regular (сведение)"}
+	if out, err := e.Remote(`sysctl fs.protected_regular`); err == nil && strings.Contains(out, "fs.protected_regular =") {
+		r.Status, r.Detail = Pass, oneLine(out)
+	} else {
+		// раунд 2 (QA мелочь 7): «нет» — не ПРОЙДЕН
+		r.Detail = "не прочитано: " + oneLine(out) + " " + fmt.Sprint(err)
+	}
+	rs = append(rs, r)
 	dk := Result{ID: "К2.8", Name: "docker без sudo (сведение)", Detail: "docker ps не выполнился: " + fmt.Sprint(e.dockerErr)}
 	if e.dockerErr == nil {
 		dk.Status, dk.Detail = Pass, "используется: "+e.docker
@@ -531,15 +679,33 @@ func (e *Env) rollback() (res Result) {
 	if err != nil {
 		return Result{Detail: "суммы файлов до не получены: " + err.Error()}
 	}
-	if _, err := e.dexec(`cp ` + p + ` ` + p + `.canary-orig && echo "#!/bin/sh" > ` + p + ` && echo "exit 1" >> ` + p + ` && chmod +x ` + p); err != nil {
-		return Result{Detail: "подмена wg-quick не удалась: " + err.Error()}
+	if _, err := e.dexec(`cp ` + p + ` ` + p + `.canary-orig`); err != nil {
+		return Result{Detail: "копия wg-quick не сделана: " + err.Error()}
 	}
-	defer func() {
+	// Возврат регистрируется СРАЗУ после копии (раунд 2, SEC S4): и при
+	// обычном конце шага, и по Ctrl+C / kill (RunCleanups из обработчика
+	// сигнала в cmd/canary-a3b).
+	restoreDone := false
+	restore := func() error {
+		if restoreDone {
+			return nil
+		}
 		if _, err := e.dexec(`mv -f ` + p + `.canary-orig ` + p); err != nil {
+			return fmt.Errorf("ВНИМАНИЕ: wg-quick НЕ возвращён — верните вручную в контейнере: mv %s.canary-orig %s (%v)", p, p, err)
+		}
+		restoreDone = true
+		return nil
+	}
+	e.Cleanup(restore)
+	defer func() {
+		if err := restore(); err != nil {
 			res.Status = Fail
-			res.Detail += "; ВНИМАНИЕ: wg-quick НЕ возвращён — верните вручную: mv " + p + ".canary-orig " + p
+			res.Detail += "; " + err.Error()
 		}
 	}()
+	if _, err := e.dexec(`echo "#!/bin/sh" > ` + p + ` && echo "exit 1" >> ` + p + ` && chmod +x ` + p); err != nil {
+		return Result{Detail: "подмена wg-quick не удалась: " + err.Error()}
+	}
 	r := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-rb")
 	after, err := e.fileSums()
 	if err != nil {
@@ -558,15 +724,34 @@ func (e *Env) rollback() (res Result) {
 
 // sudoOrders — ОТЧЁТ PR1, п. 2: запись от root, затем от пользователя с
 // docker через sudo, и наоборот; ни одного «код 66».
-func (e *Env) sudoOrders() Result {
+func (e *Env) sudoOrders() (res Result) {
 	if e.SudoKeyEnv == nil && e.MakeSudoKey != nil {
 		env, undo, err := e.MakeSudoKey()
 		if err != nil {
 			return Result{Detail: "временный пользователь с docker через sudo не создан: " + err.Error()}
 		}
-		defer undo()
+		// удаление — и в конце шага, и по сигналу; ошибка удаления громкая,
+		// шаг НЕ ПРОЙДЕН (раунд 2, SEC S3)
+		undoDone := false
+		once := func() error {
+			if undoDone {
+				return nil
+			}
+			if err := undo(); err != nil {
+				return fmt.Errorf("ВНИМАНИЕ: временный пользователь НЕ удалён — удалите вручную на сервере: userdel %s; rm -f /etc/sudoers.d/%s (%v)", TempUser, TempUser, err)
+			}
+			undoDone = true
+			return nil
+		}
+		e.Cleanup(once)
 		e.SudoKeyEnv = env
-		defer func() { e.SudoKeyEnv = nil }()
+		defer func() {
+			e.SudoKeyEnv = nil
+			if err := once(); err != nil {
+				res.Status = Fail
+				res.Detail += "; " + err.Error()
+			}
+		}()
 	}
 	if e.SudoKeyEnv == nil {
 		return Result{Detail: "второго ключа (пользователь без root, docker через sudo) нет: не задан AMNEZIA_KEY_SUDO и временного пользователя создать нечем"}
@@ -578,17 +763,19 @@ func (e *Env) sudoOrders() Result {
 	for _, o := range order {
 		r := e.cli(e.NewBin, o.env, "add", "-name", o.name)
 		if r.code != 0 || strings.Contains(r.errText, "66") {
-			return Result{Status: Fail, Detail: o.name + ": код " + strconv.Itoa(r.code) + ": " + r.title}
+			res = Result{Status: Fail, Detail: o.name + ": код " + strconv.Itoa(r.code) + ": " + r.title}
+			return res
 		}
 	}
-	return Result{Status: Pass, Detail: "root → sudo и sudo → root: все четыре записи прошли"}
+	res = Result{Status: Pass, Detail: "root → sudo и sudo → root: все четыре записи прошли"}
+	return res
 }
 
 // race — К4: два писателя одновременно по RaceRounds добавлений. Новая
 // версия — каждый, кому сказано «готово», в списке. Контроль на v0.2.0 —
 // ОБЯЗАН показать потерю, иначе стенд гонку не воспроизводит.
 func (e *Env) race() Result {
-	lostNew, okNew, err := e.raceWith(e.NewBin, "canary-n")
+	lostNew, okNew, outcomes, err := e.raceWith(e.NewBin, "canary-n")
 	if err != nil {
 		return Result{Detail: "новая версия: " + err.Error()}
 	}
@@ -596,10 +783,16 @@ func (e *Env) race() Result {
 	if lostNew > 0 {
 		return Result{Status: Fail, Detail: fmt.Sprintf("новая версия: из %d «готово» потеряно %d", okNew, lostNew)}
 	}
+	// Раунд 2 (QA блокер 1): «потерь 0» при нуле записей — не доказательство.
+	// Новая версия обязана записать ВСЕ добавления (при занятом замке она ждёт
+	// до 15 с, при «изменён другим» — это исход, а не запись).
+	if want := 2 * e.RaceRounds; okNew != want {
+		return Result{Status: Fail, Detail: fmt.Sprintf("новая версия: «готово» %d из %d; исходы остальных: %s", okNew, want, outcomes)}
+	}
 	if e.OldBin == "" {
 		return Result{Detail: fmt.Sprintf("новая версия: %d «готово», потерь 0; контроль на v0.2.0 не выполнен — программа v0.2.0 не задана", okNew)}
 	}
-	lostOld, okOld, err := e.raceWith(e.OldBin, "canary-o")
+	lostOld, okOld, _, err := e.raceWith(e.OldBin, "canary-o")
 	e.cleanup()
 	if err != nil {
 		return Result{Detail: "контроль v0.2.0: " + err.Error()}
@@ -610,9 +803,10 @@ func (e *Env) race() Result {
 	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %d «готово», потерь 0; v0.2.0: потеряно %d из %d — стенд гонку воспроизводит", okNew, lostOld, okOld)}
 }
 
-func (e *Env) raceWith(bin, prefix string) (lost, ok int, err error) {
+func (e *Env) raceWith(bin, prefix string) (lost, ok int, outcomes string, err error) {
 	var mu sync.Mutex
 	var done []string
+	fails := map[string]int{}
 	var wg sync.WaitGroup
 	for w := 0; w < 2; w++ {
 		wg.Add(1)
@@ -620,25 +814,37 @@ func (e *Env) raceWith(bin, prefix string) (lost, ok int, err error) {
 			defer wg.Done()
 			for i := 0; i < e.RaceRounds; i++ {
 				name := fmt.Sprintf("%s-%d-%02d", prefix, w, i)
-				if r := e.cli(bin, e.KeyEnv, "add", "-name", name); r.code == 0 {
-					mu.Lock()
+				r := e.cli(bin, e.KeyEnv, "add", "-name", name)
+				mu.Lock()
+				if r.code == 0 {
 					done = append(done, name)
-					mu.Unlock()
+				} else {
+					fails[fmt.Sprintf("код %d «%s»", r.code, r.title)]++
 				}
+				mu.Unlock()
 			}
 		}(w)
 	}
 	wg.Wait()
+	var parts []string
+	for k, v := range fails {
+		parts = append(parts, fmt.Sprintf("%s × %d", k, v))
+	}
+	sort.Strings(parts)
+	outcomes = strings.Join(parts, "; ")
+	if outcomes == "" {
+		outcomes = "нет"
+	}
 	m, lerr := e.names()
 	if lerr != nil {
-		return 0, 0, fmt.Errorf("список после гонки не прочитан: %w", lerr)
+		return 0, 0, outcomes, fmt.Errorf("список после гонки не прочитан: %w", lerr)
 	}
 	for _, n := range done {
 		if _, in := m[n]; !in {
 			lost++
 		}
 	}
-	return lost, len(done), nil
+	return lost, len(done), outcomes, nil
 }
 
 // breakWrite — К5 и ОТЧЁТ PR1, п. 8: запись обрывается (процесс убит, SSH
@@ -653,7 +859,13 @@ func (e *Env) breakWrite() Result {
 	time.Sleep(300 * time.Millisecond)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
-	holder, herr := e.Remote(`lslocks -o COMMAND,PID,PATH | grep -F /run/lock || echo NO-HOLDER`)
+	holders, known, why := e.lockHolders()
+	holder := strings.Join(holders, "; ")
+	if !known {
+		holder = why
+	} else if holder == "" {
+		holder = "нет"
+	}
 	second := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b")
 	consistent, why := e.consistent()
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
@@ -664,7 +876,9 @@ func (e *Env) breakWrite() Result {
 		return Result{Status: Fail, Detail: detail}
 	case third.code != 0:
 		return Result{Status: Fail, Detail: detail + " — замок завис"}
-	case herr != nil || strings.TrimSpace(holder) == "NO-HOLDER":
+	case !known:
+		return Result{Detail: detail + " — держателя замка на /run/lock узнать не удалось: ожидание второй записи не проверено"}
+	case len(holders) == 0:
 		return Result{Detail: detail + " — обрыв пришёлся не на запись под замком (или lslocks нет): ожидание второй записи не проверено"}
 	case second.code != 0 && !strings.Contains(second.errText, "сервер занят"):
 		return Result{Status: Fail, Detail: detail + " — вторая запись не прошла и не «занято»"}
@@ -748,10 +962,11 @@ func (e *Env) oldWorks(lockBefore string) Result {
 		return Result{Status: Fail, Detail: "v0.2.0 del: код " + strconv.Itoa(r.code) + ": " + r.title}
 	}
 	now, err := e.Remote("ls -ld /run/lock")
-	if err != nil || lockBefore == "" {
+	fn, fb := strings.Fields(now), strings.Fields(lockBefore)
+	if err != nil || len(fn) == 0 || len(fb) == 0 {
 		return Result{Detail: "v0.2.0 list/add/del прошли; каталог замка сравнить не удалось"}
 	}
-	if strings.Fields(now)[0] != strings.Fields(lockBefore)[0] {
+	if fn[0] != fb[0] {
 		return Result{Status: Fail, Detail: "права /run/lock изменились: было " + oneLine(lockBefore) + ", стало " + oneLine(now)}
 	}
 	return Result{Status: Pass, Detail: "v0.2.0 list/add/del прошли; /run/lock не изменился"}

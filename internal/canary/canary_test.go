@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -73,6 +74,10 @@ func emptyFake(t *testing.T, withClients bool) *fakeServer {
 		iface := string(wg)[:strings.Index(string(wg), "[Peer]")]
 		fs.SetFile("/opt/amnezia/awg/wg0.conf", []byte(iface))
 		fs.DeleteFile("/opt/amnezia/awg/clientsTable")
+		// работающий сервер — тоже без peer'ов (П0 смотрит и его)
+		if _, err := fs.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /opt/amnezia/awg/wg0.conf)'", nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ln, err := fakesrv.ListenSSH("127.0.0.1:0", user, pw, hk, fs)
 	if err != nil {
@@ -205,7 +210,7 @@ func TestK3OnFakesrv(t *testing.T) {
 // v0.2.0 не выполнен → НЕ ПРОВЕРЕНО, а не ПРОЙДЕН.
 func TestRaceNeedsControl(t *testing.T) {
 	f := emptyFake(t, false)
-	f.env.NewBin = newCLI(t)
+	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 2
 	r := f.env.race()
 	if r.Status != NotChecked || !strings.Contains(r.Detail, "потерь 0") {
@@ -242,8 +247,12 @@ func TestParseTable(t *testing.T) {
 		{"timeout rc=0", "rc=0", nil, to, Pass},
 		{"timeout rc=1", "rc=1", nil, to, Fail},
 		{"timeout нет rc", "что-то", nil, to, NotChecked},
-		{"lslocks нет держателя", "NO-HOLDER", nil, ll, Pass},
-		{"lslocks держатель", "flock 123 /run/lock", nil, ll, Fail},
+		{"lslocks нет держателя", "rc=0\nCOMMAND PID TYPE PATH\n", nil, ll, Pass},
+		{"lslocks держатель каталога", "rc=0\nCOMMAND PID TYPE PATH\nflock 123 FLOCK /run/lock/\n", nil, ll, Fail},
+		{"lslocks держатель каталога без /", "rc=0\nCOMMAND PID TYPE PATH\nflock 123 FLOCK /run/lock\n", nil, ll, Fail},
+		{"lslocks чужой файл внутри /run/lock", "rc=0\nCOMMAND PID TYPE PATH\nfoo 9 FLOCK /run/lock/foo.lock\n", nil, ll, Pass},
+		{"lslocks упал (раунд 2, QA блокер 2а)", "rc=1\nlslocks: unknown column: PATH\n", nil, ll, NotChecked},
+		{"lslocks без заголовка PATH", "rc=0\nCOMMAND PID\n", nil, ll, NotChecked},
 		{"lslocks нет утилиты", "NO-LSLOCKS", nil, ll, NotChecked},
 		{"время 0.3 с", "300000000", nil, tm, Pass},
 		{"время 12 с", "12000000000", nil, tm, Fail},
@@ -275,5 +284,259 @@ func TestSummary(t *testing.T) {
 		if got, line := Summary(c.rs, c.err); got != c.want {
 			t.Errorf("случай %d: %s — %s", i, got, line)
 		}
+	}
+}
+
+// TestMain — тестовый бинарник служит и подставной «программой» для К4:
+// копия с именем fakecli-fail падает на любом вызове, fakecli-ok «успешно»
+// ничего не делает.
+func TestMain(m *testing.M) {
+	base := filepath.Base(os.Args[0])
+	switch {
+	case strings.HasPrefix(base, "fakecli-fail"):
+		os.Exit(1)
+	case strings.HasPrefix(base, "fakecli-ok"):
+		os.Exit(0)
+	case strings.HasPrefix(base, "fakecli-serial"):
+		os.Exit(serialCLI())
+	}
+	os.Exit(m.Run())
+}
+
+// serialCLI — настоящая программа, но вызовы идут по одному (замок —
+// файл рядом): гонки нет, каждое добавление записывается. Нужна, чтобы
+// ветви «новая версия записала всё» доезжали настоящими процессами.
+func serialCLI() int {
+	self, _ := os.Executable()
+	real, err := os.ReadFile(self + ".real")
+	if err != nil {
+		return 97
+	}
+	lock := self + ".lock"
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			f.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer os.Remove(lock)
+	cmd := exec.Command(string(real), os.Args[1:]...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 98
+	}
+	return 0
+}
+
+func serialFake(t *testing.T, real string) string {
+	p := fakeCLI(t, "fakecli-serial")
+	if err := os.WriteFile(p+".real", []byte(real), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func fakeCLI(t *testing.T, name string) string {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), name)
+	if os.PathSeparator == '\\' {
+		p += ".exe"
+	}
+	if err := os.WriteFile(p, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestTableMissingPeersPresentStops — раунд 2 (SEC S1), ДОЕЗД через Run:
+// clientsTable нет, а peer'ы в wg0.conf есть (или только в работающем
+// сервере) — это НЕ «пустой сервер»: СТОП без единой записи.
+func TestTableMissingPeersPresentStops(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		prep func(*fakesrv.Server)
+	}{
+		{"таблицы нет, [Peer] в wg0.conf есть", func(s *fakesrv.Server) { s.DeleteFile("/opt/amnezia/awg/clientsTable") }},
+		{"файлы пусты, peer'ы в работающем сервере", func(s *fakesrv.Server) {
+			wg, _ := s.File("/opt/amnezia/awg/wg0.conf")
+			s.SetFile("/opt/amnezia/awg/wg0.conf", []byte(string(wg)[:strings.Index(string(wg), "[Peer]")]))
+			s.DeleteFile("/opt/amnezia/awg/clientsTable")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := emptyFake(t, true)
+			c.prep(f.exec)
+			f.env.NewBin = "не-вызывается"
+			rs, err := Run(f.env)
+			if !errors.Is(err, ErrStop) || len(rs) != 1 || rs[0].Status == Pass {
+				t.Fatalf("ожидался СТОП на П0: err=%v, %+v", err, rs)
+			}
+			for _, cmd := range f.exec.Commands() {
+				if strings.Contains(cmd, "flock -w") {
+					t.Fatalf("запись на сервере с клиентами: %.80s", cmd)
+				}
+			}
+		})
+	}
+}
+
+// TestSudoPasswordOnlyInStdin — раунд 2 (SEC S2): пароль временного
+// пользователя уходит только через stdin, в тексте ни одной команды его нет;
+// пользователь «до нас» — отказ без удаления.
+func TestSudoPasswordOnlyInStdin(t *testing.T) {
+	const pw = "0123456789abcdef0123456789abcdef"
+	var cmds []string
+	var stdins []string
+	remote := func(cmd string, stdin []byte) (string, error) {
+		cmds = append(cmds, cmd)
+		stdins = append(stdins, string(stdin))
+		return "DONE", nil
+	}
+	env, undo, err := NewSudoKeyMaker(remote, "203.0.113.10", "22", func() (string, error) { return pw, nil })()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := undo(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmds, "\n")
+	if strings.Contains(joined, pw) {
+		t.Errorf("пароль в тексте команды: %s", joined)
+	}
+	if !strings.Contains(strings.Join(stdins, ""), TempUser+":"+pw) {
+		t.Errorf("пароль не передан через stdin chpasswd")
+	}
+	if len(env) != 1 || strings.Contains(env[0], pw) == false && !strings.HasPrefix(env[0], "AMNEZIA_KEY=vpn://") {
+		t.Errorf("окружение ключа не собрано: %v", env)
+	}
+	// пользователь уже есть — не наш: отказ, удаления НЕТ
+	cmds = nil
+	exists := func(cmd string, stdin []byte) (string, error) {
+		cmds = append(cmds, cmd)
+		return "EXISTS\nDONE", nil
+	}
+	if _, _, err := NewSudoKeyMaker(exists, "h", "22", func() (string, error) { return pw, nil })(); err == nil {
+		t.Fatal("пользователь до нас — ожидался отказ")
+	}
+	for _, c := range cmds {
+		if strings.Contains(c, "userdel") {
+			t.Errorf("удалён пользователь, существовавший до нас: %s", c)
+		}
+	}
+}
+
+// TestRaceNewMustWriteAll — раунд 2 (QA блокер 1): новая версия не записала
+// ничего (каждый add падает), v0.2.0 «говорит готово» — К4 НЕ ПРОЙДЕН, а не
+// ПРОЙДЕН «без потерь».
+func TestRaceNewMustWriteAll(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = fakeCLI(t, "fakecli-fail")
+	f.env.OldBin = fakeCLI(t, "fakecli-ok")
+	f.env.RaceRounds = 2
+	r := f.env.race()
+	if r.Status != Fail || !strings.Contains(r.Detail, "«готово» 0 из 4") {
+		t.Fatalf("К4 при новой версии без записей: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestRaceControlWithoutLossNotChecked — QA п. 10: контроль «v0.2.0» (здесь
+// та же новая версия) потери не показал — К4 НЕ ПРОВЕРЕНО.
+func TestRaceControlWithoutLossNotChecked(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = serialFake(t, newCLI(t))
+	f.env.OldBin = f.env.NewBin
+	f.env.RaceRounds = 2
+	r := f.env.race()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "потери НЕ показал") {
+		t.Fatalf("К4 с контролем без потери: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestGateIncludesToolsAndTiming — раунд 2 (QA блокер 2б): все прочие
+// предусловия ПРОЙДЕНЫ, но на хосте нет flock (К2.5) — записи не идут, К3–К7
+// НЕ ПРОВЕРЕНО. Подставной сервер отвечает на каждую команду предусловий.
+func TestGateIncludesToolsAndTiming(t *testing.T) {
+	for _, broken := range []string{"К2.5", "К2.6", "К2.9"} {
+		t.Run(broken, func(t *testing.T) {
+			f := emptyFake(t, false)
+			real := f.env.Remote
+			f.env.Remote = func(cmd string) (string, error) {
+				switch {
+				case strings.Contains(cmd, "ls -ld /run/lock"):
+					return "drwxrwxrwt 3 root root 60 Oct 1 /run/lock", nil
+				case strings.Contains(cmd, "busybox"):
+					return "BusyBox v1.36.1 (2023) multi-call binary.", nil
+				case strings.Contains(cmd, `timeout 50 sh -c true; echo "rc=$?"`):
+					return "rc=0", nil
+				case strings.Contains(cmd, "timeout --help"):
+					return "Usage: timeout", nil
+				case strings.Contains(cmd, "lslocks"):
+					return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+				case strings.Contains(cmd, "echo DONE") && strings.Contains(cmd, "id "+TempUser):
+					return "DONE", nil
+				case strings.Contains(cmd, "canary-orig"):
+					return "DONE", nil
+				case strings.Contains(cmd, "for t in flock"):
+					if broken == "К2.5" {
+						return "MISSING flock\nDONE", nil
+					}
+					return "/usr/bin/flock\n/usr/bin/timeout\nDONE", nil
+				case strings.Contains(cmd, "for t in sha256sum"):
+					if broken == "К2.6" {
+						return "MISSING base64\nDONE", nil
+					}
+					return "/bin/sha256sum\nDONE", nil
+				case strings.Contains(cmd, "date +%s%N"):
+					if broken == "К2.9" {
+						return "12000000000", nil
+					}
+					return "100000000", nil
+				}
+				return real(cmd)
+			}
+			f.env.NewBin = "не-вызывается"
+			rs, err := Run(f.env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := map[string]Status{}
+			for _, r := range rs {
+				seen[r.ID] = r.Status
+				if r.ID == broken && r.Status != Fail {
+					t.Errorf("%s: %s, ожидалось НЕ ПРОЙДЕН (%s)", r.ID, r.Status, r.Detail)
+				}
+				for _, w := range []string{"К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
+					if r.ID == w && (r.Status != NotChecked || !strings.Contains(r.Detail, "предусловие К2")) {
+						t.Errorf("%s выполнялся при непройденном %s: %s — %s", w, broken, r.Status, r.Detail)
+					}
+				}
+			}
+			// все прочие предусловия ПРОЙДЕНЫ — шлюз закрыт именно сломанным
+			for _, id := range []string{"П0", "П1", "К2.1", "К2.2", "К2.3", "К2.4", "К2.5", "К2.6", "К2.9"} {
+				if id != broken && seen[id] != Pass {
+					t.Errorf("предусловие %s: %s — сценарий не изолирует %s", id, seen[id], broken)
+				}
+			}
+			if seen[broken] != Fail {
+				t.Errorf("%s нет в выводе или не НЕ ПРОЙДЕН: %v", broken, seen[broken])
+			}
+			if _, ok := seen["К3"]; !ok {
+				t.Errorf("К3 нет в выводе — шлюз не проверен")
+			}
+		})
 	}
 }
