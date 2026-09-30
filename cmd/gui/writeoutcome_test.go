@@ -81,8 +81,13 @@ func TestPR3GUIApplyOutcomes(t *testing.T) {
 			if !strings.Contains(status, guiview.ApplyStatus(want)) {
 				t.Errorf("в окне изменений нет строки статуса исхода %q:\n%s", guiview.ApplyStatus(want), status)
 			}
-			if apply.Disabled() == want.Retry {
-				t.Errorf("«Применить»: выключена=%v, а повтор допустим=%v", apply.Disabled(), want.Retry)
+			// Ожидание — СВОЁ, не из таблицы writeoutcome (выборка немоты): иначе
+			// подмена Retry в таблице меняла бы и ожидание, и тест молчал.
+			// Повтор того же плана — только где точно ничего не записано и
+			// план не устарел.
+			retry := c.kind == writeoutcome.Busy || c.kind == writeoutcome.ToolMissing || c.kind == writeoutcome.LockUnavailable
+			if apply.Disabled() == retry {
+				t.Errorf("«Применить»: выключена=%v, а повтор допустим=%v", apply.Disabled(), retry)
 			}
 			top := strings.Join(visibleTexts(u.win.Canvas().Overlays().Top()), " | ")
 			if !strings.Contains(top, want.Title) || !strings.Contains(top, want.Next) {
