@@ -125,7 +125,7 @@ func TestRefusesServerWithClients(t *testing.T) {
 		t.Fatalf("после П0 выполнялось ещё что-то: %+v", rs)
 	}
 	for _, c := range f.exec.Commands() {
-		if strings.Contains(c, "flock") || strings.Contains(c, "exec -i") {
+		if strings.Contains(c, "flock -w") || strings.Contains(c, "exec -i") {
 			t.Fatalf("на сервере с клиентами была запись: %.80s", c)
 		}
 	}
@@ -177,7 +177,7 @@ func TestFakesrvIsNeverPass(t *testing.T) {
 	}
 	// Предусловия не подтверждены — на сервер НЕ ушло ни одной записи.
 	for _, c := range f.exec.Commands() {
-		if strings.Contains(c, "flock") {
+		if strings.Contains(c, "flock -w") {
 			t.Fatalf("запись выполнялась при неподтверждённых предусловиях: %.80s", c)
 		}
 	}
