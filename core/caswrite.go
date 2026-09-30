@@ -318,6 +318,18 @@ func casSudoRefused(err error) bool {
 	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(stderrTail(err))
 }
 
+// sudoersUser — имя пользователя для подсказки строки sudoers: настоящее,
+// если оно из безопасного набора символов, иначе заглушка (имя попадает в
+// текст, который человек копирует в sudoers).
+func sudoersUser(c *ServerCreds) string {
+	if c != nil && reSudoersUser.MatchString(c.User) {
+		return c.User
+	}
+	return "<пользователь>"
+}
+
+var reSudoersUser = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
+
 // stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
 func stderrTail(err error) string {
 	s := err.Error()
@@ -377,7 +389,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 			msg: fmt.Sprintf("запись на сервере занята (замок %s держит другой процесс, возможно, другая копия программы) — ничего не записано; повторите через минуту", CASLockDir)}
 	case casSudoDenied:
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: fmt.Sprintf("docker без sudo недоступен, а sudo не разрешил запустить docker (%s) — ничего не записано; нужна строка sudoers вида «пользователь ALL=(root) NOPASSWD: /usr/bin/docker»", stderrTail(runErr))}
+			msg: fmt.Sprintf("docker без sudo недоступен, а sudo не разрешил запустить docker (%s) — ничего не записано; для того, кто настраивал сервер: нужна строка sudoers «%s ALL=(root) NOPASSWD: /usr/bin/docker» (путь к docker — вывод command -v docker на сервере)", stderrTail(runErr), sudoersUser(s.Creds))}
 	case casLockOpen:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: fmt.Sprintf("не удалось открыть замок %s (код 66: %s) — ничего не записано", CASLockDir, stderrTail(runErr))}
