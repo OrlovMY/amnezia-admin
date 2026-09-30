@@ -1697,20 +1697,27 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	// каким он уже был (совпадающим с wgBefore), и наоборот — вернуть 0 и
 	// разойтись. syncErr используется только как дополнительный контекст в
 	// тексте (б), когда runtimeVerified уже и так ложно.
+	// A3б PR-3, раунд 5 (AU-LOGIC Н-4): итог проверки после отката — ТРИ
+	// разных состояния, а не одно «не применено». Порядок — часть решения
+	// (признак 3): ИЗМЕРЕННЫЙ отказ рантайма (статистика прочитана и не
+	// совпала) стоит ВЫШЕ незнания — ошибка чтения файлов его не
+	// перекрывает; незнание (не прочитали файлы или статистику) — выше
+	// «файлы не совпали»: без чтения сравнивать нечего.
 	var verifyErr error
+	verifyKind := ErrRolledBackNotApplied
 	switch {
-	case wgReadErr != nil:
-		verifyErr = fmt.Errorf("проверка wg0.conf после отката: %w", wgReadErr)
-	case tblReadErr != nil:
-		verifyErr = fmt.Errorf("проверка clientsTable после отката: %w", tblReadErr)
-	case !filesVerified:
-		verifyErr = fmt.Errorf("содержимое файлов после отката не совпадает с прочитанным состоянием")
-	case runtimeErr != nil:
-		verifyErr = runtimeErr
-	case !runtimeVerified && syncErr != nil:
+	case runtimeErr == nil && !runtimeVerified && syncErr != nil:
 		verifyErr = fmt.Errorf("набор активных подключений не совпадает с ожидаемым (повторный syncconf: %w)", syncErr)
-	case !runtimeVerified:
+	case runtimeErr == nil && !runtimeVerified:
 		verifyErr = fmt.Errorf("набор активных подключений на сервере после отката не совпадает с ожидаемым")
+	case wgReadErr != nil:
+		verifyErr, verifyKind = fmt.Errorf("проверка wg0.conf после отката: %w", wgReadErr), ErrRollbackUnverified
+	case tblReadErr != nil:
+		verifyErr, verifyKind = fmt.Errorf("проверка clientsTable после отката: %w", tblReadErr), ErrRollbackUnverified
+	case runtimeErr != nil:
+		verifyErr, verifyKind = fmt.Errorf("проверка активных подключений после отката: %w", runtimeErr), ErrRollbackUnverified
+	case !filesVerified:
+		verifyErr, verifyKind = fmt.Errorf("содержимое файлов после отката не совпадает с прочитанным состоянием"), ErrRolledBackFilesDiffer
 	}
 
 	if verifyErr == nil {
@@ -1740,9 +1747,24 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		}
 		return &restoreError{kind: ErrRolledBack, cause: cause, msg: fmt.Sprintf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)}
 	}
+	switch verifyKind {
+	case ErrRollbackUnverified:
+		return &restoreError{kind: verifyKind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но проверить его итог не удалось (%v) — вернулся ли сервер к прежнему состоянию, неизвестно; исходная причина: %v", verifyErr, cause)}
+	case ErrRolledBackFilesDiffer:
+		return &restoreError{kind: verifyKind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но файлы на сервере после него не совпали с прежними (%v) — возможно, их изменили в другом месте; исходная причина: %v", verifyErr, cause)}
+	}
 	return &restoreError{kind: ErrRolledBackNotApplied, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены, но применить их не удалось (%v): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v",
 		verifyErr, cause)}
 }
+
+// ErrRollbackUnverified — откат записан, но проверить его итог не удалось
+// (не прочитаны файлы или статистика): вернулся ли сервер — неизвестно
+// (A3б PR-3, раунд 5, AU-LOGIC Н-4).
+var ErrRollbackUnverified = errors.New("итог отката не проверен")
+
+// ErrRolledBackFilesDiffer — откат записан, файлы прочитаны, но с прежними
+// не совпали (кто-то изменил их после отката).
+var ErrRolledBackFilesDiffer = errors.New("файлы после отката не совпали с прежними")
 
 // ErrRollbackNotDone — изменения записаны, проверка/применение не прошли, а
 // откат НЕ выполнен: команда отката не начала запись (занято, нет утилиты,
@@ -1758,7 +1780,8 @@ var ErrRollbackUnknown = errors.New("изменения записаны, ито
 var ErrRolledBack = errors.New("изменения отменены, состояние восстановлено")
 
 // ErrRolledBackNotApplied — откат вернул файлы, но работающий сервер их не
-// принял (активные подключения могут отличаться от файлов).
+// принял: статистика ПРОЧИТАНА и с прежним набором не совпала (раунд 5: только
+// измеренный отказ рантайма, не «прочитать не удалось»).
 var ErrRolledBackNotApplied = errors.New("файлы восстановлены, но не применены")
 
 // restoreError — исход restore. Unwrap отдаёт свой сентинел, исходную

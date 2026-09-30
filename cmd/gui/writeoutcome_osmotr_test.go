@@ -18,9 +18,13 @@ import (
 func pr3RealErr(t *testing.T, prep func(*fakesrv.Server)) error {
 	t.Helper()
 	srv := fakesrv.New()
-	prep(srv)
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	_, err := sess.AddUser(pr3Container(), "Mallory")
+	plan, err := sess.PlanAddUser(pr3Container(), "Mallory")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	prep(srv) // хуки — после плана: они про запись
+	_, err = sess.Apply(plan)
 	if err == nil {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: запись прошла")
 	}
@@ -42,13 +46,13 @@ func openApplyOutcome(prep func(*fakesrv.Server)) func(t *testing.T, u *ui, size
 		osmotrMain(u)
 		sized()
 		srv := fakesrv.New()
-		prep(srv)
 		u.sess = core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
 		u.warnSess = guiview.AfterWarned(u.warnServerID())
 		plan, err := u.sess.PlanAddUser(pr3Container(), "Mallory")
 		if err != nil {
 			t.Fatalf("PlanAddUser: %v", err)
 		}
+		prep(srv)
 		u.showDiffWindow(`добавление "Mallory"`, plan, func(*core.NewUser) {})
 		diff := topPopup(t, u.win.Canvas())
 		buttonByText(t, diff, "Применить").OnTapped()

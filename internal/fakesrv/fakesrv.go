@@ -55,6 +55,16 @@ type Server struct {
 	// ли» бывает и после записи).
 	WriteFault map[int]WriteFault
 
+	// ForeignWriteAfter — как ForeignWrite, но «другой писатель» пишет СРАЗУ
+	// ПОСЛЕ успешной N-й команды записи (раунд 5: файлы после отката не
+	// совпали с прежними).
+	ForeignWriteAfter map[int]map[string][]byte
+
+	// FailReadTimes — путь → сколько следующих чтений `cat` этого файла
+	// упадут (потом — как обычно). Раунд 5: проверка после записи не
+	// прочитала файл, а проверка после отката — прочитала.
+	FailReadTimes map[string]int
+
 	// FailBackup — если задана, команда резервной копии вернёт эту ошибку,
 	// ничего не скопировав (A3б PR-3, раунд 4: исход «запись не начиналась»).
 	FailBackup error
@@ -294,6 +304,10 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	case reCat.MatchString(cmd):
 		m := reCat.FindStringSubmatch(cmd)
 		path := m[2]
+		if s.FailReadTimes[path] > 0 {
+			s.FailReadTimes[path]--
+			return "", fmt.Errorf("fakesrv: имитированный отказ чтения %s", path)
+		}
 		if s.FailRead != nil {
 			if err, ok := s.FailRead[path]; ok {
 				return "", err
@@ -456,6 +470,9 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 	}
 	if code != 0 {
 		return fail(code, stderr)
+	}
+	for path, data := range s.ForeignWriteAfter[s.writeCalls] {
+		s.files[path] = append([]byte(nil), data...)
 	}
 	if faulty {
 		return fail(fault.Code, "имитированный отказ после записи")

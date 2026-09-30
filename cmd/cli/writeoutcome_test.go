@@ -71,7 +71,7 @@ func TestPR3CLIWriteOutcomes(t *testing.T) {
 			}
 			// различение: ни одного чужого заголовка
 			for k, title := range titles {
-				if k != c.kind && strings.Contains(got, title) {
+				if k != c.kind && title != want.Title && strings.Contains(got, title) { // общий заголовок по решению UX-01 (раунд 5) — различие в «что случилось»
 					t.Errorf("в stderr чужой исход %q:\n%s", title, got)
 				}
 			}

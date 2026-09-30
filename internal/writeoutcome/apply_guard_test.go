@@ -103,23 +103,48 @@ func TestApplyErrorsClassified(t *testing.T) {
 			}
 		})
 	}
-	// «Откат прошёл, но не применён»: apply-syncconf прошёл, проверка после
-	// записи не смогла прочитать wg0.conf, повторный syncconf при откате упал,
-	// прочитать итог отката тоже нельзя — файлы, может быть, вернулись, но
-	// работающий сервер не подтверждён.
-	t.Run("откат прошёл, не применён", func(t *testing.T) {
-		srv := fakesrv.New()
-		sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-		ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
-		plan, err := sess.PlanAddUser(ct, "Mallory")
-		if err != nil {
-			t.Fatalf("PlanAddUser: %v", err)
-		}
-		srv.FailSyncconfFrom = 2
-		srv.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
-		_, err = sess.Apply(plan)
-		if got := writeoutcome.Classify(err); got != writeoutcome.RolledBackNotApplied {
-			t.Fatalf("исход %d, ожидался RolledBackNotApplied: %v", got, err)
-		}
-	})
+	// Проверка после отката — три состояния (раунд 5, AU-LOGIC Н-4). Раньше
+	// здесь стоял случай «прочитать нельзя» с ожиданием RolledBackNotApplied —
+	// тест ЗАКРЕПЛЯЛ неверный исход: незнание выдавалось за измеренный отказ
+	// работающего сервера.
+	after := []struct {
+		name string
+		prep func(*fakesrv.Server)
+		want writeoutcome.Kind
+	}{
+		// сценарий аудитора: только FailRead на wg0.conf — проверка после
+		// записи и после отката не читает файл; рантайм при этом совпал.
+		{"после отката не прочитать (сценарий аудитора)", func(s *fakesrv.Server) {
+			s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
+		}, writeoutcome.RollbackUnverified},
+		// измеренный отказ рантайма: проверка после записи не прочитала файл
+		// (один раз), повторный syncconf при откате упал — рантайм остался
+		// новым, файлы после отката прочитаны и совпали.
+		{"рантайм не вернулся", func(s *fakesrv.Server) {
+			s.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1}
+			s.FailSyncconfFrom = 2
+		}, writeoutcome.RolledBackNotApplied},
+		// файлы после отката прочитаны, но не совпали с прежними.
+		{"файлы после отката не совпали", func(s *fakesrv.Server) {
+			s.FailSyncconf = errors.New("имитированный отказ syncconf")
+			s.ForeignWriteAfter = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
+		}, writeoutcome.RolledBackFilesDiffer},
+	}
+	for _, c := range after {
+		t.Run(c.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
+			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+			plan, err := sess.PlanAddUser(ct, "Mallory")
+			if err != nil {
+				t.Fatalf("PlanAddUser: %v", err)
+			}
+			c.prep(srv)
+			_, err = sess.Apply(plan)
+			got := writeoutcome.Classify(err)
+			if got != c.want {
+				t.Fatalf("исход %d, ожидался %d: %v", got, c.want, err)
+			}
+		})
+	}
 }

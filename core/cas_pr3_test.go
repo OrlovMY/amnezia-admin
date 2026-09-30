@@ -105,6 +105,33 @@ func TestPR3WgMoveReasonNamed(t *testing.T) {
 	}
 }
 
+// TestPR3ReadFailAfterRollbackIsNotRuntime — раунд 5 (AU-LOGIC Н-4),
+// сценарий аудитора, ДОЕЗД: только FailRead на wg0.conf, затем Apply.
+// Проверка после записи не читает файл → откат → проверка после отката тоже
+// не читает. Рантайм при этом совпал с прежним. Исход — «итог отката не
+// проверен», НЕ «работающий сервер не принял» и без «применить их не
+// удалось». Пользуется только API 1aabea5 (ErrRolledBackNotApplied там уже
+// есть) — там падает поведением.
+func TestPR3ReadFailAfterRollbackIsNotRuntime(t *testing.T) {
+	srv := fakesrv.New()
+	sess := pr3Session(srv)
+	plan, err := sess.PlanAddUser(pr3Container(), "Mallory")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	srv.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
+	_, err = sess.Apply(plan)
+	if err == nil {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: Apply прошёл")
+	}
+	if errors.Is(err, core.ErrRolledBackNotApplied) {
+		t.Errorf("незнание (файл не прочитан) выдано за измеренный отказ работающего сервера: %v", err)
+	}
+	if strings.Contains(err.Error(), "применить их не удалось") {
+		t.Errorf("в тексте утверждение, которого проверка не делала: %v", err)
+	}
+}
+
 // TestPR3BusyDoesNotBlameOurCopy — Low аудита PR-1: замок /run/lock/ может
 // держать и посторонняя программа; текст не утверждает, что это наша копия.
 func TestPR3BusyDoesNotBlameOurCopy(t *testing.T) {

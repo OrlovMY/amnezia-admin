@@ -50,6 +50,24 @@ var pr3Cases = []pr3Case{
 		s.FailSyncconf = errors.New("имитированный отказ syncconf")
 		s.WriteFault = map[int]fakesrv.WriteFault{2: {Code: 124}}
 	}, writeoutcome.RollbackUnknown},
+	// Раунд 5: исходы проверки после отката и «не удалось подготовить».
+	{"отменено и проверено", func(s *fakesrv.Server) {
+		s.FailSyncconf = errors.New("имитированный отказ syncconf")
+	}, writeoutcome.RolledBack},
+	{"отменено не до конца", func(s *fakesrv.Server) {
+		s.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1}
+		s.FailSyncconfFrom = 2
+	}, writeoutcome.RolledBackNotApplied},
+	{"итог отмены не проверен", func(s *fakesrv.Server) {
+		s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
+	}, writeoutcome.RollbackUnverified},
+	{"файлы после отмены не совпали", func(s *fakesrv.Server) {
+		s.FailSyncconf = errors.New("имитированный отказ syncconf")
+		s.ForeignWriteAfter = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
+	}, writeoutcome.RolledBackFilesDiffer},
+	{"не удалось подготовить запись", func(s *fakesrv.Server) {
+		s.FailBackup = errors.New("имитированный отказ резервной копии")
+	}, writeoutcome.NotStarted},
 }
 
 // pr3DiffWindow — окно изменений плана добавления над fakesrv с хуком prep;
@@ -59,15 +77,16 @@ func pr3DiffWindow(t *testing.T, prep func(*fakesrv.Server)) (*ui, *widget.Butto
 	u := focusTestUI(t)
 	osmotrMain(u)
 	srv := fakesrv.New()
-	if prep != nil {
-		prep(srv)
-	}
 	u.sess = core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
 	u.warnSess = guiview.AfterWarned(u.warnServerID())
 	u.win.Resize(fyne.NewSize(1229, 620))
 	plan, err := u.sess.PlanAddUser(pr3Container(), "Mallory")
 	if err != nil {
 		t.Fatalf("PlanAddUser: %v", err)
+	}
+	// хуки — после построения плана: они про запись, а не про чтение плана
+	if prep != nil {
+		prep(srv)
 	}
 	u.showDiffWindow(`добавление "Mallory"`, plan, func(*core.NewUser) {})
 	t.Cleanup(func() { waitGUIGoroutines(t) })
@@ -95,7 +114,7 @@ func TestPR3GUIApplyOutcomes(t *testing.T) {
 			// подмена Retry в таблице меняла бы и ожидание, и тест молчал.
 			// Повтор того же плана — только где точно ничего не записано и
 			// план не устарел.
-			retry := c.kind == writeoutcome.Busy || c.kind == writeoutcome.ToolMissing || c.kind == writeoutcome.LockUnavailable
+			retry := c.kind == writeoutcome.Busy || c.kind == writeoutcome.ToolMissing || c.kind == writeoutcome.LockUnavailable || c.kind == writeoutcome.NotStarted
 			if apply.Disabled() == retry {
 				t.Errorf("«Применить»: выключена=%v, а повтор допустим=%v", apply.Disabled(), retry)
 			}
@@ -108,6 +127,9 @@ func TestPR3GUIApplyOutcomes(t *testing.T) {
 					continue
 				}
 				other, _ := writeoutcome.Describe(pr3KindErr(o.kind))
+				if other.Title == want.Title {
+					continue // общий заголовок по решению UX-01 (раунд 5); причина — в «что случилось»
+				}
 				if strings.Contains(top+status, other.Title) {
 					t.Errorf("показан чужой исход %q", other.Title)
 				}
@@ -122,6 +144,7 @@ func pr3KindErr(k writeoutcome.Kind) error {
 		errors.Join(core.ErrLockUnavailable, core.ErrServerToolMissing),
 		core.ErrWriteUnknown, errors.Join(core.ErrWritePartial, core.ErrWriteUnknown), core.ErrRollbackForeign,
 		errors.Join(core.ErrRollbackNotDone, core.ErrServerBusy), errors.Join(core.ErrRollbackUnknown, core.ErrWriteUnknown),
+		core.ErrRolledBack, core.ErrRolledBackNotApplied, core.ErrRollbackUnverified, core.ErrRolledBackFilesDiffer, core.ErrWriteNotStarted,
 	} {
 		if writeoutcome.Classify(e) == k {
 			return e
