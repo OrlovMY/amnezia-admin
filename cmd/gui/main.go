@@ -26,6 +26,7 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/guiview"
+	"amnezia-admin/internal/writeoutcome"
 	"amnezia-admin/internal/kbdlayout"
 	"amnezia-admin/internal/version"
 )
@@ -2424,26 +2425,15 @@ func newPlanStatusLabel() *widget.Label {
 	return l
 }
 
-// isCASRefusal распознаёт отказ CAS (core/txn.go: checkCAS/casCheckFile) через
-// errors.Is(err, core.ErrCASMismatch) (review PR-2, carryover 1 — раньше
-// распознавание шло по русским подстрокам текста ошибки, что ломалось при
-// любой правке формулировки). В обоих случаях (расхождение контрольной
-// суммы и невозможность её проверить) план построен по УЖЕ неактуальному
-// чтению, поэтому его нельзя молча повторно "Применить" — план устарел, а не
-// произошёл преходящий сбой вроде сети.
-func isCASRefusal(err error) bool {
-	return errors.Is(err, core.ErrCASMismatch)
-}
-
 // showDiffWindow показывает окно с построчными diff'ами обоих файлов плана
 // и кнопкой «Применить» (дублирующая «Закрыть» кнопка — встроенный dismiss
 // диалога). «Применить» вызывает sess.Apply(plan) ТОГО ЖЕ плана, что был
-// построен Plan*-вызовом до открытия окна: CAS поймает, если сервер
-// изменился, пока окно было открыто — в этом случае (isCASRefusal) кнопку
-// «Применить» обратно не включаем (UX-01, ревью, High): план устарел, повтор
-// того же плана всегда провалится тем же образом, нужно закрыть окно и
-// начать заново. Для прочих ошибок (сеть, права и т.п.) повтор осмыслен —
-// кнопка включается снова. При успехе onApplied получает результат Apply
+// построен Plan*-вызовом до открытия окна: сверка в команде записи поймает,
+// если сервер изменился, пока окно было открыто. После исхода записи
+// (internal/writeoutcome, A3б PR-3) кнопка «Применить» снова включается
+// только там, где точно ничего не записано и план не устарел (Text.Retry);
+// прежде это решал isCASRefusal (только «изменён другим»). Для прочих ошибок
+// (сеть до записи и т.п.) повтор осмыслен — кнопка включается снова. При успехе onApplied получает результат Apply
 // (nil для всех действий, кроме add/rekey) — вызывающий код сам решает, что
 // делать дальше (showConfigDialog, refresh, текст статуса), диалог
 // закрывается сам.
@@ -2477,18 +2467,26 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 				fyne.Do(func() {
 					u.setBusy(false)
 					if err != nil {
-						if isCASRefusal(err) {
-							// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
-							// должно отличаться от "Применяю..." не только
-							// словами: DangerImportance == theme.ColorNameError.
+						// A3б PR-3: исход записи — различимый текст из
+						// internal/writeoutcome; «Применить» снова доступна
+						// ТОЛЬКО там, где точно ничего не записано и план не
+						// устарел (t.Retry): «занято», «нет утилиты», «замок».
+						// «Изменён другим» — план устарел; «неизвестно»,
+						// «частично», «откат не тронул чужое» — повтор того же
+						// плана вслепую недопустим.
+						if t, ok := writeoutcome.Describe(err); ok {
 							statusLabel.Importance = widget.DangerImportance
-							statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
-							return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+							statusLabel.SetText(guiview.ApplyStatus(t))
+							if t.Retry {
+								applyBtn.Enable()
+							}
+							u.showError(err)
+							return
 						}
 						statusLabel.Importance = widget.MediumImportance
 						statusLabel.SetText("")
 						applyBtn.Enable()
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					d.Hide()
@@ -2525,6 +2523,31 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	d.Resize(fyne.NewSize(700, 520))
 	d.Show()
 }
+
+// showError — ошибка операции. Исход записи на сервер (A3б PR-3) —
+// собственный диалог с заголовком исхода, «что случилось», «что делать» и
+// подробностями ядра (текст выделяемый: путь резервных копий копируется);
+// прочие ошибки — стандартный диалог Fyne, как раньше.
+func (u *ui) showError(err error) {
+	t, ok := writeoutcome.Describe(err)
+	if !ok {
+		dialog.ShowError(err, u.win)
+		return
+	}
+	msg := widget.NewLabel(writeoutcome.Message(t, err))
+	msg.Wrapping = fyne.TextWrapWord
+	msg.Selectable = true
+	d := dialog.NewCustom(t.Title, "Закрыть", container.NewVScroll(msg), u.win)
+	d.Resize(fyne.NewSize(writeErrorDialogWidth, writeErrorDialogHeight))
+	d.Show()
+}
+
+// Размер диалога исхода записи: текст с подробностями бывает длинным (путь
+// резервных копий, код выхода, stderr) — он в прокрутке, диалог не растёт.
+const (
+	writeErrorDialogWidth  = 480
+	writeErrorDialogHeight = 320
+)
 
 // ---------- предупреждение о гонке при одновременной работе (A3а) ----------
 
@@ -2634,7 +2657,7 @@ func (u *ui) addDialog() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onCreated(nu)
@@ -2658,7 +2681,7 @@ func (u *ui) addDialog() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("создание %q", name), plan, func(nu *core.NewUser) {
@@ -2750,7 +2773,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	saveBtn = widget.NewButtonWithIcon("Сохранить .conf", theme.DocumentSaveIcon(), func() {
 		abs, createdDir, err := u.writeConfigFile(nu)
 		if err != nil {
-			dialog.ShowError(err, u.win)
+			u.showError(err)
 			// Диалог ошибки человек закроет, а совет обязан остаться перед
 			// глазами: конфиг существует только в памяти, окно закроется — и
 			// ключи клиента потеряны.
@@ -2867,7 +2890,7 @@ func (u *ui) renameSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onRenamed(newName)
@@ -2891,7 +2914,7 @@ func (u *ui) renameSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("переименование %q → %q", victim.Name(), newName), plan, func(_ *core.NewUser) {
@@ -2961,7 +2984,7 @@ func (u *ui) toggleSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onToggled(note)
@@ -2981,7 +3004,7 @@ func (u *ui) toggleSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("%s %q", noun, victim.Name()), plan, func(_ *core.NewUser) {
@@ -3044,7 +3067,7 @@ func (u *ui) regenerateSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onRegenerated(nu)
@@ -3064,7 +3087,7 @@ func (u *ui) regenerateSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("перевыпуск конфига %q", victim.Name()), plan, func(nu *core.NewUser) {
@@ -3134,7 +3157,7 @@ func (u *ui) deleteSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onDeleted()
@@ -3154,7 +3177,7 @@ func (u *ui) deleteSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("удаление %q", victim.Name()), plan, func(_ *core.NewUser) {

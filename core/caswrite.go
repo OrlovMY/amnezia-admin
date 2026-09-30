@@ -73,9 +73,14 @@ const (
 // замок занят. Любой иной код — «неизвестно, записано ли».
 //
 // umask 077 — временные файлы, а после mv и сами wg0.conf/clientsTable,
-// получают 0600 (в wg0.conf приватный ключ сервера). stderr обоих mv
-// заглушён: после записи в выводе не должно быть слова «denied», по
-// которому когда-то повторяли под sudo.
+// получают 0600 (в wg0.conf приватный ключ сервера).
+//
+// Причина отказа mv (A3б PR-3, замечание QA) выводится в stderr с меткой
+// «not moved: <файл>: …»: при частичной записи человек обязан узнать, почему
+// clientsTable не заменена. Прежде stderr mv глушился, чтобы слово «denied»
+// после записи не вызвало повтор под sudo; теперь повтор решает
+// casDeniedBeforeWrite, и строка с меткой «not moved:» для неё — признак
+// того, что скрипт уже шёл, то есть отказ НЕ «до записи» (SEC F1).
 //
 // Строка wg0.conf "-" — «не менять wg0.conf» (rename и т.п.): сверка идёт,
 // файл не переписывается. "-" не входит в алфавит base64.
@@ -96,8 +101,8 @@ hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
 ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
 if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
 if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then mv -f "$nw" "$d/wg0.conf" 2>/dev/null || { rm -f "$nw" "$nt"; exit 1; }; fi
-mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && exit 1; exit 6; }
+if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/wg0.conf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: wg0.conf: $e" >&2; exit 1; }; fi
+e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
 exit 0`
 
 var (
@@ -151,6 +156,18 @@ var ErrWriteUnknown = errors.New("неизвестно, записаны ли и
 // ErrRollbackForeign — откат не выполнен: после нашей записи файлы изменил
 // кто-то другой, и откат стёр бы его изменения.
 var ErrRollbackForeign = errors.New("откат не выполнен: после нашей записи файлы изменил другой")
+
+// ErrLockUnavailable — замок записи /run/lock/ не открылся (код 66 flock);
+// docker exec не запускался, ничего не записано. Частный случай
+// ErrServerToolMissing (errors.Is верно для обоих): выделен, чтобы человеку
+// сказать о замке, а не о недостающей утилите (A3б PR-3).
+var ErrLockUnavailable = errors.New("не открыт замок записи на сервере")
+
+// ErrWritePartial — записано частично: wg0.conf заменён, clientsTable — нет
+// (код 6). Частный случай ErrWriteUnknown (errors.Is верно для обоих):
+// состояние сервера для плана — «неизвестно», но что именно записано,
+// известно, и человеку это говорится (A3б PR-3).
+var ErrWritePartial = errors.New("записано частично")
 
 type casOutcome int
 
@@ -213,9 +230,13 @@ func (e *casWriteError) Is(target error) bool {
 		return target == ErrCASMismatch
 	case casBusy:
 		return target == ErrServerBusy
-	case casToolMissing, casLockOpen:
+	case casToolMissing:
 		return target == ErrServerToolMissing
-	case casUnknown, casPartial:
+	case casLockOpen:
+		return target == ErrServerToolMissing || target == ErrLockUnavailable
+	case casPartial:
+		return target == ErrWriteUnknown || target == ErrWritePartial
+	case casUnknown:
 		return target == ErrWriteUnknown
 	}
 	return false
@@ -233,6 +254,9 @@ func casDeniedBeforeWrite(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "not moved: ") {
+		return false // скрипт уже шёл и дошёл до mv — отказ после начала записи
+	}
 	return strings.Contains(s, "permission denied") &&
 		(strings.Contains(s, "docker.sock") || strings.Contains(s, "docker daemon socket"))
 }
@@ -279,10 +303,12 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 			msg: fmt.Sprintf("файл %s/%s изменился с момента чтения — обновите список и повторите", c.Dir, file)}
 	case casPartial:
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: fmt.Sprintf("записано частично: wg0.conf заменён, clientsTable — нет; обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", c.Dir)}
+			msg: fmt.Sprintf("записано частично: wg0.conf заменён, clientsTable — нет (%s); обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", stderrTail(runErr), c.Dir)}
 	case casBusy:
+		// A3б PR-3 (Low аудита PR-1): замок может держать и посторонняя
+		// программа, не только наша копия.
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: "сервер занят другой копией программы — ничего не записано; повторите через минуту"}
+			msg: fmt.Sprintf("запись на сервере занята (замок %s держит другой процесс, возможно, другая копия программы) — ничего не записано; повторите через минуту", CASLockDir)}
 	case casLockOpen:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: fmt.Sprintf("не удалось открыть замок %s (код 66: %s) — ничего не записано", CASLockDir, stderrTail(runErr))}

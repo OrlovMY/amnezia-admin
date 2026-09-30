@@ -1227,8 +1227,8 @@ hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
 ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
 if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
 if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then mv -f "$nw" "$d/wg0.conf" 2>/dev/null || { rm -f "$nw" "$nt"; exit 1; }; fi
-mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && exit 1; exit 6; }
+if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/wg0.conf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: wg0.conf: $e" >&2; exit 1; }; fi
+e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
 exit 0`
 
 func casWriteTemplate(label string) string {

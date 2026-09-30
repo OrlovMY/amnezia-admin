@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/writeoutcome"
 )
 
 // colorsEnabled — включаем ANSI-цвета, если консоль их поддерживает.
@@ -64,7 +65,19 @@ func resolveByFlag(w io.Writer, clients []core.ClientEntry, ident string) (int, 
 
 // printErr — единообразный вывод ошибок
 func printErr(err error) {
-	fmt.Println(cErr("Ошибка: ") + err.Error())
+	fmt.Println(errText(err, cErr))
+}
+
+// errText — текст ошибки для человека. Исход записи на сервер (A3б PR-3) —
+// заголовок, что случилось, что делать и подробности ядра из
+// internal/writeoutcome, общие с GUI; прочие ошибки — прежнее «Ошибка: …».
+// paint — раскраска первой строки (cErr в меню; в подкомандах без цвета).
+func errText(err error, paint func(string) string) string {
+	t, ok := writeoutcome.Describe(err)
+	if !ok {
+		return paint("Ошибка: ") + err.Error()
+	}
+	return paint(t.Title) + "\n" + writeoutcome.Message(t, err)
 }
 
 // colorDecision — общее для всех ОС правило: цвет только в терминал и

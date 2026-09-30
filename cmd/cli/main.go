@@ -1059,7 +1059,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey)", cmd)
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "Ошибка:", err)
+		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))
 		return 1
 	}
 	return 0
