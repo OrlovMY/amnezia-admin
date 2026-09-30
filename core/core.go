@@ -323,8 +323,8 @@ func EnabledUnknownError(e ClientEntry) error {
 		v = string(r[:40]) + "…"
 	}
 	return fmt.Errorf("Включён ли пользователь %q, неизвестно: в clientsTable поле disabled = %q, "+
-		"а должно быть true или false. Ничего не изменено. Отключите пользователя — это исправит запись, "+
-		"после чего его можно включить и перевыпустить; или удалите его.",
+		"а должно быть true или false. Ничего не изменено. Отключите пользователя — это исправит запись; "+
+		"или удалите его.",
 		e.Name(), v)
 }
 
@@ -1180,14 +1180,23 @@ func (s *Session) RenameUser(c *Container, clientID, newName string) error {
 // planSetEnabledLocked → applyLocked (core/txn.go, PR-2); сама транзакция
 // (backup/CAS/запись/verify/restore) — в Apply, здесь только план.
 func (s *Session) SetEnabled(c *Container, clientID string, enabled bool) error {
+	_, err := s.SetEnabledNoted(c, clientID, enabled)
+	return err
+}
+
+// SetEnabledNoted — то же, что SetEnabled, и пояснение к сделанному (Plan.Note):
+// итог обязан сказать, если правилась только запись (раунд 5 долгов, Н-4).
+func (s *Session) SetEnabledNoted(c *Container, clientID string, enabled bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, err := s.planSetEnabledLocked(c, clientID, enabled)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = s.applyLocked(p)
-	return err
+	if _, err = s.applyLocked(p); err != nil {
+		return "", err
+	}
+	return p.note, nil
 }
 
 // SanitizeName убирает символы, запрещённые в именах файлов Windows,

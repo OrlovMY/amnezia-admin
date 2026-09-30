@@ -258,33 +258,6 @@ func TestDebtsToggleUnknownOffersDisable(t *testing.T) {
 	}
 }
 
-// TestDebtsPinThrottleBrokenBeforeAttempt — раунд 4 (AU-LOGIC М-1): счётчик
-// испортился ПОСЛЕ открытия диалога, до нажатия «Открыть». Проверка перед
-// попыткой (submit) обязана закрыть ввод, НЕ выполняя попытку расшифровки.
-// Признак «попытки не было»: ветка неудачной попытки очищает поле пина, а
-// ранний отказ его не трогает. Без проверки в submit попытка идёт при
-// неизвестном счётчике (и поле очищается) — тест краснеет.
-func TestDebtsPinThrottleBrokenBeforeAttempt(t *testing.T) {
-	u, open := pinDialogWith(t, func(string) {})
-	if open.Disabled() {
-		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: до порчи ввод закрыт: %s", pinDialogTexts(t, u))
-	}
-	if err := os.WriteFile(filepath.Join(core.DefaultVaultDir(), "throttle.json"), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pin := passwordEntry(t, topPopup(t, u.win.Canvas()), 0)
-	pin.SetText("1111")
-	test.Tap(open)
-	waitGUIGoroutines(t)
-	texts := pinDialogTexts(t, u)
-	if !open.Disabled() || !strings.Contains(texts, "Ввод пина закрыт: не удалось прочитать") {
-		t.Fatalf("счётчик испорчен перед попыткой, а ввод не закрыт: %s", texts)
-	}
-	if pin.Text != "1111" {
-		t.Fatalf("попытка расшифровки выполнена при неизвестном счётчике (поле пина очищено веткой неудачи): %s", texts)
-	}
-}
-
 // TestDebtsPinThrottleSaveFailClosesInput — Н8, ДОЕЗД по записи. Счётчик
 // читается, но записать его нельзя (на месте временного файла — каталог).
 // Неверная попытка (файла хранилища нет — ветка неудачи) на c65420e

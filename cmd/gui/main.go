@@ -770,12 +770,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		openBtn.Disable()
 		statusLabel.SetText("Расшифровываю...")
 		goSafe(func() {
-			data, err := core.LoadVault(path)
-			var payload core.VaultPayload
-			var vinfo core.VaultInfo
-			if err == nil {
-				payload, vinfo, err = core.OpenVaultInfo(pin, data)
-			}
+			payload, vinfo, err := vaultDecrypt(path, pin)
 			if err != nil {
 				now := clock.Now()
 				prev, cerr := core.LoadThrottle(vaultDir, vaultName)
@@ -903,6 +898,18 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	u.focusField(pinEntry)
 
 	acquireOnlineTime()
+}
+
+// vaultDecrypt — попытка расшифровки хранилища пином: чтение файла и
+// OpenVaultInfo. Переменная — шов для теста (раунд 5 долгов, AU-LOGIC М-4):
+// «при неизвестном счётчике попытки не было» утверждается прямо — числом
+// вызовов, а не косвенным признаком.
+var vaultDecrypt = func(path, pin string) (core.VaultPayload, core.VaultInfo, error) {
+	data, err := core.LoadVault(path)
+	if err != nil {
+		return core.VaultPayload{}, core.VaultInfo{}, err
+	}
+	return core.OpenVaultInfo(pin, data)
 }
 
 // pinVaultDir — каталог хранилищ для диалога пин-кода (и throttle.json в
@@ -2445,7 +2452,8 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	wgGrid := newDiffGrid(wgDiff)
 	tblGrid := newDiffGrid(tblDiff)
 
-	statusLabel := widget.NewLabel("")
+	// Пояснение к плану (Н-4, раунд 5) — в предпросмотре сразу, до «Применить».
+	statusLabel := widget.NewLabel(plan.Note())
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	var d dialog.Dialog
@@ -2931,9 +2939,13 @@ func (u *ui) toggleSelected() {
 	}
 
 	var d dialog.Dialog
-	onToggled := func() {
+	onToggled := func(note string) {
 		u.selectedRow = -1
-		u.status.SetText(fmt.Sprintf("Пользователь %q %s.", victim.Name(), verbDone))
+		st := fmt.Sprintf("Пользователь %q %s.", victim.Name(), verbDone)
+		if note != "" {
+			st += " " + note // Н-4, раунд 5: правилась только запись — прямо
+		}
+		u.status.SetText(st)
 		u.refresh()
 	}
 	apply := func() {
@@ -2944,7 +2956,7 @@ func (u *ui) toggleSelected() {
 			u.setBusy(true)
 			u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
 			goSafe(func() {
-				err := u.sess.SetEnabled(u.cur, victim.ClientID, enable)
+				note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
 				fyne.Do(func() {
 					if err != nil {
 						u.setBusy(false)
@@ -2952,7 +2964,7 @@ func (u *ui) toggleSelected() {
 						dialog.ShowError(err, u.win)
 						return
 					}
-					onToggled()
+					onToggled(note)
 				})
 			})
 		})
@@ -2974,7 +2986,7 @@ func (u *ui) toggleSelected() {
 				}
 				u.showDiffWindow(fmt.Sprintf("%s %q", noun, victim.Name()), plan, func(_ *core.NewUser) {
 					d.Hide()
-					onToggled()
+					onToggled(plan.Note())
 				})
 			})
 		})

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -302,4 +303,53 @@ func init() {
 		osmotrForm{name: "(б) пин-код, счётчик попыток не читается, путь 170+ знаков", open: openPinThrottleUnknown(true),
 			inventory: invPinBase, width: 412},
 	)
+}
+
+// TestDebtsPinThrottleBrokenBeforeAttempt — раунд 4 (AU-LOGIC М-1), раунд 5
+// (М-4): счётчик испортился ПОСЛЕ открытия диалога, до нажатия «Открыть».
+// Проверка перед попыткой (submit) обязана закрыть ввод, НЕ выполняя
+// попытку расшифровки. Утверждается ПРЯМО: число вызовов шва vaultDecrypt
+// равно 0. Различение: без порчи то же нажатие даёт ровно 1 вызов — шов
+// действительно на пути попытки. Поле пина (ветка неудачи его очищает) —
+// второй, косвенный сторож. Файл — новый API (шов), поэтому здесь, а не в
+// debts_test.go.
+func TestDebtsPinThrottleBrokenBeforeAttempt(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		u, open := pinDialogWith(t, func(string) {})
+		calls := 0
+		saved := vaultDecrypt
+		vaultDecrypt = func(path, pin string) (core.VaultPayload, core.VaultInfo, error) {
+			calls++
+			return saved(path, pin)
+		}
+		if open.Disabled() {
+			t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: до порчи ввод закрыт: %s", pinDialogTexts(t, u))
+		}
+		if broken {
+			if err := os.WriteFile(filepath.Join(core.DefaultVaultDir(), "throttle.json"), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pin := passwordEntry(t, topPopup(t, u.win.Canvas()), 0)
+		pin.SetText("1111")
+		test.Tap(open)
+		waitGUIGoroutines(t)
+		vaultDecrypt = saved
+		texts := pinDialogTexts(t, u)
+		if !broken {
+			if calls != 1 {
+				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: штатная попытка дала %d вызовов расшифровки, ожидался 1", calls)
+			}
+			continue
+		}
+		if calls != 0 {
+			t.Errorf("при неизвестном счётчике выполнено попыток расшифровки: %d, ожидалось 0: %s", calls, texts)
+		}
+		if !open.Disabled() || !strings.Contains(texts, "Ввод пина закрыт: не удалось прочитать") {
+			t.Errorf("счётчик испорчен перед попыткой, а ввод не закрыт: %s", texts)
+		}
+		if pin.Text != "1111" {
+			t.Errorf("поле пина очищено веткой неудачи — попытка была: %s", texts)
+		}
+	}
 }

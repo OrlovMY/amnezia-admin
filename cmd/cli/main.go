@@ -421,6 +421,9 @@ func printPlan(w io.Writer, p *core.Plan) {
 	dir := p.Container.Dir
 	printFileDiff(w, dir+"/wg0.conf", wgDiff)
 	printFileDiff(w, dir+"/clientsTable", tblDiff)
+	if n := p.Note(); n != "" {
+		fmt.Fprintln(w, n) // Н-4, раунд 5: что правится только запись — прямо
+	}
 }
 
 func printFileDiff(w io.Writer, path, diff string) {
@@ -747,12 +750,15 @@ func interactive() (code int) {
 					break
 				}
 			}
-			if err := sess.SetEnabled(cur, victim.ClientID, enable); err != nil {
+			if note, err := sess.SetEnabledNoted(cur, victim.ClientID, enable); err != nil {
 				printErr(err)
 			} else if enable {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q включён.", victim.Name())))
 			} else {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q отключён.", victim.Name())))
+				if note != "" {
+					fmt.Println(note)
+				}
 			}
 		case "8":
 			if !cur.Managed {
@@ -1007,12 +1013,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
 			return code
 		}
-		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
+		var note string
+		note, err = sess.SetEnabledNoted(cur, clients[idx].ClientID, enable)
 		if err == nil {
 			if enable {
 				fmt.Fprintf(stdout, "Пользователь %q включён.\n", *name)
 			} else {
 				fmt.Fprintf(stdout, "Пользователь %q отключён.\n", *name)
+			}
+			if note != "" {
+				fmt.Fprintln(stdout, note) // Н-4: правилась только запись
 			}
 		}
 	case "rekey":
