@@ -43,6 +43,9 @@ func TestClassifyDistinguishes(t *testing.T) {
 		{"замок не открыт", wrapped(core.ErrLockUnavailable, core.ErrServerToolMissing), LockUnavailable},
 		{"запись не начиналась", wrapped(core.ErrWriteNotStarted), NotStarted},
 		{"sudo не разрешил docker", wrapped(core.ErrSudoDenied), SudoDenied},
+		// «выше общих случаев» (SEC-01 У1): вместе с общими признаками — всё равно отказ sudo
+		{"sudo не разрешил docker + неизвестно", wrapped(core.ErrSudoDenied, core.ErrWriteUnknown), SudoDenied},
+		{"sudo не разрешил docker + не начиналась", wrapped(core.ErrSudoDenied, core.ErrWriteNotStarted), SudoDenied},
 		{"неизвестно", wrapped(core.ErrWriteUnknown), Unknown},
 		{"частично", wrapped(core.ErrWritePartial, core.ErrWriteUnknown), Partial},
 		{"откат не тронул чужое", fmt.Errorf("x: %w", core.ErrRollbackForeign), RollbackForeign},
