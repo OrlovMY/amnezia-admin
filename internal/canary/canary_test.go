@@ -305,6 +305,10 @@ func TestMain(m *testing.M) {
 		// заголовок «занято», но код выхода не тот — не «занято»
 		os.Stderr.WriteString("Не записано: сервер занят\n")
 		os.Exit(2)
+	case strings.HasPrefix(base, "fakecli-changed-code2"):
+		// заголовок «изменили», но код выхода не тот — не «изменили»
+		os.Stderr.WriteString("Не записано: сервер изменили в другом месте\n")
+		os.Exit(2)
 	case strings.HasPrefix(base, "fakecli-serial"):
 		os.Exit(serialCLI())
 	}
@@ -596,7 +600,7 @@ func TestRaceNewLostDone(t *testing.T) {
 // TestRaceNewUnknownOutcome — исход, не «изменили» и не «занято», → НЕ
 // ПРОЙДЕН; заголовок «занято» с чужим кодом выхода — тоже не «занято».
 func TestRaceNewUnknownOutcome(t *testing.T) {
-	for _, name := range []string{"fakecli-unknown", "fakecli-busy-code2"} {
+	for _, name := range []string{"fakecli-unknown", "fakecli-busy-code2", "fakecli-changed-code2"} {
 		f := emptyFake(t, false)
 		f.env.NewBin, f.env.OldBin, f.env.RaceRounds = fakeCLI(t, name), fakeCLI(t, "fakecli-ok"), 2
 		r := f.env.race()
@@ -637,9 +641,10 @@ func TestClassifyRace(t *testing.T) {
 	classifyRace(&st, 1, "Не записано: сервер изменили в другом месте")
 	classifyRace(&st, 1, "Не записано: сервер занят")
 	classifyRace(&st, 2, "Не записано: сервер занят")
+	classifyRace(&st, 2, "Не записано: сервер изменили в другом месте")
 	classifyRace(&st, 1, "Не записано: сервер занят, кажется")
 	classifyRace(&st, 1, "")
-	if st.changed != 1 || st.busy != 1 || st.otherCount() != 3 {
-		t.Errorf("изменили=%d занято=%d иные=%d, ожидалось 1/1/3", st.changed, st.busy, st.otherCount())
+	if st.changed != 1 || st.busy != 1 || st.otherCount() != 4 {
+		t.Errorf("изменили=%d занято=%d иные=%d, ожидалось 1/1/4", st.changed, st.busy, st.otherCount())
 	}
 }
