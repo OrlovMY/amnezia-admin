@@ -91,6 +91,15 @@ func TestShowErrorOnlyInShowError(t *testing.T) {
 		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: разобрано файлов %d, вызовов в %s %d (ожидался ровно 1)",
 			parsed, showErrorHome, count[showErrorHome])
 	}
+	// Второй, независимый сторож (выборка немоты): общее число прямых вызовов
+	// — ровно showError плюс по одному на исключение.
+	total := 0
+	for _, n := range count {
+		total += n
+	}
+	if want := 1 + len(showErrorExceptions); total != want {
+		t.Errorf("прямых dialog.ShowError в cmd/gui %d, допустимо ровно %d (showError + исключения): %v", total, want, count)
+	}
 	var bad []string
 	for fn, n := range count {
 		if fn == showErrorHome {
