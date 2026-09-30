@@ -1,22 +1,16 @@
-// Файл actionlintversion_test.go — сторож второго списка, живущего в двух
-// файлах: версии actionlint.
+// Файл actionlintversion_test.go — сторож версии actionlint и того, что
+// шаги с ним существуют и исполняются.
 //
-// scripts/dev-tools.sh объявлен ЕДИНЫМ источником версий инструментов, но
-// release.yml держит свою строку `actionlint@v1.7.12`, и править release.yml
-// запрещено. Пока расхождение ничем не краснеет, оно относится ровно к тому
-// классу, ради которого заведён этот пакет: два числа в двух файлах, которые
-// однажды разъедутся молча — и на теге будет разбирать workflow один линтер,
-// а на PR другой.
-//
-// ci.yml сюда не попадает намеренно: он версию не хардкодит, а берёт её из
-// $ACTIONLINT_VERSION, который кладёт в окружение сам dev-tools.sh. Если в
-// ci.yml когда-нибудь появится литеральная версия, сторож увидит и её —
-// поиск идёт по обоим workflow-файлам. Все три файла здесь только читаются.
+// scripts/dev-tools.sh — ЕДИНЫЙ источник версий инструментов. До A6
+// release.yml держал свою строку `actionlint@v1.7.12` — второй источник,
+// который однажды разошёлся бы молча. A6 удалил тот шаг целиком (проверку
+// несёт ci.yml), и с тех пор литеральный пин не законен ни в одном
+// workflow-файле: ci.yml берёт версию из $ACTIONLINT_VERSION, который кладёт
+// в окружение сам dev-tools.sh. Все три файла здесь только читаются.
 package ciguard
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -32,48 +26,69 @@ const (
 	actionlintM = "github.com/rhysd/actionlint"
 )
 
-// Литеральная версия в вызове `go run github.com/rhysd/actionlint/...@vX.Y.Z`.
-// Форма `@${ACTIONLINT_VERSION}` под это выражение не подходит и правильно не
-// считается вхождением: там версии нет, там ссылка на единый источник.
-var actionlintPinRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@(v[0-9]+\.[0-9]+\.[0-9]+)`)
+// Любая ссылка на версию после `actionlint@` — до пробела, кавычки или
+// обратной косой.
+var actionlintRefRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/actionlint@([^\s"'\\]+)`)
 
 // Объявление версии в единственном источнике.
 var devToolsVersionRe = regexp.MustCompile(`(?m)^ACTIONLINT_VERSION="(v[0-9]+\.[0-9]+\.[0-9]+)"\s*$`)
 
+// Переопределение версии: YAML-ключ env или присваивание в shell. Форма
+// `${ACTIONLINT_VERSION}` и `${ACTIONLINT_VERSION:-}` сюда не попадает.
+var versionOverrideRe = regexp.MustCompile(`(?m)^\s*ACTIONLINT_VERSION\s*:.*$|(?:^|[^{A-Za-z0-9_])ACTIONLINT_VERSION=\S*`)
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("не прочитать %s: %v", path, err)
-	}
+	data := readSource(t, path)
 	return string(data)
 }
 
 func TestActionlintVersionSingleSource(t *testing.T) {
 	m := devToolsVersionRe.FindStringSubmatch(readFile(t, devToolsSH))
 	if m == nil {
-		t.Fatalf("в %s не найдено объявление ACTIONLINT_VERSION=\"vX.Y.Z\" — тест перестал что-либо проверять", devToolsSH)
+		fatal(t, "в %s не найдено объявление ACTIONLINT_VERSION=\"vX.Y.Z\" — тест перестал что-либо проверять", devToolsSH)
 	}
 	want := m[1]
 
-	found := 0
+	// С A6 литеральный пин не законен НИГДЕ: слабый шаг release.yml удалён,
+	// ci.yml берёт версию из $ACTIONLINT_VERSION. Любой литерал — второй
+	// источник версии, то есть ровно тот дефект, ради которого заведён пакет.
+	// Поиск идёт по сырому тексту, включая комментарии: вызов, «временно»
+	// спрятанный в комментарий, — тоже второй источник, который разойдётся.
+	//
+	// Закрытый список (ревью QA-01, раунд 2): после `actionlint@` допустимо
+	// РОВНО `${ACTIONLINT_VERSION}`. Литерал, `@latest`, `@main`, `@$V` — всё
+	// красное: плавающая версия раньше ловилась только немой веткой соседа.
 	for _, path := range []string{releaseYML, ciYML} {
-		for _, pin := range actionlintPinRe.FindAllStringSubmatch(readFile(t, path), -1) {
-			found++
-			if pin[1] != want {
-				t.Errorf("версия actionlint разошлась: %s требует %s, а scripts/dev-tools.sh объявляет %s.\n"+
-					"  На теге и на PR workflow разбирали бы разные линтеры, и ни одна проверка бы этого не показала.",
-					path, pin[1], want)
+		for _, ref := range actionlintRefRe.FindAllStringSubmatch(readFile(t, path), -1) {
+			if ref[1] == "${ACTIONLINT_VERSION}" {
+				continue
 			}
+			fail(t, "в %s версия actionlint «%s» вместо @${ACTIONLINT_VERSION} (scripts/dev-tools.sh объявляет %s).\n"+
+				"  Единственный источник версии — scripts/dev-tools.sh; литерал — второй источник, @latest — плавающая версия.",
+				path, ref[1], want)
 		}
 	}
 
-	// Ни одного литерального пина не найдено — значит регулярка перестала
-	// попадать в текст (переписали вызов, перенесли строку), и сравнивать
-	// больше нечего. Зелёным это быть не имеет права.
-	if found == 0 {
-		t.Fatalf("ни в %s, ни в %s не найдено ни одного вызова %s/cmd/actionlint@vX.Y.Z — тест перестал что-либо проверять",
-			releaseYML, ciYML, actionlintM)
+	// Второй источник версии без литерала в вызове (ревью QA-01): ключ
+	// `ACTIONLINT_VERSION:` в env workflow, job или шага, либо присваивание
+	// `ACTIONLINT_VERSION=` в теле run: (включая запись в $GITHUB_ENV).
+	// Любое из них перекрывает значение из dev-tools.sh, а вызов при этом
+	// остаётся формы @${ACTIONLINT_VERSION}, и сторож выше его одобряет.
+	for _, path := range []string{releaseYML, ciYML} {
+		for _, hit := range versionOverrideRe.FindAllString(readFile(t, path), -1) {
+			fail(t, "в %s переопределяет ACTIONLINT_VERSION: «%s» — второй источник версии; "+
+				"единственный — scripts/dev-tools.sh", path, strings.TrimSpace(hit))
+		}
+	}
+
+	// Литералов нет — это правильное состояние, но оно же выглядело бы так,
+	// если бы регулярка перестала попадать вообще во что-либо. Поэтому
+	// обязателен хотя бы один вызов через единый источник: без него
+	// «литералов не найдено» ничего не значит.
+	if !actionlintVarRe.MatchString(readFile(t, ciYML)) {
+		fatal(t, "в %s не найдено ни одного вызова %s/cmd/actionlint@${ACTIONLINT_VERSION} — "+
+			"тест перестал что-либо проверять", ciYML, actionlintM)
 	}
 }
 
@@ -131,12 +146,16 @@ func TestActionlintVersionSingleSource(t *testing.T) {
 // «сторож обязан не видеть того, что не исполняется» была обещанием сверх
 // сделанного и заменена на эту — на то, что достигнуто.
 //
-// Про A6, чтобы починка не стала препятствием. PR-A6 удаляет слабый actionlint
-// из release.yml — это ЗАКОННОЕ изменение. После него строка требования
-// удаляется в том же PR A6, видимой строкой: «release.yml — вызова больше нет,
-// шаг удалён, проверку несёт ci.yml». Разница между обходом и законным
-// изменением ровно одна: обход молчит, законное изменение правит таблицу и
-// видно в диффе. Эта фраза и есть смысл таблицы.
+// Про A6. PR-A6 удалил слабый actionlint из release.yml — это ЗАКОННОЕ
+// изменение, и строка требования удалена в том же PR видимой строкой
+// («вызова больше нет, шаг удалён, проверку несёт ci.yml»). Разница между
+// обходом и законным изменением ровно одна: обход молчит, законное изменение
+// правит таблицу и видно в диффе. Эта фраза и есть смысл таблицы.
+//
+// Чего этот сторож НЕ видит и видеть не обязан: СМЫСЛА вызова. Вызов с
+// `--version`, без файлов или с `-ignore '.*'` проходит здесь зелёным, если
+// пути workflow стоят где-то в том же теле run:. Смысл стережёт
+// invocation_test.go (A6, следствие A5 № 2).
 // ---------------------------------------------------------------------------
 
 // Вызов через единый источник версии: `@${ACTIONLINT_VERSION}`.
@@ -178,9 +197,8 @@ var actionlintAnyRe = regexp.MustCompile(regexp.QuoteMeta(actionlintM) + `/cmd/a
 // части условия.
 var allowedActionlintGates = map[string]string{
 	"": "условия нет — шаг исполняется всегда",
-	"matrix.os == 'linux'": "release.yml, job test: actionlint гоняется один раз из ОС матрицы — " +
-		"разбор workflow от ОС не зависит, гонять его дважды незачем. Условие сужает, но не отключает — " +
-		"при условии, что os: linux в матрице этого job есть, что и проверяется",
+	// Строка `matrix.os == 'linux'` удалена в A6 вместе с шагом release.yml,
+	// которому она принадлежала: допущенное условие без шага — лишняя дверь.
 }
 
 // Ссылка на матрицу в условии: `matrix.<ключ> == '<значение>'` (кавычки любые).
@@ -242,15 +260,10 @@ type actionlintRequirement struct {
 // нет и быть не должно — он был бы вторым источником версии, то есть ровно тем
 // дефектом, ради которого заведён этот пакет.
 var actionlintRequirements = []actionlintRequirement{
-	{
-		path:        releaseYML,
-		what:        "разбор release.yml на теге (версия литералом)",
-		call:        actionlintPinRe,
-		mustContain: []string{".github/workflows/release.yml"},
-		why: "release.yml не подключает scripts/dev-tools.sh и потому держит версию литералом; " +
-			"нет этого шага — на теге actionlint не запускается вовсе. " +
-			"Строка удаляется законно в A6, где шаг убирают целиком, с записью «проверку несёт ci.yml»",
-	},
+	// Строки «разбор release.yml на теге (версия литералом)» здесь больше
+	// нет — удалена в A6 законно и видимо: шаг actionlint из release.yml
+	// убран целиком, проверку несёт ci.yml (строка «настоящий разбор ОБОИХ
+	// workflow» ниже). Смысл того вызова стережёт invocation_test.go.
 	{
 		path:        ciYML,
 		what:        "канарейка: actionlint вправду применяет shellcheck к bash внутри run:",
@@ -337,17 +350,14 @@ type runStep struct {
 func runStepsOf(t *testing.T, path string) []runStep {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("не прочитать %s: %v", path, err)
-	}
+	data := readSource(t, path)
 
 	var wf wfSteps
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 	if len(wf.Jobs) == 0 {
-		t.Fatalf("в %s не найдено ни одного job — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одного job — тест перестал что-либо проверять", path)
 	}
 
 	var out []runStep
@@ -383,7 +393,7 @@ func runStepsOf(t *testing.T, path string) []runStep {
 		}
 	}
 	if total == 0 {
-		t.Fatalf("в %s не найдено ни одного шага — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одного шага — тест перестал что-либо проверять", path)
 	}
 	return out
 }
@@ -405,10 +415,10 @@ func (r actionlintRequirement) matches(body string) bool {
 
 func TestActionlintPinnedInEveryExpectedFile(t *testing.T) {
 	if len(actionlintRequirements) == 0 {
-		t.Fatalf("таблица требуемых шагов actionlintRequirements пуста — тест перестал что-либо проверять")
+		fatal(t, "таблица требуемых шагов actionlintRequirements пуста — тест перестал что-либо проверять")
 	}
 	if len(allowedActionlintGates) == 0 {
-		t.Fatalf("закрытый список allowedActionlintGates пуст — тест перестал что-либо проверять")
+		fatal(t, "закрытый список allowedActionlintGates пуст — тест перестал что-либо проверять")
 	}
 
 	steps := map[string][]runStep{}
@@ -435,14 +445,14 @@ func TestActionlintPinnedInEveryExpectedFile(t *testing.T) {
 
 		switch {
 		case len(blocked) > 0:
-			t.Errorf("в %s шаг «%s» найден, но обеззублен — сторож считает его отсутствующим:\n%s\n  %s",
+			fail(t, "в %s шаг «%s» найден, но обеззублен — сторож считает его отсутствующим:\n%s\n  %s",
 				req.path, req.what, strings.Join(blocked, "\n"), req.why)
 		case actionlintAnyRe.MatchString(readFile(t, req.path)):
-			t.Errorf("в %s нет исполняемого шага «%s»: вызовы actionlint в файле есть, но ни один не стоит "+
+			fail(t, "в %s нет исполняемого шага «%s»: вызовы actionlint в файле есть, но ни один не стоит "+
 				"в одном теле run: вместе с %v — шаг удалён, переписан или перенесён в комментарий.\n  %s",
 				req.path, req.what, req.mustContain, req.why)
 		default:
-			t.Errorf("в %s не найдено ни одного вызова %s/cmd/actionlint@ — шаг «%s» исчез целиком, "+
+			fail(t, "в %s не найдено ни одного вызова %s/cmd/actionlint@ — шаг «%s» исчез целиком, "+
 				"и тест по этой строке перестал что-либо проверять.\n  %s",
 				req.path, actionlintM, req.what, req.why)
 		}

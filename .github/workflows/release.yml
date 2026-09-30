@@ -28,14 +28,24 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # A6: те же три пары, что в job build ниже и в job checks файла
+          # ci.yml. До A6 здесь было две ОС (без macos) — и эта матрица не
+          # сверялась ни с чем. Теперь её стережёт
+          # internal/ciguard (TestReleaseTestMatrixMatchesBuild): расхождение
+          # трёх списков краснеет, а не обнаруживается на теге.
           - os: linux
             runner: ubuntu-24.04
           - os: windows
             runner: windows-2025
+          - os: macos
+            runner: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
 
       # README actions/checkout на закреплённом SHA (см. ссылку у "Происхождение
       # тега" ниже) гарантирует только "fetch all history for all branches and
@@ -66,6 +76,28 @@ jobs:
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
 
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH —
+        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md
+        # ("MSYS2 is pre-installed on image but not added to PATH").
+        # Ниже нет глушителя кода возврата: отсутствие gcc обязано ронять job (св. 3).
+        if: matrix.os == 'windows'
+        run: |
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
+
+      # Шага actionlint здесь больше нет (A6). Он был слабым: без shellcheck,
+      # только release.yml, под `if: matrix.os == 'linux'`. Проверку несёт
+      # ci.yml, job lint: оба workflow, пиновый shellcheck, канарейка — на
+      # каждом PR, то есть ДО тега. Смысл того вызова (оба файла, без
+      # отключённых правил) стережёт internal/ciguard.
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -79,32 +111,16 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
           gcc --version
 
-      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
-        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH —
-        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md
-        # ("MSYS2 is pre-installed on image but not added to PATH").
-        # Ниже нет глушителя кода возврата: отсутствие gcc обязано ронять job (св. 3).
-        if: matrix.os == 'windows'
-        run: |
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
-          export PATH="/c/msys64/mingw64/bin:$PATH"
-          gcc --version
-
-      - name: actionlint
-        # Разрешено ядром (В2 п.3) как `go run` без установки в систему;
-        # версия закреплена явно, без @latest.
-        if: matrix.os == 'linux'
-        # dependabot.yml НЕ передаём: actionlint принимает любой переданный
-        # файл за workflow и на dependabot.yml даёт 4 ложные ошибки
-        # ("jobs"/"on" section is missing, unexpected key version/updates) —
-        # test был бы красным на каждом теге (QA-01, ревью round1).
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml
-
       - name: go vet
         run: go vet ./...
 
       - name: go test -race
-        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/
+        # Список пакетов ОБЯЗАН совпадать со списком в ci.yml (job checks) —
+        # это стережёт internal/ciguard (TestGoTestPackagesMatch). ./cmd/gui/
+        # добавлен в A6: до этого тесты GUI (сторож утечки секретов, прибор
+        # осмотра) на релизной сборке не выполнялись вовсе. cgo и библиотеки
+        # Fyne дают шаги «Linux GUI deps» и «Windows mingw» выше.
+        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/
 
   build:
     name: build (${{ matrix.os }})
@@ -127,9 +143,36 @@ jobs:
             runner: macos-26
             arch: arm64
     steps:
+      - name: Архитектура раннера против matrix.arch
+        # A6, следствие A5 № 1. internal/ciguard сверяет matrix.arch с
+        # таблицей в коде — две наши записи, ни одна не измерение. Здесь
+        # единственное измерение: RUNNER_ARCH ставит сам раннер. Если GitHub
+        # сменит архитектуру образа под меткой, job упадёт здесь, а не
+        # соберёт релиз под ложным описанием.
+        #
+        # Три исхода, а не два: неизвестное или пустое RUNNER_ARCH — СТОП, а
+        # не «совпало». Шаг стоит первым и без `if:` — сверять нечего только
+        # тогда, когда нечего собирать.
+        env:
+          DECLARED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "${RUNNER_ARCH:-}" in
+            X64) actual=amd64 ;;
+            ARM64) actual=arm64 ;;
+            "") echo "СТОП: RUNNER_ARCH пуста — раннер не предъявил архитектуру, сверять не с чем" >&2; exit 1 ;;
+            *) echo "СТОП: RUNNER_ARCH=$RUNNER_ARCH — значение, которого этот шаг не знает; сверять не с чем" >&2; exit 1 ;;
+          esac
+          test -n "${DECLARED_ARCH:-}" || { echo "СТОП: matrix.arch пуст — объявления нет, сверять не с чем" >&2; exit 1; }
+          test "$actual" = "$DECLARED_ARCH" || { echo "СТОП: раннер измерен как $RUNNER_ARCH ($actual), а matrix.arch объявляет $DECLARED_ARCH — поле arch и таблица runnerArch в internal/ciguard устарели" >&2; exit 1; }
+          echo "архитектура раннера: $RUNNER_ARCH = matrix.arch $DECLARED_ARCH"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
 
       - name: Гарантировать origin/main для merge-base
         run: |
@@ -145,6 +188,18 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "СТОП: тег $GITHUB_REF_NAME не на origin/main — сначала push main, затем Re-run; тег не пересоздавать" >&2; exit 1; }
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "СТОП: тег не semver" >&2; exit 1; }
           git tag -l | awk -v t="$GITHUB_REF_NAME" '$0 != t' | bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"
+
+      - name: Windows mingw (gcc для CGO GUI-сборки)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
+        if: matrix.os == 'windows'
+        run: |
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -172,13 +227,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
-          gcc --version
-
-      - name: Windows mingw (gcc для CGO GUI-сборки)
-        if: matrix.os == 'windows'
-        run: |
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
-          export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
       - name: Сборка
@@ -319,10 +367,25 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      # Множество субъектов аттестации — ОДНО место, откуда его берут и шаг
+      # «Субъекты аттестации» (проверяет), и attest-build-provenance
+      # (подписывает). До A6 SHA256SUMS не входил: глоб amnezia-admin-* его
+      # не берёт по имени. Файл, по которому сверяют загрузки, уходил без
+      # подписи — подменивший бинари подменил бы и его. Глоб не расширен:
+      # вторая строка называет ровно один файл.
+      ATTEST_SUBJECTS: |-
+        dist/amnezia-admin-*
+        dist/SHA256SUMS
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A6: у этого job право contents: write. Без этой строки токен
+          # остаётся в .git/config рабочего каталога и доступен любому шагу.
+          # Публикация берёт токен своим входом, а не из git-конфигурации;
+          # git fetch ниже идёт по публичному репозиторию.
+          persist-credentials: false
 
       - name: Гарантировать origin/main для merge-base
         run: |
@@ -371,9 +434,42 @@ jobs:
       - name: Контрольные суммы
         run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS
 
+      - name: Субъекты аттестации
+        # Порядок шагов не менять: суммы снимаются после проверки состава,
+        # аттестация — после сумм. Здесь раскрывается ТО ЖЕ множество
+        # ATTEST_SUBJECTS, что уходит в attest-build-provenance ниже: девять
+        # имён, среди них SHA256SUMS, и каждый файл dist/ — субъект.
+        # Каждый шаблон обязан найти хотя бы один файл: пустой шаблон —
+        # это подпись, которой нет, а не «подписывать нечего».
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          subjects=()
+          while IFS= read -r pat; do
+            test -n "$pat" || continue
+            # shellcheck disable=SC2206 # глоб раскрывается намеренно
+            found=($pat)
+            test "${#found[@]}" -gt 0 || { echo "СТОП: шаблон субъектов '$pat' не нашёл ни одного файла" >&2; exit 1; }
+            # Имя без глоб-символов nullglob не трогает: bash оставляет его
+            # как есть, даже если файла нет. Поэтому существование — отдельно.
+            for f in "${found[@]}"; do
+              test -f "$f" || { echo "СТОП: субъект аттестации '$f' (шаблон '$pat') — нет такого файла" >&2; exit 1; }
+            done
+            subjects+=("${found[@]}")
+          done <<< "$ATTEST_SUBJECTS"
+          printf 'субъект: %s\n' "${subjects[@]}"
+          uniq_count="$(printf '%s\n' "${subjects[@]}" | sort -u | wc -l)"
+          test "${#subjects[@]}" -eq "$uniq_count" || { echo "СТОП: субъекты аттестации повторяются" >&2; exit 1; }
+          test "${#subjects[@]}" -eq 9 || { echo "СТОП: субъектов аттестации ${#subjects[@]}, ожидалось 9 (8 бинарей + SHA256SUMS)" >&2; exit 1; }
+          printf '%s\n' "${subjects[@]}" | grep -qx 'dist/SHA256SUMS' || { echo "СТОП: SHA256SUMS не входит в субъекты аттестации — файл сумм уйдёт без подписи" >&2; exit 1; }
+          all=(dist/*)
+          for f in "${all[@]}"; do
+            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" || { echo "СТОП: $f публикуется, но не входит в субъекты аттестации" >&2; exit 1; }
+          done
+
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/amnezia-admin-*
+          subject-path: ${{ env.ATTEST_SUBJECTS }}
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:

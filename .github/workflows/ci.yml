@@ -5,9 +5,9 @@ name: ci
 # go test -race / actionlint случался на релизе: ошибку в коде видел тег, а не
 # автор изменения.
 #
-# release.yml этой веткой не изменён ни одной строкой (решение ядра): новый
-# job lint разбирает оба workflow-файла, включая release.yml, на каждом PR —
-# значит любая правка релизного workflow попадает под разбор до тега.
+# Job lint разбирает оба workflow-файла, включая release.yml, на каждом PR —
+# значит любая правка релизного workflow попадает под разбор до тега. С A6
+# это ЕДИНСТВЕННЫЙ прогон actionlint: слабый шаг в release.yml удалён.
 on:
   pull_request:
   push:
@@ -52,15 +52,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Три пары — как в job build файла release.yml. Его job test идёт
-          # только на двух ОС (linux, windows) — известное расхождение внутри
-          # release.yml, править который в этой ветке запрещено (решение
-          # ядра). CI берёт надмножество: всё, что гоняется на теге, гоняется
-          # и на PR.
+          # Три пары — как в job build И в job test файла release.yml (с A6
+          # job test тоже идёт на трёх ОС; до A6 он шёл на двух и не
+          # сверялся ни с чем).
           #
           # Совпадение множеств пар стережёт internal/ciguard/matrix_test.go —
-          # он читает оба файла и краснеет при расхождении; расхождение двух
-          # списков в двух файлах в этом проекте уже дважды роняло релиз.
+          # он читает оба файла и краснеет при расхождении любой из трёх
+          # матриц; расхождение списков в двух файлах в этом проекте уже
+          # дважды роняло релиз.
           #
           # Закреплённые метки на 15.09.2026 —
           # https://github.com/actions/runner-images#available-images
@@ -76,6 +75,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # fetch-depth по умолчанию: merge-base и полная история нужны
         # release.yml для проверки происхождения тега, здесь — нет.
+        with:
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
+
+      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
+        # A6 (ревью QA-01, раунд 5): шаг стоит ДО setup-go. Каталог из
+        # $GITHUB_PATH встаёт в PATH впереди уже добавленных; setup-go,
+        # добавленный позже, окажется впереди mingw, и go.exe из mingw64/bin
+        # (если он там когда-нибудь появится) не перехватит `go`. Порядок
+        # стережёт internal/ciguard (TestNoToolEnvironmentOverrides).
+        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
+        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
+        # ронять job, иначе -race тихо выключится вместе с cgo.
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          gcc --version
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         # До любого шага, печатающего или вызывающего go: на macos-26 нет
@@ -92,17 +111,6 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
-          gcc --version
-
-      - name: Windows mingw (gcc для CGO GUI-сборки и -race)
-        # windows-2025 содержит MSYS2/mingw-w64, но не добавляет его в PATH.
-        # Глушителя кода возврата ниже нет намеренно: отсутствие gcc обязано
-        # ронять job, иначе -race тихо выключится вместе с cgo.
-        if: matrix.os == 'windows'
-        run: |
-          set -euo pipefail
-          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
-          export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
 
       - name: Версии инструментов (раннер предъявляет себя)
@@ -151,11 +159,10 @@ jobs:
         # требует cgo и библиотек Fyne: gcc ставит образ раннера, библиотеки
         # linux — шаг «Linux GUI deps» выше, так что цена нулевая.
         #
-        # СПИСКИ ci.yml И release.yml ТЕПЕРЬ РАСХОДЯТСЯ НАМЕРЕННО: в
-        # release.yml ./cmd/gui/ не добавлен, потому что правка release.yml
-        # обязывает выпускать сначала rc-тег (CLAUDE.md, «Выпуск»), а этот PR
-        # релиза не делает. Расхождение закрывает A6 — там же заводится сторож
-        # согласованности этих двух списков.
+        # Список пакетов ОБЯЗАН совпадать со списком job test в release.yml.
+        # С A4в до A6 они расходились (в release.yml не было ./cmd/gui/);
+        # A6 свёл их, и расхождение теперь краснеет в internal/ciguard
+        # (TestGoTestPackagesMatch).
         run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/
 
       - name: Сборка
@@ -182,6 +189,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A6 (ревью SEC-01): токен не остаётся в .git/config — иначе его
+          # читает любой следующий шаг, включая сборку сторонних модулей.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

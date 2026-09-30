@@ -11,10 +11,8 @@
 // Почему сторож здесь, а не шагом внутри ci.yml. Во-первых, этот тест лежит в
 // ./internal/..., а этот путь входит в команду `go test -race` И в ci.yml, И в
 // release.yml, — значит расхождение ловится ещё и на теге, куда ci.yml не
-// приходит. Сами команды в двух файлах с A4в уже НЕ совпадают: ci.yml гоняет
-// ещё и ./cmd/gui/ (его тесты не исполнялись нигде), а release.yml не тронут,
-// потому что его правка обязывает выпускать сначала rc-тег. Расхождение
-// намеренное и временное; сводит списки и заводит сторожа на них — A6. Во-вторых, шаг внутри ci.yml
+// приходит. Сами команды go test в двух файлах с A6 обязаны совпадать — это
+// стережёт TestGoTestPackagesMatch (releasechain_test.go). Во-вторых, шаг внутри ci.yml
 // самореферентен: ошибка в ci.yml, из-за которой workflow не стартует, унесла
 // бы сторож вместе с собой, а это ровно тот случай, ради которого сторож
 // заводится. Оба workflow-файла здесь только читаются.
@@ -30,7 +28,6 @@
 package ciguard
 
 import (
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -55,14 +52,11 @@ type workflow struct {
 func matrixPairsOf(t *testing.T, path, job string) []string {
 	t.Helper()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("не прочитать %s: %v", path, err)
-	}
+	data := readSource(t, path)
 
 	var wf workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		t.Fatalf("не разобрать %s как YAML: %v", path, err)
+		fatal(t, "не разобрать %s как YAML: %v", path, err)
 	}
 
 	j, ok := wf.Jobs[job]
@@ -72,7 +66,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		t.Fatalf("в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
+		fatal(t, "в %s нет job %q (есть: %v) — тест перестал что-либо проверять", path, job, names)
 	}
 
 	var pairs []string
@@ -80,7 +74,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 		osName, hasOS := entry["os"]
 		runner, hasRunner := entry["runner"]
 		if !hasOS || !hasRunner {
-			t.Errorf("в %s (job %s) элемент матрицы №%d не содержит пары os/runner: %v", path, job, i+1, entry)
+			fail(t, "в %s (job %s) элемент матрицы №%d не содержит пары os/runner: %v", path, job, i+1, entry)
 			continue
 		}
 		pairs = append(pairs, osName+"/"+runner)
@@ -90,7 +84,7 @@ func matrixPairsOf(t *testing.T, path, job string) []string {
 	// перестал находить пары (переименовали ключ, перенесли матрицу, сменили
 	// форму записи), сторож обязан покраснеть, а не отрапортовать совпадение.
 	if len(pairs) == 0 {
-		t.Fatalf("в %s не найдено ни одной пары os/runner — тест перестал что-либо проверять", path)
+		fatal(t, "в %s не найдено ни одной пары os/runner — тест перестал что-либо проверять", path)
 	}
 	sort.Strings(pairs)
 	return pairs
@@ -101,7 +95,7 @@ func TestCIMatrixMatchesReleaseBuild(t *testing.T) {
 	inCI := matrixPairsOf(t, ciYML, "checks")
 
 	if strings.Join(inRelease, " ") != strings.Join(inCI, " ") {
-		t.Fatalf("матрицы ОС разошлись — на теге исполнится то, чего не видел ни один PR:\n"+
+		fatal(t, "матрицы ОС разошлись — на теге исполнится то, чего не видел ни один PR:\n"+
 			"  release.yml, job build:  %v\n"+
 			"  ci.yml, job checks:      %v", inRelease, inCI)
 	}
