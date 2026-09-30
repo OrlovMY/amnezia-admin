@@ -1232,7 +1232,7 @@ mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && ex
 exit 0`
 
 func casWriteTemplate(label string) string {
-	return "timeout 75 flock -w 15 -E 4 /run/lock docker exec -i " + dyn +
+	return "timeout 75 flock -w 15 -E 4 /run/lock/ docker exec -i " + dyn +
 		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 

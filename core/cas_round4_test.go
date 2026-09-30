@@ -7,8 +7,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -50,6 +52,10 @@ func TestSha256FailureRealScript(t *testing.T) {
 	wg, tbl := snapshot(t, srv, c)
 	_, err := sess.AddUser(c, "Carol")
 	assertOnly(t, err, ErrWriteUnknown)
+	// Прямая проверка мимо assertOnly (N2): подмена в помощнике не глушит.
+	if err == nil || errors.Is(err, ErrCASMismatch) || !strings.Contains(err.Error(), "код выхода 1") {
+		t.Errorf("отказ sha256sum обязан дать «неизвестно» с кодом 1, не «изменён»: %v", err)
+	}
 	assertUnchanged(t, srv, c, wg, tbl)
 	if srv.TempLeft != 0 {
 		t.Errorf("оставлено временных файлов: %d", srv.TempLeft)
@@ -156,6 +162,22 @@ func TestCASLockLineRealFlock(t *testing.T) {
 		t.Fatalf("свободный замок: код %d, ждали 0", code)
 	}
 
+	// Каталога замка нет: 66 и НИЧЕГО не создано (косая черта в конце).
+	// Отдельный путь вместо настоящего /run/lock.
+	missing := filepath.Join(t.TempDir(), "nolock")
+	if !strings.HasSuffix(prefix, " "+CASLockDir) {
+		t.Fatalf("строка замка не кончается на %q: %q", CASLockDir, prefix)
+	}
+	line := strings.TrimSuffix(prefix, CASLockDir) + missing + "/ true"
+	out, err := exec.Command("sh", "-c", line).CombinedOutput()
+	var ee *exec.ExitError
+	if !asExit(err, &ee) || ee.ExitCode() != 66 {
+		t.Errorf("каталога замка нет: ждали код 66, получили %v (%s)", err, out)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Errorf("flock создал %s, хотя каталога не было (нужна косая черта в конце)", missing)
+	}
+
 	// Занятый замок: держит другой процесс, строка ждёт 15 с — укорочено
 	// нельзя (флаги — часть протокола), поэтому держим дольше ожидания.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -193,4 +215,3 @@ func asExit(err error, target **exec.ExitError) bool {
 	}
 	return ok
 }
-

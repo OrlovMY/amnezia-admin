@@ -233,7 +233,7 @@ var (
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
 	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
 	// TestCASLockLineRealFlock (Linux).
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
