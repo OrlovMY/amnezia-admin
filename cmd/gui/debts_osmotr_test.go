@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/fakesrv"
 	"amnezia-admin/internal/guiview"
 )
 
@@ -292,8 +294,51 @@ func TestDebtsPinClosedHeadFirst(t *testing.T) {
 	}
 }
 
+// openDiffDisableRecordOnly — раунд 6 (AU-UX Н5-1): окно «Показать
+// изменения» из диалога «Отключить пользователя?» для клиента с
+// неизвестным disabled ("true" строкой), у которого peer'а в wg0.conf нет.
+// План настоящий (fakesrv), пояснение — plan.Note() в строке статуса окна.
+func openDiffDisableRecordOnly(t *testing.T, u *ui, sized func()) osmotrScene {
+	osmotrMain(u)
+	sized()
+	srv := fakesrv.New()
+	const tbl, wg = "/opt/amnezia/awg/clientsTable", "/opt/amnezia/awg/wg0.conf"
+	raw, _ := srv.File(tbl)
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+		t.Fatalf("fakesrv: %v", err)
+	}
+	list[0]["userData"].(map[string]any)["disabled"] = "true"
+	id, name := list[0]["clientId"].(string), list[0]["userData"].(map[string]any)["clientName"].(string)
+	out, _ := json.Marshal(list)
+	srv.SetFile(tbl, out)
+	conf, _ := srv.File(wg)
+	var kept []string
+	for _, b := range strings.Split(string(conf), "\n\n") {
+		if !strings.Contains(b, id) {
+			kept = append(kept, b)
+		}
+	}
+	srv.SetFile(wg, []byte(strings.Join(kept, "\n\n")))
+	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	plan, err := sess.PlanSetEnabled(c, id, false)
+	if err != nil {
+		t.Fatalf("PlanSetEnabled: %v", err)
+	}
+	if plan.Note() != core.NoteDisableRecordOnly {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: пояснения нет (%q)", plan.Note())
+	}
+	u.showDiffWindow("отключение \""+name+"\"", plan, nil)
+	return scenePopup(t, u)
+}
+
 func init() {
 	osmotrForms = append(osmotrForms,
+		osmotrForm{name: "(д) изменения: отключение, неизвестно, peer убран", open: openDiffDisableRecordOnly, width: 692,
+			inventory: []string{"подпись:" + firstLine(`Изменения перед применением: отключение "Alice"`),
+				"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
+				"кнопка:Применить", "подпись:" + firstLine(core.NoteDisableRecordOnly), "кнопка:Закрыть"}},
 		osmotrForm{name: "(г) главное окно, включён ли клиент — неизвестно", open: openMainEnabledUnknown,
 			inventory: invMainWithStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера")},
 		osmotrForm{name: "(г) главное окно, причина «?» в строке состояния", open: openMainLongStatus,
