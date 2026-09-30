@@ -258,17 +258,74 @@ type ClientEntry struct {
 func (e ClientEntry) Name() string    { return Str(e.UserData, "clientName") }
 func (e ClientEntry) Created() string { return Str(e.UserData, "creationDate") }
 
-// Disabled — временно отключён (SetEnabled(c, id, false)). Хранится как
-// UserData["disabled"] = true; отсутствие поля или false означает "активен".
-// Это наше совместимое расширение clientsTable — клиент Amnezia лишние поля
-// в userData сохраняет и игнорирует.
-func (e ClientEntry) Disabled() bool {
+// EnabledState — включён ли клиент по записи clientsTable. ТРИ состояния
+// (долг У1, 30.09.2026): поле disabled — наше расширение clientsTable, и
+// его может испортить кто угодно (ручная правка, чужой инструмент). Прежде
+// значение не типа bool читалось как «активен» (признак 2 CLAUDE.md), и
+// toggle/rekey действовали по догадке — rekey к тому же стирает поле, то
+// есть мог молча включить отключённого.
+type EnabledState int
+
+const (
+	// EnabledActive — поля нет или false.
+	EnabledActive EnabledState = iota
+	// EnabledDisabled — поле true.
+	EnabledDisabled
+	// EnabledUnknown — поле есть, но не true/false: включён ли — неизвестно.
+	EnabledUnknown
+)
+
+// EnabledState — состояние записи; см. тип.
+func (e ClientEntry) EnabledState() EnabledState {
 	v, ok := e.UserData["disabled"]
-	if !ok {
-		return false
+	if !ok || v == nil {
+		return EnabledActive
 	}
-	b, _ := v.(bool)
-	return b
+	b, isBool := v.(bool)
+	switch {
+	case !isBool:
+		return EnabledUnknown
+	case b:
+		return EnabledDisabled
+	}
+	return EnabledActive
+}
+
+// Disabled — ТОЧНО отключён (EnabledState() == EnabledDisabled). Хранится как
+// UserData["disabled"] = true. Это наше совместимое расширение clientsTable —
+// клиент Amnezia лишние поля в userData сохраняет и игнорирует. false здесь
+// НЕ значит «активен»: для решений, где это важно, — EnabledState().
+func (e ClientEntry) Disabled() bool {
+	return e.EnabledState() == EnabledDisabled
+}
+
+// EnabledUnknownNote — строка под списком пользователей (CLI list и строка
+// состояния GUI): у кого включённость неизвестна. Пусто — таких нет. Строка
+// в ячейке таблицы у них прежняя (без пометки «отключён»), поэтому без этой
+// строки неизвестное выглядело бы как «активен».
+func EnabledUnknownNote(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = fmt.Sprintf("%q", n)
+	}
+	return fmt.Sprintf("Неизвестно, включены ли эти пользователи (поле disabled в clientsTable не true/false): %s. "+
+		"Включать и перевыпускать их программа не будет; чтобы исправить запись, отключите их (или удалите).", strings.Join(q, ", "))
+}
+
+// EnabledUnknownError — отказ действия, зависящего от того, включён ли
+// клиент, когда это неизвестно (EnabledUnknown).
+func EnabledUnknownError(e ClientEntry) error {
+	v := fmt.Sprintf("%v", e.UserData["disabled"])
+	if r := []rune(v); len(r) > 40 {
+		v = string(r[:40]) + "…"
+	}
+	return fmt.Errorf("Включён ли пользователь %q, неизвестно: в clientsTable поле disabled = %q, "+
+		"а должно быть true или false. Ничего не изменено. Отключите пользователя — это исправит запись; "+
+		"или удалите его.",
+		e.Name(), v)
 }
 
 // LoadClients читает clientsTable. "Файла нет" и "не удалось прочитать" —
@@ -1123,14 +1180,23 @@ func (s *Session) RenameUser(c *Container, clientID, newName string) error {
 // planSetEnabledLocked → applyLocked (core/txn.go, PR-2); сама транзакция
 // (backup/CAS/запись/verify/restore) — в Apply, здесь только план.
 func (s *Session) SetEnabled(c *Container, clientID string, enabled bool) error {
+	_, err := s.SetEnabledNoted(c, clientID, enabled)
+	return err
+}
+
+// SetEnabledNoted — то же, что SetEnabled, и пояснение к сделанному (Plan.Note):
+// итог обязан сказать, если правилась только запись (раунд 5 долгов, Н-4).
+func (s *Session) SetEnabledNoted(c *Container, clientID string, enabled bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, err := s.planSetEnabledLocked(c, clientID, enabled)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = s.applyLocked(p)
-	return err
+	if _, err = s.applyLocked(p); err != nil {
+		return "", err
+	}
+	return p.note, nil
 }
 
 // SanitizeName убирает символы, запрещённые в именах файлов Windows,

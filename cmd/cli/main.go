@@ -198,25 +198,44 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 	if len(clients) == 0 {
 		fmt.Fprintln(w, "В clientsTable записей нет.")
 	} else {
+		// «Активность» — 18 знаков; при записи с неизвестной включённостью
+		// ячейка «<время> (вкл/откл: ?)» длиннее (раунд 3, Я1), и колонка
+		// расширяется, иначе строка разъехалась бы с шапкой.
+		actW := 18
+		for _, cl := range clients {
+			if cl.EnabledState() == core.EnabledUnknown {
+				actW = len([]rune("2006-01-02 15:04 "+textListEnabledUnknown)) + 2
+				break
+			}
+		}
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
-		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
-		absent := 0 // включённые клиенты, которых нет в ответе `wg show`
+		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", actW)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
+		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+actW+24+44)))
+		absent := 0                 // включённые клиенты, которых нет в ответе `wg show`
+		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
 			created := cl.Created()
 			if r := []rune(created); len(r) > 19 {
 				created = string(r[:19])
 			}
 			r := core.ReadPeer(stats, statsFailed, cl.ClientID)
-			if !cl.Disabled() && r.State == core.PeerAbsent {
-				absent++
+			switch cl.EnabledState() {
+			case core.EnabledActive:
+				if r.State == core.PeerAbsent {
+					absent++
+				}
+			case core.EnabledUnknown:
+				unknownEnabled = append(unknownEnabled, cl.Name())
 			}
-			act := listActivityText(cl.Disabled(), r)
-			hs := cDim(pad(act, 18))
-			if _, ok := r.Measured(); ok && !cl.Disabled() && act != "—" {
-				hs = cOK(pad(act, 18))
+			act := listActivityText(cl.EnabledState(), r)
+			hs := cDim(pad(act, actW))
+			// Зелёный — только ТОЧНО активному (раунд 3, SEC): у клиента с
+			// неизвестным состоянием показание измерено, но «активен» не
+			// утверждается.
+			if _, ok := r.Measured(); ok && cl.EnabledState() == core.EnabledActive && act != "—" {
+				hs = cOK(pad(act, actW))
 			}
-			traffic := listTrafficText(cl.Disabled(), r)
+			traffic := listTrafficText(cl.EnabledState(), r)
 			name := cl.Name()
 			if cl.Disabled() {
 				name = cDim(pad(name, 34))
@@ -227,6 +246,9 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		}
 		fmt.Fprintln(w, cDim("Трафик и активность — с момента перезапуска сервера."))
 		if note := listStatsNote(statsFailed, absent); note != "" {
+			fmt.Fprintln(w, cWarn(note))
+		}
+		if note := core.EnabledUnknownNote(unknownEnabled); note != "" {
 			fmt.Fprintln(w, cWarn(note))
 		}
 	}
@@ -268,10 +290,21 @@ func orphanNote(err error) string {
 //
 // Прежде «?» не было вовсе: пустая карта при отказе и отсутствующий ключ
 // давали нулевое время, то есть «—» — «не подключался» (признак 1).
-func listActivityText(disabled bool, r core.PeerReading) string {
-	if disabled {
+func listActivityText(enabled core.EnabledState, r core.PeerReading) string {
+	if enabled == core.EnabledDisabled {
 		return "(откл.)"
 	}
+	reading := listActivityReading(r)
+	if enabled == core.EnabledUnknown {
+		// У1: не «активен» и не «отключён»; причина — под таблицей
+		// (EnabledUnknownNote). Раунд 3 (UX-01, Я1): пометка добавляется к
+		// показанию, а не заменяет его.
+		return reading + " " + textListEnabledUnknown
+	}
+	return reading
+}
+
+func listActivityReading(r core.PeerReading) string {
 	st, ok := r.Measured()
 	switch {
 	case !ok:
@@ -285,8 +318,8 @@ func listActivityText(disabled bool, r core.PeerReading) string {
 
 // listTrafficText — ячейка «Трафик ↓/↑» таблицы list. Число печатается
 // только измеренному клиенту; честный измеренный ноль остаётся «0 B / 0 B».
-func listTrafficText(disabled bool, r core.PeerReading) string {
-	if disabled {
+func listTrafficText(enabled core.EnabledState, r core.PeerReading) string {
+	if enabled == core.EnabledDisabled {
 		return "(откл.)"
 	}
 	st, ok := r.Measured()
@@ -388,6 +421,9 @@ func printPlan(w io.Writer, p *core.Plan) {
 	dir := p.Container.Dir
 	printFileDiff(w, dir+"/wg0.conf", wgDiff)
 	printFileDiff(w, dir+"/clientsTable", tblDiff)
+	if n := p.Note(); n != "" {
+		fmt.Fprintln(w, n) // Н-4, раунд 5: что правится только запись — прямо
+	}
 }
 
 func printFileDiff(w io.Writer, path, diff string) {
@@ -485,11 +521,41 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 
 // ---------- интерактивный режим ----------
 
-func interactive() {
+// textListEnabledUnknown — ячейка «Активность» list, когда неизвестно,
+// включён ли клиент (У1, раунд 2).
+const textListEnabledUnknown = "(вкл/откл: ?)"
+
+// textInputEnded — строка при конце ввода в меню (долг У6, текст UX-01).
+const textInputEnded = "Ввод закончился — выход."
+
+// errInputEnded — ask() встретил конец ввода: меню разматывается до
+// interactive() паникой с этим значением. Паника, а не пустая строка: ask
+// зовут и внутри пунктов меню («Имя нового пользователя»), и пустой ответ
+// там продолжил бы действие так, будто человек что-то ответил.
+var errInputEnded = errors.New("ввод закончился")
+
+// interactive — меню. Возвращает код выхода: 0 — штатно, 2 — ввод
+// закончился (EOF на stdin). Прежде ошибка чтения отбрасывалась, пустая
+// строка уходила в switch как «неизвестный выбор», и меню печаталось
+// бесконечно (У6).
+func interactive() (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if r != errInputEnded {
+				panic(r)
+			}
+			fmt.Println()
+			fmt.Fprintln(os.Stderr, textInputEnded)
+			code = 2
+		}
+	}()
 	in := bufio.NewReader(os.Stdin)
 	ask := func(prompt string) string {
 		fmt.Print(prompt)
-		line, _ := in.ReadString('\n')
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			panic(errInputEnded)
+		}
 		return strings.TrimSpace(line)
 	}
 
@@ -665,6 +731,9 @@ func interactive() {
 				break
 			}
 			victim := clients[idx]
+			// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ,
+			// разрешено (раунд 4, решение ядра): итог от прежней записи не
+			// зависит и исправляет её.
 			enable := victim.Disabled()
 			if enable {
 				// включение — вопрос как раньше, без карточки (Г3: вопрос
@@ -681,12 +750,15 @@ func interactive() {
 					break
 				}
 			}
-			if err := sess.SetEnabled(cur, victim.ClientID, enable); err != nil {
+			if note, err := sess.SetEnabledNoted(cur, victim.ClientID, enable); err != nil {
 				printErr(err)
 			} else if enable {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q включён.", victim.Name())))
 			} else {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q отключён.", victim.Name())))
+				if note != "" {
+					fmt.Println(note)
+				}
 			}
 		case "8":
 			if !cur.Managed {
@@ -707,6 +779,11 @@ func interactive() {
 				break
 			}
 			victim := clients[idx]
+			if victim.EnabledState() == core.EnabledUnknown {
+				// У1: до вопроса и карточки — действие всё равно невозможно
+				printErr(core.EnabledUnknownError(victim))
+				break
+			}
 			card := buildCard(sess, cur, victim, "перевыпустить конфиг")
 			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
 			if !proceed {
@@ -742,8 +819,7 @@ func pause(in *bufio.Reader) {
 
 func main() {
 	if len(os.Args) < 2 {
-		interactive()
-		return
+		os.Exit(interactive())
 	}
 	knownHostsPath := filepath.Join(core.DefaultVaultDir(), "known_hosts")
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, knownHostsPath))
@@ -931,16 +1007,22 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
+		// Неизвестная включённость: enable = false — отключение, разрешено
+		// (раунд 4, решение ядра).
 		enable := clients[idx].Disabled()
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
 			return code
 		}
-		err = sess.SetEnabled(cur, clients[idx].ClientID, enable)
+		var note string
+		note, err = sess.SetEnabledNoted(cur, clients[idx].ClientID, enable)
 		if err == nil {
 			if enable {
 				fmt.Fprintf(stdout, "Пользователь %q включён.\n", *name)
 			} else {
 				fmt.Fprintf(stdout, "Пользователь %q отключён.\n", *name)
+			}
+			if note != "" {
+				fmt.Fprintln(stdout, note) // Н-4: правилась только запись
 			}
 		}
 	case "rekey":
@@ -958,6 +1040,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
+			break
+		}
+		if clients[idx].EnabledState() == core.EnabledUnknown {
+			// У1: до карточки подтверждения — действие всё равно невозможно
+			err = core.EnabledUnknownError(clients[idx])
 			break
 		}
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "перевыпустить конфиг"); !proceed {

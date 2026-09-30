@@ -245,10 +245,10 @@ func TestListCellsThreeStates(t *testing.T) {
 		{"отключён", true, core.ReadPeer(stats, false, "gone"), "(откл.)", "(откл.)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := listActivityText(tc.disabled, tc.r); got != tc.wantAct {
+			if got := listActivityText(enabledOf(tc.disabled), tc.r); got != tc.wantAct {
 				t.Errorf("активность = %q, want %q", got, tc.wantAct)
 			}
-			if got := listTrafficText(tc.disabled, tc.r); got != tc.want {
+			if got := listTrafficText(enabledOf(tc.disabled), tc.r); got != tc.want {
 				t.Errorf("трафик = %q, want %q", got, tc.want)
 			}
 		})
@@ -376,4 +376,12 @@ func TestListDisabledArrivesFromServer(t *testing.T) {
 	if row := listRow(t, out, "Bob"); !strings.Contains(row, "0 B / 0 B") {
 		t.Errorf("включённый Bob в ответе с нулём — честный ноль потерян:\n%s", row)
 	}
+}
+
+// enabledOf — булев случай таблицы в три состояния (раунд 2 долгов).
+func enabledOf(disabled bool) core.EnabledState {
+	if disabled {
+		return core.EnabledDisabled
+	}
+	return core.EnabledActive
 }

@@ -438,7 +438,9 @@ var rowFieldSource = map[string]string{
 	// оставляла оба пакета зелёными, а на экране у отключённого клиента в
 	// «Активности» показалось бы и скопировалось рукопожатие, и имя
 	// перестало бы быть курсивом.
-	"Disabled":  "cl.Disabled()",
+	// Раунд 2 долгов: Disabled bool → Enabled core.EnabledState (три
+	// состояния; подмена на cl.Disabled() не скомпилируется по типу).
+	"Enabled":   "cl.EnabledState()",
 	"CanManage": "u.canManage",
 	// Peer — задание НЕЗНАНИЕ-ТРАФИК: прежняя пара StatsFailed/Stats
 	// (`u.peerStats[cl.ClientID]`) отдавала отсутствующего в ответе
