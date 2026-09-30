@@ -4,7 +4,7 @@ package core
 // поверх файла, открытого другим процессом или потоком на чтение, отказывает
 // «файл занят» (посылка проверена TestKnownHostsRenameOverOpenFile). Чтобы
 // окно чтения было не микросекундным, а сотни миллисекунд, файл большой:
-// 20000 настоящих записей — knownhosts.New держит его открытым, пока
+// 50000 настоящих записей — knownhosts.New держит его открытым, пока
 // разбирает. Писатель стартует, когда читатель уже внутри. С замком писатель
 // ждёт и пишет; без замка на Windows rename отказывает.
 
@@ -46,12 +46,15 @@ func TestKnownHostsRenameOverOpenFile(t *testing.T) {
 }
 
 func TestKnownHostsReadHoldsLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skipf("ОС %s: rename поверх открытого файла здесь разрешён (TestKnownHostsRenameOverOpenFile), замку на чтение нечего защищать", runtime.GOOS)
+	}
 	k, err := fakesrv.NewHostKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var big bytes.Buffer
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 50000; i++ {
 		big.WriteString(knownhosts.Line([]string{fmt.Sprintf("[10.%d.%d.%d]:2222", i/65536, i/256%256, i%256)}, k.PublicKey()))
 		big.WriteByte('\n')
 	}
