@@ -10,6 +10,11 @@ package guiview
 // Граница: сторож синтаксический — он видит вызов dialog.ShowError по имени
 // пакета «dialog». Вызов через псевдоним импорта или обёртку он не увидит;
 // обёртка вне showError — та же находка ревью, что и прямой вызов.
+// Не видит он и других путей к человеку (аудит AU-LOGIC Н-2, раунд 4):
+// statusLabel.SetText(err.Error()), dialog.ShowInformation, connectFail.
+// Сейчас в путях записи таких мест нет (grep err.Error() в cmd/gui —
+// подключение, пин, QR). То, что ошибка записи ВООБЩЕ узнаётся, держит
+// другой сторож — writeoutcome.TestApplyErrorsClassified.
 
 import (
 	"go/ast"

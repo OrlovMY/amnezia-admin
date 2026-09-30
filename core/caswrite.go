@@ -157,6 +157,17 @@ var ErrWriteUnknown = errors.New("неизвестно, записаны ли и
 // кто-то другой, и откат стёр бы его изменения.
 var ErrRollbackForeign = errors.New("откат не выполнен: после нашей записи файлы изменил другой")
 
+// ErrWriteNotStarted — запись не начиналась (резервная копия не создана,
+// команда не собрана): ничего не записано, повтор безвреден (A3б PR-3,
+// раунд 4 — закрытый список исходов пути Apply).
+var ErrWriteNotStarted = errors.New("запись не начиналась")
+
+// notStarted — обёртка «запись не начиналась» с исходной причиной.
+type notStarted struct{ err error }
+
+func (n notStarted) Error() string   { return n.err.Error() }
+func (n notStarted) Unwrap() []error { return []error{ErrWriteNotStarted, n.err} }
+
 // ErrLockUnavailable — замок записи /run/lock/ не открылся (код 66 flock);
 // docker exec не запускался, ничего не записано. Частный случай
 // ErrServerToolMissing (errors.Is верно для обоих): выделен, чтобы человеку
@@ -279,7 +290,7 @@ func stderrTail(err error) string {
 func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl []byte) error {
 	cmd, err := CASWriteCommand(label, c.Name, c.Dir, wantWg, wantTbl)
 	if err != nil {
-		return fmt.Errorf("запись не выполнена: %w", err)
+		return fmt.Errorf("запись не выполнена: %w", notStarted{err})
 	}
 	stdin := CASWriteStdin(wg, tbl)
 	// Не через s.docker (SEC F1): общий фолбэк повторяет под sudo любую

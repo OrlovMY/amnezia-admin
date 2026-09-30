@@ -40,6 +40,16 @@ var pr3Cases = []pr3Case{
 		s.FailSyncconf = errors.New("имитированный отказ syncconf")
 		s.ForeignWrite = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
 	}, writeoutcome.RollbackForeign},
+	// Раунд 4 (AU-LOGIC Н-1): откат не начался («занято») и итог отката
+	// неизвестен (124) — прежде безликая ошибка и снова включённая «Применить».
+	{"откат не выполнен (занято)", func(s *fakesrv.Server) {
+		s.FailSyncconf = errors.New("имитированный отказ syncconf")
+		s.WriteFault = map[int]fakesrv.WriteFault{2: {Code: 4}}
+	}, writeoutcome.RollbackNotDone},
+	{"итог отката неизвестен (124)", func(s *fakesrv.Server) {
+		s.FailSyncconf = errors.New("имитированный отказ syncconf")
+		s.WriteFault = map[int]fakesrv.WriteFault{2: {Code: 124}}
+	}, writeoutcome.RollbackUnknown},
 }
 
 // pr3DiffWindow — окно изменений плана добавления над fakesrv с хуком prep;
@@ -111,6 +121,7 @@ func pr3KindErr(k writeoutcome.Kind) error {
 		core.ErrCASMismatch, core.ErrServerBusy, core.ErrServerToolMissing,
 		errors.Join(core.ErrLockUnavailable, core.ErrServerToolMissing),
 		core.ErrWriteUnknown, errors.Join(core.ErrWritePartial, core.ErrWriteUnknown), core.ErrRollbackForeign,
+		errors.Join(core.ErrRollbackNotDone, core.ErrServerBusy), errors.Join(core.ErrRollbackUnknown, core.ErrWriteUnknown),
 	} {
 		if writeoutcome.Classify(e) == k {
 			return e

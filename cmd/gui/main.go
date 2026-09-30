@@ -2485,7 +2485,10 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 						}
 						statusLabel.Importance = widget.MediumImportance
 						statusLabel.SetText("")
-						applyBtn.Enable()
+						// Неклассифицированное с пути Apply — БЕЗ повтора (раунд 4, AU-LOGIC Н-1/Н-2):
+						// повтор разрешён только закрытым списком writeoutcome (Retry), по
+						// умолчанию — нет. Сторож TestApplyErrorsClassified держит, что такой
+						// ветки на пути Apply нет вовсе.
 						u.showError(err)
 						return
 					}
@@ -2534,6 +2537,13 @@ func (u *ui) showError(err error) {
 		dialog.ShowError(err, u.win)
 		return
 	}
+	showWriteOutcomeDialog(u, t, err)
+}
+
+// showWriteOutcomeDialog — диалог исхода записи: заголовок исхода, текст с
+// подробностями в прокрутке (выделяемый), «Закрыть». Отдельно от showError,
+// чтобы сторож запаса ширины строил ровно этот диалог для каждого текста.
+func showWriteOutcomeDialog(u *ui, t writeoutcome.Text, err error) {
 	msg := widget.NewLabel(writeoutcome.Message(t, err))
 	msg.Wrapping = fyne.TextWrapWord
 	msg.Selectable = true

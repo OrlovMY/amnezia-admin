@@ -237,7 +237,7 @@ func (s *Session) backup(c *Container) error {
 			"ls -1t %s/backup/clientsTable.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done)'",
 		c.Name, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir)
 	if _, err := s.docker(cmd, nil); err != nil {
-		return fmt.Errorf("не удалось создать резервную копию: %w", err)
+		return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{err})
 	}
 	return nil
 }

@@ -34,6 +34,14 @@ func TestPR3CLIWriteOutcomes(t *testing.T) {
 			s.FailSyncconf = errors.New("имитированный отказ syncconf")
 			s.ForeignWrite = map[int]map[string][]byte{2: {"/opt/amnezia/awg/clientsTable": []byte("[]")}}
 		}, writeoutcome.RollbackForeign},
+		{"откат не выполнен (занято)", func(s *fakesrv.Server) {
+			s.FailSyncconf = errors.New("имитированный отказ syncconf")
+			s.WriteFault = map[int]fakesrv.WriteFault{2: {Code: 4}}
+		}, writeoutcome.RollbackNotDone},
+		{"итог отката неизвестен (124)", func(s *fakesrv.Server) {
+			s.FailSyncconf = errors.New("имитированный отказ syncconf")
+			s.WriteFault = map[int]fakesrv.WriteFault{2: {Code: 124}}
+		}, writeoutcome.RollbackUnknown},
 	}
 	titles := map[writeoutcome.Kind]string{}
 	for _, c := range cases {
@@ -102,4 +110,6 @@ var sampleErrs = []error{
 	fmt.Errorf("%w", core.ErrWriteUnknown),
 	fmt.Errorf("%w %w", core.ErrWritePartial, core.ErrWriteUnknown),
 	fmt.Errorf("%w", core.ErrRollbackForeign),
+	fmt.Errorf("%w %w", core.ErrRollbackNotDone, core.ErrServerBusy),
+	fmt.Errorf("%w %w", core.ErrRollbackUnknown, core.ErrWriteUnknown),
 }

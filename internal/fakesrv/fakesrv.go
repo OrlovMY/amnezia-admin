@@ -55,6 +55,10 @@ type Server struct {
 	// ли» бывает и после записи).
 	WriteFault map[int]WriteFault
 
+	// FailBackup — если задана, команда резервной копии вернёт эту ошибку,
+	// ничего не скопировав (A3б PR-3, раунд 4: исход «запись не начиналась»).
+	FailBackup error
+
 	// ForeignWrite — номер по счёту команды записи (как в WriteFault) →
 	// файлы (путь → байты), которые «другой писатель» записывает на сервер
 	// непосредственно ПЕРЕД этой командой. Боевой путь исходов «изменён
@@ -313,6 +317,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return "no\n", nil
 
 	case reBackup.MatchString(cmd):
+		if s.FailBackup != nil {
+			return "", s.FailBackup
+		}
 		m := reBackup.FindStringSubmatch(cmd)
 		dir := m[2]
 		for _, g := range m[3:] {

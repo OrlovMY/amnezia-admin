@@ -1634,15 +1634,27 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	// запись, которой уже сказано «готово». Оба файла — одной командой.
 	if werr := s.casWrite(c, CASLabelRollback, sha256Hex(p.wgAfter), sha256Hex(p.tblAfter), wgBytesIf(wgChanged, p.wgBefore), tblBefore); werr != nil {
 		backups := fmt.Sprintf("резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие)", c.Dir, c.Dir)
+		// A3б PR-3, раунд 4 (AU-LOGIC Н-1): исход отката — ТИПОМ, а не
+		// строкой через %v. Прежде «откат занят / нет утилиты / неизвестно»
+		// сворачивались в безликую ошибку: интерфейс её не узнавал, снова
+		// включал «Применить», и повтор говорил «ничего не записано» — при
+		// наших байтах на сервере. restoreError оборачивает и исходную
+		// причину, и исход отката (errors.Is видит оба), а свой сентинел
+		// ставит первым: исход записи — «записано, откат не выполнен /
+		// неизвестен». Текст не повторяет «ничего не записано» из текста
+		// отказа отката: к откату это верно, к операции — нет.
 		switch {
 		case errors.Is(werr, ErrCASMismatch):
 			return &rollbackForeignError{msg: fmt.Sprintf("ВНИМАНИЕ: откат не выполнен: после нашей записи файлы на сервере изменил другой — откат стёр бы его изменения. Обновите список; %s; исходная причина: %v", backups, cause)}
 		case isCASPartial(werr):
-			return fmt.Errorf("ВНИМАНИЕ: откат выполнен частично — wg0.conf вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", backups, cause)
+			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
+				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, откат выполнен частично — wg0.conf вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", backups, cause)}
 		case errors.Is(werr, ErrWriteUnknown):
-			return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — неизвестно, вернулись ли wg0.conf и clientsTable (%v); %s; исходная причина: %v", werr, backups, cause)
+			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
+				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — неизвестно, вернулись ли wg0.conf и clientsTable (%s); %s; исходная причина: %v", rollbackReason(werr), backups, cause)}
 		}
-		return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — wg0.conf и clientsTable НЕ восстановлены (%v); %s; исходная причина: %v", werr, backups, cause)
+		return &restoreError{kind: ErrRollbackNotDone, cause: cause, rollback: werr,
+			msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — wg0.conf и clientsTable НЕ восстановлены (%s); %s; исходная причина: %v", rollbackReason(werr), backups, cause)}
 	}
 
 	// Оба файла точно на месте. Повторный syncconf — попытка вернуть и
@@ -1722,14 +1734,72 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		// капслок здесь обесценивал бы настоящие предупреждения. Факт при
 		// этом не прячется.
 		if !p.tblExisted {
-			return fmt.Errorf("операция отменена, откат выполнен и проверен. Исходная причина: %v"+
+			return &restoreError{kind: ErrRolledBack, cause: cause, msg: fmt.Sprintf("операция отменена, откат выполнен и проверен. Исходная причина: %v"+
 				"\nПримечание: clientsTable до операции не существовала — вернуть отсутствие файла нечем, он оставлен пустым."+
-				" Для этой утилиты пустая таблица и отсутствующая равнозначны: список пользователей пуст и там, и там.%s", cause, scope)
+				" Для этой утилиты пустая таблица и отсутствующая равнозначны: список пользователей пуст и там, и там.%s", cause, scope)}
 		}
-		return fmt.Errorf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)
+		return &restoreError{kind: ErrRolledBack, cause: cause, msg: fmt.Sprintf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)}
 	}
-	return fmt.Errorf("ВНИМАНИЕ: файлы восстановлены, но применить их не удалось (%v): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v",
-		verifyErr, cause)
+	return &restoreError{kind: ErrRolledBackNotApplied, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены, но применить их не удалось (%v): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v",
+		verifyErr, cause)}
+}
+
+// ErrRollbackNotDone — изменения записаны, проверка/применение не прошли, а
+// откат НЕ выполнен: команда отката не начала запись (занято, нет утилиты,
+// замок). На сервере — наши записанные байты (A3б PR-3, раунд 4).
+var ErrRollbackNotDone = errors.New("изменения записаны, откат не выполнен")
+
+// ErrRollbackUnknown — изменения записаны, откат начат, но его итог
+// неизвестен (код вне списка) или частичен.
+var ErrRollbackUnknown = errors.New("изменения записаны, итог отката неизвестен")
+
+// ErrRolledBack — изменения записаны, применить/проверить не удалось, откат
+// выполнен и проверен: сервер в прежнем состоянии.
+var ErrRolledBack = errors.New("изменения отменены, состояние восстановлено")
+
+// ErrRolledBackNotApplied — откат вернул файлы, но работающий сервер их не
+// принял (активные подключения могут отличаться от файлов).
+var ErrRolledBackNotApplied = errors.New("файлы восстановлены, но не применены")
+
+// restoreError — исход restore. Unwrap отдаёт свой сентинел, исходную
+// причину и исход отката: errors.Is видит все три.
+type restoreError struct {
+	kind            error
+	msg             string
+	cause, rollback error
+}
+
+func (e *restoreError) Error() string { return e.msg }
+func (e *restoreError) Unwrap() []error {
+	out := []error{e.kind}
+	if e.cause != nil {
+		out = append(out, e.cause)
+	}
+	if e.rollback != nil {
+		out = append(out, e.rollback)
+	}
+	return out
+}
+
+// rollbackReason — причина отказа команды отката без её «ничего не
+// записано»: к откату это верно, к операции в целом — ложь (наши байты уже
+// на сервере).
+func rollbackReason(werr error) string {
+	var ce *casWriteError
+	if errors.As(werr, &ce) {
+		switch ce.outcome {
+		case casBusy:
+			return "замок записи на сервере занят другим процессом"
+		case casLockOpen:
+			return "не открылся замок записи " + CASLockDir + ": " + stderrTail(ce.cause)
+		case casToolMissing:
+			return "на сервере нет нужной утилиты: " + stderrTail(ce.cause)
+		}
+		if ce.cause != nil {
+			return stderrTail(ce.cause)
+		}
+	}
+	return werr.Error()
 }
 
 // ---------- CAS (A3б: сверка внутри команды записи, core/caswrite.go) ----------

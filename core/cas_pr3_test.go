@@ -90,6 +90,21 @@ func TestPR3PartialNamesReason(t *testing.T) {
 	}
 }
 
+// TestPR3WgMoveReasonNamed — раунд 4 (AU-LOGIC Н-3): отказ mv на wg0.conf
+// (исход «неизвестно», код 1) называет причину в подробностях — поведенчески,
+// через настоящий скрипт в sh, а не только дословной копией в T7.
+func TestPR3WgMoveReasonNamed(t *testing.T) {
+	srv := fakesrv.New()
+	srv.FailMvTo = "wg0.conf"
+	_, err := pr3Session(srv).AddUser(pr3Container(), "Mallory")
+	if !errors.Is(err, core.ErrWriteUnknown) || errors.Is(err, core.ErrWritePartial) {
+		t.Fatalf("ожидалось «неизвестно» (не «частично»), получено %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "not moved: wg0.conf:") || !strings.Contains(msg, "Permission denied") {
+		t.Errorf("причина отказа mv wg0.conf не названа: %s", msg)
+	}
+}
+
 // TestPR3BusyDoesNotBlameOurCopy — Low аудита PR-1: замок /run/lock/ может
 // держать и посторонняя программа; текст не утверждает, что это наша копия.
 func TestPR3BusyDoesNotBlameOurCopy(t *testing.T) {
