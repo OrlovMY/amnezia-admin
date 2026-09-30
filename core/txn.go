@@ -51,7 +51,7 @@ func (p *Plan) Note() string { return p.note }
 
 // NoteDisableRecordOnly — пояснение к отключению клиента с неизвестным
 // disabled, у которого peer'а в wg0.conf уже нет (Н-4).
-const NoteDisableRecordOnly = "Peer уже убран из wg0.conf — доступ отрезан; исправлена только запись в clientsTable (disabled = true)."
+const NoteDisableRecordOnly = "Доступ уже отрезан: клиента нет в wg0.conf. Исправлена только запись в clientsTable (disabled = true)."
 
 // Diff возвращает построчный diff «-/+» по обоим файлам (без unified-формата
 // и контекстных строк — только изменившееся; см. В2 п.7 задания). Пустая
@@ -1365,7 +1365,12 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 		ud[k] = v
 	}
 	ud["disabled"] = true
-	ud["disabledAt"] = time.Now().Format(time.RFC3339)
+	// Раунд 6 (AU-LOGIC Н-5): в ветке «только запись» прежний disabledAt не
+	// затирается — доступ отрезан раньше, и время того отключения — знание,
+	// а «сейчас» было бы выдумкой.
+	if _, had := ud["disabledAt"]; !(recordOnly && had) {
+		ud["disabledAt"] = time.Now().Format(time.RFC3339)
+	}
 	if !recordOnly {
 		ud["psk"] = peer["PresharedKey"]
 		ud["allowedIP"] = peer["AllowedIPs"]

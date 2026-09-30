@@ -253,7 +253,7 @@ func TestDebtsToggleUnknownNoPeerSaysRecordOnly(t *testing.T) {
 	}
 	srv.SetFile(wg, []byte(strings.Join(kept, "\n\n")))
 	wgBefore, _ := srv.File(wg)
-	const note = "Peer уже убран из wg0.conf — доступ отрезан; исправлена только запись в clientsTable (disabled = true)."
+	const note = "Доступ уже отрезан: клиента нет в wg0.conf. Исправлена только запись в clientsTable (disabled = true)."
 
 	var o, e bytes.Buffer
 	if code := run([]string{"toggle", "-dry-run", "-key", key, "-name", name}, strings.NewReader(""), &o, &e, kh); code != 0 ||

@@ -110,6 +110,37 @@ func TestDebtsDisableUnknownWithoutPeer(t *testing.T) {
 	}
 }
 
+// TestDebtsDisableRecordOnlyKeepsDisabledAt — раунд 6 (AU-LOGIC Н-5):
+// отключение без peer'а (правится только запись) не затирает прежний
+// disabledAt — доступ отрезан раньше. Различение: с peer'ом disabledAt
+// ставится заново (обычное отключение). На f176bd8 прежний disabledAt
+// заменялся текущим временем.
+func TestDebtsDisableRecordOnlyKeepsDisabledAt(t *testing.T) {
+	const old = "2026-01-01T00:00:00Z"
+	for _, peer := range []bool{false, true} {
+		srv, id := withAliceDisabled(t, "true")
+		raw, _ := srv.File(debtsTbl)
+		var list []map[string]any
+		json.Unmarshal(raw, &list)
+		list[0]["userData"].(map[string]any)["disabledAt"] = old
+		out, _ := json.Marshal(list)
+		srv.SetFile(debtsTbl, out)
+		if !peer {
+			dropPeer(t, srv, id)
+		}
+		if err := a1bSession(srv).SetEnabled(awgContainer(), id, false); err != nil {
+			t.Fatalf("peer=%v: отключение: %v", peer, err)
+		}
+		got := userDataOf(t, srv, id)["disabledAt"]
+		if !peer && got != old {
+			t.Errorf("без peer'а прежний disabledAt затёрт: %v, ожидался %s", got, old)
+		}
+		if peer && got == old {
+			t.Errorf("с peer'ом disabledAt не обновлён (обычное отключение ставит время заново)")
+		}
+	}
+}
+
 // TestDebtsDisableRecordOnlyNote — Н-4: предпросмотр отключения без peer'а
 // говорит прямо, что правится только запись; с peer'ом — не говорит.
 // Новый API (Plan.Note) — на aab4da6 не компилируется; падение там
