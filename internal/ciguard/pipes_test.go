@@ -40,28 +40,18 @@
 //     зависимостей go, вывод awk).
 //   - Функция проверяется по первой команде тела; `f() { cat >/dev/null; … }`
 //     законно проходит, и это верно: cat дочитал ввод.
-//   - Код, переданный оболочке (строкой -c, heredoc, here-string, через
-//     source/. или по имени из переменной), лексер не разбирает. Поэтому
-//     это НЕ граница, а закрытый список (AU-LOGIC F1, раунд 3): запуск
-//     bash/sh/dash/zsh/ksh, source, `.` — только точной записью из
-//     allowedShellCalls и без перенаправления входа; команда с подстановкой
-//     в имени — только из allowedDynCmds; eval — красный всегда; оболочка
-//     аргументом (find -exec sh, xargs bash) и после обёрток env/exec/… —
-//     красная. Определение функции с именем читателя, оболочки или
-//     grep/head/sed/awk (в любой форме, включая `function` и тело `( )`) и
-//     alias — красные (F2).
-//   - Обёртки перечислены в shellWrappers; команда, запускающая свой
-//     аргумент и не названная там (например, `ssh host cmd`), не
-//     опознаётся. В файлах таких нет.
+//   - Код, переданный оболочке или интерпретатору (строкой -c, heredoc,
+//     here-string, source/., trap, python3 -c, awk system, имя из
+//     переменной), лексер не разбирает. Это НЕ граница: позицию команды
+//     закрывает TestCommandProgramsClosedList (programs_test.go, раунд 4) —
+//     только программы из allowedPrograms, bash — из allowedShellCalls,
+//     имя-подстановка — только в точном месте allowedDynPlaces.
 //   - Тела run: в других ключах (shell:, defaults) не бывают — ключи
 //     закрыты TestWorkflowKeysClosedList.
 package ciguard
 
 import (
 	"fmt"
-	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -271,6 +261,15 @@ func (p *shParse) list(term byte) {
 				started = false
 				continue
 			}
+			if started && len(cur.words) > 0 && assignRe.MatchString(cur.words[len(cur.words)-1].raw) &&
+				strings.HasSuffix(cur.words[len(cur.words)-1].raw, "=") {
+				// name=( … ) — массив: элементы — слова, а не команды
+				// (раунд 4: иначе "$1" элемента попадал в позицию команды).
+				p.adv()
+				p.arrayWords()
+				started = true
+				continue
+			}
 			if !started {
 				keyword("(")
 			}
@@ -387,6 +386,27 @@ func isDigits(s string) bool {
 
 func isWordChar(c byte) bool {
 	return c != 0 && strings.IndexByte(" \t\n;&|()<>", c) < 0
+}
+
+// arrayWords — элементы массива до «)»; подстановки внутри разбираются
+// как обычно (конвейер в "$(…)" элемента виден).
+func (p *shParse) arrayWords() {
+	for p.i < len(p.s) && p.errs == nil {
+		switch c := p.s[p.i]; {
+		case c == ' ' || c == '\t' || c == '\n':
+			p.adv()
+		case c == '#':
+			p.skipComment()
+		case c == ')':
+			p.adv()
+			return
+		default:
+			if w := p.word(false); w.raw == "" {
+				p.errorf("непонятный символ «%c» в массиве", c)
+			}
+		}
+	}
+	p.errorf("незакрытый массив «(»")
 }
 
 func (p *shParse) skipComment() {
@@ -913,157 +933,8 @@ func readerProblem(c shCmd, funcs map[string]shCmd, depth int) string {
 	return ""
 }
 
-// shDef — определение функции в форме имя() (тело { } или ( )).
-type shDef struct {
-	name string
-	line int
-}
-
-var shells = map[string]bool{"bash": true, "sh": true, "dash": true, "zsh": true, "ksh": true}
-
-// allowedShellCalls — ЗАКРЫТЫЙ список вызовов оболочки (раунд 3, AU-LOGIC
-// F1). Текст, переданный оболочке строкой, heredoc, here-string, через
-// source/. или по имени из переменной, лексер не разбирает — значит,
-// конвейеры в нём не проверены. Допустимы только эти точные записи (слова
-// как в файле, вход не перенаправлен): каждая запускает наш scripts/*.sh,
-// который сторож разбирает сам. Shebang — комментарий, а не вызов.
-var allowedShellCalls = map[string]string{
-	`bash scripts/check-version-growth.sh "$GITHUB_REF_NAME"`: "release.yml, три job: рост версии тега",
-	`bash scripts/build-release.sh ${{ matrix.os }}`:          "ci.yml и release.yml: сборка",
-	`bash scripts/dev-tools.sh`:                               "ci.yml: пиновый shellcheck",
-}
-
-// allowedDynCmds — ЗАКРЫТЫЙ список команд, имя которых — подстановка
-// (`"$SHELLCHECK_BIN" …`). Иначе `"$BASH" -c` и `$SHELL -c` проходили бы: у
-// них нет буквального имени. Часть строк — элементы массивов и аргументы,
-// которые лексер видит в позиции команды (`names+=("$1")`); они безвредны,
-// но вносятся явно, чтобы новое было видно.
-var allowedDynCmds = map[string]string{
-	`"$SHELLCHECK_BIN"`:          "ci.yml: пиновый shellcheck по пути из dev-tools.sh",
-	`"./$bin"`:                   "release.yml: запуск собранного бинаря (version)",
-	`"$@"`:                       "check-history-keys.sh: исполнитель переданной команды; её слова проверяются здесь же у вызывающего",
-	`"$1"`:                       "check-history-keys.sh: элемент массива names+=(\"$1\")",
-	`"$2"`:                       "check-history-keys.sh: элемент массива wants+=(\"$2\")",
-	`$pat`:                       "release.yml: элемент массива found=($pat) — глоб субъектов",
-	`"${found[@]}"`:              "элемент массива",
-	`"$(scan | count_suspects)"`: "check-history-keys.sh: элемент массива gots+=(…)",
-}
-
-// shellWrappers — команды, исполняющие следующее слово как команду. После
-// них позиция команды сдвигается; сами по себе они допустимы.
-var shellWrappers = map[string]bool{
-	"env": true, "command": true, "exec": true, "nice": true, "nohup": true,
-	"builtin": true, "time": true, "sudo": true, "xargs": true, "timeout": true,
-}
-
-var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
-
-// protectedNames — имена, которые нельзя переопределять функцией или alias
-// (AU-LOGIC F2): читатели закрытого списка, оболочки и eval/source.
-var protectedNames = func() map[string]bool {
-	m := map[string]bool{"grep": true, "head": true, "sed": true, "awk": true,
-		"eval": true, "source": true, "alias": true}
-	for k := range pipeReaders {
-		m[k] = true
-	}
-	for k := range shells {
-		m[k] = true
-	}
-	return m
-}()
-
-// shellCallProblem — пусто, если команда не исполняет код в обход лексера.
-func shellCallProblem(c shCmd) string {
-	ws := c.words
-	k := 0
-	for k < len(ws) && assignRe.MatchString(ws[k].raw) {
-		k++
-	}
-	if k == len(ws) {
-		return ""
-	}
-	// eval — в любом месте команды
-	for _, w := range ws {
-		if !w.quoted && w.lit == "eval" {
-			return "«eval»"
-		}
-	}
-	first := ws[k]
-	switch {
-	case !first.quoted && !first.dyn && first.lit == "function":
-		if k+1 < len(ws) && protectedNames[strings.TrimSuffix(ws[k+1].lit, "()")] {
-			return "«function " + ws[k+1].raw + "» переопределяет имя из закрытого списка"
-		}
-	case !first.quoted && !first.dyn && first.lit == "alias":
-		return "«alias» — подмена имени команды, которую лексер не видит"
-	}
-	wrapped := false
-	for k < len(ws) && !ws[k].quoted && !ws[k].dyn && shellWrappers[ws[k].lit] {
-		wrapped = true
-		k++
-		for k < len(ws) && !ws[k].quoted && (strings.HasPrefix(ws[k].lit, "-") || assignRe.MatchString(ws[k].raw) || isDigits(ws[k].lit)) {
-			k++
-		}
-	}
-	if k == len(ws) {
-		return ""
-	}
-	first = ws[k]
-	var raws []string
-	for _, w := range ws[k:] {
-		raws = append(raws, w.raw)
-	}
-	call := strings.Join(raws, " ")
-	if first.dyn {
-		if _, ok := allowedDynCmds[first.raw]; !ok || wrapped {
-			return "команда с подстановкой в имени «" + call + "» вне закрытого списка allowedDynCmds"
-		}
-	}
-	base := first.lit[strings.LastIndexByte(first.lit, '/')+1:]
-	isShell := !first.dyn && (shells[base] || first.lit == "source" || first.lit == ".")
-	if isShell {
-		if _, ok := allowedShellCalls[call]; !ok || wrapped {
-			return "вызов оболочки «" + call + "» вне закрытого списка"
-		}
-		if c.inRedir != "" {
-			return "вход оболочки перенаправлен «" + c.inRedir + "» — код через heredoc/here-string"
-		}
-	}
-	// оболочка аргументом (find -exec sh, xargs … bash) — тоже вызов
-	for _, w := range ws[k+1:] {
-		b := w.lit[strings.LastIndexByte(w.lit, '/')+1:]
-		if !w.quoted && !w.dyn && shells[b] && !isShell {
-			return "оболочка «" + w.raw + "» аргументом в «" + call + "» вне закрытого списка"
-		}
-	}
-	return ""
-}
-
 func TestNoEarlyExitPipeReader(t *testing.T) {
-	type src struct{ where, body string }
-	var srcs []src
-	for _, path := range []string{releaseYML, ciYML} {
-		wf := loadWorkflow(t, path)
-		var jobs []string
-		for jn := range wf.Jobs {
-			jobs = append(jobs, jn)
-		}
-		sort.Strings(jobs)
-		for _, jn := range jobs {
-			for i, s := range wf.Jobs[jn].Steps {
-				srcs = append(srcs, src{fmtStep(path, jn, i, s.Name), s.Run})
-			}
-		}
-	}
-	scripts, err := filepath.Glob(filepath.Join("..", "..", "scripts", "*.sh"))
-	if err != nil || len(scripts) == 0 {
-		fatal(t, "не найдено ни одного scripts/*.sh (err=%v) — тест перестал что-либо проверять", err)
-	}
-	sort.Strings(scripts)
-	for _, p := range scripts {
-		p = filepath.ToSlash(p)
-		srcs = append(srcs, src{p, string(readSource(t, p))})
-	}
+	srcs := shellSources(t)
 	readers := 0
 	for _, s := range srcs {
 		p := parseShell(s.body)
@@ -1071,18 +942,6 @@ func TestNoEarlyExitPipeReader(t *testing.T) {
 			fail(t, "%s: текст не разобран (%s) — неразобранное не доказано; конвейеры в нём не проверены", s.where, e)
 		}
 		lines := strings.Split(strings.ReplaceAll(s.body, "\r\n", "\n"), "\n")
-		for _, c := range p.cmds {
-			if pr := shellCallProblem(c); pr != "" {
-				fail(t, "%s: строка %d: %s — код, переданный оболочке, лексер не разбирает, конвейеры в нём не проверены. "+
-					"Закрытый список вызовов — allowedShellCalls", s.where, c.line, pr)
-			}
-		}
-		for _, d := range p.defs {
-			if protectedNames[d.name] {
-				fail(t, "%s: строка %d: определение функции «%s» переопределяет имя из закрытого списка — "+
-					"читатель под этим именем уже не тот, кого проверяет сторож", s.where, d.line, d.name)
-			}
-		}
 		for _, r := range p.readers {
 			readers++
 			l := ""
