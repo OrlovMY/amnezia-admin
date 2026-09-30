@@ -152,6 +152,57 @@ func TestDebtsActivityCellFits(t *testing.T) {
 	}
 }
 
+// TestDebtsTableHiddenWidth — раунд 4 (AU-UX Medium): колонки ЦЕЛИКОМ, а не
+// атомом — сумма ширин против видимой ширины таблицы, штатно и с клиентом,
+// у которого неизвестна включённость, на минимальном и стартовом окне.
+// Держит решение раунда 4: расширение «Активности» — единственная добавка
+// за краем (ровно на ширину расширения), колонка ключа НЕ урезается (иначе
+// вернулась бы обрезанная подсветка ключа, решение владельца 22.09). Числа
+// печатаются в лог для отчёта.
+func TestDebtsTableHiddenWidth(t *testing.T) {
+	type res struct{ sum, visible, hidden, key float32 }
+	measure := func(unknown bool, size fyne.Size) res {
+		u := focusTestUI(t)
+		osmotrMain(u)
+		if unknown {
+			u.clients[0].UserData["disabled"] = "yes"
+		}
+		u.applyKeyColumnWidth()
+		u.win.Resize(size)
+		var sum float32
+		ws := tableColumnWidths(u.clients)
+		for _, w := range ws {
+			sum += w
+		}
+		vis := u.table.Size().Width
+		return res{sum, vis, sum - vis, ws[keyColumn]}
+	}
+	widen := func() float32 {
+		u := focusTestUI(t)
+		osmotrMain(u)
+		base := tableColumnWidths(u.clients)[activityColumn]
+		u.clients[0].UserData["disabled"] = "yes"
+		return tableColumnWidths(u.clients)[activityColumn] - base
+	}()
+	if widen <= 0 {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: «Активность» не расширяется")
+	}
+	for _, sz := range []struct {
+		name string
+		size fyne.Size
+	}{{"минимальное", fyne.NewSize(1194.2, 517)}, {"стартовое", startWindowSize()}} {
+		n, x := measure(false, sz.size), measure(true, sz.size)
+		t.Logf("%s окно %.1f×%.0f: штатно сумма %.1f, видно %.1f, за краем %.1f; с «вкл/откл: ?» сумма %.1f, видно %.1f, за краем %.1f (расширение %.1f)",
+			sz.name, sz.size.Width, sz.size.Height, n.sum, n.visible, n.hidden, x.sum, x.visible, x.hidden, widen)
+		if x.key != n.key {
+			t.Errorf("%s: колонка ключа урезана (%.1f → %.1f) — вернётся обрезанная подсветка ключа", sz.name, n.key, x.key)
+		}
+		if d := x.hidden - n.hidden - widen; d > 0.5 || d < -0.5 {
+			t.Errorf("%s: за краем прибавилось %.1f, а расширение «Активности» %.1f — есть иная добавка", sz.name, x.hidden-n.hidden, widen)
+		}
+	}
+}
+
 // TestDebtsStatusStatsFailShort — раунд 4 (AU-UX Low): при отказе
 // статистики строка состояния начинается с того, что делать, а сырая
 // ошибка (здесь ~770 знаков, как в зонде аудитора) сжата до 120 знаков с
