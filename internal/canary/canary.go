@@ -257,7 +257,7 @@ func (e *Env) dropSudoUser() error {
 }
 
 // sudoTiming — К2.10 (AU-LOGIC L-1 к H1): после H1 под замком идёт
-// `sudo -n docker exec …`, и запуск sudo тоже съедает запас 10 с внешнего
+// `env LC_ALL=C sudo -n docker exec …`, и запуск sudo тоже съедает запас 10 с внешнего
 // таймаута. Мерится от того же временного пользователя (su от root), та же
 // сумма «запуск до конца `true`» против запаса. su добавляет своё время —
 // замер с запасом в осторожную сторону. Не измерено — НЕ ПРОВЕРЕНО (шлюз).
@@ -277,7 +277,7 @@ func (e *Env) sudoTiming() Result {
 	}
 	var times []string
 	for _, which := range []string{"холодный", "тёплый"} {
-		out, err := e.Remote(`su -s /bin/sh ` + TempUser + ` -c 's=$(date +%s%N); sudo -n docker exec ` + e.Ctr.Name + ` timeout 50 sh -c true; rc=$?; e=$(date +%s%N); echo "rc=$rc ns=$((e-s))"'`)
+		out, err := e.Remote(`su -s /bin/sh ` + TempUser + ` -c 's=$(date +%s%N); env LC_ALL=C sudo -n docker exec ` + e.Ctr.Name + ` timeout 50 sh -c true; rc=$?; e=$(date +%s%N); echo "rc=$rc ns=$((e-s))"'`)
 		if err != nil {
 			r.Detail = which + ": не выполнилось: " + err.Error()
 			return r

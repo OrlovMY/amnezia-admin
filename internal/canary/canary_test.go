@@ -998,7 +998,7 @@ func TestSudoOrdersModelOnFakesrv(t *testing.T) {
 	}
 	sudoWrite := false
 	for _, c := range f.exec.Commands() {
-		if strings.Contains(c, "flock -w 15 -E 4 /run/lock/ sudo -n docker exec") {
+		if strings.Contains(c, "flock -w 15 -E 4 /run/lock/ "+fakesrv.CASSudoInfix) {
 			sudoWrite = true
 		}
 	}
