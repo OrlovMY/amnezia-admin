@@ -45,7 +45,7 @@ func TestDryRunFlagPrintsDiffAndWritesNothing(t *testing.T) {
 	}
 
 	for _, cmd := range srv.Commands() {
-		if strings.Contains(cmd, "cat > ") {
+		if strings.Contains(cmd, "flock") {
 			t.Errorf("PlanAddUser не должен писать: %q", cmd)
 		}
 		if strings.Contains(cmd, "syncconf") {
@@ -123,7 +123,7 @@ func TestRunDryRunAllActionsWriteNothing(t *testing.T) {
 			}
 
 			for _, sent := range srv.Commands() {
-				if strings.Contains(sent, "cat > ") {
+				if strings.Contains(sent, "flock") {
 					t.Errorf("%s: dry-run не должен писать: %q", cmd, sent)
 				}
 				if strings.Contains(sent, "syncconf") {

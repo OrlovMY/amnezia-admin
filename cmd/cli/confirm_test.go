@@ -236,7 +236,7 @@ func TestCardTextSharedBetweenMenuAndSubcommand(t *testing.T) {
 // из веток del/toggle/rekey — confirmSubcommand внутри решает needsConfirm,
 // ревью PR-5, Medium-4); тест ловит регресс, если порядок веток в switch
 // когда-нибудь поменяют местами. Плюс fakesrv.Commands(): сам runDryRun для
-// del ничего не пишет (без "cat > "), то есть даже если бы очередь дошла до
+// del ничего не пишет (без команды записи под flock), то есть даже если бы очередь дошла до
 // вопроса/-yes, писать было бы нечего.
 func TestDryRunBeatsYes(t *testing.T) {
 	data, err := os.ReadFile("main.go")
@@ -287,7 +287,7 @@ func TestDryRunBeatsYes(t *testing.T) {
 		t.Fatalf("runDryRun(del): %v", err)
 	}
 	for _, sent := range srv.Commands() {
-		if strings.Contains(sent, "cat > ") {
+		if strings.Contains(sent, "flock") {
 			t.Errorf("dry-run(del) не должен писать: %q", sent)
 		}
 	}

@@ -1,115 +1,231 @@
 package core
 
-// Тест CAS (Г4, ядро: fail-safe) — в отдельном файле, чтобы коммит CAS был
-// изолирован и от него самого, и от общего файла тестов транзакции.
+// CAS (Г4) после A3б: сверка внутри одной команды записи под замком
+// (core/caswrite.go). Здесь — отказ «изменён другим» (прежние
+// TestCASMismatchRefuses и NoSha256, перенесённые на новую команду) и три
+// состояния, отличные и от «записано», и от «изменён другим»: T3 «занято»,
+// T4 «неизвестно, записано ли», T5 «нет утилиты».
 
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"amnezia-admin/internal/fakesrv"
 )
 
-// TestCASMismatchRefuses — Г4: расхождение sha256sum или его недоступность
-// на сервере — отказ ДО любой записи (fail-safe).
-func TestCASMismatchRefuses(t *testing.T) {
-	t.Run("clientsTable изменилась между планом и применением", func(t *testing.T) {
-		srv := fakesrv.New()
-		sess := NewSessionWithRunner(srv, testCreds())
-		c := awgContainer()
+// isCASWriteCmd — команда записи (apply или rollback).
+func isCASWriteCmd(cmd string) bool {
+	return strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/amnezia-admin.")
+}
 
+// snapshot — оба файла на сервере.
+func snapshot(t *testing.T, srv *fakesrv.Server, c *Container) (wg, tbl []byte) {
+	t.Helper()
+	wg, _ = srv.File(c.Dir + "/wg0.conf")
+	tbl, _ = srv.File(c.Dir + "/clientsTable")
+	return wg, tbl
+}
+
+func assertUnchanged(t *testing.T, srv *fakesrv.Server, c *Container, wg, tbl []byte) {
+	t.Helper()
+	wg2, tbl2 := snapshot(t, srv, c)
+	if !bytes.Equal(wg, wg2) || !bytes.Equal(tbl, tbl2) {
+		t.Errorf("файлы на сервере изменились, хотя запись не должна была состояться")
+	}
+}
+
+// assertOnly — err распознаётся ровно как want и ни как один другой исход.
+func assertOnly(t *testing.T, err error, want error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("ждали отказ (%v), получили успех", want)
+	}
+	all := []error{ErrCASMismatch, ErrServerBusy, ErrServerToolMissing, ErrWriteUnknown, ErrRollbackForeign}
+	for _, e := range all {
+		if got := errors.Is(err, e); got != (e == want) {
+			t.Errorf("errors.Is(err, %q) = %v, ждали %v; err: %v", e, got, e == want, err)
+		}
+	}
+}
+
+// TestCASMismatchRefuses — файл изменился между планом и применением:
+// «изменён другим», ничего не записано, текст называет файл.
+func TestCASMismatchRefuses(t *testing.T) {
+	cases := []struct {
+		name, file string
+		mutate     func(srv *fakesrv.Server, c *Container)
+	}{
+		{"clientsTable изменилась", "clientsTable", func(srv *fakesrv.Server, c *Container) {
+			tbl, _ := srv.File(c.Dir + "/clientsTable")
+			srv.SetFile(c.Dir+"/clientsTable", append(append([]byte{}, tbl...), ' '))
+		}},
+		{"wg0.conf изменился", "wg0.conf", func(srv *fakesrv.Server, c *Container) {
+			wg, _ := srv.File(c.Dir + "/wg0.conf")
+			srv.SetFile(c.Dir+"/wg0.conf", append(append([]byte{}, wg...), '\n'))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			sess := NewSessionWithRunner(srv, testCreds())
+			c := awgContainer()
+			plan, err := sess.PlanAddUser(c, "Carol")
+			if err != nil {
+				t.Fatalf("PlanAddUser: %v", err)
+			}
+			tc.mutate(srv, c)
+			wg, tbl := snapshot(t, srv, c)
+
+			_, err = sess.Apply(plan)
+			assertOnly(t, err, ErrCASMismatch)
+			if !strings.Contains(err.Error(), c.Dir+"/"+tc.file+" изменился с момента чтения") {
+				t.Errorf("текст не называет %s: %v", tc.file, err)
+			}
+			if strings.Contains(err.Error(), ErrCASMismatch.Error()) {
+				t.Errorf("текст содержит сырой текст сентинела: %v", err)
+			}
+			assertUnchanged(t, srv, c, wg, tbl)
+		})
+	}
+
+	t.Run("clientsTable появилась, хотя при планировании отсутствовала", func(t *testing.T) {
+		srv := fakesrv.New()
+		c := awgContainer()
+		srv.DeleteFile(c.Dir + "/clientsTable")
+		sess := NewSessionWithRunner(srv, testCreds())
 		plan, err := sess.PlanAddUser(c, "Carol")
 		if err != nil {
 			t.Fatalf("PlanAddUser: %v", err)
 		}
+		srv.SetFile(c.Dir+"/clientsTable", []byte("[]"))
+		wg, tbl := snapshot(t, srv, c)
 
-		tbl, ok := srv.File(c.Dir + "/clientsTable")
-		if !ok {
-			t.Fatal("clientsTable отсутствует")
-		}
-		srv.SetFile(c.Dir+"/clientsTable", append(append([]byte{}, tbl...), ' '))
-
-		before := len(srv.Commands())
-		if _, err := sess.Apply(plan); err == nil {
-			t.Fatal("Apply: ожидался отказ по CAS")
-		} else if !strings.Contains(err.Error(), "изменился с момента чтения") {
-			t.Errorf("текст ошибки не про CAS: %v", err)
-		}
-
-		sawSha256 := false
-		for _, cmd := range srv.Commands()[before:] {
-			if strings.Contains(cmd, "sha256sum") {
-				sawSha256 = true
-				continue
-			}
-			if strings.Contains(cmd, "cat > ") {
-				t.Fatalf("после sha256sum не должно быть записи, но: %q", cmd)
-			}
-			if strings.Contains(cmd, "mkdir -p") {
-				t.Fatalf("CAS-отказ не должен был вызвать backup (CAS — шаг 1, backup — шаг 2, позже), но: %q", cmd)
-			}
-		}
-		if !sawSha256 {
-			t.Fatal("не увидели ни одной команды sha256sum")
-		}
+		_, err = sess.Apply(plan)
+		assertOnly(t, err, ErrCASMismatch)
+		assertUnchanged(t, srv, c, wg, tbl)
 	})
+}
 
-	t.Run("NoSha256 — на сервере нет sha256sum", func(t *testing.T) {
-		srv := fakesrv.New()
-		srv.NoSha256 = true
-		sess := NewSessionWithRunner(srv, testCreds())
-		c := awgContainer()
+// TestServerBusyIsThirdState — T3. Замок занят (код 4 flock) — «занято»: не
+// «изменён другим», не успех, не «неизвестно»; ничего не записано.
+func TestServerBusyIsThirdState(t *testing.T) {
+	srv := fakesrv.New()
+	srv.LockBusy = true
+	sess := NewSessionWithRunner(srv, testCreds())
+	c := awgContainer()
+	wg, tbl := snapshot(t, srv, c)
 
-		beforeWG, _ := srv.File(c.Dir + "/wg0.conf")
-		beforeTbl, _ := srv.File(c.Dir + "/clientsTable")
+	_, err := sess.AddUser(c, "Carol")
+	assertOnly(t, err, ErrServerBusy)
+	if !strings.Contains(err.Error(), "занят") {
+		t.Errorf("текст не говорит «занят»: %v", err)
+	}
+	assertUnchanged(t, srv, c, wg, tbl)
+}
 
-		if _, err := sess.AddUser(c, "Carol"); err == nil {
-			t.Fatal("AddUser: ожидался отказ (sha256sum недоступен)")
-		} else if !strings.Contains(err.Error(), "не удалось проверить контрольную сумму") {
-			t.Errorf("текст ошибки не про недоступность CAS: %v", err)
-		}
+// TestServerBusyOverRealSSH — T3, доезд: код 4 проходит настоящий SSH-канал
+// (fakesrv.SSHServer на эфемерном порту) и распознаётся sshRunner'ом так же.
+func TestServerBusyOverRealSSH(t *testing.T) {
+	sshSrv, exec := newFakeSSHServer(t, "127.0.0.1:0")
+	exec.LockBusy = true
+	sess, err := ConnectWithHostKey(credsForFakeSSH(t, sshSrv), HostKeyPolicy{
+		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
+		Prompt:         alwaysTrustPrompt,
+	})
+	if err != nil {
+		t.Fatalf("ConnectWithHostKey: %v", err)
+	}
+	t.Cleanup(sess.Close)
+	c := awgContainer()
+	wg, tbl := snapshot(t, exec, c)
 
-		afterWG, _ := srv.File(c.Dir + "/wg0.conf")
-		afterTbl, _ := srv.File(c.Dir + "/clientsTable")
-		if !bytes.Equal(afterWG, beforeWG) || !bytes.Equal(afterTbl, beforeTbl) {
-			t.Error("NoSha256 не должен был ничего записать")
-		}
-		for _, cmd := range srv.Commands() {
-			if strings.Contains(cmd, "cat > ") {
-				t.Fatalf("NoSha256: обнаружена запись: %q", cmd)
+	_, err = sess.AddUser(c, "Carol")
+	assertOnly(t, err, ErrServerBusy)
+	assertUnchanged(t, exec, c, wg, tbl)
+}
+
+// TestUnknownExitIsUnknown — T4. Код вне закрытого списка или отсутствие кода
+// — «неизвестно, записано ли»: не успех, не «изменён», не «занято». Два
+// случая — запись не состоялась и состоялась: ответ обязан быть одним и тем
+// же, потому что снаружи они неразличимы.
+func TestUnknownExitIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fault   fakesrv.WriteFault
+		written bool
+	}{
+		{"код 1, не записано", fakesrv.WriteFault{Code: 1}, false},
+		{"код 124 (timeout), записано", fakesrv.WriteFault{Code: 124, Written: true}, true},
+		{"код 42, записано", fakesrv.WriteFault{Code: 42, Written: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			srv.WriteFault = map[int]fakesrv.WriteFault{1: tc.fault}
+			sess := NewSessionWithRunner(srv, testCreds())
+			c := awgContainer()
+			wg, tbl := snapshot(t, srv, c)
+
+			_, err := sess.AddUser(c, "Carol")
+			assertOnly(t, err, ErrWriteUnknown)
+			if !strings.Contains(err.Error(), "неизвестно, записаны ли") {
+				t.Errorf("текст не говорит «неизвестно»: %v", err)
 			}
-			if strings.Contains(cmd, "mkdir -p") {
-				t.Fatalf("NoSha256: backup не должен был вызываться (CAS — до backup, шаг 1 раньше шага 2), но: %q", cmd)
+			rollbacks := 0
+			for _, cmd := range srv.Commands() {
+				if isCASWriteCmd(cmd) && strings.Contains(cmd, CASLabelRollback) {
+					rollbacks++
+				}
 			}
+			if rollbacks != 0 {
+				t.Errorf("при неизвестном исходе откат вслепую недопустим, откатов: %d", rollbacks)
+			}
+			wg2, tbl2 := snapshot(t, srv, c)
+			if changed := !bytes.Equal(wg, wg2) || !bytes.Equal(tbl, tbl2); changed != tc.written {
+				t.Errorf("файлы изменились = %v, ждали %v", changed, tc.written)
+			}
+		})
+	}
+
+	t.Run("кода выхода нет вовсе (обрыв связи)", func(t *testing.T) {
+		base := fakesrv.New()
+		r := stubRunner{base: base, match: "flock -w 15", err: errors.New("ssh: connection lost")}
+		sess := NewSessionWithRunner(r, testCreds())
+		_, err := sess.AddUser(awgContainer(), "Carol")
+		assertOnly(t, err, ErrWriteUnknown)
+		if !strings.Contains(err.Error(), "код выхода не получен") {
+			t.Errorf("текст не говорит, что кода нет: %v", err)
 		}
 	})
 }
 
-// assertCASErrClean — review-reply PR-3 круг 2 (Medium): текст ошибки CAS не
-// должен содержать сырой текст ErrCASMismatch.Error() (доказывает, что
-// casError.Error() не печатает сентинел — раньше именно это дублировало и
-// портило фразу) и, для веток "не удалось проверить" (сервер не менялся, а
-// проверка не удалась), не должен содержать ложное "изменился с момента
-// чтения" — эта фраза допустима только в ветках реального расхождения суммы.
-func assertCASErrClean(t *testing.T, err error, allowChangedPhrase bool) {
-	t.Helper()
-	if err == nil {
-		t.Fatal("assertCASErrClean: err == nil")
-	}
-	msg := err.Error()
-	if strings.Contains(msg, ErrCASMismatch.Error()) {
-		t.Errorf("текст ошибки содержит сырой текст сентинела ErrCASMismatch: %q", msg)
-	}
-	if !allowChangedPhrase && strings.Contains(msg, "изменился с момента чтения") {
-		t.Errorf("текст ошибки ложно утверждает 'изменился с момента чтения', хотя сервер не менялся (просто не удалось проверить): %q", msg)
+// TestMissingToolRefuses — T5. Нет утилиты — «нет утилиты», ничего не
+// записано, утилита названа. Прежний NoSha256 — случай "sha256sum".
+func TestMissingToolRefuses(t *testing.T) {
+	for _, tool := range []string{"sha256sum", "base64", "flock", "timeout"} {
+		t.Run(tool, func(t *testing.T) {
+			srv := fakesrv.New()
+			srv.MissingTool = tool
+			sess := NewSessionWithRunner(srv, testCreds())
+			c := awgContainer()
+			wg, tbl := snapshot(t, srv, c)
+
+			_, err := sess.AddUser(c, "Carol")
+			assertOnly(t, err, ErrServerToolMissing)
+			assertUnchanged(t, srv, c, wg, tbl)
+			if tool != "flock" && tool != "timeout" && !strings.Contains(err.Error(), tool) {
+				t.Errorf("текст не называет %s: %v", tool, err)
+			}
+			if strings.Contains(err.Error(), "изменился") {
+				t.Errorf("ложь: сервер не менялся, а текст говорит «изменился»: %v", err)
+			}
+		})
 	}
 }
 
-// stubRunner подменяет ОДНУ команду (по подстроке match), остальные отдаёт
-// base — нужен двум веткам CAS ниже (пустой ответ sha256sum, сбой test -f),
-// для которых заводить именной хук в fakesrv ради одной строки избыточно.
+// stubRunner подменяет ОДНУ команду (по подстроке match), остальные отдаёт base.
 type stubRunner struct {
 	base  Runner
 	match string
@@ -124,112 +240,27 @@ func (r stubRunner) Run(cmd string, stdin []byte) (string, error) {
 	return r.base.Run(cmd, stdin)
 }
 
-// TestCASMismatchIsErrCASMismatch — review PR-2, carryover 1 (текст правлен
-// по review-reply PR-3 круга 2, Medium): отказ CAS обязан распознаваться
-// через errors.Is(err, ErrCASMismatch), а не только по подстроке текста
-// (cmd/gui/main.go:isCASRefusal раньше делал именно так), и при этом сам
-// текст ErrCASMismatch не должен попадать в сообщение (assertCASErrClean).
-// Проверяем все пять веток отказа CAS (checkCAS: 2, casCheckFile: 3).
-func TestCASMismatchIsErrCASMismatch(t *testing.T) {
-	t.Run("casCheckFile: расхождение контрольной суммы (wg0.conf)", func(t *testing.T) {
-		srv := fakesrv.New()
-		sess := NewSessionWithRunner(srv, testCreds())
-		c := awgContainer()
-
-		plan, err := sess.PlanAddUser(c, "Carol")
-		if err != nil {
-			t.Fatalf("PlanAddUser: %v", err)
+// TestCASWriteCommandRejectsBadArgs — в текст команды не попадает ничего,
+// кроме имени, пути и сумм; скрипт не содержит одинарных кавычек (он сам в
+// них).
+func TestCASWriteCommandRejectsBadArgs(t *testing.T) {
+	good := strings.Repeat("a", 64)
+	if strings.Contains(CASWriteScript, "'") {
+		t.Fatal("в CASWriteScript есть одинарная кавычка — команда разорвётся")
+	}
+	if _, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", good, CASAbsent); err != nil {
+		t.Fatalf("корректные аргументы отвергнуты: %v", err)
+	}
+	bad := [][5]string{
+		{"x", "amnezia-awg", "/opt/amnezia/awg", good, good},
+		{CASLabelApply, "a;rm", "/opt/amnezia/awg", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/a b", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "zz", good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", good, "' ; x"},
+	}
+	for _, a := range bad {
+		if _, err := CASWriteCommand(a[0], a[1], a[2], a[3], a[4]); err == nil {
+			t.Errorf("CASWriteCommand%q: ждали отказ", a)
 		}
-		tbl, _ := srv.File(c.Dir + "/clientsTable")
-		srv.SetFile(c.Dir+"/clientsTable", append(append([]byte{}, tbl...), ' '))
-
-		_, err = sess.Apply(plan)
-		if !errors.Is(err, ErrCASMismatch) {
-			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
-		}
-		assertCASErrClean(t, err, true) // расхождение суммы — сервер реально изменился
-		t.Logf("проба ревьюера, текст ошибки (расхождение суммы): %v", err)
-	})
-
-	t.Run("casCheckFile: sha256sum недоступен (NoSha256) — сервер не менялся, проверить не удалось", func(t *testing.T) {
-		srv := fakesrv.New()
-		srv.NoSha256 = true
-		sess := NewSessionWithRunner(srv, testCreds())
-		c := awgContainer()
-
-		_, err := sess.AddUser(c, "Carol")
-		if !errors.Is(err, ErrCASMismatch) {
-			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
-		}
-		assertCASErrClean(t, err, false) // сервер НЕ менялся — "изменился" здесь ложь
-		t.Logf("проба ревьюера, текст ошибки (NoSha256): %v", err)
-	})
-
-	t.Run("casCheckFile: пустой ответ sha256sum", func(t *testing.T) {
-		base := fakesrv.New()
-		c := awgContainer()
-		r := stubRunner{base: base, match: "sha256sum"} // out="", err=nil — пустая строка без ошибки
-		sess := NewSessionWithRunner(r, testCreds())
-
-		plan, err := sess.PlanAddUser(c, "Carol")
-		if err != nil {
-			t.Fatalf("PlanAddUser: %v", err)
-		}
-		err = sess.checkCAS(c, plan) // белый ящик: проверяем шаг 1 напрямую, минуя Apply
-		if !errors.Is(err, ErrCASMismatch) {
-			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
-		}
-		assertCASErrClean(t, err, false) // сервер не менялся — просто пустой ответ
-		if !strings.Contains(err.Error(), "пустой ответ sha256sum") {
-			t.Errorf("текст ошибки не про пустой ответ: %v", err)
-		}
-		t.Logf("проба ревьюера, текст ошибки (пустой ответ sha256sum): %v", err)
-	})
-
-	t.Run("checkCAS: probeClientsTable вернул ошибку", func(t *testing.T) {
-		base := fakesrv.New()
-		c := awgContainer()
-		base.DeleteFile(c.Dir + "/clientsTable")
-		sess := NewSessionWithRunner(base, testCreds())
-
-		plan, err := sess.PlanAddUser(c, "Carol")
-		if err != nil {
-			t.Fatalf("PlanAddUser: %v", err)
-		}
-		// Подмена runner'а ПОСЛЕ планирования (белый ящик, sess.r — то же
-		// поле, что видит Apply): test -f при планировании уже отработал
-		// штатно (clientsTable отсутствовала — не ошибка), провалить нужно
-		// только повторный test -f внутри checkCAS (шаг 1 Apply).
-		boom := errors.New("сбой сети")
-		sess.r = stubRunner{base: base, match: "test -f", err: boom}
-		err = sess.checkCAS(c, plan)
-		if !errors.Is(err, ErrCASMismatch) {
-			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
-		}
-		assertCASErrClean(t, err, false) // не удалось ПРОВЕРИТЬ — не факт, что сервер менялся
-		if !errors.Is(err, boom) {
-			t.Errorf("errors.Is(err, boom) = false — причина (сбой сети) должна быть в цепочке: %v", err)
-		}
-		t.Logf("проба ревьюера, текст ошибки (probeClientsTable сбой): %v", err)
-	})
-
-	t.Run("checkCAS: clientsTable появилась, хотя при планировании отсутствовала", func(t *testing.T) {
-		srv := fakesrv.New()
-		c := awgContainer()
-		srv.DeleteFile(c.Dir + "/clientsTable")
-		sess := NewSessionWithRunner(srv, testCreds())
-
-		plan, err := sess.PlanAddUser(c, "Carol")
-		if err != nil {
-			t.Fatalf("PlanAddUser: %v", err)
-		}
-		srv.SetFile(c.Dir+"/clientsTable", []byte("[]"))
-
-		_, err = sess.Apply(plan)
-		if !errors.Is(err, ErrCASMismatch) {
-			t.Errorf("errors.Is(err, ErrCASMismatch) = false, err: %v", err)
-		}
-		assertCASErrClean(t, err, true) // файл реально появился — "изменился" здесь правда
-		t.Logf("проба ревьюера, текст ошибки (clientsTable появилась): %v", err)
-	})
+	}
 }

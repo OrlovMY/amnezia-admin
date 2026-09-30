@@ -158,17 +158,21 @@ func TestSyncconfFailureRestoresBackup(t *testing.T) {
 		t.Errorf("clientsTable не восстановлена байт в байт:\nбыло:  %s\nстало: %s", beforeTbl, afterTbl)
 	}
 
-	writeCount, syncCount := 0, 0
+	applyCount, rollbackCount, syncCount := 0, 0, 0
 	for _, cmd := range srv.Commands() {
-		if strings.Contains(cmd, "cat > ") {
-			writeCount++
+		if isCASWriteCmd(cmd) && strings.Contains(cmd, CASLabelApply) {
+			applyCount++
+		}
+		if isCASWriteCmd(cmd) && strings.Contains(cmd, CASLabelRollback) {
+			rollbackCount++
 		}
 		if strings.Contains(cmd, "syncconf") {
 			syncCount++
 		}
 	}
-	if writeCount != 4 {
-		t.Errorf("cat > встретилось %d раз(а), want 4 (2 записи + 2 отката)", writeCount)
+	// A3б: оба файла — одной командой; было 2 записи + 2 отката.
+	if applyCount != 1 || rollbackCount != 1 {
+		t.Errorf("записей %d, откатов %d; ждали ровно 1 и 1", applyCount, rollbackCount)
 	}
 	if syncCount != 2 {
 		t.Errorf("syncconf встретился %d раз(а), want 2 (попытка применить + повторный при откате)", syncCount)
@@ -227,7 +231,7 @@ func TestDryRunWritesNothing(t *testing.T) {
 	assertNoWrites := func(t *testing.T, srv *fakesrv.Server) {
 		t.Helper()
 		for _, cmd := range srv.Commands() {
-			if strings.Contains(cmd, "cat > ") {
+			if isCASWriteCmd(cmd) {
 				t.Errorf("dry-run не должен писать: %q", cmd)
 			}
 			if strings.Contains(cmd, "syncconf") {
@@ -429,9 +433,15 @@ func TestRenameDoesNotSync(t *testing.T) {
 		if strings.Contains(cmd, "syncconf") {
 			t.Errorf("RenameUser не должен вызывать syncconf: %q", cmd)
 		}
-		if strings.Contains(cmd, "cat > ") && strings.Contains(cmd, "wg0.conf") {
-			t.Errorf("RenameUser не должен писать wg0.conf: %q", cmd)
-		}
+	}
+	// A3б: оба файла идут одной командой; wg0.conf не переписывается, если
+	// первая строка stdin — "-".
+	stdins := srv.Stdins()
+	if len(stdins) != 1 {
+		t.Fatalf("команд записи: %d, ждали ровно 1", len(stdins))
+	}
+	if first := strings.SplitN(string(stdins[0]), "\n", 2)[0]; first != "-" {
+		t.Errorf("RenameUser передал wg0.conf на запись: первая строка stdin %q, ждали \"-\"", first)
 	}
 
 	assertOthersUntouched(t, snapshotFiles(c, beforeWG, beforeTbl), srv, subject)
@@ -589,85 +599,51 @@ func TestPlanSubjectIsName(t *testing.T) {
 	}
 }
 
-// TestRestoreTriesBothFilesIndependently — review changes-requested (круг 2,
-// Medium): прошлая версия этого теста (FailWrite[wg0.conf] безусловно) была
-// зелёной и на СТАРОМ restore() (он вообще не пытался писать clientsTable
-// после провала wg0.conf) — assert bytes.Equal(clientsTable, tblBefore)
-// проходил тривиально, потому что clientsTable к этому моменту ещё ни разу
-// не менялась (apply даже не успел до неё дойти). Чтобы тест реально что-то
-// доказывал, clientsTable должна быть ГРЯЗНОЙ (== tblAfter) к моменту
-// отката: первая запись wg0.conf (apply-time) обязана пройти, затем
-// clientsTable перезаписывается в tblAfter, и только ПОСЛЕ этого падает
-// syncconf (это и валит Apply) — а откат wg0.conf (вторая запись по этому
-// пути) проваливается через счётный хук FailWriteFrom. Тогда
-// bytes.Equal(clientsTable, tblBefore) нетривиален: он проходит только если
-// restore реально записал clientsTable обратно, невзирая на провал wg0.conf.
-func TestRestoreTriesBothFilesIndependently(t *testing.T) {
-	srv := fakesrv.New()
-	sess := NewSessionWithRunner(srv, testCreds())
-	c := awgContainer()
+// TestRestoreFailureReported — откат не записал (A3б): оба файла
+// возвращаются одной командой, поэтому прежняя проверка «пробуем каждый файл
+// независимо» заменена исходами самой команды отката. «Занято» — точно не
+// восстановлено; код вне списка — неизвестно, восстановлено ли, и текст
+// обязан сказать именно это, а не «не восстановлены».
+func TestRestoreFailureReported(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault fakesrv.WriteFault
+		want  string
+	}{
+		{"откат: замок занят", fakesrv.WriteFault{Code: 4}, "НЕ восстановлены"},
+		{"откат: код вне списка", fakesrv.WriteFault{Code: 1}, "неизвестно, вернулись ли"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			sess := NewSessionWithRunner(srv, testCreds())
+			c := awgContainer()
 
-	plan, err := sess.PlanAddUser(c, "Carol")
-	if err != nil {
-		t.Fatalf("PlanAddUser: %v", err)
-	}
-	tblBefore := append([]byte{}, plan.tblBefore...)
-
-	// Первая запись wg0.conf (apply) проходит; вторая (restore) — падает.
-	srv.FailWriteFrom = map[string]int{c.Dir + "/wg0.conf": 2}
-	// Apply валится ПОСЛЕ того, как clientsTable уже перезаписана в tblAfter
-	// (syncWg вызывается после writeIn обоих файлов в applySteps).
-	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
-
-	_, err = sess.Apply(plan)
-	if err == nil {
-		t.Fatal("Apply: ожидалась ошибка")
-	}
-	if !strings.Contains(err.Error(), "восстановить не удалось") {
-		t.Errorf("текст ошибки не про провал восстановления: %v", err)
-	}
-	if !strings.Contains(err.Error(), "wg0.conf") {
-		t.Errorf("текст ошибки должен называть wg0.conf: %v", err)
-	}
-	if !strings.Contains(err.Error(), "clientsTable") {
-		t.Errorf("текст ошибки должен называть clientsTable: %v", err)
-	}
-
-	afterTbl, ok := srv.File(c.Dir + "/clientsTable")
-	if !ok {
-		t.Fatal("clientsTable отсутствует")
-	}
-	// Нетривиально: clientsTable была грязной (tblAfter) прямо перед этим —
-	// проходит, только если restore реально её переписал обратно.
-	if !bytes.Equal(afterTbl, tblBefore) {
-		t.Errorf("clientsTable должна была вернуться к состоянию до, даже когда wg0.conf не восстановился:\nбыло:  %s\nстало: %s", tblBefore, afterTbl)
-	}
-
-	// Порядок в Commands(): запись clientsTable при откате обязана идти
-	// ПОСЛЕ второй (провалившейся) попытки записи wg0.conf.
-	cmds := srv.Commands()
-	wgWrites := 0
-	failedWgIdx := -1
-	for i, cmd := range cmds {
-		if strings.Contains(cmd, "cat > ") && strings.Contains(cmd, "wg0.conf") {
-			wgWrites++
-			if wgWrites == 2 {
-				failedWgIdx = i
+			plan, err := sess.PlanAddUser(c, "Carol")
+			if err != nil {
+				t.Fatalf("PlanAddUser: %v", err)
 			}
-		}
-	}
-	if failedWgIdx < 0 {
-		t.Fatal("не нашли вторую (restore-time) попытку записи wg0.conf в Commands()")
-	}
-	tblWriteAfter := false
-	for _, cmd := range cmds[failedWgIdx+1:] {
-		if strings.Contains(cmd, "cat > ") && strings.Contains(cmd, "clientsTable") {
-			tblWriteAfter = true
-			break
-		}
-	}
-	if !tblWriteAfter {
-		t.Error("запись clientsTable при откате не найдена ПОСЛЕ провалившейся (второй) записи wg0.conf")
+			// Первая команда записи (apply) проходит, вторая (rollback) — нет.
+			srv.WriteFault = map[int]fakesrv.WriteFault{2: tc.fault}
+			srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+
+			_, err = sess.Apply(plan)
+			if err == nil {
+				t.Fatal("Apply: ожидалась ошибка")
+			}
+			for _, sub := range []string{"восстановить не удалось", tc.want, "wg0.conf", "clientsTable", c.Dir + "/backup/"} {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("текст ошибки не содержит %q: %v", sub, err)
+				}
+			}
+			if strings.Contains(err.Error(), "восстановлено и проверено") {
+				t.Errorf("ложь: откат не записан, а текст говорит «восстановлено»: %v", err)
+			}
+			wg, _ := srv.File(c.Dir + "/wg0.conf")
+			tbl, _ := srv.File(c.Dir + "/clientsTable")
+			if !bytes.Equal(wg, plan.wgAfter) || !bytes.Equal(tbl, plan.tblAfter) {
+				t.Error("откат не должен был ничего записать — файлы обязаны остаться нашими записанными")
+			}
+		})
 	}
 }
 

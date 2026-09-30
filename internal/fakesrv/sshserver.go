@@ -19,6 +19,7 @@ package fakesrv
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -266,6 +267,10 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request, exec *Server) {
 		if runErr != nil {
 			fmt.Fprint(ch.Stderr(), runErr.Error())
 			code = 1
+			var ee *ExitError
+			if errors.As(runErr, &ee) {
+				code = uint32(ee.Status)
+			}
 		}
 		sendExitStatus(ch, code)
 		return // одна exec-сессия на канал — после неё канал закрывается (defer)

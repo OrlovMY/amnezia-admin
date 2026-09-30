@@ -1117,7 +1117,7 @@ func TestLoadClientsMissingVsError(t *testing.T) {
 			t.Fatal("AddUser: expected error")
 		}
 		for _, cmd := range srv.Commands() {
-			if strings.Contains(cmd, "cat > ") {
+			if isCASWriteCmd(cmd) {
 				t.Fatalf("AddUser не должен был выполнить ни одной записи, но выполнил: %q", cmd)
 			}
 		}
@@ -1190,8 +1190,6 @@ var cmdTemplates = []string{
 	"docker ps --format '{{.Names}}'",
 	// core.go:241
 	"docker exec " + dyn + " cat " + dyn,
-	// core.go:246
-	"docker exec -i " + dyn + " sh -c 'cat > " + dyn + ".tmp && mv " + dyn + ".tmp " + dyn + "'",
 	// core.go:258-264
 	"docker exec " + dyn + " sh -c 'mkdir -p " + dyn + "/backup && ts=$(date +%Y%m%d-%H%M%S) && " +
 		"cp " + dyn + "/wg0.conf " + dyn + "/backup/wg0.conf.$ts && " +
@@ -1204,8 +1202,35 @@ var cmdTemplates = []string{
 	"docker exec " + dyn + " bash -c 'wg syncconf wg0 <(wg-quick strip " + dyn + "/wg0.conf)'",
 	// core.go: LoadClients (Г3, новая команда этого PR)
 	"docker exec " + dyn + " sh -c 'test -f " + dyn + "/clientsTable && echo yes || echo no'",
-	// core/txn.go: casCheckFile (PR-2, Г4 — CAS по sha256sum, fail-safe, единственная новая команда PR-2)
-	"docker exec " + dyn + " sha256sum " + dyn,
+	// core/caswrite.go (A3б): запись обоих файлов со сверкой под flock — применить.
+	// Заменила две команды: отдельные `sha256sum` и `cat > P.tmp && mv`.
+	casWriteTemplate("amnezia-admin-apply"),
+	// core/caswrite.go (A3б): то же — откатить (сверка с нашими записанными байтами).
+	casWriteTemplate("amnezia-admin-rollback"),
+}
+
+// casScriptLiteral — ДОСЛОВНАЯ копия core.CASWriteScript. Копия, а не ссылка
+// на константу: сторож обязан краснеть, если текст скрипта изменят.
+const casScriptLiteral = `d=$1; ww=$2; wt=$3
+for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
+nw="$d/wg0.conf.aa.$$"; nt="$d/clientsTable.aa.$$"
+rm -f "$d"/wg0.conf.aa.* "$d"/clientsTable.aa.* || exit 1
+IFS= read -r W || exit 1
+IFS= read -r T || exit 1
+if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
+printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
+hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
+hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
+ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
+if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
+if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
+if [ "$W" != "-" ]; then mv -f "$nw" "$d/wg0.conf" || exit 1; fi
+mv -f "$nt" "$d/clientsTable" || exit 1
+exit 0`
+
+func casWriteTemplate(label string) string {
+	return "timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin." + dyn + ".lock docker exec -i " + dyn +
+		" sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 
 func mustTemplateRegex(tmpl string) *regexp.Regexp {
@@ -1293,11 +1318,19 @@ func TestServerCommandsUnchanged(t *testing.T) {
 		t.Fatalf("DeleteByID: %v", err)
 	}
 
+	// Откат (A3б): сбой syncconf после записи — единственный путь к команде
+	// отката.
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+	if _, err := sess.AddUser(c, "Dave"); err == nil {
+		t.Fatal("AddUser при сбое syncconf: ждали ошибку отката")
+	}
+	srv.FailSyncconf = nil
+
 	templates := make([]*regexp.Regexp, len(cmdTemplates))
 	for i, tmpl := range cmdTemplates {
 		templates[i] = mustTemplateRegex(tmpl)
 	}
-	seen := make([]bool, len(templates))
+	seen := make([]int, len(templates))
 	for _, cmd := range srv.Commands() {
 		matched := -1
 		for i, re := range templates {
@@ -1309,12 +1342,22 @@ func TestServerCommandsUnchanged(t *testing.T) {
 		if matched < 0 {
 			t.Fatalf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd)
 		}
-		seen[matched] = true
+		seen[matched]++
 	}
-	for i, ok := range seen {
-		if !ok {
+	for i, n := range seen {
+		if n == 0 {
 			t.Errorf("шаблон ни разу не встретился: %s", cmdTemplates[i])
 		}
+	}
+	// Точный счёт записей (не «> 0»): семь операций записи — AddUser,
+	// RenameUser, SetEnabled×2, RegenerateUser, DeleteByID, AddUser(Dave) — и
+	// ровно один откат.
+	applyIdx, rollbackIdx := len(cmdTemplates)-2, len(cmdTemplates)-1
+	if seen[applyIdx] != 7 {
+		t.Errorf("команд записи: %d, ждали ровно 7", seen[applyIdx])
+	}
+	if seen[rollbackIdx] != 1 {
+		t.Errorf("команд отката: %d, ждали ровно 1", seen[rollbackIdx])
 	}
 }
 

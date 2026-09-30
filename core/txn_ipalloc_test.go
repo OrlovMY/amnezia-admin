@@ -177,7 +177,7 @@ func TestEnableRefusesNamesHolder(t *testing.T) {
 			t.Errorf("ошибка не содержит адрес 10.8.1.3: %v", err)
 		}
 		for _, cmd := range srv.Commands()[before:] {
-			if strings.Contains(cmd, "cat > ") {
+			if isCASWriteCmd(cmd) {
 				t.Errorf("отказ при включении не должен был писать файлы, но: %q", cmd)
 			}
 			if strings.Contains(cmd, "syncconf") {
@@ -286,7 +286,7 @@ func TestRekeyDisabledRefused(t *testing.T) {
 		t.Errorf("текст ошибки не про «сначала включите»: %v", err)
 	}
 	for _, cmd := range srv.Commands()[before:] {
-		if strings.Contains(cmd, "cat > ") {
+		if isCASWriteCmd(cmd) {
 			t.Errorf("rekey отключённого не должен был писать файлы, но: %q", cmd)
 		}
 		if strings.Contains(cmd, "syncconf") {
@@ -329,7 +329,7 @@ func TestRekeyMissingPeerRefused(t *testing.T) {
 		t.Errorf("текст ошибки не про рассинхронизацию: %v", err)
 	}
 	for _, cmd := range srv.Commands()[before:] {
-		if strings.Contains(cmd, "cat > ") {
+		if isCASWriteCmd(cmd) {
 			t.Errorf("отказ по рассинхрону не должен был писать файлы, но: %q", cmd)
 		}
 	}
@@ -439,7 +439,7 @@ func TestIntegrationScenarioIPAllocation(t *testing.T) {
 		t.Errorf("текст отказа не про «сначала включите»: %v", err)
 	}
 	for _, cmd := range srv.Commands()[before:] {
-		if strings.Contains(cmd, "cat > ") {
+		if isCASWriteCmd(cmd) {
 			t.Errorf("rekey отключённой не должен был писать файлы, но: %q", cmd)
 		}
 	}

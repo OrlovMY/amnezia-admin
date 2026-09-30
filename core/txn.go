@@ -1477,9 +1477,10 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 
 // ---------- Apply — транзакция (I2) ----------
 
-// Apply применяет ранее построенный план: CAS → backup → запись → verify;
-// любая ошибка на запись/verify откатывает файлы к прочитанному состоянию
-// (restore). Конфиг с приватным ключом (для add/rekey) возвращается только
+// Apply применяет ранее построенный план: backup → сверка и запись одной
+// командой под замком (casWrite) → syncconf → verify; ошибка syncconf/verify
+// откатывает файлы к прочитанному состоянию (restore), если после нас их
+// никто не менял. Конфиг с приватным ключом (для add/rekey) возвращается только
 // после успешного verify — конфиг, выданный раньше, мог не заработать.
 func (s *Session) Apply(p *Plan) (*NewUser, error) {
 	s.mu.Lock()
@@ -1490,38 +1491,52 @@ func (s *Session) Apply(p *Plan) (*NewUser, error) {
 func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 	c := p.Container
 
-	// 1. CAS — до любой записи (fail-safe: сервер с неизвестным busybox лучше
-	// оставить как есть, чем записать поверх изменённого файла).
-	if err := s.checkCAS(c, p); err != nil {
-		return nil, err
-	}
-
-	// 2. backup — существующая команда, без изменений.
+	// 1. backup — существующая команда, без изменений. Стоит ДО записи и
+	// потому до сверки: сверка теперь внутри команды записи (A3б).
 	if err := s.backup(c); err != nil {
 		return nil, err
 	}
 
+	// 2. сверка и запись обоих файлов — одна команда под замком (A3б, В3).
+	// Любой исход, кроме «записано», возвращается как есть и без отката:
+	// «изменён другим», «занято», «нет утилиты» — ничего не записано;
+	// «неизвестно» — откат вслепую был бы тем же угадыванием.
 	wgChanged := !bytes.Equal(p.wgBefore, p.wgAfter)
+	if err := s.casWrite(c, CASLabelApply, p.wgSHA, p.tblWant(), wgBytesIf(wgChanged, p.wgAfter), p.tblAfter); err != nil {
+		return nil, err
+	}
 
-	// 3-5. запись → sync → verify
+	// 3-4. sync → verify
 	if err := s.applySteps(c, p, wgChanged); err != nil {
-		// 6. откат к прочитанному состоянию
+		// 5. откат, только если после нас никто не менял
 		return nil, s.restore(c, p, wgChanged, err)
 	}
 
-	// 7. только после успешного verify — конфиг наружу
+	// 6. только после успешного verify — конфиг наружу
 	return p.result, nil
 }
 
+// wgBytesIf — байты wg0.conf для записи или nil («не переписывать»): при
+// неизменном wg0.conf файл сверяется, но не трогается.
+func wgBytesIf(changed bool, b []byte) []byte {
+	if !changed {
+		return nil
+	}
+	if b == nil {
+		return []byte{}
+	}
+	return b
+}
+
+// tblWant — ожидаемая сумма clientsTable для сверки при записи.
+func (p *Plan) tblWant() string {
+	if !p.tblExisted {
+		return CASAbsent
+	}
+	return p.tblSHA
+}
+
 func (s *Session) applySteps(c *Container, p *Plan, wgChanged bool) error {
-	if wgChanged {
-		if err := s.writeIn(c, c.Dir+"/wg0.conf", p.wgAfter); err != nil {
-			return fmt.Errorf("запись wg0.conf: %w", err)
-		}
-	}
-	if err := s.writeIn(c, c.Dir+"/clientsTable", p.tblAfter); err != nil {
-		return fmt.Errorf("запись clientsTable: %w", err)
-	}
 	if wgChanged {
 		if err := s.syncWg(c); err != nil {
 			return fmt.Errorf("wg syncconf: %w", err)
@@ -1584,8 +1599,8 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 	return nil
 }
 
-// restore — шаг 6: откат файлов к прочитанному состоянию (теми же командами,
-// что запись — В2 п.3, не cp из backup/), с последующей проверкой ИТОГА —
+// restore — шаг 5: откат файлов к прочитанному состоянию (той же командой
+// записи со сверкой — A3б; не cp из backup/), с последующей проверкой ИТОГА —
 // SEC-01 (changes-requested, 2026-09-14): настоящий `wg syncconf` при отказе
 // НЕ гарантирует, что рантайм остался прежним — wireguard-tools setconf.c и
 // amneziawg-go device/uapi.go (IpcSetOperation) применяют peer'ы по мере
@@ -1593,9 +1608,8 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 // строк. Поэтому «файлы вернулись» не означает «рантайм тоже вернулся»:
 // повторный syncconf на восстановлении может успеть частично примениться и
 // упасть, оставив рантайм в состоянии, отличном и от старого, и от нового.
-// Пытаемся записать ОБА файла независимо друг от друга (даже если один не
-// удалось — второй всё равно пробуем), чтобы восстановить максимум
-// возможного. Ровно три исхода:
+// Оба файла возвращаются одной командой (A3б); если после нашей записи их
+// изменил другой — не трогаем вовсе (ErrRollbackForeign). Исходы:
 //
 //	(а) оба файла записались, и (если wg0.conf менялся) активные peer'ы на
 //	    сервере после повторного syncconf совпадают с wgBefore — «состояние
@@ -1606,36 +1620,27 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 //	    после повторного syncconf разошлась с wgBefore — «файлы
 //	    восстановлены, но применить их не удалось», с явным предупреждением,
 //	    что активные подключения могут отличаться от wg0.conf;
-//	(в) хотя бы один файл не удалось записать — «восстановить не удалось»,
-//	    с указанием, какой файл вернулся, а какой нет, и путём к backup/.
+//	(в) команда отката не записала («занято», «нет утилиты») —
+//	    «восстановить не удалось», или неизвестно, записала ли, — так и
+//	    сказано; путь к backup/;
+//	(г) после нас файлы изменил другой — откат не выполнен (ErrRollbackForeign).
 func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) error {
-	var wgWriteErr error
-	if wgChanged {
-		wgWriteErr = s.writeIn(c, c.Dir+"/wg0.conf", p.wgBefore)
-	}
 	tblBefore := p.tblBefore
 	if !p.tblExisted {
 		tblBefore = []byte{}
 	}
-	// clientsTable пишем НЕЗАВИСИМО от исхода записи wg0.conf — один файл не
-	// должен тянуть за собой отказ восстановления другого (SEC-01, п.3).
-	tblWriteErr := s.writeIn(c, c.Dir+"/clientsTable", tblBefore)
-
-	if wgWriteErr != nil || tblWriteErr != nil {
-		wgStatus := "не менялся"
-		if wgChanged {
-			if wgWriteErr != nil {
-				wgStatus = fmt.Sprintf("НЕ восстановлен (%v)", wgWriteErr)
-			} else {
-				wgStatus = "восстановлен"
-			}
+	// Откат — та же команда записи, но сверка с НАШИМИ записанными байтами
+	// (A3б, окно 2): если после нас файлы изменил другой, откат стёр бы его
+	// запись, которой уже сказано «готово». Оба файла — одной командой.
+	if werr := s.casWrite(c, CASLabelRollback, sha256Hex(p.wgAfter), sha256Hex(p.tblAfter), wgBytesIf(wgChanged, p.wgBefore), tblBefore); werr != nil {
+		backups := fmt.Sprintf("резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие)", c.Dir, c.Dir)
+		switch {
+		case errors.Is(werr, ErrCASMismatch):
+			return &rollbackForeignError{msg: fmt.Sprintf("ВНИМАНИЕ: откат не выполнен: после нашей записи файлы на сервере изменил другой — откат стёр бы его изменения. Обновите список; %s; исходная причина: %v", backups, cause)}
+		case errors.Is(werr, ErrWriteUnknown):
+			return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — неизвестно, вернулись ли wg0.conf и clientsTable (%v); %s; исходная причина: %v", werr, backups, cause)
 		}
-		tblStatus := "восстановлена"
-		if tblWriteErr != nil {
-			tblStatus = fmt.Sprintf("НЕ восстановлена (%v)", tblWriteErr)
-		}
-		return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — wg0.conf: %s; clientsTable: %s; резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие); исходная причина: %v",
-			wgStatus, tblStatus, c.Dir, c.Dir, cause)
+		return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — wg0.conf и clientsTable НЕ восстановлены (%v); %s; исходная причина: %v", werr, backups, cause)
 	}
 
 	// Оба файла точно на месте. Повторный syncconf — попытка вернуть и
@@ -1705,13 +1710,9 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		// A8 п.3: «вернул прежний файл» и «создал новый, прежнего не было» —
 		// разные вещи, и во второй формулировке слова «восстановлено» нет.
 		//
-		// Файл clientsTable в типичном случае создаёт шаг применения
-		// (applySteps пишет его всегда). Но есть и второй путь: если
-		// applySteps упал на записи wg0.conf, до clientsTable он не дошёл —
-		// и тогда файл создаёт именно restore строкой ниже (writeIn с
-		// tblBefore). В обоих случаях итог для человека одинаков, поэтому
-		// текст один; отката «не было файла» у нас нет — мы оставляем его
-		// пустым. Поведенчески это равнозначно отсутствию (LoadClients:
+		// Файл clientsTable создаёт запись (casWrite пишет оба файла
+		// всегда), откат оставляет его пустым: отката «не было файла» у
+		// нас нет. Поведенчески это равнозначно отсутствию (LoadClients:
 		// пустой файл → пустой список, как и отсутствующий), но молчать о
 		// подмене отсутствия пустотой нельзя.
 		//
@@ -1729,74 +1730,16 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		verifyErr, cause)
 }
 
-// ---------- CAS по sha256sum (Г4, ядро: fail-safe, отдельный коммит) ----------
+// ---------- CAS (A3б: сверка внутри команды записи, core/caswrite.go) ----------
 
-// ErrCASMismatch — сентинел отказа CAS (review PR-2, carryover 1; текст
-// правлен по review-reply PR-3 круга 2, Medium). Сам errors.New(...) текст
-// НИКОГДА не попадает в возвращаемые ошибки — casError.Error() его не
-// печатает; сентинел существует только для errors.Is(err, ErrCASMismatch)
-// (через casError.Is). Первая версия этого сентинела дословно склеивалась в
-// текст через fmt.Errorf("...: %w", ErrCASMismatch, ...), из-за чего ветка
-// расхождения суммы дублировала фразу дважды, а ветка "нет sha256sum" лживо
-// утверждала "сервер изменился" там, где он не менялся — сервер тут ни при
-// чём, проверить просто не удалось. casError разрывает эту связь: текст
-// каждой ветки — свой, ErrCASMismatch — только тег для errors.Is.
+// ErrCASMismatch — сентинел отказа «файл изменён другим»: план построен по
+// неактуальному чтению сервера, ничего не записано. Сам текст сентинела в
+// сообщения не попадает — casWriteError.Error() печатает свой msg;
+// распознавание только через errors.Is (cmd/gui: isCASRefusal).
 var ErrCASMismatch = errors.New("план построен по неактуальному чтению сервера")
 
-// casError — ошибка CAS. Error() печатает ТОЛЬКО msg (+cause, если он есть);
-// errors.Is(err, ErrCASMismatch) работает через Is(), а не через текст —
-// поэтому смена/уточнение msg в любой из веток ниже не может испортить
-// распознавание отказа в cmd/gui/main.go (isCASRefusal).
-type casError struct {
-	msg   string
-	cause error
-}
+// rollbackForeignError — откат не выполнен из-за чужой записи после нашей.
+type rollbackForeignError struct{ msg string }
 
-func (e *casError) Error() string {
-	if e.cause != nil {
-		return fmt.Sprintf("%s: %v", e.msg, e.cause)
-	}
-	return e.msg
-}
-
-func (e *casError) Unwrap() error { return e.cause }
-
-func (e *casError) Is(target error) bool { return target == ErrCASMismatch }
-
-// checkCAS — шаг 1 Apply. Расхождение контрольной суммы или невозможность её
-// проверить (нет sha256sum на сервере, любой ненулевой код) — отказ ДО любой
-// записи. Для отсутствовавшей при планировании clientsTable проверяем не
-// сумму, а сам факт отсутствия (test -f), как и предписано Г4.
-func (s *Session) checkCAS(c *Container, p *Plan) error {
-	if err := s.casCheckFile(c, c.Dir+"/wg0.conf", p.wgSHA); err != nil {
-		return err
-	}
-	if !p.tblExisted {
-		exists, err := s.probeClientsTable(c)
-		if err != nil {
-			return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
-		}
-		if exists {
-			return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", c.Dir+"/clientsTable")}
-		}
-		return nil
-	}
-	return s.casCheckFile(c, c.Dir+"/clientsTable", p.tblSHA)
-}
-
-// casCheckFile — единственная новая серверная команда этого PR: sha256sum
-// через s.docker (чтобы работал sudo-фолбэк).
-func (s *Session) casCheckFile(c *Container, path, wantSHA string) error {
-	out, err := s.docker(fmt.Sprintf("docker exec %s sha256sum %s", c.Name, path), nil)
-	if err != nil {
-		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена", cause: err}
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return &casError{msg: "не удалось проверить контрольную сумму — запись отменена: пустой ответ sha256sum"}
-	}
-	if fields[0] != wantSHA {
-		return &casError{msg: fmt.Sprintf("файл %s изменился с момента чтения — обновите список и повторите", path)}
-	}
-	return nil
-}
+func (e *rollbackForeignError) Error() string        { return e.msg }
+func (e *rollbackForeignError) Is(target error) bool { return target == ErrRollbackForeign }

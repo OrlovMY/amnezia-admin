@@ -221,12 +221,6 @@ func (s *Session) catIn(c *Container, path string) (string, error) {
 	return s.docker(fmt.Sprintf("docker exec %s cat %s", c.Name, path), nil)
 }
 
-// writeIn пишет файл атомарно: во временный файл, затем rename поверх целевого
-func (s *Session) writeIn(c *Container, path string, data []byte) error {
-	_, err := s.docker(fmt.Sprintf("docker exec -i %s sh -c 'cat > %s.tmp && mv %s.tmp %s'", c.Name, path, path, path), data)
-	return err
-}
-
 // backup делает резервную копию wg0.conf и clientsTable перед мутацией,
 // ротируя старые копии РАЗДЕЛЬНО по каждому префиксу — хранится по 20
 // последних файлов wg0.conf.* и 20 последних clientsTable.* (а не 20
@@ -368,11 +362,6 @@ func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed 
 	}
 	clients, err = parseClientsTable(data)
 	return clients, true, err
-}
-
-func (s *Session) saveClients(c *Container, list []ClientEntry) error {
-	tbl, _ := json.MarshalIndent(list, "", "    ")
-	return s.writeIn(c, c.Dir+"/clientsTable", tbl)
 }
 
 // PeerStat — статистика по одному peer'у из `wg show wg0 dump`
