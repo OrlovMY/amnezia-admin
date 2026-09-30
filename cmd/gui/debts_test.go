@@ -205,6 +205,13 @@ func TestDebtsPinThrottleUnreadableClosesInput(t *testing.T) {
 			if !strings.Contains(texts, "счётчик попыток") || !strings.Contains(texts, "throttle.json") {
 				t.Errorf("причина и путь не названы: %s", texts)
 			}
+			// Раунд 4 (Н-1): совет по сути — различение повреждённого файла
+			// и папки на его месте.
+			want := map[string]string{"файл повреждён": "удалите его, он повреждён",
+				"на месте файла каталог": "на месте файла — папка"}[c.name]
+			if !strings.Contains(texts, want) {
+				t.Errorf("совет не по сути, ожидалось %q: %s", want, texts)
+			}
 		})
 	}
 }
@@ -233,5 +240,15 @@ func TestDebtsPinThrottleSaveFailClosesInput(t *testing.T) {
 	}
 	if !strings.Contains(texts, "сохранить счётчик попыток") {
 		t.Errorf("причина не названа: %s", texts)
+	}
+	// Раунд 4 (AU-LOGIC Н-1): назван ИМЕННО тот путь, что не записался —
+	// временный throttle.json.tmp (на его месте папка), а не throttle.json,
+	// которого нет; совет — по сути, без «удалите его, он повреждён».
+	tmp := filepath.Join(core.DefaultVaultDir(), "throttle.json.tmp")
+	if !strings.Contains(texts, "Файл: "+tmp+".") {
+		t.Errorf("назван не тот файл (ожидался %s): %s", tmp, texts)
+	}
+	if !strings.Contains(texts, "на месте файла — папка") || strings.Contains(texts, "он повреждён") {
+		t.Errorf("совет не по сути (на месте .tmp папка): %s", texts)
 	}
 }

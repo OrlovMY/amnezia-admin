@@ -10,12 +10,24 @@
 // пина закрыт, пока это не исправлено (fail-closed). Прежде битый файл
 // читался как ноль попыток — то есть сбрасывал блокировку (признак 2
 // CLAUDE.md), — а ошибка записи отбрасывалась.
+//
+// ГРАНИЦЫ (что счётчик НЕ ограничивает, названо сознательно):
+//   - удаление или откат throttle.json — у кого есть доступ к файлам
+//     пользователя, у того и сам .avlt, и перебор он ведёт вне программы;
+//   - несколько запущенных экземпляров программы (раунд 4 долгов, AU-LOGIC
+//     М-2, решение ядра — не чинить): чтение-изменение-запись без блокировки
+//     между процессами, две одновременные неверные попытки из двух окон
+//     могут учесться как одна, K окон дают около 10·K попыток до блокировки.
+//     Кто может запускать программу, тот имеет и .avlt; ключ защищает
+//     медленное получение ключа из пина (argon2id, core/vault.go), а счётчик —
+//     лишь ограничение попыток через интерфейс одного окна.
 package core
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -65,10 +77,50 @@ func throttleFilePath(dir string) string {
 // ThrottleError — счётчик попыток не удалось прочитать или записать. Путь и
 // причина — отдельными полями, чтобы интерфейс назвал их человеку прямо, не
 // повторяя путь дважды (ошибки os уже содержат путь).
+//
+// Path — путь, на котором операция РЕАЛЬНО не удалась (раунд 4 долгов,
+// AU-LOGIC Н-1): при сбое записи временного throttle.json.tmp это он, а не
+// throttle.json, которого в этот момент может не быть вовсе. Fault — что с
+// этим путём, чтобы совет человеку был по сути: «удалите» — только если
+// файл есть и повреждён.
 type ThrottleError struct {
-	Op   string // "прочитать" или "сохранить"
-	Path string
-	Err  error
+	Op    string // "прочитать" или "сохранить"
+	Path  string
+	Err   error
+	Fault ThrottleFault
+}
+
+// ThrottleFault — что не так с путём из ThrottleError.
+type ThrottleFault int
+
+const (
+	// FaultOther — иная причина (например, нет папки, диск недоступен).
+	FaultOther ThrottleFault = iota
+	// FaultCorrupt — файл есть, прочитан, но содержимое не разбирается.
+	FaultCorrupt
+	// FaultIsDir — на месте файла папка.
+	FaultIsDir
+	// FaultDenied — нет прав.
+	FaultDenied
+)
+
+// newThrottleError — ошибка с путём неудавшейся операции и её разбором.
+func newThrottleError(op, path string, err error, corrupt bool) *ThrottleError {
+	e := &ThrottleError{Op: op, Path: path, Err: err}
+	switch {
+	case corrupt:
+		e.Fault = FaultCorrupt
+	case isDir(path):
+		e.Fault = FaultIsDir
+	case errors.Is(err, fs.ErrPermission):
+		e.Fault = FaultDenied
+	}
+	return e
+}
+
+func isDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 func (e *ThrottleError) Error() string {
@@ -86,6 +138,10 @@ func (e *ThrottleError) Reason() string {
 	if errors.As(e.Err, &pe) {
 		return pe.Err.Error()
 	}
+	var le *os.LinkError
+	if errors.As(e.Err, &le) {
+		return le.Err.Error()
+	}
 	return e.Err.Error()
 }
 
@@ -97,12 +153,11 @@ func readThrottleMap(path string) (map[string]ThrottleState, error) {
 		return map[string]ThrottleState{}, nil
 	}
 	if err != nil {
-		return nil, &ThrottleError{Op: "прочитать", Path: path, Err: err}
+		return nil, newThrottleError("прочитать", path, err, false)
 	}
 	var m map[string]ThrottleState
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, &ThrottleError{Op: "прочитать", Path: path,
-			Err: fmt.Errorf("файл повреждён (%v)", err)}
+		return nil, newThrottleError("прочитать", path, fmt.Errorf("файл повреждён (%v)", err), true)
 	}
 	if m == nil { // в файле буквально null
 		m = map[string]ThrottleState{}
@@ -129,9 +184,10 @@ func LoadThrottle(dir, vaultName string) (ThrottleState, error) {
 // быть счётчики других хранилищ, и молчаливая замена сбросила бы их.
 func SaveThrottle(dir, vaultName string, st ThrottleState) error {
 	path := throttleFilePath(dir)
-	wrap := func(err error) error { return &ThrottleError{Op: "сохранить", Path: path, Err: err} }
+	// wrap — с путём, на котором не удалось (Н-1): каталог, .tmp или сам файл.
+	wrap := func(at string, err error) error { return newThrottleError("сохранить", at, err, false) }
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return wrap(err)
+		return wrap(dir, err)
 	}
 	m, err := readThrottleMap(path)
 	if err != nil {
@@ -141,15 +197,15 @@ func SaveThrottle(dir, vaultName string, st ThrottleState) error {
 
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return wrap(err)
+		return wrap(path, err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0600); err != nil {
-		return wrap(err)
+		return wrap(tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
-		return wrap(err)
+		return wrap(path, err)
 	}
 	return nil
 }

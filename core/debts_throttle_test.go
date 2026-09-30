@@ -3,10 +3,47 @@ package core
 // Долг Н8 (ДОЛГИ-ПРОДУКТ, 30.09.2026): счётчик неверных пинов.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// TestDebtsThrottleErrorNamesFailedPath — раунд 4 (AU-LOGIC Н-1), ТЕСТ
+// РАЗЛИЧЕНИЯ: сбой на временном .tmp и сбой на самом throttle.json дают в
+// ошибке РАЗНЫЕ пути — тот, на котором операция не удалась, — и разный разбор.
+func TestDebtsThrottleErrorNamesFailedPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		prep  func(dir string)
+		file  string
+		fault ThrottleFault
+	}{
+		{"папка на месте .tmp", func(d string) { os.Mkdir(filepath.Join(d, "throttle.json.tmp"), 0o700) },
+			"throttle.json.tmp", FaultIsDir},
+		{"throttle.json повреждён", func(d string) { os.WriteFile(filepath.Join(d, "throttle.json"), []byte("{"), 0o600) },
+			"throttle.json", FaultCorrupt},
+		{"папка на месте throttle.json", func(d string) { os.Mkdir(filepath.Join(d, "throttle.json"), 0o700) },
+			"throttle.json", FaultIsDir},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c.prep(dir)
+			err := SaveThrottle(dir, "a.avlt", ThrottleState{Fails: 1})
+			var te *ThrottleError
+			if !errors.As(err, &te) {
+				t.Fatalf("ожидалась *ThrottleError, получено %v", err)
+			}
+			if want := filepath.Join(dir, c.file); te.Path != want {
+				t.Errorf("путь в ошибке %q, ожидался %q", te.Path, want)
+			}
+			if te.Fault != c.fault {
+				t.Errorf("разбор %d, ожидался %d", te.Fault, c.fault)
+			}
+		})
+	}
+}
 
 // TestDebtsSaveThrottleCorruptNotOverwritten — ТЕСТ РАЗЛИЧЕНИЯ, компилируется
 // на c65420e (сигнатура SaveThrottle прежняя) и падает там поведением:
