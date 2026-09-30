@@ -14,3 +14,12 @@ func ApplyStatus(t writeoutcome.Text) string {
 	}
 	return s
 }
+
+// ApplyRetryAllowed — снова ли включать «Применить» после ошибки sess.Apply:
+// только если исход в закрытом списке повтора writeoutcome (запись
+// доказанно не начиналась, план не устарел). Неклассифицированная ошибка —
+// НЕТ: неизвестно, записано ли (A3б PR-3, раунд 4, AU-LOGIC Н-1/Н-2).
+func ApplyRetryAllowed(err error) bool {
+	t, ok := writeoutcome.Describe(err)
+	return ok && t.Retry
+}

@@ -2474,21 +2474,21 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 						// «Изменён другим» — план устарел; «неизвестно»,
 						// «частично», «откат не тронул чужое» — повтор того же
 						// плана вслепую недопустим.
+						// Повтор — ОДНО решение для обеих ветвей (раунд 4,
+						// AU-LOGIC Н-1/Н-2): guiview.ApplyRetryAllowed —
+						// закрытый список writeoutcome; неклассифицированное —
+						// без повтора. Сторож TestApplyErrorsClassified держит,
+						// что на пути Apply неклассифицированного нет вовсе.
+						if guiview.ApplyRetryAllowed(err) {
+							applyBtn.Enable()
+						}
 						if t, ok := writeoutcome.Describe(err); ok {
 							statusLabel.Importance = widget.DangerImportance
 							statusLabel.SetText(guiview.ApplyStatus(t))
-							if t.Retry {
-								applyBtn.Enable()
-							}
-							u.showError(err)
-							return
+						} else {
+							statusLabel.Importance = widget.MediumImportance
+							statusLabel.SetText("")
 						}
-						statusLabel.Importance = widget.MediumImportance
-						statusLabel.SetText("")
-						// Неклассифицированное с пути Apply — БЕЗ повтора (раунд 4, AU-LOGIC Н-1/Н-2):
-						// повтор разрешён только закрытым списком writeoutcome (Retry), по
-						// умолчанию — нет. Сторож TestApplyErrorsClassified держит, что такой
-						// ветки на пути Apply нет вовсе.
 						u.showError(err)
 						return
 					}
