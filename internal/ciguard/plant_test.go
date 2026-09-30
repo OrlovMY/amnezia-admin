@@ -79,6 +79,10 @@ const goenv = "TestNoToolEnvironmentOverrides"
 
 const keys = "TestWorkflowKeysClosedList"
 
+const pipes = "TestNoEarlyExitPipeReader"
+
+const buildReleaseSH = "../../scripts/build-release.sh"
+
 const canaryLogic = "TestShellcheckCanaryStepLogic"
 
 // toolsStep — шаг «Инструменты» job lint. Добавочные вызовы actionlint
@@ -208,7 +212,7 @@ var plants = []plant{
 		wantTest: goenv, wantMsg: "запись в $GITHUB_PATH после setup-go"},
 	{name: "r5-canary-exit0", edits: ci("2>&1)\" || rc=$?\n", "2>&1)\" || rc=$?\n          exit 0\n"),
 		wantTest: canaryLogic, wantMsg: "заглушка go в режиме zero: шаг прошёл, а должен упасть — канарейка молчит"},
-	{name: "r5-canary-no-grep", edits: ci(`if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then`, `if [ "$rc" -eq 0 ]; then`),
+	{name: "r5-canary-no-grep", edits: ci(`if [ "$rc" -eq 0 ] || ! grep -q 'SC2086' <<< "$out"; then`, `if [ "$rc" -eq 0 ]; then`),
 		wantTest: canaryLogic, wantMsg: "заглушка go в режиме other: шаг прошёл, а должен упасть — канарейка молчит"},
 	// --- раунд 6 QA-01: закрытый список имён в env: ---
 	{name: "r6-bash-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          BASH_ENV: /tmp/x\n"),
@@ -242,6 +246,15 @@ var plants = []plant{
 		wantTest: goenv, wantMsg: "env VERSION=\"${{ github.ref_name }} -extldflags=-x\" — значение вне закрытого списка"},
 	{name: "r7-commit-literal", edits: ci("          COMMIT: ${{ github.sha }}\n", "          COMMIT: deadbeef\n"),
 		wantTest: goenv, wantMsg: "env COMMIT=\"deadbeef\" — значение вне закрытого списка"},
+	// --- раунд SIGPIPE: ранний выход читателя конвейера ---
+	{name: "sp-subjects-pipe", edits: rel(`            in_subjects "$f" ||`, `            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" ||`),
+		wantTest: pipes, also: []string{att}, wantMsg: `«printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f"`},
+	{name: "sp-info-pipe", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`, `            printf '%s\n' "$info" | grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' ||`),
+		wantTest: pipes, wantMsg: "читатель конвейера выходит раньше конца ввода"},
+	{name: "sp-canary-grep-m", edits: ci(`! grep -q 'SC2086' <<< "$out"; then`, `! printf '%s\n' "$out" | grep -m1 -q 'SC2086'; then`),
+		wantTest: pipes, also: []string{canaryLogic}, wantMsg: "grep -m1 -q 'SC2086'"},
+	{name: "sp-script-head", edits: []edit{{buildReleaseSH, "mkdir -p dist\n", "mkdir -p dist\ngo version | head -n 1\n"}},
+		wantTest: pipes, wantMsg: "../../scripts/build-release.sh: «go version | head -n 1»"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -330,7 +343,7 @@ var plants = []plant{
 		wantTest: att, wantMsg: "на образце из девяти файлов шаг проверки субъектов не прошёл"},
 	{name: "attest-extra-loop", edits: rel(`          all=(dist/*)
           for f in "${all[@]}"; do
-            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" || { echo "СТОП: $f публикуется, но не входит в субъекты аттестации" >&2; exit 1; }
+            in_subjects "$f" || { echo "СТОП: $f публикуется, но не входит в субъекты аттестации" >&2; exit 1; }
           done
 `, ""),
 		wantTest: att, wantMsg: "образец «лишний файл»: шаг проверки субъектов обязан упасть"},
@@ -362,6 +375,7 @@ var mainTests = []string{
 	"TestCIMatrixMatchesReleaseBuild",
 	"TestCheckoutsDoNotPersistCredentials",
 	"TestGoTestPackagesMatch",
+	"TestNoEarlyExitPipeReader",
 	"TestNoToolEnvironmentOverrides",
 	"TestReleaseAttestsChecksums",
 	"TestReleaseMatrixArchMatchesRunnerTable",

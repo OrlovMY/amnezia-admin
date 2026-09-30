@@ -288,7 +288,7 @@ jobs:
           rc=0
           out="$(go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" -shellcheck "$SHELLCHECK_BIN" "$canary" 2>&1)" || rc=$?
           printf '%s\n' "$out"
-          if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'SC2086'; then
+          if [ "$rc" -eq 0 ] || ! grep -q 'SC2086' <<< "$out"; then
             echo "СТОП: actionlint не видит shellcheck — разбор bash внутри run: не выполняется, прогон ничего не проверил" >&2
             exit 1
           fi
