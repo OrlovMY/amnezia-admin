@@ -713,11 +713,13 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		install bool
+		busy    bool
 		want    Status
 		why     string
 	}{
-		{"обёртка действует: откат ядра, «изменения отменены»", true, Pass, "изменения отменены"},
-		{"обёртка не действует: запись проходит — НЕ ПРОЙДЕН", false, Fail, "добавление прошло"},
+		{"обёртка действует: откат ядра, «изменения отменены»", true, false, Pass, "изменения отменены"},
+		{"обёртка не действует: запись проходит — НЕ ПРОЙДЕН", false, false, Fail, "добавление прошло"},
+		{"иной исход («занято») — НЕ ПРОЙДЕН, хотя файлы и сервер прежние", true, true, Fail, "исход не"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := emptyFake(t, false)
@@ -743,9 +745,11 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 					if c.install {
 						f.exec.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
 					}
+					f.exec.LockBusy = c.busy
 					return "", nil
 				case strings.HasSuffix(cmd, "sh -c 'mv -f /usr/bin/wg.canary-orig /usr/bin/wg'"):
 					f.exec.FailSyncconf = nil
+					f.exec.LockBusy = false
 					restored = true
 					return "", nil
 				case strings.Contains(cmd, "sha256sum "):
@@ -770,7 +774,7 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 			if _, ok := m["canary-rb0"]; !ok {
 				t.Errorf("опорного canary-rb0 нет")
 			}
-			if _, ok := m["canary-rb"]; ok == c.install {
+			if _, ok := m["canary-rb"]; ok != !c.install {
 				t.Errorf("canary-rb: есть=%v при действующей обёртке=%v", ok, c.install)
 			}
 		})
@@ -907,5 +911,24 @@ func TestK3RekeyMustChangeKey(t *testing.T) {
 	r := f.env.k3()
 	if r.Status != Fail || !strings.Contains(r.Detail, "перевыпустить") {
 		t.Fatalf("К3 при пустом перевыпуске: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestIsBusy — «занято» в К5 так же, как в К4 (раунд 4, L3): код 1 и
+// заголовок дословно.
+func TestIsBusy(t *testing.T) {
+	const b = "Не записано: сервер занят"
+	for _, c := range []struct {
+		r    cliRun
+		want bool
+	}{
+		{cliRun{code: 1, title: b, errText: b + "\n…"}, true},
+		{cliRun{code: 2, title: b, errText: b}, false},
+		{cliRun{code: 1, title: b + ", кажется", errText: b}, false},
+		{cliRun{code: 1, title: "Неизвестно, записаны ли изменения", errText: "… сервер занят …"}, false},
+	} {
+		if got := isBusy(c.r); got != c.want {
+			t.Errorf("%+v: %v, ожидалось %v", c.r, got, c.want)
+		}
 	}
 }
