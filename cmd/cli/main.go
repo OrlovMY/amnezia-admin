@@ -201,7 +201,7 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
 		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
-		absent := 0 // включённые клиенты, которых нет в ответе `wg show`
+		absent := 0                 // включённые клиенты, которых нет в ответе `wg show`
 		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
 			created := cl.Created()
