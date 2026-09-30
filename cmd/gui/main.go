@@ -616,8 +616,15 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 //
 // Throttle (10 неверных попыток подряд → блокировка на 5 минут, персистентно
 // в throttle.json per-vault) проверяется до расшифровки и обновляется сразу
-// после неё: неудача пишется на диск НЕМЕДЛЕННО (fail-closed), до того, как
-// решаем, показывать ли "осталось попыток" или переключаться в отсчёт блокировки.
+// после неё: неудача пишется на диск НЕМЕДЛЕННО, до того, как решаем,
+// показывать ли "осталось попыток" или переключаться в отсчёт блокировки.
+//
+// Fail-closed по счётчику (долг Н8, решение SEC-01 30.09.2026): если
+// throttle.json не удалось прочитать (не «файла нет», а нечитаем или
+// повреждён) или записать — ввод пина закрыт, человеку названы причина и
+// путь, кнопка «Повторить» проверяет заново. Прежде ошибка записи
+// отбрасывалась (`_ =`) при комментарии «fail-closed», а битый файл читался
+// как ноль попыток — оба пути снимали ограничение молча.
 //
 // Время для throttle — ОНЛАЙН, не локальные часы: при открытии диалога один
 // раз запрашивается сетевое время (core.FetchNetworkTime) и фиксируется в
@@ -672,6 +679,14 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			ticker.Stop()
 			ticker = nil
 		}
+	}
+	// closeInput — счётчик попыток неизвестен (Н8): ввод пина закрыт, пока
+	// не исправлено; «Повторить» заново читает счётчик (acquireOnlineTime).
+	closeInput := func(err error) {
+		stopTicker()
+		openBtn.Disable()
+		statusLabel.SetText(guiview.PinThrottleUnknown(err))
+		retryBtn.Show()
 	}
 
 	// startCountdown переключает диалог в режим обратного отсчёта блокировки:
@@ -739,7 +754,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			return
 		}
 		pin := pinEntry.Text
-		if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+		cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+		if lerr != nil {
+			closeInput(lerr)
+			return
+		}
+		if blocked, remaining := core.CheckThrottle(cur, clock.Now()); blocked {
 			startCountdown(clock.Now().Add(remaining))
 			return
 		}
@@ -754,10 +774,20 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			}
 			if err != nil {
 				now := clock.Now()
-				st := core.RegisterFailure(core.LoadThrottle(vaultDir, vaultName), now)
-				_ = core.SaveThrottle(vaultDir, vaultName, st) // fail-closed: пишем счётчик до любого дальнейшего ветвления
+				prev, cerr := core.LoadThrottle(vaultDir, vaultName)
+				var st core.ThrottleState
+				if cerr == nil {
+					st = core.RegisterFailure(prev, now)
+					// пишем счётчик до любого дальнейшего ветвления; не
+					// записан — «осталось попыток» было бы неправдой (Н8)
+					cerr = core.SaveThrottle(vaultDir, vaultName, st)
+				}
 				fyne.Do(func() {
 					pinEntry.SetText("")
+					if cerr != nil {
+						closeInput(cerr)
+						return
+					}
 					if blocked, remaining := core.CheckThrottle(st, now); blocked {
 						startCountdown(now.Add(remaining))
 						return
@@ -774,6 +804,11 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				})
 				return
 			}
+			// Сброс счётчика после ВЕРНОГО пина. Ошибку здесь не показываем
+			// и вход не закрываем сознательно: пин уже проверен, а
+			// несброшенный счётчик ограничение только ужесточает (в файле
+			// остаются прежние неудачи). Если файл при этом стал нечитаем,
+			// следующее открытие диалога скажет об этом через LoadThrottle.
 			_ = core.SaveThrottle(vaultDir, vaultName, core.RegisterSuccess())
 			// vc — контекст открытого хранилища для attemptConnect (Е1):
 			// ExpectedFingerprint (payload.HostKeyFingerprint), перезапечатывание
@@ -822,7 +857,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				}
 				tc := core.NewTrustedClock(onlineNow)
 				clock = &tc
-				if blocked, remaining := core.CheckThrottle(core.LoadThrottle(vaultDir, vaultName), clock.Now()); blocked {
+				cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+				if lerr != nil {
+					closeInput(lerr)
+					return
+				}
+				if blocked, remaining := core.CheckThrottle(cur, clock.Now()); blocked {
 					startCountdown(clock.Now().Add(remaining))
 					return
 				}
