@@ -104,6 +104,8 @@ type Env struct {
 	cleanMu  sync.Mutex
 	cleanups []func() error
 
+	sudoUndo func() error // удалить временного пользователя (nil — не создавали)
+
 	docker    string // "docker" или "sudo -n docker"
 	dockerErr error  // docker ps не выполнился — К2.8 НЕ ПРОВЕРЕНО
 }
@@ -155,7 +157,7 @@ func Run(e *Env) ([]Result, error) {
 	// прошлого прогона — без них выводы шагов записи бессмысленны).
 	pre := []Result{e.traces(), e.lockDir(), e.busybox(), e.timeoutSyntax(), e.lslocks()}
 	pre = append(pre, e.k2Tools()...)
-	pre = append(pre, e.execTiming())
+	pre = append(pre, e.execTiming(), e.sudoTiming())
 	for _, r := range pre {
 		add(r)
 	}
@@ -203,7 +205,102 @@ func Run(e *Env) ([]Result, error) {
 		u.Status, u.Detail = Pass, "canary-* удалены, пользователь из приложения Amnezia оставлен"
 	}
 	add(u)
+	if e.sudoUndo != nil {
+		su := Result{ID: "У2", Name: "временный пользователь " + TempUser + " удалён"}
+		if err := e.dropSudoUser(); err != nil {
+			su.Status, su.Detail = Fail, err.Error()
+		} else {
+			su.Status, su.Detail = Pass, "удалён и проверено"
+		}
+		add(su)
+	}
 	return rs, nil
+}
+
+// ensureSudoUser — временный пользователь PR4.2 (нужен уже в К2.10). Один
+// на прогон; удаление — в конце Run (шаг «У2») и по сигналу.
+func (e *Env) ensureSudoUser() error {
+	if e.SudoKeyEnv != nil {
+		return nil
+	}
+	if e.MakeSudoKey == nil {
+		return errors.New("не задан AMNEZIA_KEY_SUDO и временного пользователя создать нечем (ключ не root)")
+	}
+	env, undo, err := e.MakeSudoKey()
+	if err != nil {
+		return err
+	}
+	done := false
+	once := func() error {
+		if done {
+			return nil
+		}
+		if err := undo(); err != nil {
+			return fmt.Errorf("ВНИМАНИЕ: временный пользователь НЕ удалён — удалите вручную на сервере: userdel %s; rm -f /etc/sudoers.d/%s (%v)", TempUser, TempUser, err)
+		}
+		done = true
+		return nil
+	}
+	e.Cleanup(once)
+	e.sudoUndo = once
+	e.SudoKeyEnv = env
+	return nil
+}
+
+func (e *Env) dropSudoUser() error {
+	if e.sudoUndo == nil {
+		return nil
+	}
+	err := e.sudoUndo()
+	e.SudoKeyEnv = nil
+	return err
+}
+
+// sudoTiming — К2.10 (AU-LOGIC L-1 к H1): после H1 под замком идёт
+// `sudo -n docker exec …`, и запуск sudo тоже съедает запас 10 с внешнего
+// таймаута. Мерится от того же временного пользователя (su от root), та же
+// сумма «запуск до конца `true`» против запаса. su добавляет своё время —
+// замер с запасом в осторожную сторону. Не измерено — НЕ ПРОВЕРЕНО (шлюз).
+func (e *Env) sudoTiming() Result {
+	r := Result{ID: "К2.10", Name: "запуск sudo + docker exec < 10 с (sudo-пользователь)"}
+	if e.MakeSudoKey == nil {
+		if e.docker == "sudo -n docker" {
+			r.Status, r.Detail = Pass, "ключ не root: К2.9 уже мерил запуск через sudo -n docker exec"
+			return r
+		}
+		r.Detail = "временного sudo-пользователя создать нечем (ключ не root, docker без sudo) — запуск через sudo не измерен"
+		return r
+	}
+	if err := e.ensureSudoUser(); err != nil {
+		r.Detail = "временный пользователь не создан: " + err.Error()
+		return r
+	}
+	var times []string
+	for _, which := range []string{"холодный", "тёплый"} {
+		out, err := e.Remote(`su -s /bin/sh ` + TempUser + ` -c 's=$(date +%s%N); sudo -n docker exec ` + e.Ctr.Name + ` timeout 50 sh -c true; rc=$?; e=$(date +%s%N); echo "rc=$rc ns=$((e-s))"'`)
+		if err != nil {
+			r.Detail = which + ": не выполнилось: " + err.Error()
+			return r
+		}
+		var rc int
+		var ns int64
+		if n, _ := fmt.Sscanf(strings.TrimSpace(out), "rc=%d ns=%d", &rc, &ns); n != 2 {
+			r.Detail = which + ": вывод не разобран: " + oneLine(out)
+			return r
+		}
+		if rc != 0 {
+			r.Detail = fmt.Sprintf("%s: sudo -n docker exec от %s вернул %d — время не измерено", which, TempUser, rc)
+			return r
+		}
+		d := time.Duration(ns)
+		times = append(times, fmt.Sprintf("%s %.2f с", which, d.Seconds()))
+		if d >= 10*time.Second {
+			r.Status, r.Detail = Fail, strings.Join(times, ", ")+" — запаса 10 с не хватает при записи через sudo"
+			return r
+		}
+	}
+	r.Status, r.Detail = Pass, strings.Join(times, ", ")+" (от "+TempUser+", через su)"
+	return r
 }
 
 // buildCheck — П2: ревизия и чистота сборки -new, совпадение с ревизией
@@ -886,36 +983,10 @@ func samePeers(a, b map[string]core.PeerStat) bool {
 // sudoOrders — ОТЧЁТ PR1, п. 2: запись от root, затем от пользователя с
 // docker через sudo, и наоборот; ни одного «код 66».
 func (e *Env) sudoOrders() (res Result) {
-	if e.SudoKeyEnv == nil && e.MakeSudoKey != nil {
-		env, undo, err := e.MakeSudoKey()
-		if err != nil {
-			return Result{Detail: "временный пользователь с docker через sudo не создан: " + err.Error()}
-		}
-		// удаление — и в конце шага, и по сигналу; ошибка удаления громкая,
-		// шаг НЕ ПРОЙДЕН (раунд 2, SEC S3)
-		undoDone := false
-		once := func() error {
-			if undoDone {
-				return nil
-			}
-			if err := undo(); err != nil {
-				return fmt.Errorf("ВНИМАНИЕ: временный пользователь НЕ удалён — удалите вручную на сервере: userdel %s; rm -f /etc/sudoers.d/%s (%v)", TempUser, TempUser, err)
-			}
-			undoDone = true
-			return nil
-		}
-		e.Cleanup(once)
-		e.SudoKeyEnv = env
-		defer func() {
-			e.SudoKeyEnv = nil
-			if err := once(); err != nil {
-				res.Status = Fail
-				res.Detail += "; " + err.Error()
-			}
-		}()
-	}
-	if e.SudoKeyEnv == nil {
-		return Result{Detail: "второго ключа (пользователь без root, docker через sudo) нет: не задан AMNEZIA_KEY_SUDO и временного пользователя создать нечем"}
+	// пользователь создан в К2.10 (или задан AMNEZIA_KEY_SUDO); удаляется
+	// в конце Run — шаг «У2»
+	if err := e.ensureSudoUser(); err != nil {
+		return Result{Detail: "второго ключа (пользователь без root, docker через sudo) нет: " + err.Error()}
 	}
 	order := []struct {
 		env  []string

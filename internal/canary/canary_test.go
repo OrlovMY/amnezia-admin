@@ -27,6 +27,8 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
+
+	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -62,6 +64,13 @@ func newCLI(t *testing.T) string {
 type fakeServer struct {
 	exec *fakesrv.Server
 	env  *Env
+	hk   ssh.Signer
+}
+
+// noopSudoKey — подставной MakeSudoKey для сценариев, где сервер подставной
+// (scriptedPre): пользователь «создан», удаление проходит.
+func noopSudoKey() ([]string, func() error, error) {
+	return []string{"AMNEZIA_KEY=vpn://подставной"}, func() error { return nil }, nil
 }
 
 // emptyFake — fakesrv по SSH на 127.0.0.1:0 без клиентов (wg0.conf только с
@@ -104,7 +113,7 @@ func emptyFake(t *testing.T, withClients bool) *fakeServer {
 	}
 	t.Cleanup(sess.Close)
 	ctr := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
-	return &fakeServer{exec: fs, env: &Env{
+	return &fakeServer{exec: fs, hk: hk, env: &Env{
 		Remote: func(cmd string) (string, error) {
 			s, err := sess.Client.NewSession()
 			if err != nil {
@@ -168,7 +177,7 @@ func TestFakesrvIsNeverPass(t *testing.T) {
 			t.Errorf("шаг %s «пройден» на fakesrv, который его не моделирует", id)
 		}
 	}
-	for _, id := range []string{"П2", "К2.1", "К2.2", "К2.3", "К2.4", "К2.9", "К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
+	for _, id := range []string{"П2", "К2.1", "К2.2", "К2.3", "К2.4", "К2.9", "К2.10", "К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
 		found := false
 		for _, r := range rs {
 			if r.ID == id {
@@ -495,9 +504,10 @@ func TestRaceControlWithoutLossNotChecked(t *testing.T) {
 // предусловия ПРОЙДЕНЫ, но на хосте нет flock (К2.5) — записи не идут, К3–К7
 // НЕ ПРОВЕРЕНО. Подставной сервер отвечает на каждую команду предусловий.
 func TestGateIncludesToolsAndTiming(t *testing.T) {
-	for _, broken := range []string{"К2.5", "К2.6", "К2.9"} {
+	for _, broken := range []string{"К2.5", "К2.6", "К2.9", "К2.10"} {
 		t.Run(broken, func(t *testing.T) {
 			f := emptyFake(t, false)
+			f.env.MakeSudoKey = noopSudoKey
 			real := f.env.Remote
 			f.env.Remote = scriptedPre(real, broken)
 			f.env.NewBin = "не-вызывается"
@@ -518,7 +528,7 @@ func TestGateIncludesToolsAndTiming(t *testing.T) {
 				}
 			}
 			// все прочие предусловия ПРОЙДЕНЫ — шлюз закрыт именно сломанным
-			for _, id := range []string{"П0", "П1", "К2.1", "К2.2", "К2.3", "К2.4", "К2.5", "К2.6", "К2.9"} {
+			for _, id := range []string{"П0", "П1", "К2.1", "К2.2", "К2.3", "К2.4", "К2.5", "К2.6", "К2.9", "К2.10"} {
 				if id != broken && seen[id] != Pass {
 					t.Errorf("предусловие %s: %s — сценарий не изолирует %s", id, seen[id], broken)
 				}
@@ -669,6 +679,11 @@ func TestWgWrapperRealShell(t *testing.T) {
 func scriptedPre(real func(string) (string, error), broken string) func(string) (string, error) {
 	return func(cmd string) (string, error) {
 		switch {
+		case strings.Contains(cmd, "su -s /bin/sh "+TempUser):
+			if broken == "К2.10" {
+				return "rc=0 ns=12000000000", nil
+			}
+			return "rc=0 ns=150000000", nil
 		case strings.Contains(cmd, "ls -ld /run/lock"):
 			return "drwxrwxrwt 3 root root 60 Oct 1 /run/lock", nil
 		case strings.Contains(cmd, "busybox"):
@@ -893,6 +908,7 @@ func TestCleanupFailureInSummary(t *testing.T) {
 	}
 	f.env.NewBin = fakeCLI(t, "fakecli-fail")
 	f.env.RaceRounds = 1
+	f.env.MakeSudoKey = noopSudoKey
 	rs, err := Run(f.env)
 	if err != nil {
 		t.Fatal(err)
@@ -944,5 +960,118 @@ func TestIsBusy(t *testing.T) {
 		if got := isBusy(c.r); got != c.want {
 			t.Errorf("%+v: %v, ожидалось %v", c.r, got, c.want)
 		}
+	}
+}
+
+// TestSudoOrdersModelOnFakesrv — H1, PR4.2 доездом: второй SSH-вход на тот
+// же fakesrv (тот же ключ хоста) под amnezia-canary устроен как sudoers
+// «NOPASSWD: docker» без группы docker (fakesrv.ListenSSHSudoOnly: docker без
+// sudo — отказ сокета, sudo — только docker). Настоящая новая версия пишет в
+// обоих порядках root ↔ sudo — ПРОЙДЕН; на сервер дошла команда записи с
+// `sudo -n docker exec` ВНУТРИ замка.
+func TestSudoOrdersModelOnFakesrv(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	const pw = "canary-sudo-pw"
+	ln, err := fakesrv.ListenSSHSudoOnly("127.0.0.1:0", TempUser, pw, f.hk, f.exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	host, port, _ := net.SplitHostPort(ln.Addr())
+	undone := false
+	f.env.MakeSudoKey = func() ([]string, func() error, error) {
+		raw, _ := json.Marshal(map[string]any{"hostName": host, "userName": TempUser, "password": pw, "port": port})
+		return []string{"AMNEZIA_KEY=vpn://" + base64.RawURLEncoding.EncodeToString(raw)}, func() error { undone = true; return nil }, nil
+	}
+	r := f.env.sudoOrders()
+	if r.Status != Pass {
+		t.Fatalf("PR4.2 при NOPASSWD: docker: %s — %s", r.Status, r.Detail)
+	}
+	sudoWrite := false
+	for _, c := range f.exec.Commands() {
+		if strings.Contains(c, "flock -w 15 -E 4 /run/lock/ sudo -n docker exec") {
+			sudoWrite = true
+		}
+	}
+	if !sudoWrite {
+		t.Error("запись под sudo не дошла до сервера — путь sudo не проверен")
+	}
+	if err := f.env.dropSudoUser(); err != nil || !undone {
+		t.Errorf("временный пользователь не удалён: %v %v", err, undone)
+	}
+}
+
+// TestSudoOnlyPolicy — модель sudoers: sudo разрешает только docker; команда
+// до H1 (`sudo timeout … flock … docker exec`) отвергается текстом sudo.
+func TestSudoOnlyPolicy(t *testing.T) {
+	f := emptyFake(t, false)
+	ln, err := fakesrv.ListenSSHSudoOnly("127.0.0.1:0", TempUser, "pw", f.hk, f.exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	c, err := ssh.Dial("tcp", ln.Addr(), &ssh.ClientConfig{User: TempUser, Auth: []ssh.AuthMethod{ssh.Password("pw")}, HostKeyCallback: ssh.FixedHostKey(f.hk.PublicKey())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	run := func(cmd string) (string, error) {
+		s, err := c.NewSession()
+		if err != nil {
+			return "", err
+		}
+		defer s.Close()
+		out, err := s.CombinedOutput(cmd)
+		return string(out), err
+	}
+	for _, x := range []struct {
+		cmd  string
+		ok   bool
+		text string
+	}{
+		{"docker exec amnezia-awg cat /opt/amnezia/awg/wg0.conf", false, "docker.sock"},
+		{"sudo docker exec amnezia-awg cat /opt/amnezia/awg/wg0.conf", true, ""},
+		{"sudo timeout 75 flock -w 15 -E 4 /run/lock/ docker exec -i amnezia-awg true", false, "is not allowed to execute 'timeout'"},
+	} {
+		out, err := run(x.cmd)
+		if (err == nil) != x.ok || !strings.Contains(out, x.text) {
+			t.Errorf("%q: err=%v out=%q", x.cmd, err, out)
+		}
+	}
+}
+
+// TestSudoTimingTable — К2.10 (L-1 к H1): разбор замера от sudo-пользователя.
+func TestSudoTimingTable(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		out    string
+		err    error
+		mk     bool
+		docker string
+		want   Status
+	}{
+		{"быстро", "rc=0 ns=150000000", nil, true, "docker", Pass},
+		{"дольше запаса", "rc=0 ns=10000000000", nil, true, "docker", Fail},
+		{"sudo отказал (rc=1)", "rc=1 ns=5000000", nil, true, "docker", NotChecked},
+		{"вывод не разобран", "su: Authentication failure", nil, true, "docker", NotChecked},
+		{"не выполнилось", "", errors.New("exit status 1"), true, "docker", NotChecked},
+		{"нечем создать пользователя, docker без sudo", "", nil, false, "docker", NotChecked},
+		{"ключ не root: К2.9 мерил через sudo", "", nil, false, "sudo -n docker", Pass},
+	} {
+		e := &Env{Ctr: &core.Container{Name: "amnezia-awg"}, docker: c.docker}
+		e.Remote = func(string) (string, error) { return c.out, c.err }
+		if c.mk {
+			e.MakeSudoKey = noopSudoKey
+		}
+		if r := e.sudoTiming(); r.Status != c.want {
+			t.Errorf("%s: %s — %s", c.name, r.Status, r.Detail)
+		}
+	}
+	// пользователь не создан — НЕ ПРОВЕРЕНО
+	e := &Env{Ctr: &core.Container{Name: "amnezia-awg"}, docker: "docker"}
+	e.MakeSudoKey = func() ([]string, func() error, error) { return nil, nil, errors.New("useradd: отказ") }
+	if r := e.sudoTiming(); r.Status != NotChecked {
+		t.Errorf("пользователь не создан: %s — %s", r.Status, r.Detail)
 	}
 }
