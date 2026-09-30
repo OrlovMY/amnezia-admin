@@ -18,7 +18,7 @@ import (
 
 // isCASWriteCmd — команда записи (apply или rollback).
 func isCASWriteCmd(cmd string) bool {
-	return strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/ docker exec") || strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/ sudo -n docker exec")
+	return strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/ docker exec") || strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/ env LC_ALL=C sudo -n docker exec")
 }
 
 // snapshot — оба файла на сервере.

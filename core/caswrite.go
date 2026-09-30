@@ -146,7 +146,12 @@ func casWriteCommand(label, container, dir, wantWg, wantTbl string, sudo bool) (
 	}
 	docker := "docker"
 	if sudo {
-		docker = "sudo -n docker"
+		// env LC_ALL=C (SEC-01 R2): sudo переводит свои сообщения по локали
+		// вызывающего, а отказ sudo распознаётся по английскому тексту
+		// (reSudoDenied). Через env, а не VAR=… перед sudo: flock запускает
+		// программу, а не оболочку. sudo сверяет с sudoers программу ПОСЛЕ
+		// себя — по-прежнему docker.
+		docker = "env LC_ALL=C sudo -n docker"
 	}
 	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s",
 		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
@@ -292,9 +297,9 @@ func casDeniedBeforeWrite(err error) bool {
 		return false
 	}
 	// Только stderr: текст ошибки sshRunner начинается с САМОЙ команды, а в
-	// ней — текст скрипта с меткой «not moved: »; по всему тексту признак не
-	// срабатывал никогда (слияние H1, найдено моделью канарейки PR4.2).
-	s := strings.ToLower(stderrTail(err))
+	// ней — текст скрипта с меткой «not moved: » (слияние H1, найдено моделью
+	// канарейки PR4.2).
+	s := strings.ToLower(stderrText(err))
 	if strings.Contains(s, "not moved: ") {
 		return false // скрипт уже шёл и дошёл до mv — отказ после начала записи
 	}
@@ -313,9 +318,16 @@ var reSudoDenied = regexp.MustCompile(`sudo: a password is required|sudo: a term
 	`Sorry, user \S+ is not allowed to execute|I'm afraid I can't do that|is not in the sudoers file`)
 
 // casSudoRefused — повтор под sudo отказан самим sudo (код 1 и его текст).
+// Метка скрипта «not moved:» (PR-3: mv не удался — запись могла начаться)
+// исключает отказ sudo даже при совпадении фразы: глубина обороны (SEC-01
+// R1) — раз скрипт работал, sudo docker пустил.
 func casSudoRefused(err error) bool {
 	var es interface{ ExitStatus() int }
-	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(stderrTail(err))
+	if err == nil || !errors.As(err, &es) || es.ExitStatus() != 1 {
+		return false
+	}
+	s := stderrText(err) // только stderr: в тексте команды — сам скрипт с метками
+	return reSudoDenied.MatchString(s) && !strings.Contains(s, "not moved:")
 }
 
 // sudoersUser — имя пользователя для подсказки строки sudoers: настоящее,
@@ -330,13 +342,22 @@ func sudoersUser(c *ServerCreds) string {
 
 var reSudoersUser = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
 
-// stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
-func stderrTail(err error) string {
+// stderrText — stderr целиком: всё после последнего "stderr: " (формат
+// sshRunner и fakesrv). Признаки исхода смотрят ТОЛЬКО сюда: текст ошибки
+// sshRunner начинается с самой команды, а в ней — текст скрипта (в PR-3 — с
+// меткой «not moved: »), и поиск по всему тексту ошибки видел бы метки
+// скрипта там, где их вывел не скрипт (fix/a3b-texts 45dd2b2).
+func stderrText(err error) string {
 	s := err.Error()
 	if i := strings.LastIndex(s, "stderr: "); i >= 0 {
 		s = s[i+len("stderr: "):]
 	}
-	s = strings.TrimSpace(s)
+	return strings.TrimSpace(s)
+}
+
+// stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
+func stderrTail(err error) string {
+	s := stderrText(err)
 	if len(s) > 300 {
 		s = s[:300] + "…"
 	}

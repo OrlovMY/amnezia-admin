@@ -1239,7 +1239,7 @@ func casWriteTemplate(label string) string {
 // casWriteTemplateSudo — повтор записи под sudo (AU-LOGIC PR-4, H1): sudo
 // внутри замка, прямо перед docker.
 func casWriteTemplateSudo(label string) string {
-	return "timeout 75 flock -w 15 -E 4 /run/lock/ sudo -n docker exec -i " + dyn +
+	return "timeout 75 flock -w 15 -E 4 /run/lock/ env LC_ALL=C sudo -n docker exec -i " + dyn +
 		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 
