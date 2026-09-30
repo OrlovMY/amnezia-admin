@@ -26,9 +26,9 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/guiview"
-	"amnezia-admin/internal/writeoutcome"
 	"amnezia-admin/internal/kbdlayout"
 	"amnezia-admin/internal/version"
+	"amnezia-admin/internal/writeoutcome"
 )
 
 type ui struct {
