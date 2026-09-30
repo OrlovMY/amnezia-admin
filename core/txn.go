@@ -835,12 +835,39 @@ func splitLines(data []byte) []string {
 // probeClientsTable — тот же `test -f`, что и раньше в LoadClients; вынесен
 // отдельно, чтобы CAS (Г4) мог проверить "файла по-прежнему нет", не читая
 // содержимое.
+//
+// ТРИ ИСХОДА, А НЕ ДВА (A1б, признак 1). Команда печатает «yes» или «no»,
+// но ответ сервера бывает и третьим: пустым (контейнер перезапускается, sh
+// в нём нет, вывод съеден обёрткой) или посторонним. Прежде любой ответ,
+// кроме «yes», читался как «файла нет», и дальше срабатывала ровно та
+// ветка, против которой проверка заведена: LoadClients отдавала пустой
+// список, AddUser записывал таблицу из одного нового пользователя поверх
+// всех существующих, а CAS повторял ту же пробу и пропускал запись.
+// Непонятый ответ — ошибка, а не «нет».
 func (s *Session) probeClientsTable(c *Container) (bool, error) {
 	probe, err := s.docker(fmt.Sprintf("docker exec %s sh -c 'test -f %s/clientsTable && echo yes || echo no'", c.Name, c.Dir), nil)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(probe) == "yes", nil
+	switch strings.TrimSpace(probe) {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("непонятный ответ сервера: %q — есть ли файл %s/clientsTable, неизвестно; "+
+		"ничего не прочитано и не записано", shortReply(probe), c.Dir)
+}
+
+// shortReply — ответ сервера для текста ошибки: без секретов (maskFreeText)
+// и не длиннее 80 знаков, чтобы посторонний вывод не превращал сообщение в
+// простыню.
+func shortReply(s string) string {
+	s = maskFreeText(strings.TrimSpace(s))
+	if r := []rune(s); len(r) > 80 {
+		return string(r[:80]) + "…"
+	}
+	return s
 }
 
 // readClientsTableRaw — сырые байты clientsTable и признак существования

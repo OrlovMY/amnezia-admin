@@ -328,7 +328,17 @@ type PeerStat struct {
 // parsePeerStats разбирает вывод `wg show wg0 dump`: первая строка — интерфейс
 // (пропускается), остальные — peer'ы, поля разделены табами. Endpoint может
 // быть "(none)", поэтому strings.Fields недопустим — только split по "\t".
-func parsePeerStats(out string) map[string]PeerStat {
+//
+// НЕРАЗОБРАННОЕ — ОШИБКА, А НЕ НОЛЬ (A1б, признак 2). Прежде ошибки
+// strconv.ParseInt отбрасывались, и поле, которое не разобралось, уезжало к
+// человеку нулём: «—» (не подключался) и «0 B / 0 B» как измерение. Строка
+// peer'а короче восьми полей молча пропускалась — и клиент оказывался «нет
+// в статистике сервера (сейчас сервер его не принимает)», хотя сервер его
+// держит. Ответ, который мы не поняли, — это «статистику получить не
+// удалось» целиком: для этого состояния у всех потребителей уже есть свой
+// текст (core.PeerFailed, core.SeenFailed), а угадывать, какие строки ответа
+// верны, если одна из них нет, — не наше право.
+func parsePeerStats(out string) (map[string]PeerStat, error) {
 	stats := map[string]PeerStat{}
 	lines := strings.Split(out, "\n")
 	for i, line := range lines {
@@ -341,19 +351,24 @@ func parsePeerStats(out string) map[string]PeerStat {
 		}
 		f := strings.Split(line, "\t")
 		if len(f) < 8 {
-			continue
+			return nil, fmt.Errorf("ответ wg show не разобран: в строке %d полей %d, ожидалось 8", i+1, len(f))
 		}
 		pub := f[0]
-		hs, _ := strconv.ParseInt(f[4], 10, 64)
-		rx, _ := strconv.ParseInt(f[5], 10, 64)
-		tx, _ := strconv.ParseInt(f[6], 10, 64)
-		var t time.Time
-		if hs > 0 {
-			t = time.Unix(hs, 0)
+		var nums [3]int64
+		for k, name := range []string{"время рукопожатия", "принято байт", "передано байт"} {
+			n, err := strconv.ParseInt(f[4+k], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("ответ wg show не разобран: строка %d, поле «%s» — не число", i+1, name)
+			}
+			nums[k] = n
 		}
-		stats[pub] = PeerStat{LastHandshake: t, RxBytes: rx, TxBytes: tx}
+		var t time.Time
+		if nums[0] > 0 {
+			t = time.Unix(nums[0], 0)
+		}
+		stats[pub] = PeerStat{LastHandshake: t, RxBytes: nums[1], TxBytes: nums[2]}
 	}
-	return stats
+	return stats, nil
 }
 
 // GetPeerStats возвращает статистику по каждому peer'у (handshake, трафик)
@@ -362,7 +377,11 @@ func (s *Session) GetPeerStats(c *Container) (map[string]PeerStat, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wg show wg0 dump: %w", err)
 	}
-	return parsePeerStats(out), nil
+	stats, err := parsePeerStats(out)
+	if err != nil {
+		return nil, fmt.Errorf("wg show wg0 dump: %w", err)
+	}
+	return stats, nil
 }
 
 // GetHandshakes возвращает время последнего handshake по каждому публичному ключу
@@ -757,11 +776,16 @@ func SortByActivity(clients []ClientEntry, stats map[string]PeerStat) {
 	})
 }
 
-// OrphanPeers — публичные ключи peer'ов из wg0.conf, отсутствующие в clientsTable
-func (s *Session) OrphanPeers(c *Container, clients []ClientEntry) []string {
+// OrphanPeers — публичные ключи peer'ов из wg0.conf, отсутствующие в clientsTable.
+//
+// ОШИБКА ВОЗВРАЩАЕТСЯ (A1б, признак 2). Прежняя сигнатура — только
+// []string — при отказе чтения wg0.conf отдавала nil, то есть «сирот нет»:
+// list молчал ровно так же, как на чистом сервере, и человек не узнавал,
+// что проверка не состоялась.
+func (s *Session) OrphanPeers(c *Container, clients []ClientEntry) ([]string, error) {
 	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
 	known := map[string]bool{}
 	for _, cl := range clients {
@@ -773,7 +797,7 @@ func (s *Session) OrphanPeers(c *Container, clients []ClientEntry) []string {
 			orphans = append(orphans, pk)
 		}
 	}
-	return orphans
+	return orphans, nil
 }
 
 // ---------- wg0.conf ----------

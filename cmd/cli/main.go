@@ -231,13 +231,32 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		}
 	}
 
-	if orphans := s.OrphanPeers(c, clients); len(orphans) > 0 {
+	// Сироты печатаются только когда они есть, поэтому молчание здесь —
+	// утверждение «сирот нет». Не удалось проверить — говорим об этом
+	// (A1б, признак 2), иначе отказ чтения выглядит чистым сервером.
+	orphans, orphErr := s.OrphanPeers(c, clients)
+	if note := orphanNote(orphErr); note != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, cWarn(note))
+	}
+	if len(orphans) > 0 {
 		fmt.Fprintf(w, "\nPeers в wg0.conf без имени в clientsTable: %d\n", len(orphans))
 		for _, o := range orphans {
 			fmt.Fprintln(w, "  ", o)
 		}
 	}
 	return clients, nil
+}
+
+// orphanNote — строка о несостоявшейся проверке peers без имени; "" — если
+// проверка состоялась. Причина печатается: она уже прошла маскировку
+// секретов на границе (core.sshRunner), а без неё человеку нечего чинить.
+func orphanNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "Проверить peers в wg0.conf без имени в clientsTable не удалось: " + err.Error() +
+		". Есть ли такие — неизвестно."
 }
 
 // listActivityText — ячейка «Активность» таблицы list, без раскраски.
