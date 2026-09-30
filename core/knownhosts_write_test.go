@@ -120,4 +120,17 @@ func TestKnownHostsLockBusy(t *testing.T) {
 	if err := appendKnownHost(kh, "127.0.0.1:2222", key); err != nil {
 		t.Fatalf("после снятия замка запись обязана пройти: %v", err)
 	}
+	// Права как прежде: known_hosts и файл замка — только владелец. На
+	// Windows биты прав не выражают ACL — проверяется на Unix.
+	if runtime.GOOS != "windows" {
+		for _, p := range []string{kh, kh + ".lock"} {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm()&0o077 != 0 {
+				t.Errorf("%s: права %v, ждали без доступа группе и прочим", filepath.Base(p), fi.Mode().Perm())
+			}
+		}
+	}
 }
