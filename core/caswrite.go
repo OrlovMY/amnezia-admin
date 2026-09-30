@@ -107,10 +107,26 @@ var (
 )
 
 // CASWriteCommand собирает серверную команду записи: замок на хосте
-// (/run/lock, файл на каждый контейнер), ожидание замка 15 с, вся команда —
-// не дольше 60 с. Аргументы проверяются до сборки: в текст команды не может
-// попасть ничего, кроме имени, пути и сумм.
+// (flock на каталоге CASLockDir), ожидание замка casLockWait, вся команда —
+// не дольше casOuterTimeout. Аргументы проверяются до сборки: в текст
+// команды не может попасть ничего, кроме имени, пути и сумм.
 func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, error) {
+	return casWriteCommand(label, container, dir, wantWg, wantTbl, false)
+}
+
+// CASWriteCommandSudo — та же команда для повтора под sudo (AU-LOGIC PR-4,
+// H1): sudo стоит ВНУТРИ замка, прямо перед docker — `… flock … /run/lock/
+// sudo -n docker exec …`. sudo сверяет sudoers с ПЕРВОЙ программой после
+// себя; прежний повтор `sudo timeout … flock … docker …` требовал права на
+// timeout и отказывал пользователю с `NOPASSWD: docker`, которому v0.2.0
+// (`sudo docker exec …`) писать позволял. timeout и flock идут от
+// пользователя: замок на каталоге открывается без прав. `-n` — sudo не ждёт
+// пароль внутри замка, а сразу отказывает.
+func CASWriteCommandSudo(label, container, dir, wantWg, wantTbl string) (string, error) {
+	return casWriteCommand(label, container, dir, wantWg, wantTbl, true)
+}
+
+func casWriteCommand(label, container, dir, wantWg, wantTbl string, sudo bool) (string, error) {
 	if label != CASLabelApply && label != CASLabelRollback {
 		return "", fmt.Errorf("недопустимая метка записи %q", label)
 	}
@@ -123,8 +139,12 @@ func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, err
 	if !reCASSum.MatchString(wantWg) || !reCASSum.MatchString(wantTbl) {
 		return "", fmt.Errorf("недопустимая контрольная сумма")
 	}
-	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
-		casOuterTimeout, casLockWait, CASLockDir, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
+	docker := "docker"
+	if sudo {
+		docker = "sudo -n docker"
+	}
+	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s",
+		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
@@ -148,6 +168,10 @@ var ErrServerToolMissing = errors.New("на сервере нет нужной �
 // или не получен вовсе. Это не успех и не «не записано».
 var ErrWriteUnknown = errors.New("неизвестно, записаны ли изменения")
 
+// ErrSudoDenied — sudo отказал запустить docker (нет права или нужен
+// пароль); docker exec не запускался, ничего не записано.
+var ErrSudoDenied = errors.New("sudo не разрешил запуск docker")
+
 // ErrRollbackForeign — откат не выполнен: после нашей записи файлы изменил
 // кто-то другой, и откат стёр бы его изменения.
 var ErrRollbackForeign = errors.New("откат не выполнен: после нашей записи файлы изменил другой")
@@ -161,6 +185,7 @@ const (
 	casToolMissing
 	casPartial
 	casLockOpen
+	casSudoDenied
 	casUnknown
 )
 
@@ -215,6 +240,8 @@ func (e *casWriteError) Is(target error) bool {
 		return target == ErrServerBusy
 	case casToolMissing, casLockOpen:
 		return target == ErrServerToolMissing
+	case casSudoDenied:
+		return target == ErrSudoDenied
 	case casUnknown, casPartial:
 		return target == ErrWriteUnknown
 	}
@@ -235,6 +262,22 @@ func casDeniedBeforeWrite(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "permission denied") &&
 		(strings.Contains(s, "docker.sock") || strings.Contains(s, "docker daemon socket"))
+}
+
+// reSudoDenied — ЗАКРЫТЫЙ список сообщений sudo об отказе (sudo 1.9, язык
+// C/английский). Код 1 при повторе под sudo — общий и для sudo, и для
+// скрипта; отличить отказ sudo можно только по его тексту. Сообщения
+// скрипта начинаются с «changed:», «missing tool:», сообщения docker — с
+// «Error»/«docker:», строки «sudo:» или «Sorry, user» не даёт никто, кроме
+// sudo. Текст на другом языке (sudo переводит по LANG сервера) в список не
+// попадёт — тогда исход остаётся «неизвестно», в осторожную сторону.
+var reSudoDenied = regexp.MustCompile(`sudo: a password is required|sudo: a terminal is required|` +
+	`Sorry, user \S+ is not allowed to execute|I'm afraid I can't do that|is not in the sudoers file`)
+
+// casSudoRefused — повтор под sudo отказан самим sudo (код 1 и его текст).
+func casSudoRefused(err error) bool {
+	var es interface{ ExitStatus() int }
+	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(err.Error())
 }
 
 // stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
@@ -263,10 +306,19 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	// повтор отвечал «изменил другой». Здесь под sudo повторяем, только если
 	// отказ точно случился до записи — docker не пустил к своему сокету.
 	_, runErr := s.run(cmd, stdin)
+	sudoRefused := false
 	if casDeniedBeforeWrite(runErr) {
-		_, runErr = s.run("sudo "+cmd, stdin)
+		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, wantWg, wantTbl)
+		if err != nil {
+			return fmt.Errorf("запись не выполнена: %w", err)
+		}
+		_, runErr = s.run(sudoCmd, stdin)
+		sudoRefused = casSudoRefused(runErr)
 	}
 	outcome, code := casOutcomeOf(runErr)
+	if sudoRefused {
+		outcome = casSudoDenied
+	}
 	switch outcome {
 	case casWritten:
 		return nil
@@ -283,6 +335,9 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	case casBusy:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: "сервер занят другой копией программы — ничего не записано; повторите через минуту"}
+	case casSudoDenied:
+		return &casWriteError{outcome: outcome, cause: runErr,
+			msg: fmt.Sprintf("docker без sudo недоступен, а sudo не разрешил запустить docker (%s) — ничего не записано; нужна строка sudoers вида «пользователь ALL=(root) NOPASSWD: /usr/bin/docker»", stderrTail(runErr))}
 	case casLockOpen:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: fmt.Sprintf("не удалось открыть замок %s (код 66: %s) — ничего не записано", CASLockDir, stderrTail(runErr))}
