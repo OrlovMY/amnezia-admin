@@ -141,7 +141,12 @@ func casWriteCommand(label, container, dir, wantWg, wantTbl string, sudo bool) (
 	}
 	docker := "docker"
 	if sudo {
-		docker = "sudo -n docker"
+		// env LC_ALL=C (SEC-01 R2): sudo переводит свои сообщения по локали
+		// вызывающего, а отказ sudo распознаётся по английскому тексту
+		// (reSudoDenied). Через env, а не VAR=… перед sudo: flock запускает
+		// программу, а не оболочку. sudo сверяет с sudoers программу ПОСЛЕ
+		// себя — по-прежнему docker.
+		docker = "env LC_ALL=C sudo -n docker"
 	}
 	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s",
 		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
@@ -275,9 +280,16 @@ var reSudoDenied = regexp.MustCompile(`sudo: a password is required|sudo: a term
 	`Sorry, user \S+ is not allowed to execute|I'm afraid I can't do that|is not in the sudoers file`)
 
 // casSudoRefused — повтор под sudo отказан самим sudo (код 1 и его текст).
+// Метка скрипта «not moved:» (PR-3: mv не удался — запись могла начаться)
+// исключает отказ sudo даже при совпадении фразы: глубина обороны (SEC-01
+// R1) — раз скрипт работал, sudo docker пустил.
 func casSudoRefused(err error) bool {
 	var es interface{ ExitStatus() int }
-	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(err.Error())
+	if err == nil || !errors.As(err, &es) || es.ExitStatus() != 1 {
+		return false
+	}
+	s := err.Error()
+	return reSudoDenied.MatchString(s) && !strings.Contains(s, "not moved:")
 }
 
 // stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
