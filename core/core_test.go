@@ -1232,7 +1232,7 @@ mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && ex
 exit 0`
 
 func casWriteTemplate(label string) string {
-	return "timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin." + dyn + ".lock docker exec -i " + dyn +
+	return "timeout 75 flock -w 15 -E 4 /run/lock/amnezia-admin." + dyn + ".lock docker exec -i " + dyn +
 		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 
@@ -1413,16 +1413,63 @@ func TestServerCommandsGuardCanary(t *testing.T) {
 	}
 	for _, plant := range []string{"drop-delete", "extra-stats", "alien-cmd"} {
 		t.Run(plant, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run", "^TestServerCommandsUnchanged$", "-test.count=1", "-test.v")
+			// Без -test.v: вывод t.Logf прошедшего теста не печатается вовсе,
+			// а метка ищется только в блоке упавшего теста (от строки
+			// «--- FAIL: TestServerCommandsUnchanged» до следующей «---»).
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestServerCommandsUnchanged$", "-test.count=1")
 			cmd.Env = append(os.Environ(), t7PlantEnv+"="+plant)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("сторож не уронил прогон на посадке %q:\n%s", plant, out)
 			}
-			if !strings.Contains(string(out), t7Marker) {
-				t.Fatalf("прогон упал не по вердикту сторожа (нет %q) на посадке %q:\n%s", t7Marker, plant, out)
+			if !t7FailBlockHasMarker(string(out)) {
+				t.Fatalf("прогон упал не по вердикту сторожа (нет %q в блоке провала) на посадке %q:\n%s", t7Marker, plant, out)
 			}
 		})
+	}
+}
+
+// t7FailBlockHasMarker — есть ли метка вердикта в блоке провала
+// TestServerCommandsUnchanged.
+func t7FailBlockHasMarker(out string) bool {
+	in := false
+	for _, l := range strings.Split(out, "\n") {
+		trim := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(trim, "--- FAIL: TestServerCommandsUnchanged "):
+			in = true
+		case strings.HasPrefix(trim, "---") || trim == "FAIL" || trim == "PASS":
+			in = false
+		case in && strings.Contains(l, ": "+t7Marker):
+			return true
+		}
+	}
+	return false
+}
+
+// TestCASTimeoutInvariant — SEC R2': внешний таймаут больше ожидания замка
+// плюс внутренний; тот же порядок — в тексте команды.
+func TestCASTimeoutInvariant(t *testing.T) {
+	if casOuterTimeout <= casLockWait+casInnerTimeout {
+		t.Errorf("внешний таймаут %d не больше ожидания замка %d + внутреннего %d", casOuterTimeout, casLockWait, casInnerTimeout)
+	}
+	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", strings.Repeat("a", 64), CASAbsent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outer, wait, inner int
+	if _, err := fmt.Sscanf(cmd, "timeout %d flock -w %d", &outer, &wait); err != nil {
+		t.Fatalf("разбор команды: %v", err)
+	}
+	i := strings.Index(cmd, "docker exec -i amnezia-awg timeout ")
+	if i < 0 {
+		t.Fatal("в команде нет внутреннего timeout")
+	}
+	if _, err := fmt.Sscanf(cmd[i:], "docker exec -i amnezia-awg timeout %d", &inner); err != nil {
+		t.Fatalf("разбор внутреннего timeout: %v", err)
+	}
+	if outer <= wait+inner {
+		t.Errorf("в команде внешний %d не больше %d + %d", outer, wait, inner)
 	}
 }
 

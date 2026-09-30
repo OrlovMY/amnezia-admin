@@ -61,6 +61,10 @@ type Server struct {
 	// настоящем скрипте падает с «Permission denied» (подменой mv в PATH).
 	FailMvTo string
 
+	// Violations — нарушения протокола, замеченные сервером (повтор записи
+	// под sudo после начатой записи).
+	Violations []string
+
 	// TempLeft — сколько временных файлов *.aa.* скрипт оставил после себя
 	// (сумма по всем командам записи); читать после работы Session.
 	TempLeft int
@@ -103,6 +107,7 @@ type Server struct {
 	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
 	commands      []string
 	stdins        [][]byte // stdin команд записи
+	writeStarted  string   // команда записи, дошедшая до скрипта последней командой
 	denyOnceUsed  bool
 	syncconfCalls int // счётчик вызовов syncconf — для FailSyncconfFrom
 	writeCalls    int // счётчик команд записи — для WriteFault
@@ -225,7 +230,7 @@ var (
 	// скрипта здесь не сверяется (это делает TestServerCommandsUnchanged в
 	// core); fakesrv моделирует его смысл, а не исполняет его — исполнение в
 	// настоящих оболочках — PR-2.
-	reCASWrite = regexp.MustCompile(`^timeout 60 flock -w 15 -E 4 /run/lock/amnezia-admin\.(\S+)\.lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/amnezia-admin\.(\S+)\.lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
@@ -249,6 +254,15 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	if strings.HasPrefix(actual, "sudo ") {
 		isSudo = true
 		actual = strings.TrimPrefix(actual, "sudo ")
+	}
+	// Второй признак SEC F1: повтор ТОЙ ЖЕ команды записи под sudo сразу
+	// после того, как она дошла до скрипта, — повтор после (возможно)
+	// частичной записи. Отказ и запись в Violations.
+	started := s.writeStarted
+	s.writeStarted = ""
+	if isSudo && started != "" && started == actual {
+		s.Violations = append(s.Violations, "повтор записи под sudo после начатой записи")
+		return "", fmt.Errorf("fakesrv: НАРУШЕНИЕ: повтор записи под sudo после начатой записи: %.80q", cmd)
 	}
 	if s.DenyOnce && !isSudo && !s.denyOnceUsed {
 		s.denyOnceUsed = true
@@ -420,6 +434,7 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(5, "missing tool: "+s.MissingTool)
 	}
 	s.writeCalls++
+	s.writeStarted = cmd
 	s.stdins = append(s.stdins, append([]byte(nil), stdin...))
 	fault, faulty := s.WriteFault[s.writeCalls]
 	if faulty && !fault.Written {

@@ -36,9 +36,15 @@ const CASTempInfix = ".aa."
 // Таймауты: внешний (на хосте) держит клиента flock/docker exec, внутренний
 // (в контейнере) — сам скрипт. Внутренний меньше: скрипт умирает раньше,
 // чем снимется замок, и запись не переживает замок (SEC R2).
+//
+// Внешний обязан быть больше, чем ожидание замка плюс внутренний (SEC R2'):
+// иначе внешний убьёт flock, пока скрипт в контейнере ещё пишет, и замок
+// снимется раньше записи. Запас — на запуск docker exec.
 const (
-	casOuterTimeout = 60
+	casLockWait     = 15
 	casInnerTimeout = 50
+	casOuterMargin  = 10
+	casOuterTimeout = casLockWait + casInnerTimeout + casOuterMargin
 )
 
 // CASWriteScript — POSIX sh, исполняется в контейнере: sh -c СКРИПТ МЕТКА
@@ -101,8 +107,8 @@ func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, err
 	if !reCASSum.MatchString(wantWg) || !reCASSum.MatchString(wantTbl) {
 		return "", fmt.Errorf("недопустимая контрольная сумма")
 	}
-	return fmt.Sprintf("timeout %d flock -w 15 -E 4 /run/lock/amnezia-admin.%s.lock docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
-		casOuterTimeout, container, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
+	return fmt.Sprintf("timeout %d flock -w %d -E 4 /run/lock/amnezia-admin.%s.lock docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
+		casOuterTimeout, casLockWait, container, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
