@@ -124,6 +124,12 @@ func TestApplyErrorsClassified(t *testing.T) {
 			s.FailReadTimes = map[string]int{"/opt/amnezia/awg/wg0.conf": 1}
 			s.FailSyncconfFrom = 2
 		}, writeoutcome.RolledBackNotApplied},
+		// измеренный отказ рантайма И не прочитать файлы: рантайм стоит
+		// ВЫШЕ незнания о файлах — ошибка чтения его не перекрывает.
+		{"рантайм не вернулся, файлы не прочитать", func(s *fakesrv.Server) {
+			s.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("имитированный отказ чтения")}
+			s.FailSyncconfFrom = 2
+		}, writeoutcome.RolledBackNotApplied},
 		// файлы после отката прочитаны, но не совпали с прежними.
 		{"файлы после отката не совпали", func(s *fakesrv.Server) {
 			s.FailSyncconf = errors.New("имитированный отказ syncconf")
