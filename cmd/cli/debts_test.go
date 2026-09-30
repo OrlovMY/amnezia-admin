@@ -226,6 +226,53 @@ func TestDebtsToggleUnknownDisables(t *testing.T) {
 	}
 }
 
+// TestDebtsToggleUnknownNoPeerSaysRecordOnly — раунд 5 (Н-4), ДОЕЗД через
+// полный run(): у клиента с "true" строкой peer'а в wg0.conf нет. toggle
+// проходит, итог прямо говорит, что правилась только запись; -dry-run
+// говорит то же до записи. wg0.conf не меняется. На aab4da6 — отказ «peer
+// не найден».
+func TestDebtsToggleUnknownNoPeerSaysRecordOnly(t *testing.T) {
+	key, kh, srv := setupFakeSSHForRunWithExec(t)
+	const tbl, wg = "/opt/amnezia/awg/clientsTable", "/opt/amnezia/awg/wg0.conf"
+	raw, _ := srv.File(tbl)
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+		t.Fatalf("подготовка: %v", err)
+	}
+	ud := list[0]["userData"].(map[string]any)
+	ud["disabled"] = "true"
+	id, name := list[0]["clientId"].(string), ud["clientName"].(string)
+	out, _ := json.Marshal(list)
+	srv.SetFile(tbl, out)
+	conf, _ := srv.File(wg)
+	var kept []string
+	for _, b := range strings.Split(string(conf), "\n\n") {
+		if !strings.Contains(b, id) {
+			kept = append(kept, b)
+		}
+	}
+	srv.SetFile(wg, []byte(strings.Join(kept, "\n\n")))
+	wgBefore, _ := srv.File(wg)
+	const note = "Peer уже убран из wg0.conf — доступ отрезан; исправлена только запись в clientsTable (disabled = true)."
+
+	var o, e bytes.Buffer
+	if code := run([]string{"toggle", "-dry-run", "-key", key, "-name", name}, strings.NewReader(""), &o, &e, kh); code != 0 ||
+		!strings.Contains(o.String(), note) {
+		t.Errorf("-dry-run: код %d, вывод без пояснения:\n%s\n%s", code, o.String(), e.String())
+	}
+	o.Reset()
+	e.Reset()
+	if code := run([]string{"toggle", "-key", key, "-name", name, "-yes"}, strings.NewReader(""), &o, &e, kh); code != 0 {
+		t.Fatalf("toggle: код %d, stderr %q — отключение без peer'а должно пройти", code, e.String())
+	}
+	if !strings.Contains(o.String(), "отключён") || !strings.Contains(o.String(), note) {
+		t.Errorf("итог не говорит, что правилась только запись: %q", o.String())
+	}
+	if wgAfter, _ := srv.File(wg); string(wgAfter) != string(wgBefore) {
+		t.Error("wg0.conf изменён, хотя peer'а не было")
+	}
+}
+
 // handshakeRunner — fakesrv, у которого в ответе `wg show` у всех peer'ов
 // время последнего рукопожатия — сейчас (fakesrv отдаёт 0).
 type handshakeRunner struct{ inner *fakesrv.Server }
