@@ -2618,7 +2618,9 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 
 	content := container.NewVBox(body, container.NewHBox(contBtn))
 	d = dialog.NewCustom(guiview.WarningTitle(), guiview.WarnCancelLabel(), content, u.win)
-	d.Resize(fyne.NewSize(560, 300))
+	// A3б PR-3: текст — одна фраза (решение владельца), прежний размер
+	// 560×300 был под три абзаца A3а.
+	d.Resize(fyne.NewSize(460, 180))
 	d.Show()
 }
 

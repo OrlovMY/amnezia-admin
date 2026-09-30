@@ -250,7 +250,7 @@ var moreForms = []osmotrForm{
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
 			"кнопка:Применить", "подпись:", "кнопка:Закрыть"}},
-	{name: "(д) предупреждение о гонке", open: openRace, width: 552,
+	{name: "(д) предупреждение (приложение Amnezia)", open: openRace, width: 452,
 		inventory: []string{"подпись:" + firstLine(guiview.WarningTitle()), "подпись:" + firstLine(guiview.WarningBody()),
 			"кнопка:" + guiview.WarnContinueLabel(), "кнопка:" + guiview.WarnCancelLabel()}},
 	{name: "(е) неизвестный сервер", open: openHostKeyPrompt, width: 472,
