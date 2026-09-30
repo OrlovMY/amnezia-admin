@@ -6,6 +6,7 @@ package main
 // выхода — тот, что увидит человек).
 
 import (
+	"strings"
 	"testing"
 
 	"amnezia-admin/core"
@@ -85,4 +86,44 @@ func init() {
 				"кнопка:Применить", "подпись:" + firstLine(guiview.ApplyStatus(tx)), "кнопка:Закрыть"},
 		})
 	}
+}
+
+// Исход «не хватает прав» (SudoDenied, слияние H1): ошибка — боевым путём,
+// sess.Apply над fakesrv через исполнитель, у которого docker без sudo не
+// пускает к сокету, а sudo отказывает (тексты настоящих docker и sudo).
+func init() {
+	tx, _ := writeoutcome.Describe(core.ErrSudoDenied)
+	osmotrForms = append(osmotrForms, osmotrForm{
+		name: "(з) исход записи: не хватает прав", open: openSudoDenied, width: writeErrorDialogWidth - 8,
+		inventory: []string{"подпись:" + firstLine(tx.Title), "прокрутка:", "кнопка:Закрыть"},
+	})
+}
+
+func openSudoDenied(t *testing.T, u *ui, sized func()) osmotrScene {
+	srv := fakesrv.New()
+	sess := core.NewSessionWithRunner(&guiSudoDenyRunner{srv: srv}, &core.ServerCreds{Host: "203.0.113.10", User: "deploy", Password: "x"})
+	plan, err := sess.PlanAddUser(pr3Container(), "Mallory")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	_, err = sess.Apply(plan)
+	if writeoutcome.Classify(err) != writeoutcome.SudoDenied {
+		t.Fatalf("исход не «не хватает прав»: %v", err)
+	}
+	osmotrMain(u)
+	sized()
+	u.showError(err)
+	return scenePopup(t, u)
+}
+
+type guiSudoDenyRunner struct{ srv *fakesrv.Server }
+
+func (r *guiSudoDenyRunner) Run(cmd string, stdin []byte) (string, error) {
+	if !strings.Contains(cmd, "flock") {
+		return r.srv.Run(cmd, stdin)
+	}
+	if strings.Contains(cmd, "sudo") {
+		return "", &fakesrv.ExitError{Cmd: cmd, Status: 1, Stderr: "sudo: a password is required"}
+	}
+	return "", &fakesrv.ExitError{Cmd: cmd, Status: 1, Stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: connect: permission denied"}
 }
