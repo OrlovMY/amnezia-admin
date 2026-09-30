@@ -213,6 +213,13 @@ func Message(t Text, err error) string {
 	return t.What + "\n\n" + t.Next + "\n\nПодробности: " + err.Error()
 }
 
+// TextFor — текст исхода по виду (канарейка сверяет заголовок исхода, а не
+// вольный текст). ok == false — вида нет.
+func TextFor(k Kind) (Text, bool) {
+	t, ok := texts[k]
+	return t, ok
+}
+
 // All — все тексты исходов (для сторожей вида: запас ширины заголовка).
 func All() []Text {
 	out := make([]Text, 0, len(texts))

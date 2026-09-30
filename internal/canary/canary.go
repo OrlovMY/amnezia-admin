@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/writeoutcome"
 )
 
 // Status — исход шага.
@@ -771,43 +772,112 @@ func (e *Env) sudoOrders() (res Result) {
 	return res
 }
 
-// race — К4: два писателя одновременно по RaceRounds добавлений. Новая
-// версия — каждый, кому сказано «готово», в списке. Контроль на v0.2.0 —
-// ОБЯЗАН показать потерю, иначе стенд гонку не воспроизводит.
+// race — К4: два писателя одновременно по RaceRounds добавлений.
+// Раунд 3 (решение ядра): новая версия ПРОЙДЕН, только если (1) каждое
+// «готово» есть на сервере, (2) всё прочее — только «изменили в другом
+// месте» или «занято» (код выхода 1 и заголовок исхода дословно), (3)
+// «готово» ≥ 1, (4) исходы всех 2*RaceRounds попыток учтены. Контроль на
+// v0.2.0 ОБЯЗАН показать потерю, иначе стенд гонку не воспроизводит.
 func (e *Env) race() Result {
-	lostNew, okNew, outcomes, err := e.raceWith(e.NewBin, "canary-n")
+	st, err := e.raceWith(e.NewBin, "canary-n")
 	if err != nil {
 		return Result{Detail: "новая версия: " + err.Error()}
 	}
 	e.cleanup()
-	if lostNew > 0 {
-		return Result{Status: Fail, Detail: fmt.Sprintf("новая версия: из %d «готово» потеряно %d", okNew, lostNew)}
-	}
-	// Раунд 2 (QA блокер 1): «потерь 0» при нуле записей — не доказательство.
-	// Новая версия обязана записать ВСЕ добавления (при занятом замке она ждёт
-	// до 15 с, при «изменён другим» — это исход, а не запись).
-	if want := 2 * e.RaceRounds; okNew != want {
-		return Result{Status: Fail, Detail: fmt.Sprintf("новая версия: «готово» %d из %d; исходы остальных: %s", okNew, want, outcomes)}
+	if r, ok := judgeNew(st, 2*e.RaceRounds); !ok {
+		return r
 	}
 	if e.OldBin == "" {
-		return Result{Detail: fmt.Sprintf("новая версия: %d «готово», потерь 0; контроль на v0.2.0 не выполнен — программа v0.2.0 не задана", okNew)}
+		return Result{Detail: "новая версия: " + st.summary() + "; контроль на v0.2.0 не выполнен — программа v0.2.0 не задана"}
 	}
-	lostOld, okOld, _, err := e.raceWith(e.OldBin, "canary-o")
+	old, err := e.raceWith(e.OldBin, "canary-o")
 	e.cleanup()
 	if err != nil {
 		return Result{Detail: "контроль v0.2.0: " + err.Error()}
 	}
-	if lostOld == 0 {
-		return Result{Detail: fmt.Sprintf("новая версия без потерь, но контроль на v0.2.0 потери НЕ показал (%d «готово») — стенд не воспроизводит гонку, проверка недействительна", okOld)}
+	if old.lost == 0 {
+		return Result{Detail: fmt.Sprintf("новая версия без потерь, но контроль на v0.2.0 потери НЕ показал (%d «готово») — стенд не воспроизводит гонку, проверка недействительна", len(old.done))}
 	}
-	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %d «готово», потерь 0; v0.2.0: потеряно %d из %d — стенд гонку воспроизводит", okNew, lostOld, okOld)}
+	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %s; v0.2.0: потеряно %d из %d — стенд гонку воспроизводит", st.summary(), old.lost, len(old.done))}
 }
 
-func (e *Env) raceWith(bin, prefix string) (lost, ok int, outcomes string, err error) {
+// raceStats — исходы гонки: попытки, «готово», пропавшие из них, остальные
+// исходы по виду.
+type raceStats struct {
+	attempts int
+	done     []string
+	lost     int
+	changed  int            // код 1, «Не записано: сервер изменили в другом месте»
+	busy     int            // код 1, «Не записано: сервер занят»
+	other    map[string]int // всё иное: «код N «заголовок»»
+}
+
+func (st raceStats) otherCount() int {
+	n := 0
+	for _, v := range st.other {
+		n += v
+	}
+	return n
+}
+
+func (st raceStats) summary() string {
+	s := fmt.Sprintf("попыток %d: «готово» %d (потеряно %d), «изменили в другом месте» %d, «занято» %d", st.attempts, len(st.done), st.lost, st.changed, st.busy)
+	if len(st.other) > 0 {
+		var parts []string
+		for k, v := range st.other {
+			parts = append(parts, fmt.Sprintf("%s × %d", k, v))
+		}
+		sort.Strings(parts)
+		s += ", иные: " + strings.Join(parts, "; ")
+	}
+	return s
+}
+
+// judgeNew — приговор новой версии; ok=false — вернуть r (НЕ ПРОЙДЕН).
+func judgeNew(st raceStats, want int) (Result, bool) {
+	fail := func(why string) (Result, bool) {
+		return Result{Status: Fail, Detail: "новая версия: " + why + " — " + st.summary()}, false
+	}
+	switch {
+	case st.attempts != want || len(st.done)+st.changed+st.busy+st.otherCount() != want:
+		return fail(fmt.Sprintf("исходы учтены не для всех %d попыток", want))
+	case st.lost > 0:
+		return fail(fmt.Sprintf("из «готово» пропало %d", st.lost))
+	case st.otherCount() > 0:
+		return fail("есть исходы, кроме «изменили в другом месте» и «занято»")
+	case len(st.done) == 0:
+		return fail("ни одного «готово»")
+	}
+	return Result{}, true
+}
+
+// raceOutcome — вид исхода одной попытки по коду выхода и заголовку исхода.
+func classifyRace(st *raceStats, code int, title string) {
+	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
+	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
+	switch {
+	case code == 1 && chg.Title != "" && title == chg.Title:
+		st.changed++
+	case code == 1 && bsy.Title != "" && title == bsy.Title:
+		st.busy++
+	default:
+		if st.other == nil {
+			st.other = map[string]int{}
+		}
+		st.other[fmt.Sprintf("код %d «%s»", code, title)]++
+	}
+}
+
+func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 	var mu sync.Mutex
-	var done []string
-	fails := map[string]int{}
 	var wg sync.WaitGroup
+	// Прогрев: одно чтение списка ДО гонки, чтобы ключ сервера уже был в
+	// known_hosts этой программы. Иначе два первых одновременных подключения
+	// дописывают known_hosts через общий known_hosts.tmp, и на Windows один из
+	// них падает «файл занят» (раунд 3: поймано настоящей гонкой на fakesrv).
+	// Это не исход записи, а К4 меряет запись. Исход прогрева не судится:
+	// программа, которая не работает вовсе, провалит и саму гонку.
+	e.cli(bin, e.KeyEnv, "list")
 	for w := 0; w < 2; w++ {
 		wg.Add(1)
 		go func(w int) {
@@ -816,35 +886,27 @@ func (e *Env) raceWith(bin, prefix string) (lost, ok int, outcomes string, err e
 				name := fmt.Sprintf("%s-%d-%02d", prefix, w, i)
 				r := e.cli(bin, e.KeyEnv, "add", "-name", name)
 				mu.Lock()
+				st.attempts++
 				if r.code == 0 {
-					done = append(done, name)
+					st.done = append(st.done, name)
 				} else {
-					fails[fmt.Sprintf("код %d «%s»", r.code, r.title)]++
+					classifyRace(&st, r.code, r.title)
 				}
 				mu.Unlock()
 			}
 		}(w)
 	}
 	wg.Wait()
-	var parts []string
-	for k, v := range fails {
-		parts = append(parts, fmt.Sprintf("%s × %d", k, v))
-	}
-	sort.Strings(parts)
-	outcomes = strings.Join(parts, "; ")
-	if outcomes == "" {
-		outcomes = "нет"
-	}
 	m, lerr := e.names()
 	if lerr != nil {
-		return 0, 0, outcomes, fmt.Errorf("список после гонки не прочитан: %w", lerr)
+		return st, fmt.Errorf("список после гонки не прочитан: %w", lerr)
 	}
-	for _, n := range done {
+	for _, n := range st.done {
 		if _, in := m[n]; !in {
-			lost++
+			st.lost++
 		}
 	}
-	return lost, len(done), outcomes, nil
+	return st, nil
 }
 
 // breakWrite — К5 и ОТЧЁТ PR1, п. 8: запись обрывается (процесс убит, SSH

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -213,7 +214,7 @@ func TestRaceNeedsControl(t *testing.T) {
 	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 2
 	r := f.env.race()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "потерь 0") {
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "(потеряно 0)") || !strings.Contains(r.Detail, "v0.2.0 не выполнен") {
 		t.Fatalf("К4 без контроля: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -297,6 +298,13 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	case strings.HasPrefix(base, "fakecli-ok"):
 		os.Exit(0)
+	case strings.HasPrefix(base, "fakecli-unknown"):
+		os.Stderr.WriteString("Неизвестно, записаны ли изменения\n")
+		os.Exit(1)
+	case strings.HasPrefix(base, "fakecli-busy-code2"):
+		// заголовок «занято», но код выхода не тот — не «занято»
+		os.Stderr.WriteString("Не записано: сервер занят\n")
+		os.Exit(2)
 	case strings.HasPrefix(base, "fakecli-serial"):
 		os.Exit(serialCLI())
 	}
@@ -453,7 +461,7 @@ func TestRaceNewMustWriteAll(t *testing.T) {
 	f.env.OldBin = fakeCLI(t, "fakecli-ok")
 	f.env.RaceRounds = 2
 	r := f.env.race()
-	if r.Status != Fail || !strings.Contains(r.Detail, "«готово» 0 из 4") {
+	if r.Status != Fail || !strings.Contains(r.Detail, "есть исходы, кроме") || !strings.Contains(r.Detail, "код 1 «» × 4") {
 		t.Fatalf("К4 при новой версии без записей: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -543,5 +551,95 @@ func TestGateIncludesToolsAndTiming(t *testing.T) {
 				t.Errorf("К3 нет в выводе — шлюз не проверен")
 			}
 		})
+	}
+}
+
+// TestRaceRealCASPass — раунд 3, ГЛАВНЫЙ ПУТЬ настоящей гонкой на fakesrv:
+// настоящая новая версия, два писателя одновременно; часть «готово», часть
+// «изменили в другом месте», потерь 0 → К4 ПРОЙДЕН (контроль: подставная
+// «v0.2.0» говорит «готово», не записав, — потеря есть). Гонка случайна:
+// до пяти прогонов, пока не случится хотя бы один отказ CAS; каждый прогон
+// обязан быть ПРОЙДЕН.
+func TestRaceRealCASPass(t *testing.T) {
+	cli := newCLI(t)
+	old := fakeCLI(t, "fakecli-ok")
+	re := regexp.MustCompile(`«изменили в другом месте» (\d+)`)
+	sawCAS := false
+	for try := 0; try < 5 && !sawCAS; try++ {
+		f := emptyFake(t, false)
+		f.env.NewBin, f.env.OldBin, f.env.RaceRounds = cli, old, 3
+		r := f.env.race()
+		if r.Status != Pass {
+			t.Fatalf("прогон %d: %s — %s", try, r.Status, r.Detail)
+		}
+		if m := re.FindStringSubmatch(r.Detail); m != nil && m[1] != "0" {
+			sawCAS = true
+			t.Logf("гонка: %s", r.Detail)
+		}
+	}
+	if !sawCAS {
+		t.Fatal("за пять прогонов ни одного отказа CAS — путь «часть CAS» не проверен")
+	}
+}
+
+// TestRaceNewLostDone — «готово», а записи нет → НЕ ПРОЙДЕН (доезд: процесс
+// говорит «готово», на fakesrv ничего не записано).
+func TestRaceNewLostDone(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin, f.env.OldBin, f.env.RaceRounds = fakeCLI(t, "fakecli-ok"), fakeCLI(t, "fakecli-ok"), 2
+	r := f.env.race()
+	if r.Status != Fail || !strings.Contains(r.Detail, "из «готово» пропало 4") {
+		t.Fatalf("К4: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestRaceNewUnknownOutcome — исход, не «изменили» и не «занято», → НЕ
+// ПРОЙДЕН; заголовок «занято» с чужим кодом выхода — тоже не «занято».
+func TestRaceNewUnknownOutcome(t *testing.T) {
+	for _, name := range []string{"fakecli-unknown", "fakecli-busy-code2"} {
+		f := emptyFake(t, false)
+		f.env.NewBin, f.env.OldBin, f.env.RaceRounds = fakeCLI(t, name), fakeCLI(t, "fakecli-ok"), 2
+		r := f.env.race()
+		if r.Status != Fail || !strings.Contains(r.Detail, "есть исходы, кроме") {
+			t.Errorf("%s: %s — %s", name, r.Status, r.Detail)
+		}
+	}
+}
+
+// TestJudgeNewTable — приговор по учтённым исходам, в том числе «сумма не
+// сходится» (боевым путём не возникает — только таблицей).
+func TestJudgeNewTable(t *testing.T) {
+	d := func(n int) []string { return make([]string, n) }
+	for _, c := range []struct {
+		name string
+		st   raceStats
+		ok   bool
+		why  string
+	}{
+		{"часть готово, часть CAS и занято", raceStats{attempts: 4, done: d(2), changed: 1, busy: 1}, true, ""},
+		{"всё готово", raceStats{attempts: 4, done: d(4)}, true, ""},
+		{"ни одного готово", raceStats{attempts: 4, changed: 4}, false, "ни одного «готово»"},
+		{"готово пропало", raceStats{attempts: 4, done: d(4), lost: 1}, false, "пропало 1"},
+		{"иной исход", raceStats{attempts: 4, done: d(3), other: map[string]int{"код 1 «Записано частично»": 1}}, false, "есть исходы, кроме"},
+		{"сумма не сходится", raceStats{attempts: 4, done: d(2), changed: 1}, false, "учтены не для всех"},
+		{"попыток меньше", raceStats{attempts: 3, done: d(3)}, false, "учтены не для всех"},
+	} {
+		r, ok := judgeNew(c.st, 4)
+		if ok != c.ok || (!ok && (r.Status != Fail || !strings.Contains(r.Detail, c.why))) {
+			t.Errorf("%s: ok=%v %s — %s", c.name, ok, r.Status, r.Detail)
+		}
+	}
+}
+
+// TestClassifyRace — вид исхода по коду выхода и заголовку дословно.
+func TestClassifyRace(t *testing.T) {
+	var st raceStats
+	classifyRace(&st, 1, "Не записано: сервер изменили в другом месте")
+	classifyRace(&st, 1, "Не записано: сервер занят")
+	classifyRace(&st, 2, "Не записано: сервер занят")
+	classifyRace(&st, 1, "Не записано: сервер занят, кажется")
+	classifyRace(&st, 1, "")
+	if st.changed != 1 || st.busy != 1 || st.otherCount() != 3 {
+		t.Errorf("изменили=%d занято=%d иные=%d, ожидалось 1/1/3", st.changed, st.busy, st.otherCount())
 	}
 }
