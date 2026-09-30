@@ -63,8 +63,11 @@ var allowedShellCalls = map[string]string{
 // один раз (пропавшая или размноженная — красная). Любой другой вызов с
 // оболочкой аргументом краснеет по-прежнему, в том числе `sudo apt-get
 // install -y busybox sh` или тот же пакет другой строкой.
+//
+// Ключ — файл и вызов (AU-LOGIC L2): та же строка в release.yml — красная,
+// установка пакета не попадает в релизную цепочку незамеченной.
 var allowedPackageInstalls = map[string]string{
-	"sudo apt-get install -y busybox": "ci.yml, шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
+	"../../.github/workflows/ci.yml|sudo apt-get install -y busybox": "ci.yml, шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
 		"(скрипт записи A3б исполняется в busybox sh, как в контейнере на busybox); dash в Ubuntu есть всегда (/bin/sh)",
 }
 
@@ -272,8 +275,8 @@ func TestCommandProgramsClosedList(t *testing.T) {
 				}
 			}
 			// оболочка аргументом — в кавычках или без
-			if _, ok := allowedPackageInstalls[call]; ok {
-				installUsed[call]++
+			if _, ok := allowedPackageInstalls[s.file+"|"+call]; ok {
+				installUsed[s.file+"|"+call]++
 			} else if w.lit != "bash" {
 				for _, a := range args {
 					if b := a.lit[strings.LastIndexByte(a.lit, '/')+1:]; !a.dyn && shells[b] {

@@ -33,6 +33,11 @@ import (
 )
 
 const shellsMarker = "ОБОЛОЧКИ-ВЕРДИКТ:"
+
+// shellsPlantBroken — метка «посадка не легла» (AU-LOGIC H1). Отдельная от
+// shellsMarker: канарейка, увидев её, краснеет сама, а не засчитывает её как
+// вердикт.
+const shellsPlantBroken = "ПОСАДКА-НЕ-ЛЕГЛА:"
 const shellsPlantEnv = "AMNEZIA_SHELLS_PLANT"
 
 // shellsWantScenarios — ТОЧНОЕ число сценариев на каждую оболочку.
@@ -335,9 +340,18 @@ func shellScenarios() []scenario {
 func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 	var bad []string
 	path := rs.shimDir(t, "", "", "")
-	out, err := exec.Command(rs.sh, append(append([]string{}, rs.shArg...), "-c", "command -v printf")...).Output()
-	if err != nil || strings.TrimSpace(string(out)) != "printf" {
-		bad = append(bad, fmt.Sprintf("printf не встроенный: command -v printf = %q (%v)", out, err))
+	// Посадка «notbuiltin»: вместо printf спрашивается заведомо внешняя
+	// утилита (sha256sum). Оболочку, где printf не встроенный, из dash и
+	// busybox не получить — граница названа: посадка доказывает, что
+	// сравнение и вердикт этой проверки способны покраснеть, а не что
+	// какая-то оболочка бывает без встроенного printf.
+	name := "printf"
+	if os.Getenv(shellsPlantEnv) == "notbuiltin" {
+		name = "sha256sum"
+	}
+	out, err := exec.Command(rs.sh, append(append([]string{}, rs.shArg...), "-c", "command -v "+name)...).Output()
+	if err != nil || strings.TrimSpace(string(out)) != name {
+		bad = append(bad, fmt.Sprintf("printf не встроенный: command -v %s = %q (%v)", name, out, err))
 	}
 	marker := []byte("SECRETMARKER-A3B-PR2")
 	// Размер подобран с двух сторон (измерено в WSL, посадка extprintf):
@@ -475,7 +489,14 @@ func parallelWriters(t *testing.T, rs realShell, script string) []string {
 func shellsScript() (script string, ok bool) {
 	switch os.Getenv(shellsPlantEnv) {
 	case "extprintf":
-		s := strings.ReplaceAll(CASWriteScript, `printf %s "$`, `env printf %s "$`)
+		// Внешний printf по АБСОЛЮТНОМУ пути (AU-LOGIC M1): под `env printf`
+		// в PATH-обёртке не было env, данные не доходили, и посадка
+		// краснела по посторонней причине.
+		ext, err := exec.LookPath("printf")
+		if err != nil {
+			return "", false
+		}
+		s := strings.ReplaceAll(CASWriteScript, `printf %s "$`, ext+` %s "$`)
 		return s, s != CASWriteScript
 	case "nocheck":
 	default:
@@ -506,7 +527,7 @@ func TestCASScriptRealShells(t *testing.T) {
 	}
 	script, ok := shellsScript()
 	if !ok {
-		t.Fatalf("%s посадка %q не применилась к CASWriteScript (nocheck: нет строки сверки `\"$hw\" != \"$ww\"`; extprintf: нет `printf %%s \"$`)", shellsMarker, os.Getenv(shellsPlantEnv))
+		t.Fatalf("%s посадка %q не применилась к CASWriteScript (nocheck: нет строки сверки `\"$hw\" != \"$ww\"`; extprintf: нет `printf %%s \"$` или внешнего printf)", shellsPlantBroken, os.Getenv(shellsPlantEnv))
 	}
 	scen := shellScenarios()
 	if os.Getenv(shellsPlantEnv) == "drop" {
@@ -573,8 +594,16 @@ func TestCASScriptRealShellsCanary(t *testing.T) {
 	if _, missing := findRealShells(); len(missing) != 0 && os.Getenv("CI") == "" {
 		t.Skipf("нет %v (не CI)", missing)
 	}
-	for _, plant := range []string{"nocheck", "drop", "extprintf"} {
-		t.Run(plant, func(t *testing.T) {
+	// Для каждой посадки — СВОЁ ожидаемое сообщение вердикта (AU-LOGIC H1):
+	// общей метки мало, ею помечен любой провал.
+	plants := []struct{ name, want string }{
+		{"nocheck", "код 0, ждали 3"},
+		{"drop", "исполнено сценариев 12, ждали ровно 13"},
+		{"extprintf", "данные видны в /proc/*/cmdline"},
+		{"notbuiltin", "printf не встроенный"},
+	}
+	for _, pl := range plants {
+		t.Run(pl.name, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run", "^TestCASScriptRealShells$", "-test.count=1")
 			// Без GITHUB_STEP_SUMMARY: итог посаженного прогона не должен
 			// попасть в сводку job рядом с настоящим.
@@ -583,20 +612,25 @@ func TestCASScriptRealShellsCanary(t *testing.T) {
 					cmd.Env = append(cmd.Env, kv)
 				}
 			}
-			cmd.Env = append(cmd.Env, shellsPlantEnv+"="+plant)
+			cmd.Env = append(cmd.Env, shellsPlantEnv+"="+pl.name)
 			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("проверка в оболочках не уронила прогон на посадке %q:\n%s", plant, out)
+			if strings.Contains(string(out), shellsPlantBroken) {
+				t.Fatalf("посадка %q не легла — канарейка ничего не проверила:\n%s", pl.name, out)
 			}
-			if !failBlockHas(string(out), "TestCASScriptRealShells", shellsMarker) {
-				t.Fatalf("прогон упал не по вердикту (нет %q в блоке провала) на посадке %q:\n%s", shellsMarker, plant, out)
+			if err == nil {
+				t.Fatalf("проверка в оболочках не уронила прогон на посадке %q:\n%s", pl.name, out)
+			}
+			if !failBlockHas(string(out), "TestCASScriptRealShells", shellsMarker, pl.want) {
+				t.Fatalf("прогон упал не по нужному вердикту (нет %q с «%s» в блоке провала) на посадке %q:\n%s",
+					shellsMarker, pl.want, pl.name, out)
 			}
 		})
 	}
 }
 
-// failBlockHas — есть ли метка в блоке провала теста test (включая подтесты).
-func failBlockHas(out, test, marker string) bool {
+// failBlockHas — есть ли в блоке провала теста test (включая подтесты)
+// строка сообщения с меткой marker и текстом want.
+func failBlockHas(out, test, marker, want string) bool {
 	in := false
 	for _, l := range strings.Split(out, "\n") {
 		trim := strings.TrimSpace(l)
@@ -605,7 +639,7 @@ func failBlockHas(out, test, marker string) bool {
 			in = true
 		case strings.HasPrefix(trim, "--- PASS") || strings.HasPrefix(trim, "--- SKIP") || trim == "FAIL" || trim == "PASS":
 			in = false
-		case in && strings.Contains(l, ": "+marker):
+		case in && strings.Contains(l, ": "+marker) && strings.Contains(l, want):
 			return true
 		}
 	}
