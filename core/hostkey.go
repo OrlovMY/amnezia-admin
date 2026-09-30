@@ -299,7 +299,7 @@ func recordKnownHost(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr
 			pol.OnChanged(addr, changedFp, fp)
 		}
 		return false, newHostKeyError(ErrHostKeyChanged, addr, changedFp, fp,
-			"адрес %s, пока ключ подтверждался, другая копия программы записала для него ключ %s, а сервер предъявил %s (known_hosts: %s); если сервер переустанавливали, удалите строку %q из %s и подключитесь заново",
+			"адрес %s: пока ключ подтверждался, в known_hosts появилась другая запись для этого сервера (ключ %s), а сервер предъявил %s (known_hosts: %s); если сервер переустанавливали, удалите строку %q из %s и подключитесь заново",
 			addr, changedFp, fp, pol.KnownHostsPath, addr, pol.KnownHostsPath)
 	}
 	return true, nil
@@ -356,16 +356,10 @@ func lookupKnownHostLocked(path, addr string, remote net.Addr, key ssh.PublicKey
 	return nil, cbErr
 }
 
-// appendKnownHost дописывает строку addr → key в файл known_hosts по пути
-// path атомарно (как SaveVault: tmp + rename), создавая каталог и сам файл
-// при необходимости; права 0600.
-func appendKnownHost(path, addr string, key ssh.PublicKey) error {
-	// Под межпроцессным замком: перечитать, дописать, заменить атомарно
-	// через уникальный временный файл (core/knownhostsfile.go).
-	return withKnownHostsLock(path, func() error { return appendKnownHostLocked(path, addr, key) })
-}
-
-// appendKnownHostLocked — тело appendKnownHost; вызывать под замком.
+// appendKnownHostLocked — дописать строку addr → key; вызывать под замком
+// withKnownHostsLock. Обёртки «взять замок и дописать» в программе нет
+// намеренно (SEC-01): любая запись идёт через recordKnownHost, который под
+// тем же замком повторяет проверку.
 func appendKnownHostLocked(path, addr string, key ssh.PublicKey) error {
 	{
 		existing, err := os.ReadFile(path)
