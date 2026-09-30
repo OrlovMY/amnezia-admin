@@ -485,11 +485,37 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 
 // ---------- интерактивный режим ----------
 
-func interactive() {
+// textInputEnded — строка при конце ввода в меню (долг У6, текст UX-01).
+const textInputEnded = "Ввод закончился — выход."
+
+// errInputEnded — ask() встретил конец ввода: меню разматывается до
+// interactive() паникой с этим значением. Паника, а не пустая строка: ask
+// зовут и внутри пунктов меню («Имя нового пользователя»), и пустой ответ
+// там продолжил бы действие так, будто человек что-то ответил.
+var errInputEnded = errors.New("ввод закончился")
+
+// interactive — меню. Возвращает код выхода: 0 — штатно, 2 — ввод
+// закончился (EOF на stdin). Прежде ошибка чтения отбрасывалась, пустая
+// строка уходила в switch как «неизвестный выбор», и меню печаталось
+// бесконечно (У6).
+func interactive() (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if r != errInputEnded {
+				panic(r)
+			}
+			fmt.Println()
+			fmt.Fprintln(os.Stderr, textInputEnded)
+			code = 2
+		}
+	}()
 	in := bufio.NewReader(os.Stdin)
 	ask := func(prompt string) string {
 		fmt.Print(prompt)
-		line, _ := in.ReadString('\n')
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			panic(errInputEnded)
+		}
 		return strings.TrimSpace(line)
 	}
 
@@ -742,8 +768,7 @@ func pause(in *bufio.Reader) {
 
 func main() {
 	if len(os.Args) < 2 {
-		interactive()
-		return
+		os.Exit(interactive())
 	}
 	knownHostsPath := filepath.Join(core.DefaultVaultDir(), "known_hosts")
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, knownHostsPath))
