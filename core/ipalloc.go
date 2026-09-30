@@ -111,12 +111,27 @@ func allocateIP(conf *wgConf, clients []ClientEntry) (string, error) {
 	// (порядок итерации карты в Go не определён — review круг 2, Low,
 	// AR-01: недетерминизм, внесённый этим PR; nextFreeIP до PR-3 читала
 	// подсеть тем же способом, через conf.peers).
+	//
+	// Раунд 2 ревью долгов (SEC-01, Н-1): подсеть берётся по peer'ам,
+	// только если ВСЕ они в одной подсети. Разошлись — какая из них подсеть
+	// сервера, неизвестно; «первый peer» здесь был бы порядком ветвей
+	// (признак 3), перехватывающим «не знаем».
 	if subnet == "" {
+		var seen []string
 		for _, p := range conf.peers {
 			if m := ipRe.FindStringSubmatch(p["AllowedIPs"]); m != nil {
-				subnet = m[1]
-				break
+				if subnet == "" {
+					subnet = m[1]
+				}
+				if !containsStr(seen, m[1]) {
+					seen = append(seen, m[1])
+				}
 			}
+		}
+		if len(seen) > 1 {
+			return "", fmt.Errorf("В wg0.conf сервера не указан Address, а клиенты в нём — в разных подсетях (%s). "+
+				"Какая из них подсеть сервера, неизвестно: клиент с неверным адресом не подключится. "+
+				"Ничего не изменено. Проверьте сервер в приложении Amnezia.", strings.Join(seen, ".x, ")+".x")
 		}
 	}
 	for ip := range usedIPs(conf, clients) {
@@ -163,4 +178,13 @@ func serverListenPort(conf *wgConf) (string, error) {
 		return "", ErrNoListenPort
 	}
 	return p, nil
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

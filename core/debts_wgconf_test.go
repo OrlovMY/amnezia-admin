@@ -5,6 +5,7 @@ package core
 // fakesrv) и падают там поведением: add и rekey подставляли 51820 и 10.8.1.
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -71,7 +72,7 @@ func TestDebtsListenPortNotGuessed(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s выдал конфиг при неизвестном порте сервера: %s", op.name, endpointLine(nu.Config))
 			}
-			if !strings.Contains(err.Error(), "не указан ListenPort") {
+			if !strings.Contains(fmt.Sprint(err), "не указан ListenPort") { // fmt.Sprint: без паники на nil, если строку выше обезвредят
 				t.Errorf("отказ не по причине порта: %v", err)
 			}
 			wgAfter, _ := srv.File(debtsWg0)
@@ -99,8 +100,60 @@ func TestDebtsSubnetNotGuessed(t *testing.T) {
 	if err == nil {
 		t.Fatalf("add выдал адрес %s при неизвестной подсети сервера", nu.IP)
 	}
-	if !strings.Contains(err.Error(), "не указан Address") {
+	if !strings.Contains(fmt.Sprint(err), "не указан Address") { // fmt.Sprint: см. выше
 		t.Errorf("отказ не по причине подсети: %v", err)
+	}
+}
+
+// TestDebtsPeerSubnetsDiverge — раунд 2 (SEC-01, Н-1): в wg0.conf нет
+// Address. Все peer'ы в одной подсети — адрес выдан из неё (контроль
+// различения); peer'ы в двух подсетях — отказ, на сервере ничего не
+// изменено. Боевой путь: AddUser через Session и fakesrv. На c65420e при
+// двух подсетях add выдавал 10.8.1.4 (подсеть первого peer'а, занятость —
+// по последнему октету чужой подсети).
+func TestDebtsPeerSubnetsDiverge(t *testing.T) {
+	cases := []struct {
+		name     string
+		secondIP string
+		wantIP   string // "" — ожидается отказ
+	}{
+		{"одна подсеть", "10.8.1.3", "10.8.1.4"},
+		{"две подсети", "10.9.0.3", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := fakesrv.New()
+			wg0, _ := srv.File(debtsWg0)
+			s := regexp.MustCompile(`(?m)^Address = .*\n`).ReplaceAllString(string(wg0), "")
+			if strings.Contains(s, "Address") || !strings.Contains(s, "AllowedIPs = 10.8.1.3/32") {
+				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: wg0.conf fakesrv изменился:\n%s", s)
+			}
+			s = strings.Replace(s, "AllowedIPs = 10.8.1.3/32", "AllowedIPs = "+c.secondIP+"/32", 1)
+			srv.SetFile(debtsWg0, []byte(s))
+			wgBefore, _ := srv.File(debtsWg0)
+			tblBefore, _ := srv.File("/opt/amnezia/awg/clientsTable")
+			nu, err := a1bSession(srv).AddUser(awgContainer(), "Mallory")
+			if c.wantIP != "" {
+				if err != nil {
+					t.Fatalf("одна подсеть у всех peer'ов, а add отказал: %v", err)
+				}
+				if nu.IP != c.wantIP {
+					t.Fatalf("выдан %s, ожидался %s", nu.IP, c.wantIP)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("peer'ы в двух подсетях, а add выдал %s — подсеть выбрана наугад", nu.IP)
+			}
+			if !strings.Contains(fmt.Sprint(err), "в разных подсетях (10.8.1.x, 10.9.0.x)") {
+				t.Errorf("отказ не по причине расхождения подсетей: %v", err)
+			}
+			wgAfter, _ := srv.File(debtsWg0)
+			tblAfter, _ := srv.File("/opt/amnezia/awg/clientsTable")
+			if string(wgAfter) != string(wgBefore) || string(tblAfter) != string(tblBefore) {
+				t.Error("при отказе сервер изменён")
+			}
+		})
 	}
 }
 
