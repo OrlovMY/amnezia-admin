@@ -128,7 +128,7 @@ func (rs realShell) shimDir(t *testing.T, drop, fail, failMvTo string) string {
 func realLink(t *testing.T, d, name, target string) string {
 	t.Helper()
 	rd := filepath.Join(d, ".real")
-	if err := os.MkdirAll(rd, 0o755); err != nil {
+	if err := os.MkdirAll(rd, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p := filepath.Join(rd, name)
@@ -140,7 +140,7 @@ func realLink(t *testing.T, d, name, target string) string {
 
 func writeExec(t *testing.T, p, body string) {
 	t.Helper()
-	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(p, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -340,7 +340,15 @@ func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 		bad = append(bad, fmt.Sprintf("printf не встроенный: command -v printf = %q (%v)", out, err))
 	}
 	marker := []byte("SECRETMARKER-A3B-PR2")
-	enc := string(CASWriteStdin(append([]byte("PrivateKey = "), marker...), tblNew))
+	// Размер подобран с двух сторон (измерено в WSL, посадка extprintf):
+	// строка base64 БОЛЬШЕ буфера канала (64 КБ) — внешний printf, будь он в
+	// скрипте, блокировался бы на записи и был бы жив в момент просмотра
+	// /proc; и МЕНЬШЕ предела одного аргумента exec (MAX_ARG_STRLEN, 128 КБ)
+	// — иначе внешний printf не запустился бы вовсе («Argument list too
+	// long»), base64 получил бы пустой вход, и проверка молчала бы. 60 КБ
+	// данных — около 80 КБ base64.
+	payload := append(append([]byte("PrivateKey = "), marker...), bytes.Repeat([]byte("x"), 60<<10)...)
+	enc := string(CASWriteStdin(payload, tblNew))
 	encLine := strings.SplitN(enc, "\n", 2)[0]
 	work := t.TempDir()
 	report := filepath.Join(work, "found")
@@ -361,6 +369,9 @@ func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 	res := rs.runTail(t, tail, path+":/usr/bin:/bin", []byte(enc))
 	if res.code != 0 {
 		bad = append(bad, fmt.Sprintf("запись с маркером: код %d (%s)", res.code, res.stderr))
+	}
+	if got, _ := readOpt(d, "wg0.conf"); !bytes.Equal(got, payload) {
+		bad = append(bad, fmt.Sprintf("wg0.conf после записи с маркером — %d байт вместо %d: данные не дошли", len(got), len(payload)))
 	}
 	if b, _ := os.ReadFile(report); len(bytes.TrimSpace(b)) != 0 {
 		bad = append(bad, fmt.Sprintf("данные видны в /proc/*/cmdline: %q", b))
@@ -457,8 +468,17 @@ func parallelWriters(t *testing.T, rs realShell, script string) []string {
 // сравнению `"$hw" != "$ww"`, а не по всему тексту строки, чтобы пережить
 // правку сообщений скрипта (PR-3). Не нашлась — ok=false, и тест падает
 // громко: посадка, которая не применилась, — канарейка, которая молчит.
+//
+// Посадка «extprintf» (SEC-01 R-1): `printf %s "$W"` и `printf %s "$T"` →
+// `env printf …` — данные попадают в argv внешнего процесса, и сценарий
+// SEC R3 обязан это увидеть в /proc/*/cmdline.
 func shellsScript() (script string, ok bool) {
-	if os.Getenv(shellsPlantEnv) != "nocheck" {
+	switch os.Getenv(shellsPlantEnv) {
+	case "extprintf":
+		s := strings.ReplaceAll(CASWriteScript, `printf %s "$`, `env printf %s "$`)
+		return s, s != CASWriteScript
+	case "nocheck":
+	default:
 		return CASWriteScript, true
 	}
 	lines := strings.Split(CASWriteScript, "\n")
@@ -486,14 +506,37 @@ func TestCASScriptRealShells(t *testing.T) {
 	}
 	script, ok := shellsScript()
 	if !ok {
-		t.Fatalf("%s посадка nocheck не применилась: в CASWriteScript нет строки сверки `\"$hw\" != \"$ww\"`", shellsMarker)
+		t.Fatalf("%s посадка %q не применилась к CASWriteScript (nocheck: нет строки сверки `\"$hw\" != \"$ww\"`; extprintf: нет `printf %%s \"$`)", shellsMarker, os.Getenv(shellsPlantEnv))
 	}
 	scen := shellScenarios()
 	if os.Getenv(shellsPlantEnv) == "drop" {
 		scen = scen[1:]
 	}
+	// Итог счёта (QA-01). go test по списку пакетов печатает у прошедшего
+	// пакета только «ok», и t.Logf в журнале CI не виден; второй шаг go test
+	// -v сторож ciguard запрещает (ровно один шаг go test, без -v) — и
+	// правильно. Поэтому итог ещё дописывается в сводку job
+	// ($GITHUB_STEP_SUMMARY — её GitHub даёт каждому шагу): на странице
+	// прогона видно прямо, что сценарии исполнились.
+	var tally []string
+	defer func() {
+		line := "исполнено сценариев скрипта записи: " + strings.Join(tally, ", ")
+		t.Logf("%s", line)
+		if p := os.Getenv("GITHUB_STEP_SUMMARY"); p != "" {
+			f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Errorf("%s сводка job %s не открылась: %v", shellsMarker, p, err)
+				return
+			}
+			defer f.Close()
+			if _, err := fmt.Fprintf(f, "- A3б, core: %s\n", line); err != nil {
+				t.Errorf("%s сводка job: %v", shellsMarker, err)
+			}
+		}
+	}()
 	for _, rs := range shells {
 		ran := 0
+		defer func(name string, ran *int) { tally = append(tally, fmt.Sprintf("%d в %s", *ran, name)) }(rs.name, &ran)
 		for _, sc := range scen {
 			t.Run(rs.name+"/"+sc.name, func(t *testing.T) {
 				ran++
@@ -530,10 +573,17 @@ func TestCASScriptRealShellsCanary(t *testing.T) {
 	if _, missing := findRealShells(); len(missing) != 0 && os.Getenv("CI") == "" {
 		t.Skipf("нет %v (не CI)", missing)
 	}
-	for _, plant := range []string{"nocheck", "drop"} {
+	for _, plant := range []string{"nocheck", "drop", "extprintf"} {
 		t.Run(plant, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run", "^TestCASScriptRealShells$", "-test.count=1")
-			cmd.Env = append(os.Environ(), shellsPlantEnv+"="+plant)
+			// Без GITHUB_STEP_SUMMARY: итог посаженного прогона не должен
+			// попасть в сводку job рядом с настоящим.
+			for _, kv := range os.Environ() {
+				if !strings.HasPrefix(kv, "GITHUB_STEP_SUMMARY=") {
+					cmd.Env = append(cmd.Env, kv)
+				}
+			}
+			cmd.Env = append(cmd.Env, shellsPlantEnv+"="+plant)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("проверка в оболочках не уронила прогон на посадке %q:\n%s", plant, out)

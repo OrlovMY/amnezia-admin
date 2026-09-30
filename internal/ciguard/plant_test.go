@@ -427,6 +427,8 @@ var plants = []plant{
 		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox sh»"},
 	{name: "a3b-install-twice", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox\n          sudo apt-get install -y busybox\n"),
 		wantTest: progs, wantMsg: "встречается 2 раз вместо одного"},
+	{name: "a3b-install-gone", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox-static\n"),
+		wantTest: progs, wantMsg: "не встречается ни разу слово в слово"},
 	{name: "r1-dyn-place-moved", edits: rel(`              out="$("./$bin" version)"`, `              out="$("./$bin" version 2>&1)"`),
 		wantTest: progs, wantMsg: `место allowedDynPlaces «../../.github/workflows/release.yml|out="$("./$bin" version)"|"./$bin"» встречается 0 раз`},
 	// --- раунд 4: R2 — trap ---

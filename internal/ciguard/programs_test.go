@@ -287,9 +287,12 @@ func TestCommandProgramsClosedList(t *testing.T) {
 		fatal(t, "не найдено ни одной команды — разбор пуст, тест ничего не проверил")
 	}
 	for key := range allowedPackageInstalls {
-		if installUsed[key] != 1 {
-			fail(t, "вызов allowedPackageInstalls «%s» встречается %d раз вместо одного — запись устарела или вызов размножен",
-				key, installUsed[key])
+		switch n := installUsed[key]; {
+		case n == 0:
+			fail(t, "вызов allowedPackageInstalls «%s» не встречается ни разу слово в слово — запись устарела "+
+				"или вызов изменён (изменённый вызов краснеет отдельно как «оболочка аргументом»)", key)
+		case n > 1:
+			fail(t, "вызов allowedPackageInstalls «%s» встречается %d раз вместо одного — вызов размножен", key, n)
 		}
 	}
 	for key := range allowedDynPlaces {
