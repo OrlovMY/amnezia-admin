@@ -1637,6 +1637,8 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		switch {
 		case errors.Is(werr, ErrCASMismatch):
 			return &rollbackForeignError{msg: fmt.Sprintf("ВНИМАНИЕ: откат не выполнен: после нашей записи файлы на сервере изменил другой — откат стёр бы его изменения. Обновите список; %s; исходная причина: %v", backups, cause)}
+		case isCASPartial(werr):
+			return fmt.Errorf("ВНИМАНИЕ: откат выполнен частично — wg0.conf вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", backups, cause)
 		case errors.Is(werr, ErrWriteUnknown):
 			return fmt.Errorf("ВНИМАНИЕ: восстановить не удалось — неизвестно, вернулись ли wg0.conf и clientsTable (%v); %s; исходная причина: %v", werr, backups, cause)
 		}

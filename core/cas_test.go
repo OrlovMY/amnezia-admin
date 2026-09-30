@@ -18,7 +18,7 @@ import (
 
 // isCASWriteCmd — команда записи (apply или rollback).
 func isCASWriteCmd(cmd string) bool {
-	return strings.Contains(cmd, "flock -w 15 -E 4 /run/lock/amnezia-admin.")
+	return strings.Contains(cmd, "flock -w 15 -E 4 /run/lock docker exec")
 }
 
 // snapshot — оба файла на сервере.

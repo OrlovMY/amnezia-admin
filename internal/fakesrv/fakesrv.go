@@ -17,9 +17,7 @@ package fakesrv
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,10 +71,14 @@ type Server struct {
 	// (flock -E 4), ничего не записав.
 	LockBusy bool
 
-	// MissingTool — нет утилиты: "timeout"/"flock" (на хосте) → код 127
-	// оболочки; любое другое имя (в контейнере) → код 5 скрипта. Ничего не
-	// записывается.
+	// MissingTool — нет утилиты. "timeout"/"flock" (на хосте) — модель: код
+	// 127 оболочки. Утилиты контейнера (sha256sum, base64, mv, rm) убираются
+	// из PATH настоящего скрипта — код 5 даёт сам скрипт.
 	MissingTool string
+
+	// FailTool — утилита контейнера (сейчас "sha256sum"), которая в
+	// настоящем скрипте запускается, но падает с кодом 1.
+	FailTool string
 
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
 	// (множество применённых peer'ов) не меняется.
@@ -226,11 +228,12 @@ func (s *Server) RuntimePeers() []string {
 var (
 	reDockerPS = `docker ps --format '{{.Names}}'`
 	reCat      = regexp.MustCompile(`^docker exec (\S+) cat (\S+)$`)
-	// reCASWrite — A3б: запись обоих файлов со сверкой под flock. Текст
-	// скрипта здесь не сверяется (это делает TestServerCommandsUnchanged в
-	// core); fakesrv моделирует его смысл, а не исполняет его — исполнение в
-	// настоящих оболочках — PR-2.
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/amnezia-admin\.(\S+)\.lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	// reCASWrite — A3б: запись обоих файлов со сверкой под flock на каталоге
+	// /run/lock. Тело скрипта берётся из команды и ИСПОЛНЯЕТСЯ настоящим sh
+	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
+	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
+	// TestCASLockLineRealFlock (Linux).
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
@@ -404,34 +407,20 @@ func (e *ExitError) Error() string {
 // ExitStatus — код выхода.
 func (e *ExitError) ExitStatus() int { return e.Status }
 
-func sumOrAbsent(data []byte, ok bool) string {
-	if !ok {
-		return "absent"
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// casWrite моделирует CASWriteScript под замком: весь Run идёт под s.mu,
-// поэтому две команды записи взаимно исключены, как под flock.
+// casWrite исполняет команду записи: хуки хоста (замок занят, нет
+// timeout/flock) — модель, тело скрипта — настоящий sh (execScript). Весь Run
+// идёт под s.mu, поэтому две команды записи взаимно исключены, как под flock.
 func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) {
-	if m[1] != m[2] {
-		return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
-	}
-	dir, wantWg, wantTbl := m[5], m[6], m[7]
+	dir, wantWg, wantTbl := m[4], m[5], m[6]
 	fail := func(code int, stderr string) (string, error) {
 		return "", &ExitError{Cmd: cmd, Status: code, Stderr: stderr}
 	}
 	switch s.MissingTool {
-	case "":
 	case "timeout", "flock":
 		return fail(127, "sh: "+s.MissingTool+": not found")
 	}
 	if s.LockBusy {
 		return fail(4, "")
-	}
-	if s.MissingTool != "" {
-		return fail(5, "missing tool: "+s.MissingTool)
 	}
 	s.writeCalls++
 	s.writeStarted = cmd
@@ -441,7 +430,7 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(fault.Code, "имитированный отказ записи")
 	}
 
-	code, stderr, err := s.execScript(m[3], m[4], dir, wantWg, wantTbl, stdin)
+	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, stdin)
 	if err != nil {
 		return "", err
 	}
@@ -481,17 +470,12 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl string, stdin []
 		}
 	}
 	env := os.Environ()
-	if s.FailMvTo != "" {
-		shim := filepath.Join(tmp, "shim")
-		if err := os.Mkdir(shim, 0o700); err != nil {
-			return 0, "", fmt.Errorf("fakesrv: %w", err)
+	if s.FailMvTo != "" || s.MissingTool != "" || s.FailTool != "" {
+		shim, err := s.toolShim(sh, tmp)
+		if err != nil {
+			return 0, "", err
 		}
-		body := "#!/bin/sh\nfor a; do last=$a; done\ncase \"$last\" in */" + s.FailMvTo +
-			") echo \"mv: cannot move to $last: Permission denied\" >&2; exit 1;; esac\nPATH=${PATH#*:} exec mv \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(shim, "mv"), []byte(body), 0o700); err != nil {
-			return 0, "", fmt.Errorf("fakesrv: %w", err)
-		}
-		env = append(env, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+		env = append(env, "PATH="+shim)
 	}
 	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl)
 	cmd.Env = env
@@ -541,4 +525,45 @@ func FindSh() (string, error) {
 		}
 	}
 	return "", errors.New("fakesrv: не найден POSIX sh — скрипт записи (core.CASWriteScript) исполняется настоящей оболочкой, без неё проверка невозможна; на Windows установите Git for Windows (Git\\bin\\sh.exe)")
+}
+
+// casTools — внешние утилиты скрипта записи в контейнере.
+var casTools = []string{"sha256sum", "base64", "mv", "rm"}
+
+// toolShim — каталог, который становится ЕДИНСТВЕННЫМ PATH скрипта: обёртки
+// над настоящими утилитами, кроме MissingTool (её нет вовсе), FailTool
+// (падает) и mv на FailMvTo (Permission denied).
+func (s *Server) toolShim(sh, tmp string) (string, error) {
+	out, err := exec.Command(sh, "-c", "for t in "+strings.Join(casTools, " ")+"; do command -v $t || exit 1; done").Output()
+	if err != nil {
+		return "", fmt.Errorf("fakesrv: не найдены утилиты для скрипта записи (%s) в sh: %w", strings.Join(casTools, ", "), err)
+	}
+	paths := strings.Fields(string(out))
+	if len(paths) != len(casTools) {
+		return "", fmt.Errorf("fakesrv: пути утилит: %q", out)
+	}
+	shim := filepath.Join(tmp, "shim")
+	if err := os.Mkdir(shim, 0o700); err != nil {
+		return "", fmt.Errorf("fakesrv: %w", err)
+	}
+	for i, tool := range casTools {
+		if tool == s.MissingTool {
+			continue
+		}
+		body := "#!/bin/sh\n"
+		switch {
+		case tool == s.FailTool:
+			body += "echo \"" + tool + ": имитированный отказ\" >&2\nexit 1\n"
+		case tool == "mv" && s.FailMvTo != "":
+			body += "for a; do last=$a; done\ncase \"$last\" in */" + s.FailMvTo +
+				") echo \"mv: cannot move to $last: Permission denied\" >&2; exit 1;; esac\n"
+			body += "exec \"" + paths[i] + "\" \"$@\"\n"
+		default:
+			body += "exec \"" + paths[i] + "\" \"$@\"\n"
+		}
+		if err := os.WriteFile(filepath.Join(shim, tool), []byte(body), 0o700); err != nil {
+			return "", fmt.Errorf("fakesrv: %w", err)
+		}
+	}
+	return shim, nil
 }

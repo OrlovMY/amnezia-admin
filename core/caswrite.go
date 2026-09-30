@@ -24,6 +24,18 @@ const (
 	CASLabelRollback = "amnezia-admin-rollback"
 )
 
+// CASLockDir — замок записи: flock на КАТАЛОГЕ /run/lock, а не на файле в
+// нём (аудит AU-LOGIC H1). Файл замка, созданный пользователем без sudo,
+// root при fs.protected_regular (по умолчанию в Debian/Ubuntu) открыть с
+// O_CREAT не может — flock давал 66 на каждой записи под sudo. Каталог
+// /run/lock существует всегда (1777, root), открывается на чтение без
+// O_CREAT и root, и любым пользователем; ничего не создаётся — нет ни
+// владельца, ни лишней команды mkdir. Цена: замок общий для всех
+// контейнеров хоста (запись в разные контейнеры идёт по очереди) и для
+// любой программы, взявшей flock на /run/lock (такая займёт нас — исход
+// «занято», не порча).
+const CASLockDir = "/run/lock"
+
 // CASAbsent — ожидаемая «сумма» файла, которого не должно быть.
 const CASAbsent = "absent"
 
@@ -107,8 +119,8 @@ func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, err
 	if !reCASSum.MatchString(wantWg) || !reCASSum.MatchString(wantTbl) {
 		return "", fmt.Errorf("недопустимая контрольная сумма")
 	}
-	return fmt.Sprintf("timeout %d flock -w %d -E 4 /run/lock/amnezia-admin.%s.lock docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
-		casOuterTimeout, casLockWait, container, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
+	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s docker exec -i %s timeout %d sh -c '%s' %s %s %s %s",
+		casOuterTimeout, casLockWait, CASLockDir, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
@@ -144,6 +156,7 @@ const (
 	casBusy
 	casToolMissing
 	casPartial
+	casLockOpen
 	casUnknown
 )
 
@@ -168,6 +181,9 @@ func casOutcomeOf(err error) (casOutcome, int) {
 		return casBusy, code
 	case 5, 127:
 		return casToolMissing, code
+	case 66:
+		// flock: не открыт файл замка — docker exec не запускался.
+		return casLockOpen, code
 	case 6:
 		return casPartial, code
 	default:
@@ -193,7 +209,7 @@ func (e *casWriteError) Is(target error) bool {
 		return target == ErrCASMismatch
 	case casBusy:
 		return target == ErrServerBusy
-	case casToolMissing:
+	case casToolMissing, casLockOpen:
 		return target == ErrServerToolMissing
 	case casUnknown, casPartial:
 		return target == ErrWriteUnknown
@@ -263,8 +279,11 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	case casBusy:
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: "сервер занят другой копией программы — ничего не записано; повторите через минуту"}
+	case casLockOpen:
+		return &casWriteError{outcome: outcome, cause: runErr,
+			msg: fmt.Sprintf("не удалось открыть замок %s (код 66: %s) — ничего не записано", CASLockDir, stderrTail(runErr))}
 	case casToolMissing:
-		tool := "timeout, flock или sh"
+		tool := "timeout, flock, docker или sudo (на хосте) либо timeout или sh (в контейнере)"
 		if m := reCASMissing.FindStringSubmatch(stderrTail(runErr)); m != nil {
 			tool = m[1]
 		}
@@ -277,4 +296,10 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	}
 	return &casWriteError{outcome: casUnknown, cause: runErr,
 		msg: fmt.Sprintf("неизвестно, записаны ли изменения (%s: %s) — обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", codeText, stderrTail(runErr), c.Dir)}
+}
+
+// isCASPartial — исход «записано частично» (код 6).
+func isCASPartial(err error) bool {
+	var ce *casWriteError
+	return errors.As(err, &ce) && ce.outcome == casPartial
 }

@@ -1232,7 +1232,7 @@ mv -f "$nt" "$d/clientsTable" 2>/dev/null || { rm -f "$nt"; [ "$W" = "-" ] && ex
 exit 0`
 
 func casWriteTemplate(label string) string {
-	return "timeout 75 flock -w 15 -E 4 /run/lock/amnezia-admin." + dyn + ".lock docker exec -i " + dyn +
+	return "timeout 75 flock -w 15 -E 4 /run/lock docker exec -i " + dyn +
 		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 
@@ -1244,8 +1244,9 @@ func mustTemplateRegex(tmpl string) *regexp.Regexp {
 // TestServerCommandsUnchanged — эталон на запрет В2 п.2: серверные команды,
 // проверенные на живом сервере, не должны измениться ни на байт. Прогоняет
 // весь набор операций и сверяет каждую команду из Commands() с множеством
-// шаблонов cmdTemplates (порядок и кратность не важны, но каждый шаблон
-// обязан встретиться хотя бы раз). Обязательно DenyOnce == false — иначе
+// шаблонов cmdTemplates; число команд каждого шаблона — ТОЧНО t7Want, в обе
+// стороны (serverCommandsVerdict), вердикт держит канарейка
+// TestServerCommandsGuardCanary. Обязательно DenyOnce == false — иначе
 // команды пойдут с префиксом "sudo " и не совпадут ни с одним шаблоном
 // (sudo-фолбэк проверяет отдельный TestSudoFallback).
 func TestServerCommandsUnchanged(t *testing.T) {
