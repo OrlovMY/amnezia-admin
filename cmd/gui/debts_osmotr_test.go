@@ -223,6 +223,11 @@ func TestDebtsStatusStatsFailShort(t *testing.T) {
 	if n := len([]rune(reason)); n > 121 {
 		t.Errorf("причина %d знаков, ожидалось не больше 120: %q", n, reason)
 	}
+	// Второй, независимый сторож сжатия (выборка немоты, раунд 4): середина
+	// сырой ошибки — десять повторов — в строку состояния не попадает.
+	if n := strings.Count(st, "handshake failed"); n > 2 {
+		t.Errorf("сырая ошибка не сжата: %d повторов из 10 в строке состояния", n)
+	}
 	if !strings.HasSuffix(reason, "connection reset by peer.") {
 		t.Errorf("конец причины потерян: %q", reason)
 	}
