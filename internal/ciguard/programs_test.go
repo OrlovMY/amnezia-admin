@@ -61,19 +61,6 @@ type progRule struct {
 	check func(args []shWord) string // nil — аргументы не проверяются
 }
 
-func noArgWord(bad ...string) func([]shWord) string {
-	return func(args []shWord) string {
-		for _, a := range args {
-			for _, b := range bad {
-				if strings.Contains(a.lit, b) {
-					return "в аргументе есть «" + b + "» — код в обход лексера"
-				}
-			}
-		}
-		return ""
-	}
-}
-
 // allowedPrograms — ЗАКРЫТЫЙ список: ровно то, что сейчас стоит в позиции
 // команды в файлах (снято разбором 30.09.2026).
 var allowedPrograms = map[string]progRule{
@@ -97,8 +84,7 @@ var allowedPrograms = map[string]progRule{
 	"test":     {why: "проверка условия"},
 	"true":     {why: "пустая команда в || true"},
 	// внешние программы
-	"awk": {why: "фильтр; без system/getline/вывода в трубу — иначе запускает оболочку",
-		check: noArgWord("system", "getline", "| \"", "|\"")},
+	"awk":       {why: "фильтр; текст программы — только из allowedScriptTexts (scripttext_test.go)"},
 	"base64":    {why: "образец канарейки в check-history-keys.sh"},
 	"bash":      {why: "только allowedShellCalls — наши scripts/*.sh, разбираемые сторожем"},
 	"cat":       {why: "склейка потоков"},
@@ -114,7 +100,7 @@ var allowedPrograms = map[string]progRule{
 	"ls":        {why: "список файлов"},
 	"mkdir":     {why: "каталоги"},
 	"mv":        {why: "переименование"},
-	"sed":       {why: "фильтр; читателем — без q/Q (pipeReaders)", check: noArgWord("e ", "/e")},
+	"sed":       {why: "фильтр; текст скрипта — только из allowedScriptTexts (scripttext_test.go)"},
 	"sha256sum": {why: "контрольные суммы"},
 	"sort":      {why: "сортировка"},
 	"sudo": {why: "только sudo apt-get update|install на Linux-раннере", check: func(args []shWord) string {
@@ -191,6 +177,8 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	seen := map[string]int{}
 	distinct := map[string]bool{} // все буквальные имена в позиции команды, кроме функций
 	placeUsed := map[string]int{}
+	textUsed := map[string]int{}
+	textAll := map[string]bool{} // все разные тексты, включая незнакомые
 	cmds := 0
 	for _, s := range shellSources(t) {
 		p := parseShell(s.body)
@@ -244,6 +232,23 @@ func TestCommandProgramsClosedList(t *testing.T) {
 					"с обоснованием; интерпретатор или оболочка исполняет код мимо лексера", where, w.lit, call)
 			} else {
 				seen[w.lit]++
+				if w.lit == "awk" || w.lit == "sed" {
+					text, pr := scriptText(w.lit, args)
+					key := scriptKey(w.lit, text)
+					if pr == "" {
+						textAll[key] = true
+					}
+					switch {
+					case pr != "":
+						fail(t, "%s: «%s»: %s", where, call, pr)
+					case allowedScriptTexts[key] == "":
+						fail(t, "%s: текст программы %s «%s» (%s) вне закрытого списка allowedScriptTexts — "+
+							"awk/sed сами исполняют команды (system, print | cmd, sed e); новый текст — строкой после ревью",
+							where, w.lit, text, key)
+					default:
+						textUsed[key]++
+					}
+				}
 				if rule.check != nil {
 					if pr := rule.check(args); pr != "" {
 						fail(t, "%s: «%s»: %s", where, call, pr)
@@ -283,6 +288,18 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		fatal(t, "не встречено ни одной программы из списка — тест ничего не проверил")
+	}
+	for key := range allowedScriptTexts {
+		if textUsed[key] == 0 {
+			fail(t, "текст %s из allowedScriptTexts больше не встречается — запись устарела, убери её", key)
+		}
+	}
+	if len(textUsed) == 0 {
+		fatal(t, "не встречено ни одного текста awk/sed из списка — проверка текстов ничего не проверила")
+	}
+	if len(textAll) != wantScriptTexts {
+		fail(t, "разных текстов awk/sed найдено %d, ожидалось %d — законно изменилось — поправь wantScriptTexts и allowedScriptTexts",
+			len(textAll), wantScriptTexts)
 	}
 	if len(distinct) != wantPrograms {
 		fail(t, "разных программ найдено %d, ожидалось %d — законно изменилось — поправь wantPrograms и allowedPrograms",
