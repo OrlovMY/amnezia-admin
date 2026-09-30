@@ -33,7 +33,7 @@ type partialRunner struct {
 }
 
 func (r *partialRunner) Run(cmd string, stdin []byte) (string, error) {
-	if stdin != nil && !r.done && !strings.HasPrefix(cmd, "sudo ") {
+	if stdin != nil && !r.done && !strings.Contains(cmd, "sudo ") {
 		r.done = true
 		first := strings.SplitN(string(stdin), "\n", 2)[0]
 		if wg, err := base64.StdEncoding.DecodeString(first); err == nil && first != "-" {
@@ -63,7 +63,7 @@ func TestPartialWriteNotRetriedUnderSudo(t *testing.T) {
 				t.Errorf("частичная запись выдана за «изменил другой»: %v", err)
 			}
 			for _, cmd := range srv.Commands() {
-				if strings.HasPrefix(cmd, "sudo ") {
+				if strings.Contains(cmd, "sudo ") {
 					t.Errorf("после записи повтор под sudo недопустим: %.60q", cmd)
 				}
 			}
