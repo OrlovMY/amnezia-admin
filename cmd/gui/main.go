@@ -2006,7 +2006,7 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 		Name:      cl.Name(),
 		Created:   cl.Created(),
 		ClientID:  cl.ClientID,
-		Disabled:  cl.Disabled(),
+		Enabled:   cl.EnabledState(),
 		CanManage: u.canManage,
 		Peer:      core.ReadPeer(u.peerStats, u.statsFailed, cl.ClientID),
 	}, true
@@ -2060,7 +2060,7 @@ func (u *ui) buildTable() {
 				return
 			}
 			if id.Col == 1 {
-				c.TextStyle = fyne.TextStyle{Bold: true, Italic: r.Disabled}
+				c.TextStyle = fyne.TextStyle{Bold: true, Italic: r.Enabled == core.EnabledDisabled}
 			}
 			// Текст ячейки — из guiview.CellText: и «?» при неудавшемся
 			// запросе, и всё остальное решается там же, откуда берётся

@@ -217,12 +217,12 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 			case core.EnabledUnknown:
 				unknownEnabled = append(unknownEnabled, cl.Name())
 			}
-			act := listActivityText(cl.Disabled(), r)
+			act := listActivityText(cl.EnabledState(), r)
 			hs := cDim(pad(act, 18))
 			if _, ok := r.Measured(); ok && !cl.Disabled() && act != "—" {
 				hs = cOK(pad(act, 18))
 			}
-			traffic := listTrafficText(cl.Disabled(), r)
+			traffic := listTrafficText(cl.EnabledState(), r)
 			name := cl.Name()
 			if cl.Disabled() {
 				name = cDim(pad(name, 34))
@@ -277,9 +277,14 @@ func orphanNote(err error) string {
 //
 // Прежде «?» не было вовсе: пустая карта при отказе и отсутствующий ключ
 // давали нулевое время, то есть «—» — «не подключался» (признак 1).
-func listActivityText(disabled bool, r core.PeerReading) string {
-	if disabled {
+func listActivityText(enabled core.EnabledState, r core.PeerReading) string {
+	switch enabled {
+	case core.EnabledDisabled:
 		return "(откл.)"
+	case core.EnabledUnknown:
+		// раунд 2 долгов, У1: не «активен» и не «отключён»; причина — в
+		// строке под таблицей (EnabledUnknownNote)
+		return textListEnabledUnknown
 	}
 	st, ok := r.Measured()
 	switch {
@@ -294,8 +299,8 @@ func listActivityText(disabled bool, r core.PeerReading) string {
 
 // listTrafficText — ячейка «Трафик ↓/↑» таблицы list. Число печатается
 // только измеренному клиенту; честный измеренный ноль остаётся «0 B / 0 B».
-func listTrafficText(disabled bool, r core.PeerReading) string {
-	if disabled {
+func listTrafficText(enabled core.EnabledState, r core.PeerReading) string {
+	if enabled == core.EnabledDisabled {
 		return "(откл.)"
 	}
 	st, ok := r.Measured()
@@ -493,6 +498,10 @@ func runDryRun(w io.Writer, sess *core.Session, cur *core.Container, cmd, name, 
 }
 
 // ---------- интерактивный режим ----------
+
+// textListEnabledUnknown — ячейка «Активность» list, когда неизвестно,
+// включён ли клиент (У1, раунд 2).
+const textListEnabledUnknown = "(вкл/откл: ?)"
 
 // textInputEnded — строка при конце ввода в меню (долг У6, текст UX-01).
 const textInputEnded = "Ввод закончился — выход."

@@ -158,6 +158,19 @@ func TestDebtsListNamesUnknownEnabled(t *testing.T) {
 			if got != c.want {
 				t.Fatalf("строка о неизвестном состоянии: есть=%v, ожидалось %v:\n%s", got, c.want, o.String())
 			}
+			// Раунд 2 (QA п.5): и в САМОЙ строке таблицы — не как у активного.
+			var aliceRow string
+			for _, l := range strings.Split(o.String(), "\n") {
+				if strings.Contains(l, "Alice") && !strings.Contains(l, "Неизвестно") {
+					aliceRow = l
+				}
+			}
+			if aliceRow == "" {
+				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: строки Alice нет:\n%s", o.String())
+			}
+			if marked := strings.Contains(aliceRow, "(вкл/откл: ?)"); marked != c.want {
+				t.Fatalf("строка Alice: пометка «(вкл/откл: ?)» есть=%v, ожидалось %v: %q", marked, c.want, aliceRow)
+			}
 		})
 	}
 }

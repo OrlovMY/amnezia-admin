@@ -192,15 +192,15 @@ func TestActivityTextThreeStates(t *testing.T) {
 		{"незаполненное показание — незнание", true, false, core.PeerReading{}, "?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := guiview.ActivityText(tc.canManage, tc.disabled, tc.r); got != tc.want {
+			if got := guiview.ActivityText(tc.canManage, enabledOf(tc.disabled), tc.r); got != tc.want {
 				t.Errorf("ActivityText = %q, want %q", got, tc.want)
 			}
 		})
 	}
-	if guiview.ActivityText(true, false, failed) == guiview.ActivityText(true, false, never) {
+	if guiview.ActivityText(true, core.EnabledActive, failed) == guiview.ActivityText(true, core.EnabledActive, never) {
 		t.Fatal("«узнать не удалось» неотличимо от «не подключался»")
 	}
-	if guiview.ActivityText(true, false, absent) == guiview.ActivityText(true, false, never) {
+	if guiview.ActivityText(true, core.EnabledActive, absent) == guiview.ActivityText(true, core.EnabledActive, never) {
 		t.Fatal("«нет в ответе» неотличимо от «не подключался»")
 	}
 }
@@ -217,7 +217,7 @@ func TestActivityTextArrivesFromServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("тест перестал что-либо проверять: GetPeerStats не вернула ошибку на отказавшем транспорте")
 	}
-	if got, want := guiview.ActivityText(true, false, reading(stats, err != nil, "peer-1")), "?"; got != want {
+	if got, want := guiview.ActivityText(true, core.EnabledActive, reading(stats, err != nil, "peer-1")), "?"; got != want {
 		t.Errorf("отказ сервера не доехал до ячейки активности: %q, want %q", got, want)
 	}
 
@@ -234,10 +234,10 @@ func TestActivityTextArrivesFromServer(t *testing.T) {
 	if anyPeer == "" {
 		t.Fatal("тест перестал что-либо проверять: fakesrv не вернул ни одного peer'а")
 	}
-	if got, want := guiview.ActivityText(true, false, reading(stats, false, anyPeer)), "—"; got != want {
+	if got, want := guiview.ActivityText(true, core.EnabledActive, reading(stats, false, anyPeer)), "—"; got != want {
 		t.Errorf("исправный сервер: %q, want %q — ответ «не подключался» обязан остаться собой", got, want)
 	}
-	if got, want := guiview.ActivityText(true, false, reading(stats, false, "нет-такого")), "?"; got != want {
+	if got, want := guiview.ActivityText(true, core.EnabledActive, reading(stats, false, "нет-такого")), "?"; got != want {
 		t.Errorf("клиент, которого нет в ответе: %q, want %q", got, want)
 	}
 }
@@ -274,17 +274,17 @@ func TestTrafficTextThreeStates(t *testing.T) {
 		{"незаполненное показание — не ноль", true, false, core.PeerReading{}, "?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := guiview.TrafficText(tc.canManage, tc.disabled, tc.r)
+			got := guiview.TrafficText(tc.canManage, enabledOf(tc.disabled), tc.r)
 			if got != tc.want {
 				t.Errorf("TrafficText = %q, want %q", got, tc.want)
 			}
 		})
 	}
-	zero := guiview.TrafficText(true, false, reading(stats, false, "zero"))
-	if guiview.TrafficText(true, false, reading(stats, false, "gone")) == zero {
+	zero := guiview.TrafficText(true, core.EnabledActive, reading(stats, false, "zero"))
+	if guiview.TrafficText(true, core.EnabledActive, reading(stats, false, "gone")) == zero {
 		t.Fatal("«клиента нет в статистике» неотличимо от измеренного нуля — ровно тот дефект, который чинится")
 	}
-	if guiview.TrafficText(true, false, reading(nil, true, "zero")) == zero {
+	if guiview.TrafficText(true, core.EnabledActive, reading(nil, true, "zero")) == zero {
 		t.Fatal("\"не удалось получить\" неотличимо от измеренного нуля")
 	}
 }
@@ -301,7 +301,7 @@ func TestTrafficTextArrivesFromServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("тест перестал что-либо проверять: GetPeerStats не вернула ошибку на отказавшем транспорте")
 	}
-	if got, want := guiview.TrafficText(true, false, core.ReadPeer(stats, err != nil, "peer-1")), "?"; got != want {
+	if got, want := guiview.TrafficText(true, core.EnabledActive, core.ReadPeer(stats, err != nil, "peer-1")), "?"; got != want {
 		t.Errorf("отказ сервера не доехал до ячейки трафика: %q, want %q", got, want)
 	}
 }
@@ -360,11 +360,11 @@ func TestTrafficTextAbsentArrivesFromServer(t *testing.T) {
 		t.Fatalf("GetPeerStats после рассинхрона: %v — сервер обязан ОТВЕТИТЬ, иначе проверяется не тот случай", err)
 	}
 	for _, id := range []string{subject, bystander} {
-		if got := guiview.TrafficText(true, false, core.ReadPeer(stats, false, id)); got != "?" {
+		if got := guiview.TrafficText(true, core.EnabledActive, core.ReadPeer(stats, false, id)); got != "?" {
 			t.Errorf("включённый клиент, которого нет в ответе сервера: %q, want \"?\"", got)
 		}
 	}
-	if got := guiview.TrafficText(true, false, core.ReadPeer(stats, false, carol)); got != "0 B / 0 B" {
+	if got := guiview.TrafficText(true, core.EnabledActive, core.ReadPeer(stats, false, carol)); got != "0 B / 0 B" {
 		t.Errorf("клиент, который есть в ответе с нулём: %q, want \"0 B / 0 B\" — честный ноль обязан остаться нулём", got)
 	}
 }
@@ -385,5 +385,36 @@ func TestDeleteCardActivityAbsentArrivesFromServer(t *testing.T) {
 	}
 	if got := guiview.DeleteCardActivity(hs, carol, nil, false); got != "Подключений не было." {
 		t.Errorf("клиент есть в ответе и не подключался: %q, want \"Подключений не было.\"", got)
+	}
+}
+
+// enabledOf — булев случай таблицы в три состояния (раунд 2 долгов).
+func enabledOf(disabled bool) core.EnabledState {
+	if disabled {
+		return core.EnabledDisabled
+	}
+	return core.EnabledActive
+}
+
+// TestEnabledUnknownCells — раунд 2 долгов (QA п.5): третье состояние
+// включённости в самой строке. «Активность» — EnabledUnknownCell, а не
+// время и не «отключён»; «Трафик» — измеренное число (это показание сервера).
+func TestEnabledUnknownCells(t *testing.T) {
+	stats := map[string]core.PeerStat{"p": {RxBytes: 2048, TxBytes: 1024}}
+	r := core.ReadPeer(stats, false, "p")
+	for _, c := range []struct {
+		st       core.EnabledState
+		act, trf string
+	}{
+		{core.EnabledActive, "—", "2.0 KB / 1.0 KB"},
+		{core.EnabledDisabled, "отключён", "отключён"},
+		{core.EnabledUnknown, guiview.EnabledUnknownCell, "2.0 KB / 1.0 KB"},
+	} {
+		if got := guiview.ActivityText(true, c.st, r); got != c.act {
+			t.Errorf("состояние %d: «Активность» %q, ожидалось %q", c.st, got, c.act)
+		}
+		if got := guiview.TrafficText(true, c.st, r); got != c.trf {
+			t.Errorf("состояние %d: «Трафик» %q, ожидалось %q", c.st, got, c.trf)
+		}
 	}
 }

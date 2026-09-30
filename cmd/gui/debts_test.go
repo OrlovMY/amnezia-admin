@@ -129,6 +129,45 @@ func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
 	}
 }
 
+// TestDebtsRowShowsEnabledUnknown — раунд 2 (QA п.5, «чинить в типе»):
+// третье состояние видно в САМОЙ строке таблицы, а не только в строке
+// состояния. Боевой путь: refresh() против fakesrv, ячейка — настоящий
+// UpdateCell. Различение: false — активен («—», рукопожатий не было), true —
+// «отключён», "yes" — «вкл/откл: ?». На c65420e "yes" давал «—», как у
+// активного.
+func TestDebtsRowShowsEnabledUnknown(t *testing.T) {
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
+	for _, cs := range []struct {
+		v    any
+		want string
+	}{{false, "—"}, {true, "отключён"}, {"yes", "вкл/откл: ?"}} {
+		srv := fakesrv.New()
+		const path = "/opt/amnezia/awg/clientsTable"
+		raw, _ := srv.File(path)
+		var list []map[string]any
+		if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+			t.Fatalf("подготовка: %v", err)
+		}
+		list[0]["userData"].(map[string]any)["disabled"] = cs.v
+		out, _ := json.Marshal(list)
+		srv.SetFile(path, out)
+		u := refreshedUI(t, core.NewSessionWithRunner(srv, creds), c)
+		row := -1
+		for i, cl := range u.clients {
+			if cl.Name() == "Alice" {
+				row = i
+			}
+		}
+		if row < 0 {
+			t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: Alice нет в таблице")
+		}
+		if got := cellText(u, row, 3); got != cs.want {
+			t.Errorf("disabled=%#v: «Активность» = %q, ожидалось %q", cs.v, got, cs.want)
+		}
+	}
+}
+
 // TestDebtsPinThrottleUnreadableClosesInput — Н8, ТЕСТ РАЗЛИЧЕНИЯ и ДОЕЗДА
 // по чтению. «Файла счётчика нет» (штатно: ввод открыт) ≠ «файл есть, но
 // повреждён или не читается» (ввод закрыт, названы причина и путь). На

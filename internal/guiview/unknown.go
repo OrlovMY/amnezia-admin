@@ -77,6 +77,8 @@ func DeleteCardActivity(hs map[string]string, clientID string, err error, disabl
 //	                                 `wg` у XRay/DNS): "?" здесь означало бы
 //	                                 «не смогли узнать», а мы и не спрашивали;
 //	disabled            → "отключён" состояние записи, а не измерение;
+//	включён ли — неизвестно → EnabledUnknownCell (раунд 2 долгов, У1): не
+//	                                 «активен» и не «отключён»;
 //	не PeerMeasured     → "?"        запрос не удался ИЛИ клиента нет в
 //	                                 ответе — про него мы не знаем;
 //	без рукопожатия     → "—"        сервер ответил: не подключался;
@@ -95,12 +97,15 @@ func DeleteCardActivity(hs map[string]string, clientID string, err error, disabl
 // П-НЕЗНАНИЕ): частный случай выше общего перехватывал бы «не знаем».
 // Текст живёт здесь, а не в cmd/gui, по тому же доводу, что и остальное в
 // этом файле.
-func ActivityText(canManage, disabled bool, r core.PeerReading) string {
+func ActivityText(canManage bool, enabled core.EnabledState, r core.PeerReading) string {
 	if !canManage {
 		return "—"
 	}
-	if disabled {
+	switch enabled {
+	case core.EnabledDisabled:
 		return "отключён"
+	case core.EnabledUnknown:
+		return EnabledUnknownCell
 	}
 	st, ok := r.Measured()
 	switch {
@@ -136,11 +141,15 @@ const HandshakeLayout = "2006-01-02 15:04"
 // st из карты по ключу, отсутствующий ключ давал нулевую PeerStat, и
 // «0 B / 0 B» уезжал к человеку как измерение. core.PeerReading числа без
 // признака «измерено» не отдаёт.
-func TrafficText(canManage, disabled bool, r core.PeerReading) string {
+//
+// Включённость неизвестна — число показывается, если измерено: трафик —
+// показание сервера, а не вывод из записи; что включённость неизвестна,
+// говорит соседняя колонка «Активность».
+func TrafficText(canManage bool, enabled core.EnabledState, r core.PeerReading) string {
 	if !canManage {
 		return "—"
 	}
-	if disabled {
+	if enabled == core.EnabledDisabled {
 		return "отключён"
 	}
 	st, ok := r.Measured()
@@ -149,3 +158,8 @@ func TrafficText(canManage, disabled bool, r core.PeerReading) string {
 	}
 	return core.HumanBytes(st.RxBytes) + " / " + core.HumanBytes(st.TxBytes)
 }
+
+// EnabledUnknownCell — ячейка «Активность» клиента, про которого неизвестно,
+// включён ли он (поле disabled в clientsTable не true/false). Причина — в
+// строке состояния (LoadedStatus).
+const EnabledUnknownCell = "вкл/откл: ?"

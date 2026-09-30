@@ -40,6 +40,22 @@ func openMainLongStatus(t *testing.T, u *ui, sized func()) osmotrScene {
 	return osmotrScene{root: c.Content(), canvas: c, mins: osmotrFrame(c.Content(), nil)}
 }
 
+// openMainEnabledUnknown — главное окно, у «Телефона Анны» поле disabled
+// испорчено: в «Активности» — guiview.EnabledUnknownCell (раунд 2, QA п.5).
+func openMainEnabledUnknown(t *testing.T, u *ui, sized func()) osmotrScene {
+	osmotrMain(u)
+	u.clients[1].UserData["disabled"] = "yes"
+	u.status.SetText(guiview.LoadedStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера",
+		u.clients, u.peerStats, nil))
+	u.table.Refresh()
+	sized()
+	if got := cellText(u, 1, 3); got != guiview.EnabledUnknownCell {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: «Активность» строки 2 — %q", got)
+	}
+	c := u.win.Canvas()
+	return osmotrScene{root: c.Content(), canvas: c, mins: osmotrFrame(c.Content(), nil)}
+}
+
 func invMainWithStatus(status string) []string {
 	inv := append([]string(nil), invMain...)
 	inv[len(inv)-1] = "подпись:" + firstLine(status) // последняя — строка состояния
@@ -82,6 +98,8 @@ func invPinThrottleUnknown() []string {
 
 func init() {
 	osmotrForms = append(osmotrForms,
+		osmotrForm{name: "(г) главное окно, включён ли клиент — неизвестно", open: openMainEnabledUnknown,
+			inventory: invMainWithStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера")},
 		osmotrForm{name: "(г) главное окно, причина «?» в строке состояния", open: openMainLongStatus,
 			inventory: invMainWithStatus(debtsLoadedStatus(nil))},
 		osmotrForm{name: "(б) пин-код, счётчик попыток не читается", open: openPinThrottleUnknown,
