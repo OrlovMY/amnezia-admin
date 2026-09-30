@@ -291,7 +291,10 @@ func casDeniedBeforeWrite(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
+	// Только stderr: текст ошибки sshRunner начинается с САМОЙ команды, а в
+	// ней — текст скрипта с меткой «not moved: »; по всему тексту признак не
+	// срабатывал никогда (слияние H1, найдено моделью канарейки PR4.2).
+	s := strings.ToLower(stderrTail(err))
 	if strings.Contains(s, "not moved: ") {
 		return false // скрипт уже шёл и дошёл до mv — отказ после начала записи
 	}
@@ -312,7 +315,7 @@ var reSudoDenied = regexp.MustCompile(`sudo: a password is required|sudo: a term
 // casSudoRefused — повтор под sudo отказан самим sudo (код 1 и его текст).
 func casSudoRefused(err error) bool {
 	var es interface{ ExitStatus() int }
-	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(err.Error())
+	return err != nil && errors.As(err, &es) && es.ExitStatus() == 1 && reSudoDenied.MatchString(stderrTail(err))
 }
 
 // stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
