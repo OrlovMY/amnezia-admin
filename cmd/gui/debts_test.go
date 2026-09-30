@@ -216,6 +216,48 @@ func TestDebtsPinThrottleUnreadableClosesInput(t *testing.T) {
 	}
 }
 
+// TestDebtsToggleUnknownOffersDisable — раунд 4 (AU-UX High, решение ядра):
+// «Вкл/Выкл» на клиенте с испорченным disabled открывает вопрос об
+// ОТКЛЮЧЕНИИ, а «Перевыпустить» — отказ с шагом «Отключите пользователя».
+// Боевой путь: refresh() против fakesrv, настоящие toggleSelected и
+// regenerateSelected. На f5951bc «Вкл/Выкл» давал отказ.
+func TestDebtsToggleUnknownOffersDisable(t *testing.T) {
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
+	srv := fakesrv.New()
+	const path = "/opt/amnezia/awg/clientsTable"
+	raw, _ := srv.File(path)
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+		t.Fatalf("подготовка: %v", err)
+	}
+	list[0]["userData"].(map[string]any)["disabled"] = "yes"
+	out, _ := json.Marshal(list)
+	srv.SetFile(path, out)
+	u := refreshedUI(t, core.NewSessionWithRunner(srv, creds), c)
+	u.selectedRow = -1
+	for i, cl := range u.clients {
+		if cl.EnabledState() == core.EnabledUnknown {
+			u.selectedRow = i
+		}
+	}
+	if u.selectedRow < 0 {
+		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: клиента с неизвестным состоянием нет")
+	}
+	u.toggleSelected()
+	texts := strings.Join(visibleTexts(u.win.Canvas().Overlays().Top()), " | ")
+	if !strings.Contains(texts, "Отключить пользователя?") || strings.Contains(texts, "неизвестно:") {
+		t.Fatalf("«Вкл/Выкл» при неизвестном состоянии — не вопрос об отключении: %s", texts)
+	}
+	u.win.Canvas().Overlays().Top().Hide()
+	u.win.Canvas().Overlays().Remove(u.win.Canvas().Overlays().Top())
+	u.regenerateSelected()
+	texts = strings.Join(visibleTexts(u.win.Canvas().Overlays().Top()), " | ")
+	if !strings.Contains(texts, "Отключите пользователя — это исправит запись") {
+		t.Fatalf("«Перевыпустить» при неизвестном состоянии — не отказ с шагом: %s", texts)
+	}
+}
+
 // TestDebtsPinThrottleBrokenBeforeAttempt — раунд 4 (AU-LOGIC М-1): счётчик
 // испортился ПОСЛЕ открытия диалога, до нажатия «Открыть». Проверка перед
 // попыткой (submit) обязана закрыть ввод, НЕ выполняя попытку расшифровки.

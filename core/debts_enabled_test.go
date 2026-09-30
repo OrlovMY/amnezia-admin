@@ -34,10 +34,12 @@ func withAliceDisabled(t *testing.T, v any, extra ...map[string]any) (*fakesrv.S
 }
 
 // TestDebtsEnabledUnknownRefused — ТЕСТ РАЗЛИЧЕНИЯ и ДОЕЗДА через Session и
-// fakesrv: disabled = false / true / "true" (строка). Перевыпуск, отключение
-// и включение для строки — отказ с причиной, таблица и wg0.conf не
-// тронуты. На c65420e строка читалась как «активен»: rekey проходил и
-// стирал поле, disable писал true, enable отвечал «уже активен».
+// fakesrv: disabled = false / true / "true" (строка) / 1. Перевыпуск и
+// включение при неизвестном — отказ с причиной и шагом «отключите», таблица
+// и wg0.conf не тронуты. На c65420e строка читалась как «активен»: rekey
+// проходил и стирал поле, enable отвечал «уже активен». Отключение при
+// неизвестном РАЗРЕШЕНО (раунд 4, решение ядра) — см.
+// TestDebtsDisableUnknownWritesTrue.
 func TestDebtsEnabledUnknownRefused(t *testing.T) {
 	type op struct {
 		name string
@@ -65,12 +67,17 @@ func TestDebtsEnabledUnknownRefused(t *testing.T) {
 				tblBefore, _ := srv.File(debtsTbl)
 				wgBefore, _ := srv.File(debtsWg0)
 				err := o.do(a1bSession(srv), id)
+				wantU := c.wantU && o.name != "disable"
 				isUnknown := err != nil && strings.Contains(err.Error(), "неизвестно")
-				if isUnknown != c.wantU {
-					t.Fatalf("disabled=%#v, %s: err=%v; ожидался отказ «неизвестно»: %v", c.v, o.name, err, c.wantU)
+				if isUnknown != wantU {
+					t.Fatalf("disabled=%#v, %s: err=%v; ожидался отказ «неизвестно»: %v", c.v, o.name, err, wantU)
 				}
-				if !c.wantU {
+				if !wantU {
 					return
+				}
+				// Раунд 4 (AU-UX High): отказ называет выполнимый шаг.
+				if !strings.Contains(err.Error(), "Отключите пользователя — это исправит запись") {
+					t.Errorf("отказ не говорит, что делать: %v", err)
 				}
 				tblAfter, _ := srv.File(debtsTbl)
 				wgAfter, _ := srv.File(debtsWg0)
@@ -89,7 +96,7 @@ func TestDebtsEnabledUnknownNoteText(t *testing.T) {
 		t.Fatalf("имён нет, а строка есть: %q", got)
 	}
 	const want = `Неизвестно, включены ли эти пользователи (поле disabled в clientsTable не true/false): "X", "Y". ` +
-		"Отключать, включать и перевыпускать их программа не будет, пока запись на сервере не исправлена."
+		"Включать и перевыпускать их программа не будет; чтобы исправить запись, отключите их (или удалите)."
 	if got := EnabledUnknownNote([]string{"X", "Y"}); got != want {
 		t.Fatalf("текст:\n%q\nожидался:\n%q", got, want)
 	}
@@ -111,5 +118,37 @@ func TestDebtsEnabledUnknownKeepsReservedIP(t *testing.T) {
 	}
 	if nu.IP == "10.8.1.4" {
 		t.Fatal("адрес клиента с неизвестным состоянием выдан новому пользователю")
+	}
+}
+
+// TestDebtsDisableUnknownWritesTrue — раунд 4 (AU-UX High, решение ядра):
+// отключение клиента с испорченным полем disabled ПРОХОДИТ и пишет
+// disabled=true (bool) — итог от прежней записи не зависит, запись
+// исправлена; peer из wg0.conf убран. На f5951bc здесь был отказ, и отрезать
+// доступ можно было только удалением.
+func TestDebtsDisableUnknownWritesTrue(t *testing.T) {
+	for _, v := range []any{"true", 1, "yes"} {
+		srv, id := withAliceDisabled(t, v)
+		if err := a1bSession(srv).SetEnabled(awgContainer(), id, false); err != nil {
+			t.Fatalf("disabled=%#v: отключение отказало: %v", v, err)
+		}
+		raw, _ := srv.File(debtsTbl)
+		var list []map[string]any
+		if err := json.Unmarshal(raw, &list); err != nil {
+			t.Fatal(err)
+		}
+		var got any = "записи нет"
+		for _, e := range list {
+			if e["clientId"] == id {
+				got = e["userData"].(map[string]any)["disabled"]
+			}
+		}
+		if got != true {
+			t.Errorf("disabled=%#v: после отключения поле %#v, ожидалось true", v, got)
+		}
+		wg, _ := srv.File(debtsWg0)
+		if strings.Contains(string(wg), id) {
+			t.Errorf("disabled=%#v: peer остался в wg0.conf после отключения", v)
+		}
 	}
 }

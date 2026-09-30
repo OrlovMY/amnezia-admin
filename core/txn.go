@@ -1304,9 +1304,10 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
 	}
-	if clients[idx].EnabledState() == EnabledUnknown {
-		return nil, EnabledUnknownError(clients[idx])
-	}
+	// Раунд 4 долгов (AU-UX High, решение ядра): отключение при неизвестном
+	// disabled РАЗРЕШЕНО — итог «отключён» от прежнего значения не зависит,
+	// и это единственный способ исправить запись в самой программе.
+	// Включение и перевыпуск при неизвестном по-прежнему отказывают.
 	if clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q уже отключён", clients[idx].Name())
 	}

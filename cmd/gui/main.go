@@ -2912,11 +2912,8 @@ func (u *ui) toggleSelected() {
 		return
 	}
 	victim := u.clients[idx]
-	if victim.EnabledState() == core.EnabledUnknown {
-		// У1: включён ли — неизвестно; до вопроса, а не после него
-		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
-		return
-	}
+	// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ, разрешено
+	// (раунд 4 долгов, решение ядра): итог от прежней записи не зависит.
 	enable := victim.Disabled()
 	title := "Отключить пользователя?"
 	verb := "Отключаю"

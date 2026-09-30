@@ -728,11 +728,9 @@ func interactive() (code int) {
 				break
 			}
 			victim := clients[idx]
-			if victim.EnabledState() == core.EnabledUnknown {
-				// У1: до вопроса и карточки — действие всё равно невозможно
-				printErr(core.EnabledUnknownError(victim))
-				break
-			}
+			// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ,
+			// разрешено (раунд 4, решение ядра): итог от прежней записи не
+			// зависит и исправляет её.
 			enable := victim.Disabled()
 			if enable {
 				// включение — вопрос как раньше, без карточки (Г3: вопрос
@@ -1003,11 +1001,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
-		if clients[idx].EnabledState() == core.EnabledUnknown {
-			// У1: до карточки подтверждения — действие всё равно невозможно
-			err = core.EnabledUnknownError(clients[idx])
-			break
-		}
+		// Неизвестная включённость: enable = false — отключение, разрешено
+		// (раунд 4, решение ядра).
 		enable := clients[idx].Disabled()
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
 			return code

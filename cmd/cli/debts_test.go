@@ -190,6 +190,42 @@ func TestDebtsListNamesUnknownEnabled(t *testing.T) {
 	}
 }
 
+// TestDebtsToggleUnknownDisables — раунд 4 (AU-UX High, решение ядра),
+// ДОЕЗД через полный run(): toggle клиента с испорченным disabled —
+// отключение проходит (код 0, «отключён»), rekey — отказ с шагом
+// «Отключите пользователя». На f5951bc toggle отказывал.
+func TestDebtsToggleUnknownDisables(t *testing.T) {
+	key, kh, srv := setupFakeSSHForRunWithExec(t)
+	const path = "/opt/amnezia/awg/clientsTable"
+	raw, _ := srv.File(path)
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+		t.Fatalf("подготовка: %v", err)
+	}
+	list[0]["userData"].(map[string]any)["disabled"] = "yes"
+	name := list[0]["userData"].(map[string]any)["clientName"].(string)
+	out, _ := json.Marshal(list)
+	srv.SetFile(path, out)
+
+	var o, e bytes.Buffer
+	if code := run([]string{"rekey", "-key", key, "-name", name, "-yes"}, strings.NewReader(""), &o, &e, kh); code == 0 ||
+		!strings.Contains(e.String(), "Отключите пользователя — это исправит запись") {
+		t.Errorf("rekey при неизвестном: код %d, stderr %q — ожидался отказ с шагом", code, e.String())
+	}
+	o.Reset()
+	e.Reset()
+	if code := run([]string{"toggle", "-key", key, "-name", name, "-yes"}, strings.NewReader(""), &o, &e, kh); code != 0 {
+		t.Fatalf("toggle при неизвестном: код %d, stderr %q — отключение должно пройти", code, e.String())
+	}
+	if !strings.Contains(o.String(), "отключён") {
+		t.Errorf("toggle при неизвестном не отключил: %q", o.String())
+	}
+	raw, _ = srv.File(path)
+	if !strings.Contains(string(raw), `"disabled": true`) && !strings.Contains(string(raw), `"disabled":true`) {
+		t.Errorf("после отключения запись не исправлена: %s", raw)
+	}
+}
+
 // handshakeRunner — fakesrv, у которого в ответе `wg show` у всех peer'ов
 // время последнего рукопожатия — сейчас (fakesrv отдаёт 0).
 type handshakeRunner struct{ inner *fakesrv.Server }
