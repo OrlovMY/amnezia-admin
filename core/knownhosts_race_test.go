@@ -7,6 +7,7 @@ package core
 // Серверы — fakesrv.SSHServer на эфемерных портах 127.0.0.1.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	"testing"
 
 	"amnezia-admin/internal/fakesrv"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const khChildEnv = "AMNEZIA_KH_CHILD" // адреса через запятую
@@ -56,11 +59,13 @@ func TestKnownHostsTwoProcesses(t *testing.T) {
 		kh := filepath.Join(t.TempDir(), "known_hosts")
 		var groups [2][]string
 		var fps []string
+		wantFp := map[string]string{}
 		for c := 0; c < 2; c++ {
 			for i := 0; i < perChild; i++ {
 				srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
 				groups[c] = append(groups[c], srv.Addr())
 				fps = append(fps, srv.Addr())
+				wantFp[knownhosts.Normalize(srv.Addr())] = srv.Fingerprint()
 			}
 		}
 		var wg sync.WaitGroup
@@ -84,6 +89,13 @@ func TestKnownHostsTwoProcesses(t *testing.T) {
 		}
 		data, _ := os.ReadFile(kh)
 		missing := khMissing(string(data), fps)
+		// Второй признак (QA-01): разбор итогового файла ТЕМ ЖЕ разборщиком,
+		// что у программы (ssh.ParseKnownHosts), — ровно по одной записи на
+		// сервер, каждая с его ключом; полузаписанная или склеенная строка —
+		// ошибка разбора.
+		for _, msg := range khParseCheck(data, wantFp) {
+			t.Errorf("раунд %d: %s", r, msg)
+		}
 		refused := strings.Join(outs[:], "\n")
 		var silent []string
 		for _, m := range missing {
@@ -113,3 +125,33 @@ func khMissing(data string, addrs []string) []string {
 }
 
 var _ = fakesrv.New
+
+// khParseCheck — разбор known_hosts через ssh.ParseKnownHosts: ровно одна
+// запись на каждый адрес из want, с его отпечатком, и ничего сверх.
+func khParseCheck(data []byte, want map[string]string) []string {
+	var bad []string
+	seen := map[string]int{}
+	rest := data
+	for len(bytes.TrimSpace(rest)) > 0 {
+		_, hosts, key, _, next, err := ssh.ParseKnownHosts(rest)
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("known_hosts не разбирается: %v", err))
+			break
+		}
+		for _, h := range hosts {
+			seen[h]++
+			if fp, ok := want[h]; !ok {
+				bad = append(bad, fmt.Sprintf("лишняя запись для %s", h))
+			} else if got := ssh.FingerprintSHA256(key); got != fp {
+				bad = append(bad, fmt.Sprintf("%s: ключ %s, ждали %s", h, got, fp))
+			}
+		}
+		rest = next
+	}
+	for h := range want {
+		if seen[h] != 1 {
+			bad = append(bad, fmt.Sprintf("%s: записей %d, ждали ровно 1", h, seen[h]))
+		}
+	}
+	return bad
+}

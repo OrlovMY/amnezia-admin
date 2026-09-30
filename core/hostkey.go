@@ -255,10 +255,7 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 			return false, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
 				"адрес %s, ожидался %s, предъявлен %s", addr, pol.ExpectedFingerprint, fp)
 		}
-		if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
-			return false, fmt.Errorf("%w (%s): %w", ErrKnownHostsWrite, pol.KnownHostsPath, err)
-		}
-		return true, nil
+		return recordKnownHost(pol, addr, lookupAddr, remote, fp, key)
 	}
 	if pol.Prompt == nil {
 		return false, newHostKeyError(ErrHostKeyUnknown, addr, "", fp, "адрес %s, отпечаток %s", addr, fp)
@@ -266,8 +263,44 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 	if !pol.Prompt(addr, fp) {
 		return false, newHostKeyError(ErrHostKeyUnknown, addr, "", fp, "адрес %s, отпечаток %s", addr, fp)
 	}
-	if err := appendKnownHost(pol.KnownHostsPath, addr, key); err != nil {
-		return false, fmt.Errorf("%w (%s): %w", ErrKnownHostsWrite, pol.KnownHostsPath, err)
+	return recordKnownHost(pol, addr, lookupAddr, remote, fp, key)
+}
+
+// recordKnownHost — запись принятого ключа (SEC-01 K1). Между первой
+// проверкой и записью был вопрос человеку (или сверка с хранилищем), и
+// другая копия программы могла за это время записать строку для того же
+// адреса. Поэтому под замком проверка повторяется:
+//   - ключ уже записан и совпал — не писать (дубликат), принять;
+//   - записан ДРУГОЙ ключ — ErrHostKeyChanged, не писать, отказ: иначе
+//     две строки для одного хоста, и knownhosts принял бы любую —
+//     жёсткий отказ при смене ключа был бы обойдён;
+//   - записи нет — дописать.
+func recordKnownHost(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, fp string, key ssh.PublicKey) (bool, error) {
+	var changedFp string
+	werr := withKnownHostsLock(pol.KnownHostsPath, func() error {
+		keyErr, err := lookupKnownHostLocked(pol.KnownHostsPath, lookupAddr, remote, key)
+		if err != nil {
+			return err
+		}
+		if keyErr == nil {
+			return nil // уже записан и совпал
+		}
+		if len(keyErr.Want) > 0 {
+			changedFp = ssh.FingerprintSHA256(keyErr.Want[0].Key)
+			return nil
+		}
+		return appendKnownHostLocked(pol.KnownHostsPath, addr, key)
+	})
+	if werr != nil {
+		return false, fmt.Errorf("%w (%s): %w", ErrKnownHostsWrite, pol.KnownHostsPath, werr)
+	}
+	if changedFp != "" {
+		if pol.OnChanged != nil {
+			pol.OnChanged(addr, changedFp, fp)
+		}
+		return false, newHostKeyError(ErrHostKeyChanged, addr, changedFp, fp,
+			"адрес %s, пока ключ подтверждался, другая копия программы записала для него ключ %s, а сервер предъявил %s (known_hosts: %s); если сервер переустанавливали, удалите строку %q из %s и подключитесь заново",
+			addr, changedFp, fp, pol.KnownHostsPath, addr, pol.KnownHostsPath)
 	}
 	return true, nil
 }
@@ -329,7 +362,12 @@ func lookupKnownHostLocked(path, addr string, remote net.Addr, key ssh.PublicKey
 func appendKnownHost(path, addr string, key ssh.PublicKey) error {
 	// Под межпроцессным замком: перечитать, дописать, заменить атомарно
 	// через уникальный временный файл (core/knownhostsfile.go).
-	return withKnownHostsLock(path, func() error {
+	return withKnownHostsLock(path, func() error { return appendKnownHostLocked(path, addr, key) })
+}
+
+// appendKnownHostLocked — тело appendKnownHost; вызывать под замком.
+func appendKnownHostLocked(path, addr string, key ssh.PublicKey) error {
+	{
 		existing, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return err
@@ -342,7 +380,7 @@ func appendKnownHost(path, addr string, key ssh.PublicKey) error {
 		buf.WriteString(knownhosts.Line([]string{addr}, key))
 		buf.WriteByte('\n')
 		return replaceFileAtomic(path, buf.Bytes())
-	})
+	}
 }
 
 // ForgetHostKey — «забыть ключ сервера» для записи хранилища vaultPath:
