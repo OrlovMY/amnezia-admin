@@ -160,6 +160,64 @@ func TestPR3ForeignFilesNoRestartAdvice(t *testing.T) {
 	}
 }
 
+// TestPR3RenameRollbackNoRuntimeClaim — раунд 7 (AU-LOGIC Н-6), проба
+// аудитора, ДОЕЗД: переименование (wg0.conf не меняется, работающий сервер
+// не трогается), проверка после записи не прочитала clientsTable (один раз),
+// откат прошёл, файлы совпали. `wg show` при этом не работает — набор
+// активных подключений не мерился. Текст не имеет права говорить, что он
+// «проверен». Только API a66400a — там падает поведением.
+func TestPR3RenameRollbackNoRuntimeClaim(t *testing.T) {
+	srv := fakesrv.New()
+	sess := pr3Session(srv)
+	cl, err := sess.LoadClients(pr3Container())
+	if err != nil || len(cl) == 0 {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	plan, err := sess.PlanRename(pr3Container(), cl[0].ClientID, "Переименованный")
+	if err != nil {
+		t.Fatalf("PlanRename: %v", err)
+	}
+	srv.FailReadTimes = map[string]int{"/opt/amnezia/awg/clientsTable": 1}
+	srv.FailWgShowFrom = 1
+	_, err = sess.Apply(plan)
+	if !errors.Is(err, core.ErrRolledBack) {
+		t.Fatalf("ожидался «отменено» (файлы проверены), получено: %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "набор активных подключений на сервере.") || strings.Contains(msg, "состояние восстановлено и проверено") {
+		t.Errorf("о подключениях сказано «проверено», хотя wg show не мерился: %v", err)
+	}
+	if !strings.Contains(msg, "не менялся и не проверялся") {
+		t.Errorf("не сказано, что подключения не менялись и не проверялись: %v", err)
+	}
+}
+
+// TestPR3RuntimeDifferWithoutSyncErr — раунд 7 (AU-LOGIC Н-7): ветка
+// «рантайм не совпал» БЕЗ ошибки повторного syncconf. syncconf «проходит»,
+// но выбрасывает постороннего peer'а (DropPeerOnSync) — при записи и при
+// откате. Файлы после отката совпали, набор подключений измерен и не совпал:
+// исход «сервер нужно перезапустить», не «неизвестно».
+func TestPR3RuntimeDifferWithoutSyncErr(t *testing.T) {
+	srv := fakesrv.New()
+	sess := pr3Session(srv)
+	cl, err := sess.LoadClients(pr3Container())
+	if err != nil || len(cl) < 2 {
+		t.Fatalf("LoadClients: %v", err)
+	}
+	plan, err := sess.PlanAddUser(pr3Container(), "Mallory")
+	if err != nil {
+		t.Fatalf("PlanAddUser: %v", err)
+	}
+	srv.DropPeerOnSync = cl[1].ClientID
+	_, err = sess.Apply(plan)
+	if !errors.Is(err, core.ErrRolledBackNotApplied) {
+		t.Fatalf("ожидался измеренный отказ работающего сервера, получено: %v", err)
+	}
+	if strings.Contains(err.Error(), "повторный syncconf") {
+		t.Errorf("syncconf не падал, а в тексте его ошибка: %v", err)
+	}
+}
+
 // TestPR3BusyDoesNotBlameOurCopy — Low аудита PR-1: замок /run/lock/ может
 // держать и посторонняя программа; текст не утверждает, что это наша копия.
 func TestPR3BusyDoesNotBlameOurCopy(t *testing.T) {

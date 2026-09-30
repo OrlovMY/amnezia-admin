@@ -1679,8 +1679,14 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		// A8 п.2: слово «проверено» обязано нести границу проверки — иначе
 		// оно означает «проверено частично», выданное за полное. Границу
 		// выносим ОТДЕЛЬНЫМИ строками ПОСЛЕ причины (ревью UX-01, круг 2).
-		const scope = "\nПроверено: содержимое обоих файлов байт в байт; набор активных подключений на сервере." +
+		scope := "\nПроверено: содержимое обоих файлов байт в байт; набор активных подключений на сервере." +
 			"\nНе проверялись: AllowedIPs и PSK в работающем сервере (только в файлах)."
+		if runtime == checkNotNeeded {
+			// Раунд 7 (AU-LOGIC Н-6): wg0.conf этой операцией не менялся,
+			// работающий сервер не мерился — слова «проверено» о нём нет.
+			scope = "\nПроверено: содержимое обоих файлов байт в байт." +
+				"\nНабор активных подключений этой операцией не менялся и не проверялся."
+		}
 		// A8 п.3: «вернул прежний файл» и «создал новый, прежнего не было» —
 		// разные вещи. clientsTable, которой не было, откат оставляет пустой:
 		// для утилиты это равнозначно отсутствию, но молчать об этом нельзя.
@@ -1689,7 +1695,11 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 				"\nПримечание: clientsTable до операции не существовала — вернуть отсутствие файла нечем, он оставлен пустым."+
 				" Для этой утилиты пустая таблица и отсутствующая равнозначны: список пользователей пуст и там, и там.%s", cause, scope)}
 		}
-		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("операция отменена, состояние восстановлено и проверено. Исходная причина: %v%s", cause, scope)}
+		done := "операция отменена, состояние восстановлено и проверено"
+		if runtime == checkNotNeeded {
+			done = "операция отменена, файлы восстановлены и проверены"
+		}
+		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("%s. Исходная причина: %v%s", done, cause, scope)}
 	case ErrRolledBackNotApplied:
 		// только клетка «файлы совпали с прежними × рантайм не совпал»
 		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены и проверены, но применить их не удалось — работающий сервер к прежнему состоянию не вернулся (%s): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v", runtimeWhy, cause)}
@@ -1706,12 +1716,16 @@ const (
 	checkSame    checkState = iota // совпал с прежним
 	checkDiffer                    // прочитан и не совпал
 	checkUnknown                   // прочитать не удалось
+	// checkNotNeeded — рантайм не мерился: wg0.conf этой операцией не
+	// менялся (rename). Это НЕ «совпал» (раунд 7, AU-LOGIC Н-6, признак 2).
+	checkNotNeeded
 )
 
 type rollbackCell struct{ files, runtime checkState }
 
 // rollbackOutcome — ЯВНАЯ таблица исходов отката: по одной строке на каждую
-// из 9 клеток (сторож TestRollbackOutcomeTableComplete). Правило строк:
+// из 12 клеток — файлы 3 × рантайм 4, с «не мерился» (сторож
+// TestRollbackOutcomeTableComplete). Правило строк:
 // «сервер нужно перезапустить» (NotApplied) — только когда файлы ПРОВЕРЕНЫ
 // и совпали: перезапуск применит именно их. Файлы не совпали — ни «вернулись»,
 // ни «перезапустите»: перезапуск применил бы чужие файлы. Файлы не прочитаны
@@ -1726,6 +1740,11 @@ var rollbackOutcome = map[rollbackCell]error{
 	{checkUnknown, checkSame}:    ErrRollbackUnverified,
 	{checkUnknown, checkDiffer}:  ErrRollbackUnverified,
 	{checkUnknown, checkUnknown}: ErrRollbackUnverified,
+	// рантайм не мерился (wg0.conf не менялся): исход — по файлам; в тексте
+	// RolledBack о подключениях — «не менялся и не проверялся».
+	{checkSame, checkNotNeeded}:    ErrRolledBack,
+	{checkDiffer, checkNotNeeded}:  ErrRolledBackFilesDiffer,
+	{checkUnknown, checkNotNeeded}: ErrRollbackUnverified,
 }
 
 // measureFilesAfterRollback — совпали ли оба файла с прежними байтами.
@@ -1749,7 +1768,7 @@ func (s *Session) measureFilesAfterRollback(c *Container, wgBefore, tblBefore []
 // syncErr — только контекст в тексте: исход решает измерение.
 func (s *Session) measureRuntimeAfterRollback(c *Container, wgBefore []byte, wgChanged bool, syncErr error) (checkState, string) {
 	if !wgChanged {
-		return checkSame, "не менялся"
+		return checkNotNeeded, "не менялся этой операцией и не проверялся"
 	}
 	stats, err := s.GetPeerStats(c)
 	if err != nil {

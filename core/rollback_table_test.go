@@ -8,12 +8,13 @@ import "testing"
 // совпал»; «отменено и проверено» — только «совпали × совпал»; при файлах
 // «не совпали» — только FilesDiffer, при «неизвестно» — только Unverified.
 func TestRollbackOutcomeTableComplete(t *testing.T) {
-	states := []checkState{checkSame, checkDiffer, checkUnknown}
-	if len(rollbackOutcome) != 9 {
-		t.Fatalf("клеток %d, должно быть ровно 9", len(rollbackOutcome))
+	fileStates := []checkState{checkSame, checkDiffer, checkUnknown}
+	runtimeStates := []checkState{checkSame, checkDiffer, checkUnknown, checkNotNeeded}
+	if len(rollbackOutcome) != 12 {
+		t.Fatalf("клеток %d, должно быть ровно 12", len(rollbackOutcome))
 	}
-	for _, f := range states {
-		for _, r := range states {
+	for _, f := range fileStates {
+		for _, r := range runtimeStates {
 			got, ok := rollbackOutcome[rollbackCell{f, r}]
 			if !ok || got == nil {
 				t.Errorf("клетка (файлы %d, рантайм %d) пуста", f, r)
@@ -21,7 +22,7 @@ func TestRollbackOutcomeTableComplete(t *testing.T) {
 			}
 			var want error
 			switch {
-			case f == checkSame && r == checkSame:
+			case f == checkSame && (r == checkSame || r == checkNotNeeded):
 				want = ErrRolledBack
 			case f == checkSame && r == checkDiffer:
 				want = ErrRolledBackNotApplied
