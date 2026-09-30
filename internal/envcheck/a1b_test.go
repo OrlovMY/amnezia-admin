@@ -41,7 +41,7 @@ func TestA1bUnknownLibcAdviceArrives(t *testing.T) {
 			if !strings.Contains(out, "Библиотека C: определить не удалось\n") {
 				t.Fatalf("строка признака потеряна:\n%s", out)
 			}
-			if !strings.Contains(out, "если это Alpine (musl)") {
+			if !strings.Contains(out, "Alpine — графическая версия там не работает вовсе") {
 				t.Errorf("при неопознанной libc совет не называет развилку Alpine — "+
 					"«не знаем, какая система» звучит как «Debian»:\n%s", out)
 			}

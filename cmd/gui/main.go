@@ -1432,8 +1432,14 @@ func sortDirFromName(s string) core.SortDir {
 	return core.Asc
 }
 
+// uiStateDir — каталог ui.json. В бою — каталог хранилищ рядом с exe; тесты
+// пакета подменяют его своим временным каталогом (TestMain), чтобы ui.json
+// не ложился в общий каталог рядом с тестовым бинарником и порядок
+// прогона ни на что не влиял (ревью QA-01 A1б).
+var uiStateDir = core.DefaultVaultDir
+
 func uiStatePath() string {
-	return uiStatePathIn(core.DefaultVaultDir())
+	return uiStatePathIn(uiStateDir())
 }
 
 // uiStatePathIn — то же имя файла, но в заданном каталоге: чтобы запись и
@@ -1476,7 +1482,7 @@ func saveSortState(primary core.SortColumn, primaryDir core.SortDir, secondary c
 		Secondary:    sortColumnNames[secondary],
 		SecondaryDir: sortDirName(secondaryDir),
 	}
-	saveSortStateTo(core.DefaultVaultDir(), st)
+	saveSortStateTo(uiStateDir(), st)
 }
 
 // saveSortStateTo вынесена из saveSortState с явным каталогом ровно затем,

@@ -90,8 +90,14 @@ func TestA1bProbeGarbageDoesNotWipeTable(t *testing.T) {
 		t.Fatal("тест перестал что-либо проверять: у fakesrv нет clientsTable")
 	}
 	s := a1bSession(&rewriteRunner{inner: srv, match: probeCmd, reply: func(string) string { return "" }})
-	if _, err := s.AddUser(awgContainer(), "Mallory"); err == nil {
+	// Сверяется ПРИЧИНА (ревью QA-01, п.2): AddUser, упавший по любой другой
+	// причине, прошёл бы проверку «есть ошибка».
+	switch _, err := s.AddUser(awgContainer(), "Mallory"); {
+	case err == nil:
 		t.Error("AddUser завершился успехом, хотя есть ли clientsTable, неизвестно")
+	case !strings.Contains(err.Error(), "непонятный ответ сервера") ||
+		!strings.Contains(err.Error(), "/opt/amnezia/awg/clientsTable, неизвестно"):
+		t.Errorf("AddUser упал не по причине пробы: %v", err)
 	}
 	after, _ := srv.File("/opt/amnezia/awg/clientsTable")
 	if string(after) != string(before) {

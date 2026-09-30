@@ -464,8 +464,8 @@ func TestGUITargets(t *testing.T) {
 // нет — обещать её нельзя.
 func TestNonLinuxVerdict(t *testing.T) {
 	cases := []struct{ goos, goarch, want string }{
-		{"windows", "amd64", textWillRun},
-		{"darwin", "arm64", textWillRun},
+		{"windows", "amd64", textWillRunNonLinux},
+		{"darwin", "arm64", textWillRunNonLinux},
 		{"darwin", "amd64", textNoGUIPlatform},
 	}
 	for _, c := range cases {
@@ -611,10 +611,9 @@ func TestMissingHardBeatsUnknownLibc(t *testing.T) {
 		"Установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
 		"После установки выполните проверку ещё раз."
 	const missingGLLibcUnknown = "Графический интерфейс не запустится: не хватает библиотек — libGL.so.1. " +
-		"Какая в системе библиотека C, определить не удалось: если это Alpine (musl), графическая версия " +
-		"там не запустится и после установки — пользуйтесь консольной. " +
-		"Если нет — установите их: Debian/Ubuntu — `libgl1`; Fedora — `mesa-libGL`. " +
-		"После установки выполните проверку ещё раз."
+		"Какая у вас система, определить не удалось, поэтому совет зависит от неё (узнать: `cat /etc/os-release`). " +
+		"Alpine — графическая версия там не работает вовсе, установка библиотек не поможет; пользуйтесь консольной. " +
+		"Debian или Ubuntu — установите `libgl1`; Fedora — `mesa-libGL`; затем выполните проверку ещё раз."
 	cases := []struct {
 		name string
 		libc Libc
@@ -760,7 +759,7 @@ func TestReportGolden(t *testing.T) {
 			"Проверка компьютера\n" +
 				"ОС: Windows\n" +
 				"Архитектура: amd64\n" +
-				"Графический интерфейс запустится.\n",
+				"Для Windows и macOS проверять нечего: графической версии не нужны дополнительные библиотеки, она должна запуститься. Если не откроется — пользуйтесь консольной версией.\n",
 		},
 		{
 			"е) Linux, под который GUI не собирается (linux/arm64)",

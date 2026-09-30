@@ -44,7 +44,7 @@ func TestRunCheckNoKey(t *testing.T) {
 			// задания. На прочих платформах состав строк зависит от машины и
 			// проверяется тестом дословности в internal/envcheck.
 			if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
-				want := "Проверка компьютера\nОС: Windows\nАрхитектура: amd64\nГрафический интерфейс запустится.\n"
+				want := "Проверка компьютера\nОС: Windows\nАрхитектура: amd64\nДля Windows и macOS проверять нечего: графической версии не нужны дополнительные библиотеки, она должна запуститься. Если не откроется — пользуйтесь консольной версией.\n"
 				if out.String() != want {
 					t.Errorf("stdout = %q, хочу %q", out.String(), want)
 				}

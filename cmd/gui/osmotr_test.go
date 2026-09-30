@@ -615,7 +615,7 @@ func (s osmotrNoServer) Run(string, []byte) (string, error) {
 func withOneVault(t *testing.T) {
 	t.Helper()
 	dir := core.DefaultVaultDir()
-	if tmp, err := filepath.Abs(os.TempDir()); err != nil || !strings.HasPrefix(dir, tmp) {
+	if !insideTempDir(dir) {
 		t.Fatalf("каталог хранилищ %s не во временном каталоге — осмотр его не трогает", dir)
 	}
 	vs, listErr := core.ListVaults(dir)

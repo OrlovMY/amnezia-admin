@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -31,9 +32,8 @@ import (
 func vaultDirForTest(t *testing.T) string {
 	t.Helper()
 	dir := core.DefaultVaultDir()
-	tmp, err := filepath.Abs(os.TempDir())
-	if err != nil || !strings.HasPrefix(dir, tmp) {
-		t.Fatalf("каталог хранилищ %s не во временном каталоге — тест его не трогает", dir)
+	if !insideTempDir(dir) {
+		t.Fatalf("каталог хранилищ %s не во временном каталоге %s — тест его не трогает", dir, os.TempDir())
 	}
 	if _, err := os.Stat(dir); err == nil {
 		aside := dir + ".a1b-aside"
@@ -51,6 +51,42 @@ func vaultDirForTest(t *testing.T) string {
 		})
 	}
 	return dir
+}
+
+// canonPath — путь в одной форме для сравнения (ревью QA-01, п.6): Abs,
+// затем EvalSymlinks. На macOS это /var → /private/var; на Windows
+// EvalSymlinks сверяет каждую часть пути с файловой системой и возвращает
+// ДЛИННЫЕ имена (RUNNER~1 → runneradmin). Несуществующий хвост
+// (каталог хранилищ до создания) приводится через ближайшего
+// существующего родителя.
+func canonPath(p string) string {
+	p, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	var tail []string
+	for cur := p; ; {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(append([]string{r}, tail...)...)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
+}
+
+// insideTempDir — лежит ли p внутри временного каталога ОС. Сравнение по
+// частям пути через filepath.Rel, на Windows без учёта регистра.
+func insideTempDir(p string) bool {
+	tmp, cp := canonPath(os.TempDir()), canonPath(p)
+	if runtime.GOOS == "windows" {
+		tmp, cp = strings.ToLower(tmp), strings.ToLower(cp)
+	}
+	rel, err := filepath.Rel(tmp, cp)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // vaultPathIsAFile — по пути каталога хранилищ лежит ФАЙЛ: каталог «есть»,

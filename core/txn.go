@@ -856,7 +856,8 @@ func (s *Session) probeClientsTable(c *Container) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("непонятный ответ сервера: %q — есть ли файл %s/clientsTable, неизвестно; "+
-		"ничего не прочитано и не записано", shortReply(probe), c.Dir)
+		"ничего не прочитано и не записано. Повторите команду; если ошибка повторится — "+
+		"не меняйте пользователей, пока не выясните, что с сервером", shortReply(probe), c.Dir)
 }
 
 // shortReply — ответ сервера для текста ошибки: без секретов (maskFreeText)
