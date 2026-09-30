@@ -2858,6 +2858,11 @@ func (u *ui) toggleSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if victim.EnabledState() == core.EnabledUnknown {
+		// У1: включён ли — неизвестно; до вопроса, а не после него
+		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
+		return
+	}
 	enable := victim.Disabled()
 	title := "Отключить пользователя?"
 	verb := "Отключаю"
@@ -2946,6 +2951,11 @@ func (u *ui) regenerateSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if victim.EnabledState() == core.EnabledUnknown {
+		// У1: включён ли — неизвестно; до вопроса, а не после него
+		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
+		return
+	}
 
 	var d dialog.Dialog
 	onRegenerated := func(nu *core.NewUser) {

@@ -202,14 +202,20 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
 		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
 		absent := 0 // включённые клиенты, которых нет в ответе `wg show`
+		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
 			created := cl.Created()
 			if r := []rune(created); len(r) > 19 {
 				created = string(r[:19])
 			}
 			r := core.ReadPeer(stats, statsFailed, cl.ClientID)
-			if !cl.Disabled() && r.State == core.PeerAbsent {
-				absent++
+			switch cl.EnabledState() {
+			case core.EnabledActive:
+				if r.State == core.PeerAbsent {
+					absent++
+				}
+			case core.EnabledUnknown:
+				unknownEnabled = append(unknownEnabled, cl.Name())
 			}
 			act := listActivityText(cl.Disabled(), r)
 			hs := cDim(pad(act, 18))
@@ -227,6 +233,9 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		}
 		fmt.Fprintln(w, cDim("Трафик и активность — с момента перезапуска сервера."))
 		if note := listStatsNote(statsFailed, absent); note != "" {
+			fmt.Fprintln(w, cWarn(note))
+		}
+		if note := core.EnabledUnknownNote(unknownEnabled); note != "" {
 			fmt.Fprintln(w, cWarn(note))
 		}
 	}
@@ -691,6 +700,11 @@ func interactive() (code int) {
 				break
 			}
 			victim := clients[idx]
+			if victim.EnabledState() == core.EnabledUnknown {
+				// У1: до вопроса и карточки — действие всё равно невозможно
+				printErr(core.EnabledUnknownError(victim))
+				break
+			}
 			enable := victim.Disabled()
 			if enable {
 				// включение — вопрос как раньше, без карточки (Г3: вопрос
@@ -733,6 +747,11 @@ func interactive() (code int) {
 				break
 			}
 			victim := clients[idx]
+			if victim.EnabledState() == core.EnabledUnknown {
+				// У1: до вопроса и карточки — действие всё равно невозможно
+				printErr(core.EnabledUnknownError(victim))
+				break
+			}
 			card := buildCard(sess, cur, victim, "перевыпустить конфиг")
 			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
 			if !proceed {
@@ -956,6 +975,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
+		if clients[idx].EnabledState() == core.EnabledUnknown {
+			// У1: до карточки подтверждения — действие всё равно невозможно
+			err = core.EnabledUnknownError(clients[idx])
+			break
+		}
 		enable := clients[idx].Disabled()
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "отключить"); !proceed {
 			return code
@@ -983,6 +1007,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
 			err = e
+			break
+		}
+		if clients[idx].EnabledState() == core.EnabledUnknown {
+			// У1: до карточки подтверждения — действие всё равно невозможно
+			err = core.EnabledUnknownError(clients[idx])
 			break
 		}
 		if proceed, code := confirmSubcommand(stdin, stdout, stderr, isTTY, *yes, cmd, clients[idx], sess, cur, "перевыпустить конфиг"); !proceed {

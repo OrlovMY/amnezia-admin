@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,6 +118,41 @@ func TestDebtsMenuEOFExits(t *testing.T) {
 			}
 			if got := strings.Contains(out.String(), textInputEndedLiteral); got != c.wantLine {
 				t.Fatalf("строка %q: есть=%v, ожидалось %v; конец вывода:\n%s", textInputEndedLiteral, got, c.wantLine, tail)
+			}
+		})
+	}
+}
+
+// TestDebtsListNamesUnknownEnabled — У1, ДОЕЗД через полный run() list
+// против fakesrv: у Alice поле disabled испорчено («true» строкой). Список
+// обязан сказать, что включена ли она — неизвестно; при исправном поле
+// (различение) этой строки нет. На c65420e строки не было вовсе: запись
+// выглядела активной.
+func TestDebtsListNamesUnknownEnabled(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		v    any
+		want bool
+	}{{"исправное поле", false, false}, {"испорченное поле", "true", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			key, kh, srv := setupFakeSSHForRunWithExec(t)
+			const path = "/opt/amnezia/awg/clientsTable"
+			raw, _ := srv.File(path)
+			var list []map[string]any
+			if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+				t.Fatalf("подготовка: %v", err)
+			}
+			list[0]["userData"].(map[string]any)["disabled"] = c.v
+			out, _ := json.Marshal(list)
+			srv.SetFile(path, out)
+			var o, e bytes.Buffer
+			if code := run([]string{"list", "-key", key}, strings.NewReader(""), &o, &e, kh); code != 0 {
+				t.Fatalf("list: code=%d %s", code, e.String())
+			}
+			got := strings.Contains(o.String(), "Включён ли пользователь, неизвестно") &&
+				strings.Contains(o.String(), `"Alice"`)
+			if got != c.want {
+				t.Fatalf("строка о неизвестном состоянии: есть=%v, ожидалось %v:\n%s", got, c.want, o.String())
 			}
 		})
 	}

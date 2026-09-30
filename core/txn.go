@@ -1141,6 +1141,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	// отключённый пользователь включился бы без ведома администратора.
 	// Проверка — ДО чтения wg0.conf: отказ не должен зависеть от состояния
 	// сервера, раз решение принимается по одной лишь clientsTable.
+	if clients[idx].EnabledState() == EnabledUnknown {
+		return nil, EnabledUnknownError(clients[idx])
+	}
 	if clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q отключён — сначала включите его, затем перевыпускайте конфиг", name)
 	}
@@ -1301,6 +1304,9 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
 	}
+	if clients[idx].EnabledState() == EnabledUnknown {
+		return nil, EnabledUnknownError(clients[idx])
+	}
 	if clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q уже отключён", clients[idx].Name())
 	}
@@ -1371,6 +1377,9 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 	idx := findClient(clients, clientID)
 	if idx < 0 {
 		return nil, fmt.Errorf("клиент с ключом %q не найден", clientID)
+	}
+	if clients[idx].EnabledState() == EnabledUnknown {
+		return nil, EnabledUnknownError(clients[idx])
 	}
 	if !clients[idx].Disabled() {
 		return nil, fmt.Errorf("пользователь %q уже активен", clients[idx].Name())

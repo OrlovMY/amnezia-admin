@@ -59,7 +59,9 @@ func usedIPs(conf *wgConf, clients []ClientEntry) map[string]string {
 	// владелец, показанный отказом, должен быть занявшим адрес peer'ом, а не
 	// самим отключённым, чей резерв не должен маскировать конфликт).
 	for _, cl := range clients {
-		if !cl.Disabled() {
+		// Резервируется адрес и ТОЧНО отключённого, и того, про кого
+		// неизвестно (У1): неизвестное не выдаётся за «активен».
+		if cl.EnabledState() == EnabledActive {
 			continue
 		}
 		ip := hostIP(Str(cl.UserData, "allowedIP"))
