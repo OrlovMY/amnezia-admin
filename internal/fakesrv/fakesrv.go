@@ -55,6 +55,13 @@ type Server struct {
 	// ли» бывает и после записи).
 	WriteFault map[int]WriteFault
 
+	// ForeignWrite — номер по счёту команды записи (как в WriteFault) →
+	// файлы (путь → байты), которые «другой писатель» записывает на сервер
+	// непосредственно ПЕРЕД этой командой. Боевой путь исходов «изменён
+	// другим» (N = 1) и «откат не тронул чужое» (N = 2 после сбоя verify)
+	// без обёртки над Runner — нужен тестам через настоящий SSH (A3б PR-3).
+	ForeignWrite map[int]map[string][]byte
+
 	// FailMvTo — имя файла (wg0.conf или clientsTable): mv на него в
 	// настоящем скрипте падает с «Permission denied» (подменой mv в PATH).
 	FailMvTo string
@@ -423,6 +430,12 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(4, "")
 	}
 	s.writeCalls++
+	for path, data := range s.ForeignWrite[s.writeCalls] {
+		if s.files == nil {
+			s.files = map[string][]byte{}
+		}
+		s.files[path] = append([]byte(nil), data...)
+	}
 	s.writeStarted = cmd
 	s.stdins = append(s.stdins, append([]byte(nil), stdin...))
 	fault, faulty := s.WriteFault[s.writeCalls]
