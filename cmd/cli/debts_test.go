@@ -19,6 +19,7 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
+	"amnezia-admin/internal/testpath"
 )
 
 const debtsMenuChildEnv = "AMNEZIA_ADMIN_DEBTS_MENU_CHILD"
@@ -40,8 +41,11 @@ func TestDebtsMenuChild(t *testing.T) {
 func menuVaultDir(t *testing.T) string {
 	t.Helper()
 	dir := core.DefaultVaultDir()
-	if !strings.HasPrefix(filepath.Clean(dir), filepath.Clean(os.TempDir())) {
-		t.Skipf("каталог %s не во временном каталоге — тест его не трогает", dir)
+	// Fatalf, а не Skip (ревью QA долгов): пропущенный тест выглядит как
+	// зелёный прогон. Пути — через testpath (EvalSymlinks с обеих сторон).
+	if !testpath.InsideTempDir(dir) {
+		t.Fatalf("каталог %s не во временном каталоге %s — тест его не трогает, "+
+			"и проверка У6 НЕ ВЫПОЛНЕНА; запустите тестовый бинарник из временного каталога", dir, os.TempDir())
 	}
 	if _, err := os.Stat(dir); err == nil {
 		aside := dir + ".debts-aside"
