@@ -56,6 +56,11 @@ func TestPR3CLIWriteOutcomes(t *testing.T) {
 					t.Errorf("в stderr нет %q:\n%s", part, got)
 				}
 			}
+			// Второй, независимый сторож (выборка немоты): исход записи не
+			// печатается прежним безликим «Ошибка: …».
+			if strings.HasPrefix(got, "Ошибка: ") {
+				t.Errorf("исход записи напечатан как безликая ошибка:\n%s", got)
+			}
 			// различение: ни одного чужого заголовка
 			for k, title := range titles {
 				if k != c.kind && strings.Contains(got, title) {
