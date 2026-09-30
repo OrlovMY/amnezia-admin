@@ -113,6 +113,25 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
           gcc --version
 
+      - name: Оболочки для скрипта записи (busybox, dash)
+        # A3б, PR-2: core.CASWriteScript исполняется на боевом сервере в
+        # контейнере, где sh может оказаться busybox, а на хосте — dash.
+        # TestCASScriptRealShells (core/cas_shells_test.go) исполняет точный
+        # текст команды в обеих оболочках. Отдельный шаг, а не пакет в
+        # строке «Linux GUI deps»: та дословно повторяет release.yml.
+        # dash не ставится: в Ubuntu он Essential и служит /bin/sh. Имя
+        # пакета busybox совпадает с именем оболочки — этот вызов целиком
+        # внесён в internal/ciguard allowedPackageInstalls.
+        #
+        # Проверки «установилось ли» здесь нет намеренно: её делает сам тест —
+        # на Linux при заданной CI отсутствие busybox, dash или flock роняет
+        # его, а не пропускает. Шаг, молча не выполнившийся из-за опечатки в
+        # if:, тем самым тоже роняет job.
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y busybox
+
       - name: Версии инструментов (раннер предъявляет себя)
         # Оба ложных PASS этого проекта выглядели как зелёный прогон: один раз
         # actionlint молча отключил shellcheck, не найдя его в PATH, второй раз
