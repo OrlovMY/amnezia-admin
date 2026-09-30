@@ -452,13 +452,22 @@ func parallelWriters(t *testing.T, rs realShell, script string) []string {
 	return bad
 }
 
-// shellsScript — скрипт под посадкой канарейки или настоящий.
-func shellsScript() string {
-	if os.Getenv(shellsPlantEnv) == "nocheck" {
-		return strings.Replace(CASWriteScript,
-			`if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi`+"\n", "", 1)
+// shellsScript — скрипт под посадкой канарейки или настоящий. Посадка
+// «nocheck» убирает строку сверки суммы wg0.conf — ищется по самому
+// сравнению `"$hw" != "$ww"`, а не по всему тексту строки, чтобы пережить
+// правку сообщений скрипта (PR-3). Не нашлась — ok=false, и тест падает
+// громко: посадка, которая не применилась, — канарейка, которая молчит.
+func shellsScript() (script string, ok bool) {
+	if os.Getenv(shellsPlantEnv) != "nocheck" {
+		return CASWriteScript, true
 	}
-	return CASWriteScript
+	lines := strings.Split(CASWriteScript, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, `"$hw" != "$ww"`) {
+			return strings.Join(append(lines[:i:i], lines[i+1:]...), "\n"), true
+		}
+	}
+	return "", false
 }
 
 func TestCASScriptRealShells(t *testing.T) {
@@ -475,7 +484,10 @@ func TestCASScriptRealShells(t *testing.T) {
 		}
 		t.Skipf("нет %v (не CI): поставьте busybox и dash или задайте AMNEZIA_BUSYBOX", missing)
 	}
-	script := shellsScript()
+	script, ok := shellsScript()
+	if !ok {
+		t.Fatalf("%s посадка nocheck не применилась: в CASWriteScript нет строки сверки `\"$hw\" != \"$ww\"`", shellsMarker)
+	}
 	scen := shellScenarios()
 	if os.Getenv(shellsPlantEnv) == "drop" {
 		scen = scen[1:]
