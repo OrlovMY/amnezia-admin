@@ -141,7 +141,7 @@ func TestDebtsRowShowsEnabledUnknown(t *testing.T) {
 	for _, cs := range []struct {
 		v    any
 		want string
-	}{{false, "—"}, {true, "отключён"}, {"yes", "вкл/откл: ?"}} {
+	}{{false, "—"}, {true, "отключён"}, {"yes", "— · вкл/откл: ?"}} {
 		srv := fakesrv.New()
 		const path = "/opt/amnezia/awg/clientsTable"
 		raw, _ := srv.File(path)

@@ -1804,7 +1804,35 @@ func keyColumnCap() float32 {
 func tableColumnWidths(clients []core.ClientEntry) []float32 {
 	out := make([]float32, 0, len(fixedColumnWidths)+1)
 	out = append(out, fixedColumnWidths...)
+	out[activityColumn] = activityColumnWidth(clients)
 	return append(out, keyColumnWidth(clients))
+}
+
+// activityColumn — индекс колонки «Активность».
+const activityColumn = 3
+
+// activityColumnWidth — ширина «Активности». Обычно — постоянная из
+// fixedColumnWidths. Раунд 3 долгов (UX-01, Я1): у клиента с неизвестной
+// включённостью ячейка — «<время> · вкл/откл: ?», она шире 140 т., а Fyne
+// подпись не обрезает: текст налез бы на «Трафик». Тогда колонка
+// расширяется по самому длинному такому тексту — только пока такие
+// записи есть в таблице.
+func activityColumnWidth(clients []core.ClientEntry) float32 {
+	w := fixedColumnWidths[activityColumn]
+	for _, c := range clients {
+		if c.EnabledState() != core.EnabledUnknown {
+			continue
+		}
+		th := fyne.CurrentApp().Settings().Theme()
+		sample := "2026-09-22 12:34 · " + guiview.EnabledUnknownCell
+		need := fyne.MeasureText(sample, th.Size(theme.SizeNameText), fyne.TextStyle{}).Width +
+			2*th.Size(theme.SizeNameInnerPadding)
+		if need > w {
+			w = need
+		}
+		break
+	}
+	return w
 }
 
 // Высота главного окна. Ширина НЕ ЗАДАЁТСЯ ЧИСЛОМ — она считается по
@@ -2146,6 +2174,9 @@ func (u *ui) applyKeyColumnWidth() {
 		return
 	}
 	u.table.SetColumnWidth(keyColumn, keyColumnWidth(u.clients))
+	// «Активность» тоже зависит от состава (Я1, раунд 3): при записи с
+	// неизвестной включённостью она шире.
+	u.table.SetColumnWidth(activityColumn, activityColumnWidth(u.clients))
 }
 
 // onHeaderTapped обрабатывает клик по заголовку сортируемой колонки: тот же

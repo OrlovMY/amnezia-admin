@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -168,13 +170,113 @@ func TestDebtsListNamesUnknownEnabled(t *testing.T) {
 			if aliceRow == "" {
 				t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: строки Alice нет:\n%s", o.String())
 			}
-			if marked := strings.Contains(aliceRow, "(вкл/откл: ?)"); marked != c.want {
+			// раунд 3: строка не разъезжается с шапкой — ключ Alice стоит под
+			// «Публичный ключ» и при длинной ячейке «Активности».
+			var head string
+			for _, l := range strings.Split(o.String(), "\n") {
+				if strings.Contains(l, "Публичный ключ") {
+					head = l
+				}
+			}
+			aliceKey := list[0]["clientId"].(string)
+			if hi, ki := runeIndex(head, "Публичный ключ"), runeIndex(aliceRow, aliceKey); hi < 0 || hi != ki {
+				t.Errorf("колонка ключа разъехалась: в шапке с %d-го знака, в строке Alice с %d-го:\n%s\n%s", hi, ki, head, aliceRow)
+			}
+			// раунд 3 (Я1): пометка — рядом с показанием («—»), а не вместо
+			if marked := strings.Contains(aliceRow, "— (вкл/откл: ?)"); marked != c.want {
 				t.Fatalf("строка Alice: пометка «(вкл/откл: ?)» есть=%v, ожидалось %v: %q", marked, c.want, aliceRow)
 			}
 		})
 	}
 }
 
+// handshakeRunner — fakesrv, у которого в ответе `wg show` у всех peer'ов
+// время последнего рукопожатия — сейчас (fakesrv отдаёт 0).
+type handshakeRunner struct{ inner *fakesrv.Server }
+
+func (r handshakeRunner) Run(cmd string, stdin []byte) (string, error) {
+	out, err := r.inner.Run(cmd, stdin)
+	if err != nil || !strings.Contains(cmd, "wg show wg0 dump") {
+		return out, err
+	}
+	lines := strings.Split(out, "\n")
+	for i := 1; i < len(lines); i++ {
+		f := strings.Split(lines[i], "\t")
+		if len(f) >= 5 {
+			f[4] = strconv.FormatInt(time.Now().Unix(), 10)
+			lines[i] = strings.Join(f, "\t")
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// TestDebtsListGreenOnlyActive — раунд 3 (SEC): зелёный в «Активности»
+// list означает «активен, подключался». Клиент с неизвестным состоянием
+// зелёным не красится, хотя показание измерено. Различение: при
+// disabled=false у той же записи с тем же рукопожатием ячейка зелёная.
+// Боевой путь: listUsers против fakesrv. На c65420e испорченное поле
+// читалось как «активен», и ячейка была зелёной.
+func TestDebtsListGreenOnlyActive(t *testing.T) {
+	saved := colorsEnabled
+	colorsEnabled = true
+	t.Cleanup(func() { colorsEnabled = saved })
+	const green = "\x1b[32m"
+	for _, c := range []struct {
+		v     any
+		green bool
+	}{{false, true}, {"yes", false}} {
+		srv := fakesrv.New()
+		const path = "/opt/amnezia/awg/clientsTable"
+		raw, _ := srv.File(path)
+		var list []map[string]any
+		if err := json.Unmarshal(raw, &list); err != nil || len(list) == 0 {
+			t.Fatalf("подготовка: %v", err)
+		}
+		list[0]["userData"].(map[string]any)["disabled"] = c.v
+		out, _ := json.Marshal(list)
+		srv.SetFile(path, out)
+		sess := core.NewSessionWithRunner(handshakeRunner{srv}, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
+		cur := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+		var o bytes.Buffer
+		if _, err := listUsers(&o, sess, cur); err != nil {
+			t.Fatalf("listUsers: %v", err)
+		}
+		var aliceRow string
+		for _, l := range strings.Split(o.String(), "\n") {
+			if strings.Contains(l, "Alice") && !strings.Contains(l, "Неизвестно") {
+				aliceRow = l
+			}
+		}
+		if aliceRow == "" {
+			t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: строки Alice нет:\n%s", o.String())
+		}
+		// Колонка ключа не разъезжается с шапкой при самой длинной ячейке
+		// «<время> (вкл/откл: ?)» (раунд 3, Я1). Цвета не считаются в знаки.
+		plain := regexp.MustCompile("\x1b\\[[0-9;]*m")
+		var head string
+		for _, l := range strings.Split(o.String(), "\n") {
+			if strings.Contains(l, "Публичный ключ") {
+				head = plain.ReplaceAllString(l, "")
+			}
+		}
+		key := list[0]["clientId"].(string)
+		if hi, ki := runeIndex(head, "Публичный ключ"), runeIndex(plain.ReplaceAllString(aliceRow, ""), key); hi < 0 || hi != ki {
+			t.Errorf("disabled=%#v: колонка ключа разъехалась: шапка %d, строка Alice %d:\n%s\n%s", c.v, hi, ki, head, plain.ReplaceAllString(aliceRow, ""))
+		}
+		if got := strings.Contains(aliceRow, green); got != c.green {
+			t.Errorf("disabled=%#v: зелёный в строке Alice: %v, ожидалось %v: %q", c.v, got, c.green, aliceRow)
+		}
+	}
+}
+
 // Литерал, а не константа из main.go: на c65420e её нет, а тест обязан там
 // компилироваться.
 const textInputEndedLiteral = "Ввод закончился — выход."
+
+func runeIndex(s, sub string) int {
+	i := strings.Index(s, sub)
+	if i < 0 {
+		return -1
+	}
+	return len([]rune(s[:i]))
+}

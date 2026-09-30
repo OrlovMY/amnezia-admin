@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
@@ -45,13 +47,16 @@ func openMainLongStatus(t *testing.T, u *ui, sized func()) osmotrScene {
 // испорчено: в «Активности» — guiview.EnabledUnknownCell (раунд 2, QA п.5).
 func openMainEnabledUnknown(t *testing.T, u *ui, sized func()) osmotrScene {
 	osmotrMain(u)
-	u.clients[1].UserData["disabled"] = "yes"
+	// строка 1 («Ноутбук») — с измеренным временем: самая длинная ячейка
+	// «<время> · вкл/откл: ?» (раунд 3, Я1)
+	u.clients[0].UserData["disabled"] = "yes"
 	u.status.SetText(guiview.LoadedStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера",
 		u.clients, u.peerStats, nil))
+	u.applyKeyColumnWidth() // как refresh(): ширины по составу
 	u.table.Refresh()
 	sized()
-	if got := cellText(u, 1, 3); got != guiview.EnabledUnknownCell {
-		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: «Активность» строки 2 — %q", got)
+	if got, want := cellText(u, 0, 3), testSeen.Format(guiview.HandshakeLayout)+" · "+guiview.EnabledUnknownCell; got != want {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: «Активность» строки 1 — %q, ожидалось %q", got, want)
 	}
 	c := u.win.Canvas()
 	return osmotrScene{root: c.Content(), canvas: c, mins: osmotrFrame(c.Content(), nil)}
@@ -120,6 +125,30 @@ func openPinThrottleUnknown(long bool) func(t *testing.T, u *ui, sized func()) o
 		mins := osmotrFrame(pop, nil)
 		passwordEntry(t, pop, 0).SetText(typedCyrillicPin)
 		return osmotrScene{root: pop, canvas: c, mins: mins}
+	}
+}
+
+// TestDebtsActivityCellFits — раунд 3 (Я1): ячейка «<время> · вкл/откл: ?»
+// помещается в колонку «Активность» (Fyne подпись не обрезает — лишнее
+// налезло бы на «Трафик»; прибор осмотра меряет таблицу целиком и этого не
+// видит). Текст — настоящий UpdateCell главного окна. Различение: без
+// таких записей колонка прежняя, 140 т.
+func TestDebtsActivityCellFits(t *testing.T) {
+	u := focusTestUI(t)
+	osmotrMain(u)
+	if w := tableColumnWidths(u.clients)[activityColumn]; w != 140 {
+		t.Fatalf("без неизвестных записей «Активность» %.1f т., ожидалось прежние 140", w)
+	}
+	u.clients[0].UserData["disabled"] = "yes"
+	cell := cellText(u, 0, activityColumn)
+	if !strings.Contains(cell, " · "+guiview.EnabledUnknownCell) {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: ячейка %q", cell)
+	}
+	th := theme.Current()
+	need := fyne.MeasureText(cell, th.Size(theme.SizeNameText), fyne.TextStyle{}).Width +
+		2*th.Size(theme.SizeNameInnerPadding)
+	if w := tableColumnWidths(u.clients)[activityColumn]; w < need {
+		t.Fatalf("ячейка %q требует %.1f т., колонка %.1f т. — текст налезет на «Трафик»", cell, need, w)
 	}
 }
 

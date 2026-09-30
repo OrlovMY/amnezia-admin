@@ -101,12 +101,23 @@ func ActivityText(canManage bool, enabled core.EnabledState, r core.PeerReading)
 	if !canManage {
 		return "—"
 	}
-	switch enabled {
-	case core.EnabledDisabled:
+	if enabled == core.EnabledDisabled {
 		return "отключён"
-	case core.EnabledUnknown:
-		return EnabledUnknownCell
 	}
+	reading := activityReading(r)
+	if enabled == core.EnabledUnknown {
+		// Раунд 3 (UX-01, Я1): пометка ДОБАВЛЯЕТСЯ к показанию, а не
+		// вытесняет его: время последнего подключения измерено сервером и от
+		// записи disabled не зависит, а по нему решают, пользуется ли клиент
+		// доступом (удаление при неизвестном disabled разрешено).
+		return reading + " · " + EnabledUnknownCell
+	}
+	return reading
+}
+
+// activityReading — показание рукопожатия: «?» — не знаем, «—» — сервер
+// ответил, что подключений не было, иначе время.
+func activityReading(r core.PeerReading) string {
 	st, ok := r.Measured()
 	switch {
 	case !ok:

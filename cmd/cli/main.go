@@ -198,9 +198,19 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 	if len(clients) == 0 {
 		fmt.Fprintln(w, "В clientsTable записей нет.")
 	} else {
+		// «Активность» — 18 знаков; при записи с неизвестной включённостью
+		// ячейка «<время> (вкл/откл: ?)» длиннее (раунд 3, Я1), и колонка
+		// расширяется, иначе строка разъехалась бы с шапкой.
+		actW := 18
+		for _, cl := range clients {
+			if cl.EnabledState() == core.EnabledUnknown {
+				actW = len([]rune("2006-01-02 15:04 "+textListEnabledUnknown)) + 2
+				break
+			}
+		}
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", 18)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
-		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+18+24+44)))
+		fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Активность", actW)+pad("Трафик ↓/↑", 24)+"Публичный ключ"))
+		fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+actW+24+44)))
 		absent := 0                 // включённые клиенты, которых нет в ответе `wg show`
 		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
@@ -218,9 +228,12 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 				unknownEnabled = append(unknownEnabled, cl.Name())
 			}
 			act := listActivityText(cl.EnabledState(), r)
-			hs := cDim(pad(act, 18))
-			if _, ok := r.Measured(); ok && !cl.Disabled() && act != "—" {
-				hs = cOK(pad(act, 18))
+			hs := cDim(pad(act, actW))
+			// Зелёный — только ТОЧНО активному (раунд 3, SEC): у клиента с
+			// неизвестным состоянием показание измерено, но «активен» не
+			// утверждается.
+			if _, ok := r.Measured(); ok && cl.EnabledState() == core.EnabledActive && act != "—" {
+				hs = cOK(pad(act, actW))
 			}
 			traffic := listTrafficText(cl.EnabledState(), r)
 			name := cl.Name()
@@ -278,14 +291,20 @@ func orphanNote(err error) string {
 // Прежде «?» не было вовсе: пустая карта при отказе и отсутствующий ключ
 // давали нулевое время, то есть «—» — «не подключался» (признак 1).
 func listActivityText(enabled core.EnabledState, r core.PeerReading) string {
-	switch enabled {
-	case core.EnabledDisabled:
+	if enabled == core.EnabledDisabled {
 		return "(откл.)"
-	case core.EnabledUnknown:
-		// раунд 2 долгов, У1: не «активен» и не «отключён»; причина — в
-		// строке под таблицей (EnabledUnknownNote)
-		return textListEnabledUnknown
 	}
+	reading := listActivityReading(r)
+	if enabled == core.EnabledUnknown {
+		// У1: не «активен» и не «отключён»; причина — под таблицей
+		// (EnabledUnknownNote). Раунд 3 (UX-01, Я1): пометка добавляется к
+		// показанию, а не заменяет его.
+		return reading + " " + textListEnabledUnknown
+	}
+	return reading
+}
+
+func listActivityReading(r core.PeerReading) string {
 	st, ok := r.Measured()
 	switch {
 	case !ok:

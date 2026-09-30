@@ -408,13 +408,38 @@ func TestEnabledUnknownCells(t *testing.T) {
 	}{
 		{core.EnabledActive, "—", "2.0 KB / 1.0 KB"},
 		{core.EnabledDisabled, "отключён", "отключён"},
-		{core.EnabledUnknown, guiview.EnabledUnknownCell, "2.0 KB / 1.0 KB"},
+		// раунд 3 (Я1): пометка рядом с показанием, а не вместо него
+		{core.EnabledUnknown, "— · " + guiview.EnabledUnknownCell, "2.0 KB / 1.0 KB"},
 	} {
 		if got := guiview.ActivityText(true, c.st, r); got != c.act {
 			t.Errorf("состояние %d: «Активность» %q, ожидалось %q", c.st, got, c.act)
 		}
 		if got := guiview.TrafficText(true, c.st, r); got != c.trf {
 			t.Errorf("состояние %d: «Трафик» %q, ожидалось %q", c.st, got, c.trf)
+		}
+	}
+}
+
+// TestEnabledUnknownKeepsReading — раунд 3 (UX-01, Я1): у клиента с
+// неизвестной включённостью «Активность» сохраняет показание сервера во
+// всех трёх его видах (время, «—», «?») и добавляет пометку.
+func TestEnabledUnknownKeepsReading(t *testing.T) {
+	seen := time.Date(2026, 9, 22, 12, 30, 0, 0, time.Local)
+	stats := map[string]core.PeerStat{"was": {LastHandshake: seen}, "never": {}}
+	for _, c := range []struct {
+		r    core.PeerReading
+		want string
+	}{
+		{core.ReadPeer(stats, false, "was"), "2026-09-22 12:30 · вкл/откл: ?"},
+		{core.ReadPeer(stats, false, "never"), "— · вкл/откл: ?"},
+		{core.ReadPeer(nil, true, "was"), "? · вкл/откл: ?"},
+	} {
+		if got := guiview.ActivityText(true, core.EnabledUnknown, c.r); got != c.want {
+			t.Errorf("«Активность» %q, ожидалось %q", got, c.want)
+		}
+		active := guiview.ActivityText(true, core.EnabledActive, c.r)
+		if !strings.HasPrefix(c.want, active+" · ") {
+			t.Errorf("показание у неизвестного %q не совпадает с показанием активного %q", c.want, active)
 		}
 	}
 }
