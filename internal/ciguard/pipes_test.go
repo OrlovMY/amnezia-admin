@@ -40,8 +40,11 @@
 //     зависимостей go, вывод awk).
 //   - Функция проверяется по первой команде тела; `f() { cat >/dev/null; … }`
 //     законно проходит, и это верно: cat дочитал ввод.
-//   - Конвейер, собранный в строку и выполненный через eval/bash -c, не
-//     разбирается; eval и bash -c в файлах сейчас не встречаются.
+//   - Строку как код (eval, bash/sh/dash/zsh с -c) лексер разобрать не
+//     может, поэтому такие команды запрещены целиком (ревью QA-01, раунд
+//     2): закрытый список допустимых мест пуст — в файлах их нет. Слово
+//     eval или пара «оболочка + флаг с c» в любом месте команды — красное,
+//     даже как аргумент echo: лишняя строгость дешевле дыры.
 //   - Тела run: в других ключах (shell:, defaults) не бывают — ключи
 //     закрыты TestWorkflowKeysClosedList.
 package ciguard
@@ -79,11 +82,13 @@ type shParse struct {
 	s       string
 	i, line int
 	readers []shCmd
+	cmds    []shCmd          // все простые команды — для запрета eval / sh -c
 	funcs   map[string]shCmd // имя функции → первая команда её тела
 	errs    []string
 	pending []heredoc
 	funcDef string // имя() разобрано, ждём {
 	funcArm string // { тела функции открыта, ждём первую команду
+	bt      int    // глубина `…`: там обратная кавычка закрывает, а не открывает
 }
 
 func parseShell(src string) *shParse {
@@ -142,6 +147,10 @@ func (p *shParse) list(term byte) {
 	}
 	endCmd := func() {
 		if started {
+			if cur.line == 0 {
+				cur.line = p.line
+			}
+			p.cmds = append(p.cmds, cur)
 			if pipeOp != "" {
 				cur.op = pipeOp
 				p.readers = append(p.readers, cur)
@@ -442,6 +451,9 @@ func (p *shParse) word(cond bool) shWord {
 			}
 			break
 		}
+		if c == '`' && p.bt > 0 {
+			break // конец `…`, в котором стоит слово
+		}
 		if cond && c == '&' && p.peek(1) == '&' {
 			break
 		}
@@ -474,7 +486,9 @@ func (p *shParse) word(cond bool) shWord {
 			w.quoted = true
 		case '`':
 			p.adv()
+			p.bt++
 			p.list('`')
+			p.bt--
 			if p.i >= len(p.s) {
 				p.errorf("незакрытая обратная кавычка")
 				break
@@ -514,7 +528,9 @@ func (p *shParse) dquote(w *shWord, lit *strings.Builder) {
 			}
 		case '`':
 			p.adv()
+			p.bt++
 			p.list('`')
+			p.bt--
 			if p.i >= len(p.s) {
 				p.errorf("незакрытая обратная кавычка")
 				return
@@ -886,6 +902,25 @@ func readerProblem(c shCmd, funcs map[string]shCmd, depth int) string {
 	return ""
 }
 
+var shells = map[string]bool{"bash": true, "sh": true, "dash": true, "zsh": true, "ksh": true}
+
+// codeStringProblem — есть ли в команде eval или оболочка с -c.
+func codeStringProblem(c shCmd) string {
+	shell := ""
+	for _, w := range c.words {
+		base := w.lit[strings.LastIndexByte(w.lit, '/')+1:]
+		switch {
+		case base == "eval":
+			return "«eval»"
+		case shells[base]:
+			shell = base
+		case shell != "" && strings.HasPrefix(w.lit, "-") && !strings.HasPrefix(w.lit, "--") && strings.ContainsRune(w.lit, 'c'):
+			return "«" + shell + " " + w.lit + "»"
+		}
+	}
+	return ""
+}
+
 func TestNoEarlyExitPipeReader(t *testing.T) {
 	type src struct{ where, body string }
 	var srcs []src
@@ -918,6 +953,12 @@ func TestNoEarlyExitPipeReader(t *testing.T) {
 			fail(t, "%s: текст не разобран (%s) — неразобранное не доказано; конвейеры в нём не проверены", s.where, e)
 		}
 		lines := strings.Split(strings.ReplaceAll(s.body, "\r\n", "\n"), "\n")
+		for _, c := range p.cmds {
+			if pr := codeStringProblem(c); pr != "" {
+				fail(t, "%s: строка %d: %s — строку как код лексер не разбирает, конвейеры в ней не проверены. "+
+					"Закрытый список мест для eval / sh -c пуст", s.where, c.line, pr)
+			}
+		}
 		for _, r := range p.readers {
 			readers++
 			l := ""

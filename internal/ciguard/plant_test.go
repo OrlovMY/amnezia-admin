@@ -48,6 +48,11 @@ type plant struct {
 	name     string
 	edits    []edit
 	extraDir string
+	// extraFiles — лишние файлы в результате обхода .github (путь от
+	// каталога пакета, например ../../.github/workflows/evil.yml).
+	extraFiles []string
+	// parseRow — строка, добавляемая в таблицу лексера (TestShellParserTable).
+	parseRow *parseCase
 	wantTest string // единственный тест, который обязан упасть
 	wantMsg  string // что обязано быть в блоке провала с меткой failMark
 	// also — тесты, которые по существу обязаны упасть ВМЕСТЕ с wantTest:
@@ -353,6 +358,37 @@ var plants = []plant{
 	{name: "us-count", edits: ci("      - name: actionlint (оба workflow)\n",
 		"      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: go.mod\n      - name: actionlint (оба workflow)\n"),
 		wantTest: usesT, wantMsg: "ссылок uses: найдено 14, ожидалось 13"},
+	// --- раунд 2: SEC-01 С-1 — ./ и .. при правильной форме SHA ---
+	{name: "us-dot-owner", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "./x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "uses «./x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a» не закреплён по SHA"},
+	{name: "us-dotdot", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "../../x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "uses «../../x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a» не закреплён по SHA"},
+	{name: "us-dotdot-path", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact/../../c/d@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "сегмент «..» в пути"},
+	// --- раунд 2: QA-01 рек. 3 — чужой владелец с правильной формой ---
+	{name: "us-foreign-owner", edits: ci("      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:",
+		"      - uses: evil-org/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:"),
+		wantTest: usesT, wantMsg: "источник «evil-org/setup-go» вне закрытого списка allowedActions"},
+	// --- раунд 2: SEC-01 С-2 — состав .github ---
+	{name: "wf-extra-file", extraFiles: []string{githubDir + "/workflows/evil.yml"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: "состав .github/workflows [ci.yml evil.yml release.yml]"},
+	{name: "wf-actions-dir", extraFiles: []string{githubDir + "/actions"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: ".github/actions вне закрытого списка содержимого .github"},
+	// --- раунд 2: QA-01 рек. 1 — eval / sh -c ---
+	{name: "cs-eval", edits: sh(`eval "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "«eval» — строку как код лексер не разбирает"},
+	{name: "cs-bash-c", edits: sh(`bash -c "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "«bash -c» — строку как код"},
+	{name: "cs-sh-lc", edits: sh(`/bin/sh -lc "printf x | grep -q y"`),
+		wantTest: pipes, wantMsg: "«sh -lc» — строку как код"},
+	{name: "cs-workflow-eval", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`,
+		`            eval "grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< \"\$info\"" ||`),
+		wantTest: pipes, wantMsg: "«eval» — строку как код"},
+	// --- раунд 2: QA-01 п.2 — вердикт таблицы лексера доходит до go test ---
+	{name: "tbl-wrong", parseRow: &parseCase{src: "a | grep -q y", want: ""},
+		wantTest: "TestShellParserTable", wantMsg: "таблица лексера: \"a | grep -q y\" — читатели «grep», ждали «»"},
+	{name: "tbl-unparsed", parseRow: &parseCase{src: "echo 'x", want: ""},
+		wantTest: "TestShellParserTable", wantMsg: "таблица лексера: \"echo 'x\" не разобрано"},
 	// --- долги CI: триггеры ---
 	{name: "tr-dispatch", edits: rel("on:\n  push:\n", "on:\n  workflow_dispatch:\n  push:\n"),
 		wantTest: trig, wantMsg: "release.yml: событие «workflow_dispatch» вне закрытого списка"},
@@ -503,6 +539,8 @@ var mainTests = []string{
 	"TestWorkflowKeysClosedList",
 	"TestActionsPinnedBySHA",
 	"TestWorkflowTriggersClosedList",
+	"TestWorkflowFilesClosedList",
+	"TestShellParserTable",
 }
 
 func activePlant(t *testing.T) *plant {
@@ -555,6 +593,16 @@ func plantedTestDir(t *testing.T) string {
 		return p.extraDir
 	}
 	return ""
+}
+
+// plantedExtraFiles — файлы, которые подсадка добавляет к результату обхода
+// .github (см. TestWorkflowFilesClosedList).
+func plantedExtraFiles(t *testing.T) []string {
+	t.Helper()
+	if p := activePlant(t); p != nil {
+		return p.extraFiles
+	}
+	return nil
 }
 
 var failLineRe = regexp.MustCompile(`(?m)^\s*--- FAIL: (Test[A-Za-z0-9_]+)`)

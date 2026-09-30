@@ -24,9 +24,13 @@
 package ciguard
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -91,8 +95,43 @@ func TestWorkflowTriggersClosedList(t *testing.T) {
 	}
 }
 
-// pinnedUsesRe — `<владелец>/<репо>[/путь]@<40 hex>`.
-var pinnedUsesRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$`)
+// pinnedUsesRe — `<владелец>/<репо>[/путь]@<40 hex>`; владелец и репо
+// начинаются с буквы или цифры (ревью SEC-01, С-1: иначе `./x@<sha>` —
+// локальный action из проверяемой ветки — проходил как «закреплённый»).
+var pinnedUsesRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*((?:/[A-Za-z0-9_.-]+)*))@[0-9a-f]{40}$`)
+
+// allowedActions — ЗАКРЫТЫЙ список источников (ревью QA-01, рек. 3): SHA
+// защищает от подмены тега у того же владельца, но не от смены владельца
+// (`evil-org/setup-go@<тот же sha>`). SHA внутри пары не закреплён — его
+// обновляет Dependabot. Любой action может писать в $GITHUB_ENV и
+// $GITHUB_PATH, поэтому новый источник — только видимой строкой здесь.
+var allowedActions = map[string]string{
+	"actions/checkout":                "выгрузка репозитория (оба workflow)",
+	"actions/setup-go":                "Go по go.mod (оба workflow)",
+	"actions/upload-artifact":         "передача сборок build → release",
+	"actions/download-artifact":       "приём сборок в job release",
+	"actions/attest-build-provenance": "аттестация происхождения релиза",
+	"softprops/action-gh-release":     "публикация релиза на GitHub",
+}
+
+// usesProblem — пусто, если ссылка закреплена по SHA и источник из списка.
+func usesProblem(v interface{}) string {
+	s, _ := v.(string)
+	m := pinnedUsesRe.FindStringSubmatch(s)
+	if m == nil {
+		return fmt.Sprintf("uses «%v» не закреплён по SHA — допустимо только <владелец>/<репо>[/путь]@<40 hex>; "+
+			"метка и ветка изменяемы, ./, ../ и docker:// вне списка", v)
+	}
+	for _, seg := range strings.Split(m[1], "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Sprintf("uses «%v»: сегмент «%s» в пути — выход из репозитория action запрещён", v, seg)
+		}
+	}
+	if _, ok := allowedActions[m[1]]; !ok {
+		return fmt.Sprintf("uses «%v»: источник «%s» вне закрытого списка allowedActions", v, m[1])
+	}
+	return ""
+}
 
 func TestActionsPinnedBySHA(t *testing.T) {
 	checked := 0
@@ -102,8 +141,8 @@ func TestActionsPinnedBySHA(t *testing.T) {
 			job, _ := jobs[jn].(map[string]interface{})
 			if u, ok := job["uses"]; ok {
 				checked++
-				if s, _ := u.(string); !pinnedUsesRe.MatchString(s) {
-					fail(t, "%s: job %s: uses «%v» не закреплён по SHA", path, jn, u)
+				if pr := usesProblem(u); pr != "" {
+					fail(t, "%s: job %s: %s", path, jn, pr)
 				}
 			}
 			steps, _ := job["steps"].([]interface{})
@@ -114,11 +153,8 @@ func TestActionsPinnedBySHA(t *testing.T) {
 					continue
 				}
 				checked++
-				s, _ := u.(string)
-				if !pinnedUsesRe.MatchString(s) {
-					fail(t, "%s: job %s, шаг №%d: uses «%v» не закреплён по SHA — допустимо только "+
-						"<владелец>/<репо>[/путь]@<40 hex>; метка и ветка изменяемы, ./ и docker:// вне списка",
-						path, jn, i+1, u)
+				if pr := usesProblem(u); pr != "" {
+					fail(t, "%s: job %s, шаг №%d: %s", path, jn, i+1, pr)
 				}
 			}
 		}
@@ -132,3 +168,52 @@ func TestActionsPinnedBySHA(t *testing.T) {
 
 // wantUses — сколько `uses:` сейчас в обоих workflow (ci.yml 4, release.yml 9).
 const wantUses = 13
+
+// Состав .github (ревью SEC-01, С-2). Закрытые списки выше читают только
+// ci.yml и release.yml; третий файл workflow с pull_request_target и
+// uses: foo/bar@main не проверял бы никто. Поэтому состав закрыт: в
+// .github/workflows ровно эти два файла, в .github — только перечисленное;
+// каталога .github/actions нет (локальные action закрыты и в uses:).
+var wantWorkflowFiles = []string{"ci.yml", "release.yml"}
+
+var allowedGithubEntries = map[string]string{
+	"workflows":      "ci.yml и release.yml",
+	"dependabot.yml": "обновления go-модулей и SHA actions",
+}
+
+const githubDir = "../../.github"
+
+func TestWorkflowFilesClosedList(t *testing.T) {
+	list := func(dir string) []string {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			fatal(t, "не прочитать каталог %s: %v", dir, err)
+		}
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		// Подсадка канарейки — лишний файл в результате обхода.
+		for _, f := range plantedExtraFiles(t) {
+			if filepath.ToSlash(filepath.Dir(f)) == filepath.ToSlash(dir) {
+				names = append(names, filepath.Base(f))
+			}
+		}
+		sort.Strings(names)
+		return names
+	}
+	wf := list(githubDir + "/workflows")
+	if strings.Join(wf, " ") != strings.Join(wantWorkflowFiles, " ") {
+		fail(t, "состав .github/workflows %v, допустимо ровно %v — файл вне списка не проверяет ни один сторож "+
+			"(триггеры, uses:, ключи, тела run:)", wf, wantWorkflowFiles)
+	}
+	top := list(githubDir)
+	for _, n := range top {
+		if _, ok := allowedGithubEntries[n]; !ok {
+			fail(t, ".github/%s вне закрытого списка содержимого .github (локальные action, чужие workflow)", n)
+		}
+	}
+	if len(top) == 0 {
+		fatal(t, "каталог .github пуст — тест перестал что-либо проверять")
+	}
+}
