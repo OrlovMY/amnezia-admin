@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1314,8 +1316,21 @@ func TestServerCommandsUnchanged(t *testing.T) {
 		t.Fatalf("Carol2 не найдена после RegenerateUser: %+v", clients)
 	}
 
-	if err := sess.DeleteByID(c, carol2ID); err != nil {
-		t.Fatalf("DeleteByID: %v", err)
+	// Посадки канарейки (TestServerCommandsGuardCanary): только в дочернем
+	// процессе, по переменной окружения.
+	plant := os.Getenv(t7PlantEnv)
+	if plant != "drop-delete" {
+		if err := sess.DeleteByID(c, carol2ID); err != nil {
+			t.Fatalf("DeleteByID: %v", err)
+		}
+	}
+	if plant == "extra-stats" {
+		if _, err := sess.GetPeerStats(c); err != nil {
+			t.Fatalf("GetPeerStats: %v", err)
+		}
+	}
+	if plant == "alien-cmd" {
+		_, _ = sess.r.Run("docker exec amnezia-awg rm -f /opt/amnezia/awg/wg0.conf", nil)
 	}
 
 	// Откат (A3б): сбой syncconf после записи — единственный путь к команде
@@ -1330,8 +1345,36 @@ func TestServerCommandsUnchanged(t *testing.T) {
 	for i, tmpl := range cmdTemplates {
 		templates[i] = mustTemplateRegex(tmpl)
 	}
+	for _, msg := range serverCommandsVerdict(templates, srv.Commands()) {
+		t.Errorf("%s %s", t7Marker, msg)
+	}
+}
+
+// t7Marker — метка вердикта сторожа; канарейка требует её в выводе упавшего
+// дочернего процесса, чтобы красный был «по своей причине».
+const t7Marker = "T7-ВЕРДИКТ:"
+
+const t7PlantEnv = "AMNEZIA_T7_PLANT"
+
+// t7Want — ТОЧНОЕ число команд каждого шаблона (индексы cmdTemplates) в
+// сценарии TestServerCommandsUnchanged. Сравнение в обе стороны: и лишняя,
+// и недостающая команда — красный.
+var t7Want = []int{
+	1,  // docker ps
+	31, // cat
+	7,  // backup
+	7,  // wg show
+	7,  // syncconf
+	10, // test -f
+	7,  // запись (apply): AddUser, RenameUser, SetEnabled×2, RegenerateUser, DeleteByID, AddUser(Dave)
+	1,  // откат
+}
+
+// serverCommandsVerdict — вердикт сторожа: список нарушений (пустой — чисто).
+func serverCommandsVerdict(templates []*regexp.Regexp, cmds []string) []string {
+	var bad []string
 	seen := make([]int, len(templates))
-	for _, cmd := range srv.Commands() {
+	for _, cmd := range cmds {
 		matched := -1
 		for i, re := range templates {
 			if re.MatchString(cmd) {
@@ -1340,24 +1383,45 @@ func TestServerCommandsUnchanged(t *testing.T) {
 			}
 		}
 		if matched < 0 {
-			t.Fatalf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd)
+			bad = append(bad, fmt.Sprintf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd))
+			continue
 		}
 		seen[matched]++
 	}
-	for i, n := range seen {
-		if n == 0 {
-			t.Errorf("шаблон ни разу не встретился: %s", cmdTemplates[i])
+	if len(t7Want) != len(templates) {
+		bad = append(bad, fmt.Sprintf("t7Want: %d чисел на %d шаблонов", len(t7Want), len(templates)))
+		return bad
+	}
+	for i := range templates {
+		if seen[i] != t7Want[i] {
+			bad = append(bad, fmt.Sprintf("шаблон #%d: команд %d, ждали ровно %d: %.80s", i, seen[i], t7Want[i], cmdTemplates[i]))
 		}
 	}
-	// Точный счёт записей (не «> 0»): семь операций записи — AddUser,
-	// RenameUser, SetEnabled×2, RegenerateUser, DeleteByID, AddUser(Dave) — и
-	// ровно один откат.
-	applyIdx, rollbackIdx := len(cmdTemplates)-2, len(cmdTemplates)-1
-	if seen[applyIdx] != 7 {
-		t.Errorf("команд записи: %d, ждали ровно 7", seen[applyIdx])
+	return bad
+}
+
+// TestServerCommandsGuardCanary — сторож обязан УРОНИТЬ прогон, а не только
+// найти дефект (guards-can-stop-failing): TestServerCommandsUnchanged
+// запускается дочерним процессом с посаженным дефектом, и тот обязан упасть с
+// меткой вердикта. Три посадки: недостающая команда, лишняя команда, чужая
+// команда — одностороннее ослабление сравнения или Errorf→Logf дают зелёный
+// дочерний прогон, и канарейка краснеет.
+func TestServerCommandsGuardCanary(t *testing.T) {
+	if os.Getenv(t7PlantEnv) != "" {
+		t.Skip("дочерний процесс")
 	}
-	if seen[rollbackIdx] != 1 {
-		t.Errorf("команд отката: %d, ждали ровно 1", seen[rollbackIdx])
+	for _, plant := range []string{"drop-delete", "extra-stats", "alien-cmd"} {
+		t.Run(plant, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestServerCommandsUnchanged$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), t7PlantEnv+"="+plant)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("сторож не уронил прогон на посадке %q:\n%s", plant, out)
+			}
+			if !strings.Contains(string(out), t7Marker) {
+				t.Fatalf("прогон упал не по вердикту сторожа (нет %q) на посадке %q:\n%s", t7Marker, plant, out)
+			}
+		})
 	}
 }
 
