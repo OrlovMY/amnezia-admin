@@ -168,7 +168,9 @@ func TestCASLockLineRealFlock(t *testing.T) {
 	if !strings.HasSuffix(prefix, " "+CASLockDir) {
 		t.Fatalf("строка замка не кончается на %q: %q", CASLockDir, prefix)
 	}
-	line := strings.TrimSuffix(prefix, CASLockDir) + missing + "/ true"
+	// Путь подменяется с сохранением того, как CASLockDir оканчивается:
+	// косую черту добавляет не тест, а сама константа.
+	line := strings.TrimSuffix(prefix, CASLockDir) + missing + strings.TrimPrefix(CASLockDir, "/run/lock") + " true"
 	out, err := exec.Command("sh", "-c", line).CombinedOutput()
 	var ee *exec.ExitError
 	if !asExit(err, &ee) || ee.ExitCode() != 66 {
