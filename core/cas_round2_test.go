@@ -49,7 +49,7 @@ func TestPartialWriteRealScript(t *testing.T) {
 		t.Errorf("текст не говорит о частичной записи: %v", err)
 	}
 	for _, cmd := range srv.Commands() {
-		if strings.HasPrefix(cmd, "sudo ") {
+		if strings.Contains(cmd, "sudo ") {
 			t.Errorf("повтор под sudo после записи: %.60q", cmd)
 		}
 	}
@@ -103,7 +103,7 @@ type denyDockerOnce struct {
 
 func (r *denyDockerOnce) Run(cmd string, stdin []byte) (string, error) {
 	if isCASWriteCmd(cmd) {
-		if strings.Contains(cmd, " sudo -n docker exec ") {
+		if strings.Contains(cmd, " env LC_ALL=C sudo -n docker exec ") {
 			r.sudoWrites++
 			return r.base.Run(cmd, stdin)
 		}

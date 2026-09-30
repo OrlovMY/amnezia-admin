@@ -43,7 +43,7 @@ func (r *sudoersRunner) Run(cmd string, stdin []byte) (string, error) {
 			return "", &exitErr{code: 1, msg: fmt.Sprintf("команда: exit status 1; stderr: Sorry, user admin is not allowed to execute '/usr/bin/%s' as root on host.", prog)}
 		}
 		// разрешено: sudo исполняет docker от root — сокет доступен
-		return r.srv.Run(strings.Replace(cmd, "sudo -n ", "", 1), stdin)
+		return r.srv.Run(cmd, stdin)
 	}
 	// без sudo: любой docker — отказ сокета
 	for _, w := range words {

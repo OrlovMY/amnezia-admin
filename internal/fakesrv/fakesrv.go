@@ -259,7 +259,7 @@ var (
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
 	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
 	// TestCASLockLineRealFlock (Linux).
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
@@ -289,7 +289,12 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	// частичной записи. Отказ и запись в Violations.
 	started := s.writeStarted
 	s.writeStarted = ""
-	if isSudo && started != "" && started == actual {
+	// Повтор под sudo — и старой формы («sudo » + вся команда), и новой
+	// (AU-LOGIC H1: «… /run/lock/ env LC_ALL=C sudo -n docker exec …» —
+	// sudo внутри замка). Прежде признак искал только префикс «sudo » и для
+	// новой формы молчал (AU-LOGIC M-2).
+	plain := strings.Replace(actual, CASSudoInfix, "docker exec", 1)
+	if started != "" && ((isSudo && started == actual) || (plain != actual && started == plain)) {
 		s.Violations = append(s.Violations, "повтор записи под sudo после начатой записи")
 		return "", fmt.Errorf("fakesrv: НАРУШЕНИЕ: повтор записи под sudo после начатой записи: %.80q", cmd)
 	}
@@ -443,6 +448,10 @@ func (e *ExitError) Error() string {
 
 // ExitStatus — код выхода.
 func (e *ExitError) ExitStatus() int { return e.Status }
+
+// CASSudoInfix — как повтор под sudo выглядит внутри команды записи (копия
+// из core: fakesrv core не импортирует; сверяет TestServerCommandSudoRetryUnchanged).
+const CASSudoInfix = "env LC_ALL=C sudo -n docker exec"
 
 // casWrite исполняет команду записи: хуки хоста (замок занят, нет
 // timeout/flock) — модель, тело скрипта — настоящий sh (execScript). Весь Run
