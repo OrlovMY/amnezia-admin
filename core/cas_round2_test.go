@@ -103,9 +103,9 @@ type denyDockerOnce struct {
 
 func (r *denyDockerOnce) Run(cmd string, stdin []byte) (string, error) {
 	if isCASWriteCmd(cmd) {
-		if strings.HasPrefix(cmd, "sudo ") {
+		if strings.Contains(cmd, " sudo -n docker exec ") {
 			r.sudoWrites++
-			return r.base.Run(strings.TrimPrefix(cmd, "sudo "), stdin)
+			return r.base.Run(cmd, stdin)
 		}
 		if !r.denied {
 			r.denied = true

@@ -1236,6 +1236,68 @@ func casWriteTemplate(label string) string {
 		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
 }
 
+// casWriteTemplateSudo — повтор записи под sudo (AU-LOGIC PR-4, H1): sudo
+// внутри замка, прямо перед docker.
+func casWriteTemplateSudo(label string) string {
+	return "timeout 75 flock -w 15 -E 4 /run/lock/ sudo -n docker exec -i " + dyn +
+		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
+}
+
+// sockDeniedRunner — docker без sudo не пускает к сокету: запись без sudo
+// отказывает, повтор под sudo уходит в fakesrv.
+type sockDeniedRunner struct{ srv *fakesrv.Server }
+
+func (r sockDeniedRunner) Run(cmd string, stdin []byte) (string, error) {
+	if strings.Contains(cmd, "flock") && !strings.Contains(cmd, "sudo") {
+		return "", &fakesrv.ExitError{Cmd: "x", Status: 1,
+			Stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"}
+	}
+	return r.srv.Run(cmd, stdin)
+}
+
+// TestServerCommandSudoRetryUnchanged — T7 для повтора под sudo: запись и
+// откат при отказе сокета идут командами-шаблонами casWriteTemplateSudo,
+// ровно по одной; прочие команды — из cmdTemplates.
+func TestServerCommandSudoRetryUnchanged(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(sockDeniedRunner{srv}, testCreds())
+	c := awgContainer()
+	if _, err := sess.AddUser(c, "Carol"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+	if _, err := sess.AddUser(c, "Dave"); err == nil {
+		t.Fatal("AddUser при сбое syncconf: ждали ошибку отката")
+	}
+	sudoT := []*regexp.Regexp{mustTemplateRegex(casWriteTemplateSudo("amnezia-admin-apply")), mustTemplateRegex(casWriteTemplateSudo("amnezia-admin-rollback"))}
+	var others []*regexp.Regexp
+	for _, tmpl := range cmdTemplates {
+		others = append(others, mustTemplateRegex(tmpl))
+	}
+	seen := make([]int, 2)
+	for _, cmd := range srv.Commands() {
+		cmd = strings.TrimPrefix(cmd, "sudo ") // чтения — общим фолбэком «sudo docker …»
+		matched := false
+		for i, re := range sudoT {
+			if re.MatchString(cmd) {
+				seen[i]++
+				matched = true
+			}
+		}
+		for _, re := range others {
+			if re.MatchString(cmd) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("%s команда вне шаблонов: %.120q", t7Marker, cmd)
+		}
+	}
+	if seen[0] != 2 || seen[1] != 1 {
+		t.Errorf("%s записей под sudo %d (ждали ровно 2), откатов под sudo %d (ждали ровно 1)", t7Marker, seen[0], seen[1])
+	}
+}
+
 func mustTemplateRegex(tmpl string) *regexp.Regexp {
 	escaped := regexp.QuoteMeta(tmpl)
 	return regexp.MustCompile("^" + strings.ReplaceAll(escaped, dyn, `\S+`) + "$")
