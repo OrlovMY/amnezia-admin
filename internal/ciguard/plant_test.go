@@ -91,6 +91,19 @@ const canaryLogic = "TestShellcheckCanaryStepLogic"
 const toolsStep = "        run: bash scripts/dev-tools.sh\n"
 const toolsStepMulti = "        run: |\n          bash scripts/dev-tools.sh\n"
 
+const historyKeysSH = "../../scripts/check-history-keys.sh"
+
+const (
+	usesT = "TestActionsPinnedBySHA"
+	trig  = "TestWorkflowTriggersClosedList"
+)
+
+// sh — строка, добавленная в scripts/build-release.sh; этот файл из
+// сторожей пакета читает только TestNoEarlyExitPipeReader.
+func sh(line string) []edit {
+	return []edit{{buildReleaseSH, "mkdir -p dist\n", "mkdir -p dist\n" + line + "\n"}}
+}
+
 func ci(old, new string) []edit  { return []edit{{ciYML, old, new}} }
 func rel(old, new string) []edit { return []edit{{releaseYML, old, new}} }
 
@@ -250,11 +263,113 @@ var plants = []plant{
 	{name: "sp-subjects-pipe", edits: rel(`            in_subjects "$f" ||`, `            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" ||`),
 		wantTest: pipes, also: []string{att}, wantMsg: `«printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f"`},
 	{name: "sp-info-pipe", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`, `            printf '%s\n' "$info" | grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' ||`),
-		wantTest: pipes, wantMsg: "читатель конвейера выходит раньше конца ввода"},
+		wantTest: pipes, wantMsg: "«grep»: флаг «-qE» вне закрытого списка"},
 	{name: "sp-canary-grep-m", edits: ci(`! grep -q 'SC2086' <<< "$out"; then`, `! printf '%s\n' "$out" | grep -m1 -q 'SC2086'; then`),
 		wantTest: pipes, also: []string{canaryLogic}, wantMsg: "grep -m1 -q 'SC2086'"},
 	{name: "sp-script-head", edits: []edit{{buildReleaseSH, "mkdir -p dist\n", "mkdir -p dist\ngo version | head -n 1\n"}},
 		wantTest: pipes, wantMsg: "../../scripts/build-release.sh: «go version | head -n 1»"},
+	// --- долги CI: закрытый список читателей; обходы QA-01 по одному ---
+	{name: "cl-pipe-amp", edits: sh("printf x |& grep -q y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-q» вне закрытого списка"},
+	{name: "cl-egrep", edits: sh("printf x | egrep -q y"),
+		wantTest: pipes, wantMsg: "читатель «egrep» вне закрытого списка"},
+	{name: "cl-fgrep", edits: sh("printf x | fgrep -q y"),
+		wantTest: pipes, wantMsg: "читатель «fgrep» вне закрытого списка"},
+	{name: "cl-grep-m1", edits: sh("printf x | grep -m1 y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-m1» вне закрытого списка"},
+	{name: "cl-lc-all", edits: sh("printf x | LC_ALL=C grep -q y"),
+		wantTest: pipes, wantMsg: "читатель «LC_ALL=C» вне закрытого списка"},
+	{name: "cl-env", edits: sh("printf x | env grep -q y"),
+		wantTest: pipes, wantMsg: "читатель «env» вне закрытого списка"},
+	{name: "cl-sed-q", edits: sh("printf x | sed q"),
+		wantTest: pipes, wantMsg: "«sed»: в скрипте sed есть q/Q"},
+	{name: "cl-sed-block", edits: sh("printf x | sed -n '/x/{p;q}'"),
+		wantTest: pipes, wantMsg: "«sed»: в скрипте sed есть q/Q"},
+	{name: "cl-awk-exit", edits: sh("printf x | awk '/x/{print; exit}'"),
+		wantTest: pipes, wantMsg: "«awk»: в программе awk есть exit/nextfile"},
+	{name: "cl-grep-l", edits: sh("printf x | grep -l y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-l» вне закрытого списка"},
+	{name: "cl-cmp", edits: sh("printf x | cmp - /dev/null"),
+		wantTest: pipes, wantMsg: "читатель «cmp» вне закрытого списка"},
+	{name: "cl-read", edits: sh("printf x | read -r v"),
+		wantTest: pipes, wantMsg: "читатель «read» вне закрытого списка"},
+	{name: "cl-xargs", edits: sh("printf x | xargs grep -q y"),
+		wantTest: pipes, wantMsg: "читатель «xargs» вне закрытого списка"},
+	{name: "cl-newline", edits: sh("printf x |\n  grep -q y"),
+		wantTest: pipes, wantMsg: "«grep -q y» — «grep»: флаг «-q»"},
+	// --- долги CI: прочие формы и ветки закрытого списка ---
+	{name: "cl-command", edits: sh("printf x | command grep y"),
+		wantTest: pipes, wantMsg: "читатель «command» вне закрытого списка"},
+	{name: "cl-backslash", edits: sh(`printf x | \grep y`),
+		wantTest: pipes, wantMsg: `читатель «\grep» вне закрытого списка`},
+	{name: "cl-subshell", edits: sh("printf x | (grep y)"),
+		wantTest: pipes, wantMsg: "читатель «(» вне закрытого списка"},
+	{name: "cl-group", edits: sh("printf x | { grep y; }"),
+		wantTest: pipes, wantMsg: "читатель «{» вне закрытого списка"},
+	{name: "cl-while", edits: sh("printf x | while read -r v; do :; done"),
+		wantTest: pipes, wantMsg: "читатель «while» вне закрытого списка"},
+	{name: "cl-head", edits: sh("printf x | head -n 1"),
+		wantTest: pipes, wantMsg: "читатель «head» вне закрытого списка"},
+	{name: "cl-file-operand", edits: sh("printf x | grep -E y /etc/hostname"),
+		wantTest: pipes, wantMsg: "«grep»: лишний операнд «/etc/hostname» — читается файл"},
+	{name: "cl-cat-no-dash", edits: sh("printf x | cat /etc/hostname"),
+		wantTest: pipes, wantMsg: "«cat»: лишний операнд «/etc/hostname»"},
+	{name: "cl-in-redirect", edits: sh("printf x | sort -u < /etc/hostname"),
+		wantTest: pipes, wantMsg: "вход читателя перенаправлен «< /etc/hostname»"},
+	{name: "cl-long-flag", edits: sh("printf x | grep --quiet y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «--quiet» вне закрытого списка"},
+	{name: "cl-in-cmdsubst", edits: sh(`v="$(printf x | grep -q y)"`),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-q»"},
+	{name: "cl-unknown-func", edits: sh("printf x | myfilter"),
+		wantTest: pipes, wantMsg: "читатель «myfilter» вне закрытого списка"},
+	{name: "cl-func-body", edits: []edit{{historyKeysSH, "count_suspects() { grep -c '^SUSPECT ' || true; }", "count_suspects() { grep -q '^SUSPECT ' || true; }"}},
+		wantTest: pipes, wantMsg: "функция «count_suspects»: первая команда тела — «grep»: флаг «-q»"},
+	{name: "cl-unparsed", edits: sh("echo 'незакрыто"),
+		wantTest: pipes, wantMsg: "текст не разобран (строка"},
+	{name: "cl-workflow-amp-newline", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`,
+		"            printf '%s\\n' \"$info\" |&\n              grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' ||"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-qE» вне закрытого списка"},
+	{name: "cl-count", edits: []edit{{devToolsSH, `sha256sum "$1" | awk '{print $1}'`, `awk '{print $1}' < <(sha256sum "$1")`}},
+		wantTest: pipes, wantMsg: "читателей конвейера найдено 29, ожидалось 30"},
+	{name: "cl-growth-break", edits: []edit{{growthScript, "*) continue ;; #", "*) break ;; #"}},
+		wantTest: pipes, wantMsg: "в цикле чтения check-version-growth.sh есть break/exit"},
+	{name: "cl-growth-exit0", edits: []edit{{growthScript, "max_key=\"\"\n", "exit 0\nmax_key=\"\"\n"}},
+		wantTest: pipes, wantMsg: "выходит успешно (exit 0) до цикла чтения"},
+	{name: "cl-growth-noloop", edits: []edit{{growthScript, "while IFS= read -r line || [ -n \"$line\" ]; do", "while read -r line; do"}},
+		wantTest: pipes, wantMsg: "не найден цикл `while IFS= read -r line … done`"},
+	// --- долги CI: uses: по SHA ---
+	{name: "us-tag", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@v7"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@v7» не закреплён по SHA"},
+	{name: "us-branch", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@main"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@main» не закреплён по SHA"},
+	{name: "us-short-sha", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@043fb46"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@043fb46» не закреплён по SHA"},
+	{name: "us-local", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "./.github/actions/upload"),
+		wantTest: usesT, wantMsg: "uses «./.github/actions/upload» не закреплён по SHA"},
+	{name: "us-docker", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "docker://alpine:3.20"),
+		wantTest: usesT, wantMsg: "uses «docker://alpine:3.20» не закреплён по SHA"},
+	{name: "us-job", edits: rel("\njobs:\n", "\njobs:\n  reuse:\n    uses: octo/wf/.github/workflows/x.yml@main\n"),
+		wantTest: usesT, also: []string{keys}, wantMsg: "job reuse: uses «octo/wf/.github/workflows/x.yml@main» не закреплён по SHA"},
+	{name: "us-count", edits: ci("      - name: actionlint (оба workflow)\n",
+		"      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: go.mod\n      - name: actionlint (оба workflow)\n"),
+		wantTest: usesT, wantMsg: "ссылок uses: найдено 14, ожидалось 13"},
+	// --- долги CI: триггеры ---
+	{name: "tr-dispatch", edits: rel("on:\n  push:\n", "on:\n  workflow_dispatch:\n  push:\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «workflow_dispatch» вне закрытого списка"},
+	{name: "tr-call", edits: rel("on:\n  push:\n", "on:\n  workflow_call:\n  push:\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «workflow_call» вне закрытого списка"},
+	{name: "tr-prt", edits: ci("on:\n  pull_request:\n", "on:\n  pull_request_target:\n  pull_request:\n"),
+		wantTest: trig, wantMsg: "ci.yml: событие «pull_request_target» вне закрытого списка"},
+	{name: "tr-tag-pattern", edits: rel("      - \"v*\"\n", "      - \"*\"\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «push»: настройка"},
+	{name: "tr-release-branches", edits: rel("on:\n  push:\n", "on:\n  push:\n    branches: [main]\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «push»: настройка"},
+	{name: "tr-ci-branches", edits: ci("    branches: [main]\n", "    branches: [main, dev]\n"),
+		wantTest: trig, wantMsg: "ci.yml: событие «push»: настройка"},
+	{name: "tr-missing", edits: ci("on:\n  pull_request:\n", "on:\n"),
+		wantTest: trig, wantMsg: "ci.yml: нет события «pull_request»"},
+	{name: "tr-form", edits: rel("on:\n  push:\n    tags:\n      - \"v*\"\n", "on: [push]\n"),
+		wantTest: trig, wantMsg: "release.yml: `on:` не в форме словаря событий"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -353,7 +468,10 @@ var plants = []plant{
 		wantTest: att, also: []string{keys}, wantMsg: "нет env ATTEST_SUBJECTS"},
 	{name: "attest-check-gone", edits: rel("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n",
 		"        run: echo пропущено\n        x-old: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n"),
-		wantTest: att, also: []string{keys}, wantMsg: "не найдены шаги: сумм №"},
+		// Тело шага с `sort -u | wc -l` уходит в x-old: читателей конвейера
+		// становится на два меньше, и точный счёт TestNoEarlyExitPipeReader
+		// обязан это заметить — поэтому pipes в also.
+		wantTest: att, also: []string{keys, pipes}, wantMsg: "не найдены шаги: сумм №"},
 	{name: "attest-order", edits: []edit{
 		{releaseYML, "        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n", "        run: echo суммы-позже\n"},
 		{releaseYML, "\n      - uses: actions/attest-build-provenance", "\n      - name: Суммы поздно\n        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n\n      - uses: actions/attest-build-provenance"}},
@@ -383,6 +501,8 @@ var mainTests = []string{
 	"TestReleaseTestMatrixMatchesBuild",
 	"TestShellcheckCanaryStepLogic",
 	"TestWorkflowKeysClosedList",
+	"TestActionsPinnedBySHA",
+	"TestWorkflowTriggersClosedList",
 }
 
 func activePlant(t *testing.T) *plant {
