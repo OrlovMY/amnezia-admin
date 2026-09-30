@@ -80,6 +80,12 @@ type Env struct {
 	SudoKeyEnv     []string // второй ключ — пользователь, которому docker доступен через sudo (nil — нет)
 	HostKey        string   // отпечаток SHA256:… — передаётся программам через -hostkey
 
+	// MakeSudoKey — создаёт на ТЕСТОВОМ сервере временного пользователя без
+	// root, которому docker доступен только через sudo, и отдаёт окружение с
+	// его ключом; undo — удалить пользователя. nil — не умеем (PR4.2 тогда
+	// НЕ ПРОВЕРЕНО).
+	MakeSudoKey func() (env []string, undo func(), err error)
+
 	Ask func(question string) Answer
 	Out io.Writer
 
@@ -553,8 +559,17 @@ func (e *Env) rollback() (res Result) {
 // sudoOrders — ОТЧЁТ PR1, п. 2: запись от root, затем от пользователя с
 // docker через sudo, и наоборот; ни одного «код 66».
 func (e *Env) sudoOrders() Result {
+	if e.SudoKeyEnv == nil && e.MakeSudoKey != nil {
+		env, undo, err := e.MakeSudoKey()
+		if err != nil {
+			return Result{Detail: "временный пользователь с docker через sudo не создан: " + err.Error()}
+		}
+		defer undo()
+		e.SudoKeyEnv = env
+		defer func() { e.SudoKeyEnv = nil }()
+	}
 	if e.SudoKeyEnv == nil {
-		return Result{Detail: "второй ключ (AMNEZIA_KEY_SUDO — пользователь без root, docker через sudo) не задан"}
+		return Result{Detail: "второго ключа (пользователь без root, docker через sudo) нет: не задан AMNEZIA_KEY_SUDO и временного пользователя создать нечем"}
 	}
 	order := []struct {
 		env  []string

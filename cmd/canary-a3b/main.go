@@ -14,6 +14,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -115,6 +119,28 @@ func run() int {
 	}
 	if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
 		env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
+	} else if creds.User == "root" {
+		// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере; пароль
+		// случайный, нигде не печатается; после шага пользователь удаляется.
+		env.MakeSudoKey = func() ([]string, func(), error) {
+			buf := make([]byte, 16)
+			if _, err := rand.Read(buf); err != nil {
+				return nil, nil, err
+			}
+			pw := hex.EncodeToString(buf)
+			const u = "amnezia-canary"
+			undo := func() {
+				_, _ = env.Remote("userdel " + u + " 2>/dev/null; rm -f /etc/sudoers.d/" + u)
+			}
+			if _, err := env.Remote("id " + u + " >/dev/null 2>&1 && exit 1; useradd -M -s /bin/sh " + u +
+				" && echo " + u + ":" + pw + " | chpasswd && d=$(command -v docker) && echo \"" + u +
+				" ALL=(root) NOPASSWD: $d\" > /etc/sudoers.d/" + u + " && chmod 0440 /etc/sudoers.d/" + u); err != nil {
+				undo()
+				return nil, nil, fmt.Errorf("useradd/sudoers (или пользователь %s уже есть): %v", u, err)
+			}
+			raw, _ := json.Marshal(map[string]any{"hostName": creds.Host, "port": creds.Port, "userName": u, "password": pw})
+			return []string{"AMNEZIA_KEY=vpn://" + base64.RawURLEncoding.EncodeToString(raw)}, undo, nil
+		}
 	}
 	rs, runErr := canary.Run(env)
 	st, line := canary.Summary(rs, runErr)
