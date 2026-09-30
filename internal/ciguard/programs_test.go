@@ -84,7 +84,7 @@ var allowedPrograms = map[string]progRule{
 	"test":     {why: "проверка условия"},
 	"true":     {why: "пустая команда в || true"},
 	// внешние программы
-	"awk":       {why: "фильтр; текст программы — только из allowedScriptTexts (scripttext_test.go)"},
+	"awk":       {why: "фильтр; вызов целиком — только из allowedToolCalls (scripttext_test.go)"},
 	"base64":    {why: "образец канарейки в check-history-keys.sh"},
 	"bash":      {why: "только allowedShellCalls — наши scripts/*.sh, разбираемые сторожем"},
 	"cat":       {why: "склейка потоков"},
@@ -100,7 +100,7 @@ var allowedPrograms = map[string]progRule{
 	"ls":        {why: "список файлов"},
 	"mkdir":     {why: "каталоги"},
 	"mv":        {why: "переименование"},
-	"sed":       {why: "фильтр; текст скрипта — только из allowedScriptTexts (scripttext_test.go)"},
+	"sed":       {why: "фильтр; вызов целиком — только из allowedToolCalls (scripttext_test.go)"},
 	"sha256sum": {why: "контрольные суммы"},
 	"sort":      {why: "сортировка"},
 	"sudo": {why: "только sudo apt-get update|install на Linux-раннере", check: func(args []shWord) string {
@@ -233,19 +233,15 @@ func TestCommandProgramsClosedList(t *testing.T) {
 			} else {
 				seen[w.lit]++
 				if w.lit == "awk" || w.lit == "sed" {
-					text, pr := scriptText(w.lit, args)
-					key := scriptKey(w.lit, text)
-					if pr == "" {
-						textAll[key] = true
-					}
-					switch {
-					case pr != "":
-						fail(t, "%s: «%s»: %s", where, call, pr)
-					case allowedScriptTexts[key] == "":
-						fail(t, "%s: текст программы %s «%s» (%s) вне закрытого списка allowedScriptTexts — "+
-							"awk/sed сами исполняют команды (system, print | cmd, sed e); новый текст — строкой после ревью",
-							where, w.lit, text, key)
-					default:
+					// Раунд 6 (AU-LOGIC S1): сверяется ВЕСЬ вызов — имя,
+					// флаги и тексты, слово в слово, как в файле.
+					key := toolCallKey(c.words[k:])
+					textAll[key] = true
+					if allowedToolCalls[key] == "" {
+						fail(t, "%s: вызов %s «%s» (%s) вне закрытого списка allowedToolCalls — "+
+							"awk/sed сами исполняют команды (system, print | cmd, sed e, -f файл); новый вызов — строкой после ревью",
+							where, w.lit, call, key)
+					} else {
 						textUsed[key]++
 					}
 				}
@@ -289,17 +285,17 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	if len(seen) == 0 {
 		fatal(t, "не встречено ни одной программы из списка — тест ничего не проверил")
 	}
-	for key := range allowedScriptTexts {
+	for key := range allowedToolCalls {
 		if textUsed[key] == 0 {
-			fail(t, "текст %s из allowedScriptTexts больше не встречается — запись устарела, убери её", key)
+			fail(t, "вызов %s из allowedToolCalls больше не встречается — запись устарела, убери её", key)
 		}
 	}
 	if len(textUsed) == 0 {
-		fatal(t, "не встречено ни одного текста awk/sed из списка — проверка текстов ничего не проверила")
+		fatal(t, "не встречено ни одного вызова awk/sed из списка — проверка вызовов ничего не проверила")
 	}
-	if len(textAll) != wantScriptTexts {
-		fail(t, "разных текстов awk/sed найдено %d, ожидалось %d — законно изменилось — поправь wantScriptTexts и allowedScriptTexts",
-			len(textAll), wantScriptTexts)
+	if len(textAll) != wantToolCalls {
+		fail(t, "разных вызовов awk/sed найдено %d, ожидалось %d — законно изменилось — поправь wantToolCalls и allowedToolCalls",
+			len(textAll), wantToolCalls)
 	}
 	if len(distinct) != wantPrograms {
 		fail(t, "разных программ найдено %d, ожидалось %d — законно изменилось — поправь wantPrograms и allowedPrograms",

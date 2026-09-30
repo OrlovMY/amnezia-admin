@@ -1,15 +1,19 @@
-// Файл scripttext_test.go — программы awk и sed только из закрытого списка
-// ТОЧНЫХ текстов (долги CI, раунд 5; AU-LOGIC Q1, Q2).
+// Файл scripttext_test.go — вызовы awk и sed только из закрытого списка
+// ТОЧНЫХ ВЫЗОВОВ (долги CI, раунды 5–6; AU-LOGIC Q1, Q2, S1).
 //
 // Почему. awk и sed — сами интерпретаторы: `print "x" | cmd`, `system()`,
-// `sed 1e cmd`, `s/x/y/ge` запускают оболочку мимо лексера. Проверка по
-// подстрокам (раунд 4) пропускала формы, которых не перечисляла. Поэтому
-// текст программы (первый операнд или значение -e) сверяется целиком: его
-// sha256 обязан быть в allowedScriptTexts. Новый текст — видимая строка
-// здесь, после ревью человеком. Подстановка в тексте — красная.
+// `sed 1e cmd`, `s/x/y/ge`, `-f файл`, `--expression=`, `--source`
+// запускают оболочку или чужой текст мимо лексера. Проверка подстрок
+// (раунд 4) и проверка одного текста программы (раунд 5) пропускали формы,
+// которых не знали: второй -e, длинные флаги, -fФАЙЛ. Третья форма одного
+// класса — меняем устройство: сверяется ВЕСЬ вызов — имя, все флаги и
+// тексты, слово в слово, как в файле (сырые слова лексера, через пробел).
+// Ключ — sha256 этой последовательности. Новый вызов — видимая строка
+// здесь, после ревью человеком. Перенаправления (`<`, `>`) в ключ не входят:
+// вход закрыт pipeReaders, выход безвреден.
 //
 // Немота списка: запись без единого использования — красная; число
-// разных текстов сверяется точно (wantScriptTexts).
+// разных вызовов (включая незнакомые) сверяется точно (wantToolCalls).
 package ciguard
 
 import (
@@ -18,53 +22,26 @@ import (
 	"strings"
 )
 
-// allowedScriptTexts — «awk:<sha256>» / «sed:<sha256>» → откуда и зачем.
+// allowedToolCalls — «awk:<sha256>» / «sed:<sha256>» → вызов и зачем.
 // Снято с файлов 30.09.2026.
-var allowedScriptTexts = map[string]string{
-	"awk:73c19bad099dfbbe57fc321bb7314e3c5affa10c4cbbea5cdc19011bc132459e": "check-history-keys.sh, scan(): поиск тел ключей PEM; без system/getline/print |",
-	"awk:37c22fcc5700df9ded0292d151ebebb28990fdf3a05ae7bcb92d4deb800f315e": "dev-tools.sh: '{print $1}' — первое поле sha256sum",
-	"awk:e660d2d7c0387805d3d86f7c8b70c1bdb656de872de692cc34b871e457ab5644": "release.yml ×3: '$0 != t' — убрать текущий тег из списка",
-	"sed:b67d8931eb2f3ba244742690d5541e2e162845c4e9250b3e96ce196769d6a533": "check-history-keys.sh: 's/^/+/' — префикс строк образца",
-	"sed:d8f09b2a6c529cde458f6a8ebac925422ec4f00e3e19510c60277a5c22f7a1b5": "check-history-keys.sh: 's/.\\{20\\}/& /g; s/^/+/' — пробелы в теле образца",
-	"sed:7e74e1717f0817b9fb7ccd9355646e7ceca56793e16a23f9fbcfa17711b00ce2": "check-history-keys.sh: 's/^HEADERS //p' — число заголовков",
+var allowedToolCalls = map[string]string{
+	"awk:4398c96d35f3efddefb7b0109d589212ebe80e5d088cb81e1d9b36f6ac12a5e9": "check-history-keys.sh, scan(): awk '<программа поиска тел PEM>' — без system/getline/print |",
+	"awk:d81541cf02fc7ebca1947675467a0019a93e7829f937217af96222e2eb1e75a6": "dev-tools.sh: awk '{print $1}' — первое поле sha256sum",
+	"awk:83334826ca45cbf2fb5067f87f1dab303034827073f062d55dcdd9c56c7e2bdf": "release.yml ×3: awk -v t=\"$GITHUB_REF_NAME\" '$0 != t' — убрать текущий тег",
+	"sed:de5a76014cdd5082791a7e07990b5de51436da9ff9ae1e08c95f6b43de02bbdd": "check-history-keys.sh ×2: sed 's/^/+/' — префикс строк образца",
+	"sed:c664450fff2c9640f6a3ec0748d325f264a07a70b27ea84b089bf151f2d1e555": "check-history-keys.sh: sed 's/.\\{20\\}/& /g; s/^/+/' — пробелы в теле образца",
+	"sed:d604c36b219cef6077f9f2685a6416a23ba82343d3b7cbb8e352865101996056": "check-history-keys.sh: sed -n 's/^HEADERS //p' — число заголовков",
 }
 
-// wantScriptTexts — число разных текстов awk/sed в файлах.
-const wantScriptTexts = 6
+// wantToolCalls — число разных вызовов awk/sed в файлах.
+const wantToolCalls = 6
 
-// scriptText — текст программы awk/sed из аргументов; ok=false, если его
-// нет или он с подстановкой.
-func scriptText(prog string, args []shWord) (text string, problem string) {
-	valFlags := map[string]bool{}
-	if prog == "awk" {
-		valFlags["-v"], valFlags["-F"] = true, true
+// toolCallKey — ключ вызова: имя программы и sha256 сырых слов через пробел.
+func toolCallKey(ws []shWord) string {
+	raws := make([]string, len(ws))
+	for i, w := range ws {
+		raws[i] = w.raw
 	}
-	for k := 0; k < len(args); k++ {
-		a := args[k]
-		switch {
-		case !a.quoted && valFlags[a.lit]:
-			k++
-		case !a.quoted && a.lit == "-e" && prog == "sed":
-			if k+1 < len(args) {
-				return textOf(args[k+1])
-			}
-			return "", "у -e нет текста"
-		case !a.quoted && strings.HasPrefix(a.lit, "-") && a.lit != "-":
-		default:
-			return textOf(a)
-		}
-	}
-	return "", "нет текста программы"
-}
-
-func textOf(w shWord) (string, string) {
-	if w.dyn {
-		return "", "текст программы с подстановкой — содержимое неизвестно"
-	}
-	return w.lit, ""
-}
-
-func scriptKey(prog, text string) string {
-	h := sha256.Sum256([]byte(text))
-	return prog + ":" + hex.EncodeToString(h[:])
+	h := sha256.Sum256([]byte(strings.Join(raws, " ")))
+	return ws[0].lit + ":" + hex.EncodeToString(h[:])
 }
