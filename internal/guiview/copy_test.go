@@ -3,6 +3,7 @@ package guiview
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"amnezia-admin/core"
 )
@@ -20,10 +21,14 @@ func sample() Row {
 		Created:   "2026-09-22T12:34:56.789Z",
 		ClientID:  "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/aBcD1=",
 		CanManage: true,
-		Handshake: "2 минуты назад",
-		Traffic:   measured(core.PeerStat{RxBytes: 1200000, TxBytes: 900000}),
+		Peer:      measured(core.PeerStat{LastHandshake: sampleSeen, RxBytes: 1200000, TxBytes: 900000}),
 	}
 }
+
+// sampleSeen — время последнего рукопожатия в sample(). A1б: активность
+// теперь читается из того же показания, что и трафик (Row.Peer), а не из
+// готовой строки Handshake.
+var sampleSeen = time.Date(2026, 9, 22, 12, 30, 0, 0, time.Local)
 
 // measured — показание клиента, который ЕСТЬ в ответе сервера. Собирается
 // через core.ReadPeer, а не литералом: измеренное показание иначе не
@@ -48,7 +53,7 @@ func TestCellTextTable(t *testing.T) {
 		{"номер", sample(), 0, "3"},
 		{"имя", sample(), 1, "Ноутбук"},
 		{"дата обрезана до 19 знаков", sample(), 2, "2026-09-22T12:34:5"[:18] + "6"},
-		{"активность", sample(), 3, "2 минуты назад"},
+		{"активность", sample(), 3, "2026-09-22 12:30"},
 		{"ключ целиком", sample(), 5, sample().ClientID},
 		{"колонки вне диапазона", sample(), 6, ""},
 	}
@@ -69,17 +74,14 @@ func TestCopyKeepsUnknownUnknown(t *testing.T) {
 	notAsked.CanManage = false
 
 	failed := sample()
-	failed.Traffic = failedReading()
-	failed.ActivityFailed = true
+	failed.Peer = failedReading()
 
 	zero := sample()
-	zero.Traffic = measured(core.PeerStat{})
-	zero.Handshake = "—"
+	zero.Peer = measured(core.PeerStat{})
 
 	// Задание НЕЗНАНИЕ-ТРАФИК: клиента нет в ответе сервера.
 	absent := sample()
-	absent.Traffic = absentReading()
-	absent.Handshake = ""
+	absent.Peer = absentReading()
 
 	traffic := map[string]string{
 		"не спрашивали": CopyValue(notAsked, 4),
@@ -115,7 +117,7 @@ func TestCopyKeepsUnknownUnknown(t *testing.T) {
 		"не удалось":    CopyValue(failed, 3),
 		"не подключался": CopyValue(func() Row {
 			r := sample()
-			r.Handshake = "—"
+			r.Peer = measured(core.PeerStat{})
 			return r
 		}(), 3),
 	}
@@ -156,7 +158,7 @@ func TestCopyValueIsFullValue(t *testing.T) {
 func TestCopyRowFormat(t *testing.T) {
 	r := sample()
 	got := CopyRow(r)
-	want := "Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2 минуты назад | " +
+	want := "Ноутбук | Создан: 2026-09-22T12:34:56.789Z | Активность: 2026-09-22 12:30 | " +
 		"Трафик ↓/↑: 1.2 MB / 900.0 KB | Ключ: " + r.ClientID
 	if got != want {
 		t.Errorf("CopyRow() =\n%q\nожидалось\n%q", got, want)
@@ -199,11 +201,11 @@ func TestCopyRowFormat(t *testing.T) {
 // этот, и он обязан быть проверен отдельно.
 func TestCopyRowUnknownStaysUnknown(t *testing.T) {
 	failed := sample()
-	failed.Traffic = failedReading()
+	failed.Peer = failedReading()
 	zero := sample()
-	zero.Traffic = measured(core.PeerStat{})
+	zero.Peer = measured(core.PeerStat{})
 	absent := sample()
-	absent.Traffic = absentReading()
+	absent.Peer = absentReading()
 	if got := CopyRow(absent); !strings.Contains(got, "Трафик ↓/↑: ?") || strings.Contains(got, "0 B / 0 B") {
 		t.Errorf("строка целиком для клиента, которого нет в ответе сервера: %q — "+
 			"ожидалось «Трафик ↓/↑: ?» и ни одного «0 B / 0 B»", got)

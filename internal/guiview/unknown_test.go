@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -164,72 +165,80 @@ func TestDeleteCardActivityFreshDataArrives(t *testing.T) {
 }
 
 // TestActivityTextThreeStates — ТЕСТ РАЗЛИЧЕНИЯ ячейки активности: «запрос
-// не удался» отличимо и от «не подключался» («—» в ответе сервера), и от
-// «не спрашивали» («—» у неуправляемого протокола). Текст этой ячейки
-// переехал из cmd/gui в guiview по ревью BE-01: ветка «?» была написана
-// литералом там, где её не проверяет ни один тест.
+// не удался» и «клиента нет в ответе» отличимы и от «не подключался» (в
+// ответе, без рукопожатия), и от «не спрашивали» («—» у неуправляемого
+// протокола). Текст этой ячейки переехал из cmd/gui в guiview по ревью
+// BE-01. A1б: вход — core.PeerReading (одно показание на обе колонки), а не
+// строка из второго запроса.
 func TestActivityTextThreeStates(t *testing.T) {
+	seen := time.Date(2026, 9, 18, 21, 40, 0, 0, time.Local)
+	was := reading(map[string]core.PeerStat{"k": {LastHandshake: seen}}, false, "k")
+	never := reading(map[string]core.PeerStat{"k": {}}, false, "k")
+	absent := reading(map[string]core.PeerStat{}, false, "k")
+	failed := reading(nil, true, "k")
 	for _, tc := range []struct {
-		name                        string
-		canManage, failed, disabled bool
-		hs                          string
-		want                        string
+		name                string
+		canManage, disabled bool
+		r                   core.PeerReading
+		want                string
 	}{
-		{"неуправляемый протокол — не спрашивали", false, false, false, "", "—"},
-		{"неуправляемый и при отказе — по-прежнему не спрашивали", false, true, false, "", "—"},
-		{"отключённый клиент", true, false, true, "2026-09-18 21:40", "отключён"},
-		{"сервер ответил: подключался", true, false, false, "2026-09-18 21:40", "2026-09-18 21:40"},
-		{"сервер ответил: не подключался", true, false, false, "—", "—"},
-		{"ключа нет в ответе — про него не знаем", true, false, false, "", "?"},
-		{"запрос не удался", true, true, false, "", "?"},
-		{"запрос не удался — прежнее значение не печатается", true, true, false, "2026-09-18 21:40", "?"},
+		{"неуправляемый протокол — не спрашивали", false, false, absent, "—"},
+		{"неуправляемый и при отказе — по-прежнему не спрашивали", false, false, failed, "—"},
+		{"отключённый клиент", true, true, was, "отключён"},
+		{"сервер ответил: подключался", true, false, was, "2026-09-18 21:40"},
+		{"сервер ответил: не подключался", true, false, never, "—"},
+		{"ключа нет в ответе — про него не знаем", true, false, absent, "?"},
+		{"запрос не удался", true, false, failed, "?"},
+		{"незаполненное показание — незнание", true, false, core.PeerReading{}, "?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := guiview.ActivityText(tc.canManage, tc.failed, tc.disabled, tc.hs)
-			if got != tc.want {
+			if got := guiview.ActivityText(tc.canManage, tc.disabled, tc.r); got != tc.want {
 				t.Errorf("ActivityText = %q, want %q", got, tc.want)
 			}
 		})
 	}
-	if guiview.ActivityText(true, true, false, "2026-09-18 21:40") ==
-		guiview.ActivityText(true, false, false, "2026-09-18 21:40") {
-		t.Fatal("«узнать не удалось» неотличимо от свежей даты подключения")
-	}
-	if guiview.ActivityText(true, true, false, "") == guiview.ActivityText(true, false, false, "—") {
+	if guiview.ActivityText(true, false, failed) == guiview.ActivityText(true, false, never) {
 		t.Fatal("«узнать не удалось» неотличимо от «не подключался»")
+	}
+	if guiview.ActivityText(true, false, absent) == guiview.ActivityText(true, false, never) {
+		t.Fatal("«нет в ответе» неотличимо от «не подключался»")
 	}
 }
 
 // TestActivityTextArrivesFromServer — ТЕСТ ДОЕЗДА той же ячейки: отказ
-// приходит боевым путём из core.Session.GetHandshakes.
+// приходит боевым путём из core.Session.GetPeerStats (тем же запросом, что
+// cmd/gui.refresh, и через тот же core.ReadPeer, что cmd/gui.rowFor).
 func TestActivityTextArrivesFromServer(t *testing.T) {
 	sess := core.NewSessionWithRunner(
 		&failWgShow{inner: fakesrv.New(), err: errors.New("ssh: connection reset")},
 		&core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
 
-	hs, err := sess.GetHandshakes(wgContainer())
+	stats, err := sess.GetPeerStats(wgContainer())
 	if err == nil {
-		t.Fatal("тест перестал что-либо проверять: GetHandshakes не вернула ошибку на отказавшем транспорте")
+		t.Fatal("тест перестал что-либо проверять: GetPeerStats не вернула ошибку на отказавшем транспорте")
 	}
-	if got, want := guiview.ActivityText(true, err != nil, false, hs["peer-1"]), "?"; got != want {
+	if got, want := guiview.ActivityText(true, false, reading(stats, err != nil, "peer-1")), "?"; got != want {
 		t.Errorf("отказ сервера не доехал до ячейки активности: %q, want %q", got, want)
 	}
 
 	ok := core.NewSessionWithRunner(fakesrv.New(), &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	hs, err = ok.GetHandshakes(wgContainer())
+	stats, err = ok.GetPeerStats(wgContainer())
 	if err != nil {
 		t.Fatalf("исправный сервер: %v", err)
 	}
 	var anyPeer string
-	for pub := range hs {
+	for pub := range stats {
 		anyPeer = pub
 		break
 	}
 	if anyPeer == "" {
 		t.Fatal("тест перестал что-либо проверять: fakesrv не вернул ни одного peer'а")
 	}
-	if got, want := guiview.ActivityText(true, err != nil, false, hs[anyPeer]), "—"; got != want {
+	if got, want := guiview.ActivityText(true, false, reading(stats, false, anyPeer)), "—"; got != want {
 		t.Errorf("исправный сервер: %q, want %q — ответ «не подключался» обязан остаться собой", got, want)
+	}
+	if got, want := guiview.ActivityText(true, false, reading(stats, false, "нет-такого")), "?"; got != want {
+		t.Errorf("клиент, которого нет в ответе: %q, want %q", got, want)
 	}
 }
 

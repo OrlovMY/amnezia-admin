@@ -73,33 +73,49 @@ func DeleteCardActivity(hs map[string]string, clientID string, err error, disabl
 
 // ActivityText — ячейка колонки «Активность» таблицы пользователей.
 //
-//	!canManage       → "—"        статистика не запрашивалась вовсе (нет `wg`
-//	                              у XRay/DNS): "?" здесь означало бы «не
-//	                              смогли узнать», а мы и не спрашивали;
-//	disabled         → "отключён" состояние записи, а не измерение;
-//	activityFailed   → "?"        запрос был и не удался;
-//	hs == ""         → "?"        сервер ответил, но этого ключа в ответе
-//	                              нет — про него мы тоже не знаем;
-//	иначе            → значение из ответа ("—" = не подключался).
+//	!canManage          → "—"        статистика не запрашивалась вовсе (нет
+//	                                 `wg` у XRay/DNS): "?" здесь означало бы
+//	                                 «не смогли узнать», а мы и не спрашивали;
+//	disabled            → "отключён" состояние записи, а не измерение;
+//	не PeerMeasured     → "?"        запрос не удался ИЛИ клиента нет в
+//	                                 ответе — про него мы не знаем;
+//	без рукопожатия     → "—"        сервер ответил: не подключался;
+//	иначе               → время последнего рукопожатия.
+//
+// ТРЕТЬЕ СОСТОЯНИЕ ВЫРАЖЕНО ТИПОМ (A1б, долг НЕЗНАНИЕ-ТРАФИК). Прежняя
+// сигнатура (canManage, activityFailed, disabled bool, hs string) держала
+// «клиента нет в ответе» ДОГОВОРЁННОСТЬЮ: пустая строка из
+// u.handshakes[id]. Строку брали из отдельного запроса `wg show`
+// (GetHandshakes), а трафик и сортировку — из второго (GetPeerStats), и
+// одна строка таблицы могла сочетать показания двух разных ответов сервера.
+// Теперь обе колонки читают ОДНО показание core.PeerReading, и число без
+// признака «измерено» из него не достать.
 //
 // Порядок ветвей — часть решения, а не стиль (признак 3 правила
 // П-НЕЗНАНИЕ): частный случай выше общего перехватывал бы «не знаем».
 // Текст живёт здесь, а не в cmd/gui, по тому же доводу, что и остальное в
-// этом файле: в cmd/gui строку не проверяет ни один тест.
-func ActivityText(canManage, activityFailed, disabled bool, hs string) string {
-	switch {
-	case !canManage:
+// этом файле.
+func ActivityText(canManage, disabled bool, r core.PeerReading) string {
+	if !canManage {
 		return "—"
-	case disabled:
+	}
+	if disabled {
 		return "отключён"
-	case activityFailed:
+	}
+	st, ok := r.Measured()
+	switch {
+	case !ok:
 		return "?"
-	case hs == "":
-		return "?"
+	case st.LastHandshake.IsZero():
+		return "—"
 	default:
-		return hs
+		return st.LastHandshake.Format(HandshakeLayout)
 	}
 }
+
+// HandshakeLayout — формат времени последнего рукопожатия в таблице; тот
+// же, что у core.GetHandshakes (карточка удаления) и у таблицы CLI.
+const HandshakeLayout = "2006-01-02 15:04"
 
 // TrafficText — ячейка колонки «Трафик» таблицы пользователей.
 //

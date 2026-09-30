@@ -587,8 +587,7 @@ func osmotrMain(u *ui) {
 		{ClientID: repeatKey('Q'), UserData: map[string]any{"clientName": "Телефон Анны", "creationDate": "2026-09-20T08:00:00.000Z"}},
 		{ClientID: repeatKey('Z'), UserData: map[string]any{"clientName": "Роутер дача", "creationDate": "2026-09-01T10:00:00.000Z"}},
 	}
-	u.handshakes = map[string]string{testKey: "2 минуты назад"}
-	u.peerStats = map[string]core.PeerStat{testKey: {RxBytes: 1200000, TxBytes: 900000}}
+	u.peerStats = map[string]core.PeerStat{testKey: {LastHandshake: testSeen, RxBytes: 1200000, TxBytes: 900000}}
 	u.canManage = true
 	u.showMainScreen()
 	// Выбор протокола — БЕЗ обработчика: он пошёл бы на сервер (refresh). В
@@ -619,7 +618,11 @@ func withOneVault(t *testing.T) {
 	if tmp, err := filepath.Abs(os.TempDir()); err != nil || !strings.HasPrefix(dir, tmp) {
 		t.Fatalf("каталог хранилищ %s не во временном каталоге — осмотр его не трогает", dir)
 	}
-	if n := len(core.ListVaults(dir)); n != 0 {
+	vs, listErr := core.ListVaults(dir)
+	if listErr != nil {
+		t.Fatalf("каталог хранилищ не читается — осмотр его не трогает: %v", listErr)
+	}
+	if n := len(vs); n != 0 {
 		t.Fatalf("в %s уже лежит %d хранилищ — осмотр их не трогает", dir, n)
 	}
 	_, statErr := os.Stat(dir)
@@ -848,6 +851,10 @@ var osmotrForms = []osmotrForm{
 		inventory: cat(invConnect, invVault), mayOverlap: connectMayOverlap},
 	{name: "(а) экран подключения, отказ раскладки", open: openConnect(false, true),
 		inventory: cat(invConnect, invFail), mayOverlap: connectMayOverlap},
+	// A1б: каталог сохранённых ключей не читается — на месте блока
+	// «Или загрузить из сохранённых» подпись о незнании.
+	{name: "(а) экран подключения, сохранённые ключи не читаются", open: openConnectVaultUnreadable,
+		inventory: cat(invConnect, invVaultUnreadable), mayOverlap: connectMayOverlap},
 	{name: "(б) пин-код, подсказка вкл", open: openPin(false), inventory: invPinBase, width: 412},
 	{name: "(б) пин-код, отказ раскладки", open: openPin(true), inventory: cat(invPinBase, invFail), width: 412},
 	{name: "(б) сохранение ключа, подсказка вкл", open: openSave(false), inventory: invSaveBase, width: 712},
