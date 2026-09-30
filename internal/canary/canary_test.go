@@ -714,12 +714,14 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 		name    string
 		install bool
 		busy    bool
+		drop    bool // после исхода работающий сервер теряет peer'ов (исход ядра «верный»)
 		want    Status
 		why     string
 	}{
-		{"обёртка действует: откат ядра, «изменения отменены»", true, false, Pass, "изменения отменены"},
-		{"обёртка не действует: запись проходит — НЕ ПРОЙДЕН", false, false, Fail, "добавление прошло"},
-		{"иной исход («занято») — НЕ ПРОЙДЕН, хотя файлы и сервер прежние", true, true, Fail, "исход не"},
+		{"обёртка действует: откат ядра, «изменения отменены»", true, false, false, Pass, "изменения отменены"},
+		{"обёртка не действует: запись проходит — НЕ ПРОЙДЕН", false, false, false, Fail, "добавление прошло"},
+		{"иной исход («занято») — НЕ ПРОЙДЕН, хотя файлы и сервер прежние", true, true, false, Fail, "исход не"},
+		{"исход верный, но работающий сервер не прежний — НЕ ПРОЙДЕН", true, false, true, Fail, "не прежний"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := emptyFake(t, false)
@@ -730,6 +732,7 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 			}
 			real := f.env.Remote
 			restored := false
+			sums := 0
 			sum := func(path string) string {
 				b, _ := f.exec.File(path)
 				h := sha256.Sum256(b)
@@ -753,7 +756,18 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 					restored = true
 					return "", nil
 				case strings.Contains(cmd, "sha256sum "):
-					return sum("/opt/amnezia/awg/wg0.conf") + "\n" + sum("/opt/amnezia/awg/clientsTable") + "\n", nil
+					out := sum("/opt/amnezia/awg/wg0.conf") + "\n" + sum("/opt/amnezia/awg/clientsTable") + "\n"
+					sums++
+					if c.drop && sums == 2 { // второй подсчёт — сразу после исхода
+						f.exec.SetFile("/tmp/canary-empty/wg0.conf", []byte("[Interface]\n"))
+						saved := f.exec.FailSyncconf
+						f.exec.FailSyncconf = nil
+						if _, err := f.exec.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /tmp/canary-empty/wg0.conf)'", nil); err != nil {
+							t.Fatalf("модель потери peer'ов: %v", err)
+						}
+						f.exec.FailSyncconf = saved
+					}
+					return out, nil
 				}
 				return real(cmd)
 			}
