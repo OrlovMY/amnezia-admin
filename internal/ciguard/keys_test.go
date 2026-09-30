@@ -21,8 +21,10 @@
 // метку оттуда.
 //
 // ГРАНИЦА. Ключи ниже уровня шага (with: конкретного action, подключи
-// strategy, concurrency, on, defaults.run кроме shell) сторожем не
-// перечисляются. defaults.run.shell сверяет shellProblem, with: у
+// strategy, concurrency, defaults.run кроме shell) сторожем не
+// перечисляются. Содержимое `on:` сверяет целиком
+// TestWorkflowTriggersClosedList, значение `uses:` — TestActionsPinnedBySHA
+// (triggers_test.go). defaults.run.shell сверяет shellProblem, with: у
 // attest-build-provenance — TestReleaseAttestsChecksums, у checkout —
 // TestCheckoutsDoNotPersistCredentials.
 package ciguard

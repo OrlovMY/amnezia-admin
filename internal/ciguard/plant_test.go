@@ -48,6 +48,13 @@ type plant struct {
 	name     string
 	edits    []edit
 	extraDir string
+	// extraFiles — лишние файлы в результате обхода .github (путь от
+	// каталога пакета, например ../../.github/workflows/evil.yml).
+	extraFiles []string
+	// hideFiles — файлы, которые подсадка убирает из результата обхода .github.
+	hideFiles []string
+	// parseRow — строка, добавляемая в таблицу лексера (TestShellParserTable).
+	parseRow *parseCase
 	wantTest string // единственный тест, который обязан упасть
 	wantMsg  string // что обязано быть в блоке провала с меткой failMark
 	// also — тесты, которые по существу обязаны упасть ВМЕСТЕ с wantTest:
@@ -81,6 +88,8 @@ const keys = "TestWorkflowKeysClosedList"
 
 const pipes = "TestNoEarlyExitPipeReader"
 
+const progs = "TestCommandProgramsClosedList"
+
 const buildReleaseSH = "../../scripts/build-release.sh"
 
 const canaryLogic = "TestShellcheckCanaryStepLogic"
@@ -90,6 +99,19 @@ const canaryLogic = "TestShellcheckCanaryStepLogic"
 // рядом с настоящим вызовом — закрытый список тела.
 const toolsStep = "        run: bash scripts/dev-tools.sh\n"
 const toolsStepMulti = "        run: |\n          bash scripts/dev-tools.sh\n"
+
+const historyKeysSH = "../../scripts/check-history-keys.sh"
+
+const (
+	usesT = "TestActionsPinnedBySHA"
+	trig  = "TestWorkflowTriggersClosedList"
+)
+
+// sh — строка, добавленная в scripts/build-release.sh; этот файл из
+// сторожей пакета читает только TestNoEarlyExitPipeReader.
+func sh(line string) []edit {
+	return []edit{{buildReleaseSH, "mkdir -p dist\n", "mkdir -p dist\n" + line + "\n"}}
+}
 
 func ci(old, new string) []edit  { return []edit{{ciYML, old, new}} }
 func rel(old, new string) []edit { return []edit{{releaseYML, old, new}} }
@@ -137,7 +159,7 @@ var plants = []plant{
 		wantTest: inv, wantMsg: "перед вызовом в строке стоит «true || go run»"},
 	{name: "al-if", edits: ci(ciRealLint, strings.Replace(strings.Replace(ciRealLint, "          go run", "          if go run", 1),
 		".github/workflows/ci.yml\n", ".github/workflows/ci.yml; then :; fi\n", 1)),
-		wantTest: inv, wantMsg: "перед вызовом в строке стоит «if go run»"},
+		wantTest: inv, also: []string{progs}, wantMsg: "перед вызовом в строке стоит «if go run»"},
 	{name: "al-set-plus", edits: ci(ciRealLint, "          set +e\n"+ciRealLint+"          echo done\n"),
 		wantTest: inv, wantMsg: "строка «set +e» выше вызова — вне закрытого списка"},
 	{name: "al-no-set", edits: ci(ciLintGuards+ciRealLint, strings.Replace(ciLintGuards, "          set -euo pipefail\n", "", 1)+ciRealLint),
@@ -150,15 +172,15 @@ var plants = []plant{
 	{name: "r2-subshell", edits: ci(ciRealLint, "          (\n"+ciRealLint+"          ) || true\n"),
 		wantTest: inv, wantMsg: "строка «(» выше вызова — вне закрытого списка"},
 	{name: "r2-if-false", edits: ci(ciRealLint, "          if false; then\n"+ciRealLint+"          fi\n"),
-		wantTest: inv, wantMsg: "строка «if false; then» выше вызова"},
+		wantTest: inv, also: []string{progs}, wantMsg: "строка «if false; then» выше вызова"},
 	{name: "r2-while-false", edits: ci(ciRealLint, "          while false; do\n"+ciRealLint+"          done\n"),
-		wantTest: inv, wantMsg: "строка «while false; do» выше вызова"},
+		wantTest: inv, also: []string{progs}, wantMsg: "строка «while false; do» выше вызова"},
 	{name: "r2-case", edits: ci(ciRealLint, "          case x in\n            y)\n"+ciRealLint+"            ;;\n          esac\n"),
 		wantTest: inv, wantMsg: "строка «case x in» выше вызова"},
 	{name: "r2-heredoc", edits: ci(ciRealLint, "          cat >/dev/null <<'X'\n"+ciRealLint+"          X\n"),
 		wantTest: inv, wantMsg: "строка «cat >/dev/null <<'X'» выше вызова"},
 	{name: "r2-literal", edits: ci(ciRealLint, "          : '\n"+ciRealLint+"          '\n"),
-		wantTest: inv, wantMsg: "строка «: '» выше вызова"},
+		wantTest: inv, also: []string{progs}, wantMsg: "строка «: '» выше вызова"},
 	{name: "r2-trailing-line", edits: ci(ciRealLint, ciRealLint+"          echo готово\n"),
 		wantTest: inv, wantMsg: "после вызова стоит строка «echo готово»"},
 	{name: "r2-env-goflags", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          GOFLAGS: -n\n"),
@@ -182,7 +204,7 @@ var plants = []plant{
 	{name: "r2-gotest-subshell", edits: []edit{
 		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
 		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
-		wantTest: gtm, wantMsg: "строка «if false; then» выше вызова"},
+		wantTest: gtm, also: []string{progs}, wantMsg: "строка «if false; then» выше вызова"},
 	// --- раунд 4 QA-01: значение -shellcheck и окружение инструментов ---
 	{name: "r4-sc-nonexistent", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck /nonexistent \`),
 		wantTest: inv, wantMsg: "значение -shellcheck «/nonexistent» вне закрытого списка"},
@@ -250,11 +272,255 @@ var plants = []plant{
 	{name: "sp-subjects-pipe", edits: rel(`            in_subjects "$f" ||`, `            printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f" ||`),
 		wantTest: pipes, also: []string{att}, wantMsg: `«printf '%s\n' "${subjects[@]}" | grep -qxF -- "$f"`},
 	{name: "sp-info-pipe", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`, `            printf '%s\n' "$info" | grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' ||`),
-		wantTest: pipes, wantMsg: "читатель конвейера выходит раньше конца ввода"},
+		wantTest: pipes, wantMsg: "«grep»: флаг «-qE» вне закрытого списка"},
 	{name: "sp-canary-grep-m", edits: ci(`! grep -q 'SC2086' <<< "$out"; then`, `! printf '%s\n' "$out" | grep -m1 -q 'SC2086'; then`),
 		wantTest: pipes, also: []string{canaryLogic}, wantMsg: "grep -m1 -q 'SC2086'"},
 	{name: "sp-script-head", edits: []edit{{buildReleaseSH, "mkdir -p dist\n", "mkdir -p dist\ngo version | head -n 1\n"}},
 		wantTest: pipes, wantMsg: "../../scripts/build-release.sh: «go version | head -n 1»"},
+	// --- долги CI: закрытый список читателей; обходы QA-01 по одному ---
+	{name: "cl-pipe-amp", edits: sh("printf x |& grep -q y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-q» вне закрытого списка"},
+	{name: "cl-egrep", edits: sh("printf x | egrep -q y"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «egrep» вне закрытого списка"},
+	{name: "cl-fgrep", edits: sh("printf x | fgrep -q y"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «fgrep» вне закрытого списка"},
+	{name: "cl-grep-m1", edits: sh("printf x | grep -m1 y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-m1» вне закрытого списка"},
+	{name: "cl-lc-all", edits: sh("printf x | LC_ALL=C grep -q y"),
+		wantTest: pipes, wantMsg: "читатель «LC_ALL=C» вне закрытого списка"},
+	{name: "cl-env", edits: sh("printf x | env grep -q y"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «env» вне закрытого списка"},
+	{name: "cl-sed-q", edits: sh("printf x | sed q"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "«sed»: в скрипте sed есть q/Q"},
+	{name: "cl-sed-block", edits: sh("printf x | sed -n '/x/{p;q}'"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "«sed»: в скрипте sed есть q/Q"},
+	{name: "cl-awk-exit", edits: sh("printf x | awk '/x/{print; exit}'"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "«awk»: в программе awk есть exit/nextfile"},
+	{name: "cl-grep-l", edits: sh("printf x | grep -l y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-l» вне закрытого списка"},
+	{name: "cl-cmp", edits: sh("printf x | cmp - /dev/null"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «cmp» вне закрытого списка"},
+	{name: "cl-read", edits: sh("printf x | read -r v"),
+		wantTest: pipes, wantMsg: "читатель «read» вне закрытого списка"},
+	{name: "cl-xargs", edits: sh("printf x | xargs grep -q y"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «xargs» вне закрытого списка"},
+	{name: "cl-newline", edits: sh("printf x |\n  grep -q y"),
+		wantTest: pipes, wantMsg: "«grep -q y» — «grep»: флаг «-q»"},
+	// --- долги CI: прочие формы и ветки закрытого списка ---
+	{name: "cl-command", edits: sh("printf x | command grep y"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «command» вне закрытого списка"},
+	{name: "cl-backslash", edits: sh(`printf x | \grep y`),
+		wantTest: pipes, also: []string{progs}, wantMsg: `читатель «\grep» вне закрытого списка`},
+	{name: "cl-subshell", edits: sh("printf x | (grep y)"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «(» вне закрытого списка"},
+	{name: "cl-group", edits: sh("printf x | { grep y; }"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «{» вне закрытого списка"},
+	{name: "cl-while", edits: sh("printf x | while read -r v; do :; done"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «while» вне закрытого списка"},
+	{name: "cl-head", edits: sh("printf x | head -n 1"),
+		wantTest: pipes, wantMsg: "читатель «head» вне закрытого списка"},
+	{name: "cl-file-operand", edits: sh("printf x | grep -E y /etc/hostname"),
+		wantTest: pipes, wantMsg: "«grep»: лишний операнд «/etc/hostname» — читается файл"},
+	{name: "cl-cat-no-dash", edits: sh("printf x | cat /etc/hostname"),
+		wantTest: pipes, wantMsg: "«cat»: лишний операнд «/etc/hostname»"},
+	{name: "cl-in-redirect", edits: sh("printf x | sort -u < /etc/hostname"),
+		wantTest: pipes, wantMsg: "вход читателя перенаправлен «< /etc/hostname»"},
+	{name: "cl-long-flag", edits: sh("printf x | grep --quiet y"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «--quiet» вне закрытого списка"},
+	{name: "cl-in-cmdsubst", edits: sh(`v="$(printf x | grep -q y)"`),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-q»"},
+	{name: "cl-unknown-func", edits: sh("printf x | myfilter"),
+		wantTest: pipes, also: []string{progs}, wantMsg: "читатель «myfilter» вне закрытого списка"},
+	{name: "cl-func-body", edits: []edit{{historyKeysSH, "count_suspects() { grep -c '^SUSPECT ' || true; }", "count_suspects() { grep -q '^SUSPECT ' || true; }"}},
+		wantTest: pipes, wantMsg: "функция «count_suspects»: первая команда тела — «grep»: флаг «-q»"},
+	{name: "cl-unparsed", edits: sh("echo 'незакрыто"),
+		wantTest: pipes, wantMsg: "текст не разобран (строка"},
+	{name: "cl-workflow-amp-newline", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`,
+		"            printf '%s\\n' \"$info\" |&\n              grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' ||"),
+		wantTest: pipes, wantMsg: "«grep»: флаг «-qE» вне закрытого списка"},
+	{name: "cl-count", edits: []edit{{devToolsSH, `sha256sum "$1" | awk '{print $1}'`, `awk '{print $1}' < <(sha256sum "$1")`}},
+		wantTest: pipes, wantMsg: "читателей конвейера найдено 29, ожидалось 30"},
+	{name: "cl-growth-break", edits: []edit{{growthScript, "*) continue ;; #", "*) break ;; #"}},
+		wantTest: pipes, also: []string{progs}, wantMsg: "в цикле чтения check-version-growth.sh есть break/exit"},
+	{name: "cl-growth-exit0", edits: []edit{{growthScript, "max_key=\"\"\n", "exit 0\nmax_key=\"\"\n"}},
+		wantTest: pipes, wantMsg: "выходит успешно (exit 0) до цикла чтения"},
+	{name: "cl-growth-noloop", edits: []edit{{growthScript, "while IFS= read -r line || [ -n \"$line\" ]; do", "while read -r line; do"}},
+		wantTest: pipes, wantMsg: "не найден цикл `while IFS= read -r line … done`"},
+	// --- долги CI: uses: по SHA ---
+	{name: "us-tag", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@v7"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@v7» не закреплён по SHA"},
+	{name: "us-branch", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@main"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@main» не закреплён по SHA"},
+	{name: "us-short-sha", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact@043fb46"),
+		wantTest: usesT, wantMsg: "uses «actions/upload-artifact@043fb46» не закреплён по SHA"},
+	{name: "us-local", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "./.github/actions/upload"),
+		wantTest: usesT, wantMsg: "uses «./.github/actions/upload» не закреплён по SHA"},
+	{name: "us-docker", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "docker://alpine:3.20"),
+		wantTest: usesT, wantMsg: "uses «docker://alpine:3.20» не закреплён по SHA"},
+	{name: "us-job", edits: rel("\njobs:\n", "\njobs:\n  reuse:\n    uses: octo/wf/.github/workflows/x.yml@main\n"),
+		wantTest: usesT, also: []string{keys}, wantMsg: "job reuse: uses «octo/wf/.github/workflows/x.yml@main» не закреплён по SHA"},
+	{name: "us-count", edits: ci("      - name: actionlint (оба workflow)\n",
+		"      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: go.mod\n      - name: actionlint (оба workflow)\n"),
+		wantTest: usesT, wantMsg: "ссылок uses: найдено 14, ожидалось 13"},
+	// --- раунд 2: SEC-01 С-1 — ./ и .. при правильной форме SHA ---
+	{name: "us-dot-owner", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "./x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "uses «./x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a» не закреплён по SHA"},
+	{name: "us-dotdot", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "../../x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "uses «../../x@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a» не закреплён по SHA"},
+	{name: "us-dotdot-path", edits: rel("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", "actions/upload-artifact/../../c/d@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+		wantTest: usesT, wantMsg: "сегмент «..» в пути"},
+	// --- раунд 2: QA-01 рек. 3 — чужой владелец с правильной формой ---
+	{name: "us-foreign-owner", edits: ci("      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:",
+		"      - uses: evil-org/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:"),
+		wantTest: usesT, wantMsg: "источник «evil-org/setup-go» вне закрытого списка allowedActions"},
+	// --- раунд 2: SEC-01 С-2 — состав .github ---
+	{name: "wf-extra-file", extraFiles: []string{githubDir + "/workflows/evil.yml"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: "в .github/workflows лишний файл evil.yml"},
+	{name: "wf-missing-file", hideFiles: []string{githubDir + "/workflows/ci.yml"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: "в .github/workflows нет ci.yml"},
+	{name: "wf-actions-dir", extraFiles: []string{githubDir + "/actions"},
+		wantTest: "TestWorkflowFilesClosedList", wantMsg: ".github/actions вне закрытого списка содержимого .github"},
+	// --- раунд 2: QA-01 рек. 1 — eval / sh -c ---
+	{name: "cs-eval", edits: sh(`eval "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: `программа «eval» вне закрытого списка`},
+	{name: "cs-bash-c", edits: sh(`bash -c "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: "вызов оболочки «bash -c"},
+	{name: "cs-sh-lc", edits: sh(`/bin/sh -lc "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: `программа «/bin/sh» вне закрытого списка`},
+	{name: "cs-workflow-eval", edits: rel(`            grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< "$info" ||`,
+		`            eval "grep -qE 'path[[:space:]]+amnezia-admin/cmd/cli' <<< \"\$info\"" ||`),
+		wantTest: progs, wantMsg: `программа «eval» вне закрытого списка`},
+	// --- раунд 3: AU-LOGIC F1 — код в оболочку в обход лексера ---
+	{name: "sc-heredoc", edits: sh("bash <<'E'\nprintf x | grep -q y\nE"),
+		wantTest: progs, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	{name: "sc-herestring", edits: sh(`bash <<< "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	{name: "sc-source-procsub", edits: sh(`source <(printf 'printf x | grep -q y')`),
+		wantTest: progs, wantMsg: `программа «source» вне закрытого списка`},
+	{name: "sc-dot-stdin", edits: sh(`. /dev/stdin <<< "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: `программа «.» вне закрытого списка`},
+	{name: "sc-bash-var", edits: sh(`"$BASH" -c "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: `в имени «"$BASH" -c`},
+	{name: "sc-shell-var", edits: sh(`$SHELL -c "printf x | grep -q y"`),
+		wantTest: progs, wantMsg: `в имени «$SHELL -c`},
+	{name: "sc-allowed-redirected", edits: sh(`bash scripts/dev-tools.sh <<< x`),
+		wantTest: progs, wantMsg: "вход оболочки перенаправлен «<<< x»"},
+	{name: "sc-wrapped", edits: sh(`env bash scripts/dev-tools.sh`),
+		wantTest: progs, wantMsg: `программа «env» вне закрытого списка`},
+	{name: "sc-shell-arg", edits: sh(`find . -name x -exec sh {} +`),
+		wantTest: progs, wantMsg: "оболочка «sh» аргументом"},
+	// Воспроизведение аудитора на настоящей строке build-release.sh:55;
+	// законный `| wc -l` держит счёт звеньев 30, как в аудите.
+	{name: "sc-audit-line55", edits: []edit{{buildReleaseSH, "if printf '%s\\n' \"$deps\" | grep -E 'fakesrv|fakeserver'; then\n",
+		"if bash <<'E'\nprintf '%s\\n' \"$deps\" | grep -qE 'fakesrv|fakeserver'\nE\nthen\nprintf x | wc -l\n"}},
+		wantTest: progs, wantMsg: "вызов оболочки «bash» вне закрытого списка"},
+	// --- раунд 4: AU-LOGIC R1 — "$1"/"$@" в позиции команды вне своего места ---
+	{name: "r1-sh-run-line55", edits: []edit{{buildReleaseSH, "if printf '%s\\n' \"$deps\" | grep -E 'fakesrv|fakeserver'; then\n",
+		"sh_run() { \"$1\" -c \"$2\"; }\nif sh_run \"bash\" \"set -o pipefail; printf '%s\\n' \\\"$deps\\\" | grep -qE 'fakesrv|fakeserver'\"\nthen\nprintf x | wc -l\n"}},
+		wantTest: progs, wantMsg: `команда с подстановкой или кавычками в имени «"$1" -c "$2"»`},
+	{name: "r1-set-dollar-at", edits: sh("set -- \"bash\" -c x\n\"$@\""),
+		wantTest: progs, wantMsg: `команда с подстановкой или кавычками в имени «"$@"»`},
+	{name: "r1-quoted-shell-arg", edits: sh(`printf '%s' "bash"`),
+		wantTest: progs, wantMsg: `оболочка «"bash"» аргументом`},
+	{name: "r1-dyn-place-moved", edits: rel(`              out="$("./$bin" version)"`, `              out="$("./$bin" version 2>&1)"`),
+		wantTest: progs, wantMsg: `место allowedDynPlaces «../../.github/workflows/release.yml|out="$("./$bin" version)"|"./$bin"» встречается 0 раз`},
+	// --- раунд 4: R2 — trap ---
+	{name: "r2-trap", edits: sh(`trap "go version | grep -q go" EXIT`),
+		wantTest: progs, wantMsg: "программа «trap» вне закрытого списка"},
+	// --- раунд 4: R3 — интерпретаторы, оболочки вне списка, env -S, find -exec ---
+	{name: "r3-python", edits: sh(`python3 -c 'import os; os.system("bash -c x")'`),
+		wantTest: progs, wantMsg: "программа «python3» вне закрытого списка"},
+	{name: "r3-perl", edits: sh(`perl -e 'system("bash","-c","x")'`),
+		wantTest: progs, wantMsg: "программа «perl» вне закрытого списка"},
+	{name: "r3-node", edits: sh(`node -e 'require("child_process").execSync("bash -c x")'`),
+		wantTest: progs, wantMsg: "программа «node» вне закрытого списка"},
+	{name: "r3-awk-system", edits: sh(`awk 'BEGIN{system("bash -c x")}'`),
+		wantTest: progs, wantMsg: `вызов awk «awk 'BEGIN{system("bash -c x")}'»`},
+	{name: "r3-env-S", edits: sh(`env -S "bash -c x"`),
+		wantTest: progs, wantMsg: "программа «env» вне закрытого списка"},
+	{name: "r3-find-exec", edits: sh(`find . -exec "bash" -c 'x' \;`),
+		wantTest: progs, wantMsg: "программа «find» вне закрытого списка"},
+	{name: "r3-ash", edits: sh(`ash -c x`),
+		wantTest: progs, wantMsg: "программа «ash» вне закрытого списка"},
+	{name: "r3-mksh", edits: sh(`mksh -c x`),
+		wantTest: progs, wantMsg: "программа «mksh» вне закрытого списка"},
+	// --- раунд 5: AU-LOGIC Q1, Q2 — тексты awk/sed только из закрытого списка ---
+	{name: "q1-awk-print-pipe", edits: sh(`awk '{print "x" | c}' /dev/null`),
+		wantTest: progs, wantMsg: `вызов awk «awk '{print "x" | c}' /dev/null»`},
+	{name: "q2-sed-1e", edits: sh(`sed 1e /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed 1e /dev/null»"},
+	{name: "q2-sed-ge", edits: sh(`sed 's/x/y/ge' /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed 's/x/y/ge' /dev/null»"},
+	// --- раунд 6: AU-LOGIC S1 — весь вызов awk/sed, а не первый текст ---
+	{name: "s1-sed-second-e", edits: sh(`sed -e 's/^/+/' -e 1e /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed -e 's/^/+/' -e 1e /dev/null»"},
+	{name: "s1-sed-expression", edits: sh(`sed --expression=1e /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed --expression=1e /dev/null»"},
+	{name: "s1-sed-f", edits: sh(`sed -fp.sed /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed -fp.sed /dev/null»"},
+	{name: "s1-awk-f", edits: sh(`awk -fp.awk /dev/null`),
+		wantTest: progs, wantMsg: "вызов awk «awk -fp.awk /dev/null»"},
+	{name: "s1-awk-source", edits: sh(`awk --source 'BEGIN{}' /dev/null`),
+		wantTest: progs, wantMsg: "вызов awk «awk --source 'BEGIN{}' /dev/null»"},
+	{name: "s1-extra-flag", edits: []edit{{devToolsSH, `awk '{print $1}'`, `awk -F ' ' '{print $1}'`}},
+		wantTest: progs, wantMsg: "вызов awk «awk -F ' ' '{print $1}'»"},
+	{name: "st-new-text", edits: sh(`sed 's/a/b/' /dev/null`),
+		wantTest: progs, wantMsg: "вызов sed «sed 's/a/b/' /dev/null»"},
+	{name: "st-dyn-text", edits: sh(`sed "$prog" /dev/null`),
+		wantTest: progs, wantMsg: `вызов sed «sed "$prog" /dev/null»`},
+	{name: "st-stale", edits: []edit{{historyKeysSH, `sed -n 's/^HEADERS //p'`, `sed 's/^/+/'`}},
+		wantTest: progs, wantMsg: "из allowedToolCalls больше не встречается"},
+	{name: "st-count-less", edits: []edit{{historyKeysSH, `sed -n 's/^HEADERS //p'`, `sed 's/^/+/'`}},
+		wantTest: progs, wantMsg: "разных вызовов awk/sed найдено 5, ожидалось 6"},
+	{name: "st-count-more", edits: sh(`sed 's/a/b/' /dev/null`),
+		wantTest: progs, wantMsg: "разных вызовов awk/sed найдено 7, ожидалось 6"},
+	// --- раунд 4: список программ не немой ---
+	{name: "pg-stale", edits: []edit{{devToolsSH, `unzip -o -q "$archive"`, `tar -xf "$archive"`}},
+		wantTest: progs, wantMsg: "программа «unzip» из allowedPrograms больше не встречается"},
+	{name: "pg-count-less", edits: []edit{{devToolsSH, `unzip -o -q "$archive"`, `tar -xf "$archive"`}},
+		wantTest: progs, wantMsg: "разных программ найдено 43, ожидалось 44"},
+	{name: "pg-count-more", edits: sh("python3 --version"),
+		wantTest: progs, wantMsg: "разных программ найдено 45, ожидалось 44"},
+	// --- раунд 3: AU-LOGIC F2 — переопределение имени читателя ---
+	{name: "fn-function-kw", edits: sh("function grep { head -n1; }"),
+		wantTest: progs, wantMsg: `программа «function» вне закрытого списка`},
+	{name: "fn-subshell-body", edits: sh("sort() ( head -n1 )"),
+		wantTest: progs, wantMsg: "определение функции «sort» переопределяет имя"},
+	{name: "fn-alias", edits: sh(`alias grep="grep -q"`),
+		wantTest: progs, wantMsg: `программа «alias» вне закрытого списка`},
+	// --- раунд 3: AU-LOGIC F3 — счёт uses: вниз (подмена != на > немая без неё) ---
+	{name: "us-count-less", edits: rel("      - uses: actions/upload-artifact@", "      - x-uses: actions/upload-artifact@"),
+		wantTest: usesT, also: []string{keys}, wantMsg: "ссылок uses: найдено 12, ожидалось 13"},
+	// Счёт читателей вверх: законный `| wc -l` — без неё подмена != на <
+	// немая (выборка раунда 3).
+	{name: "cl-count-more", edits: sh("printf x | wc -l"),
+		wantTest: pipes, wantMsg: "читателей конвейера найдено 31, ожидалось 30"},
+	// --- раунд 3: AU-LOGIC F4 — чужой SHA под разрешённой парой ---
+	{name: "us-zero-sha", edits: ci("      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:",
+		"      - uses: actions/setup-go@0000000000000000000000000000000000000000 # v7.0.0\n        with:"),
+		wantTest: usesT, wantMsg: "не совпадает с закреплённым b7ad1dad31e06c5925ef5d2fc7ad053ef454303e для actions/setup-go — обновите таблицу"},
+	// --- раунд 2: QA-01 п.2 — вердикт таблицы лексера доходит до go test ---
+	{name: "tbl-wrong", parseRow: &parseCase{src: "a | grep -q y", want: ""},
+		wantTest: "TestShellParserTable", wantMsg: "таблица лексера: \"a | grep -q y\" — читатели «grep», ждали «»"},
+	{name: "tbl-unparsed", parseRow: &parseCase{src: "echo 'x", want: ""},
+		wantTest: "TestShellParserTable", wantMsg: "таблица лексера: \"echo 'x\" не разобрано"},
+	// --- долги CI: триггеры ---
+	{name: "tr-dispatch", edits: rel("on:\n  push:\n", "on:\n  workflow_dispatch:\n  push:\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «workflow_dispatch» вне закрытого списка"},
+	{name: "tr-call", edits: rel("on:\n  push:\n", "on:\n  workflow_call:\n  push:\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «workflow_call» вне закрытого списка"},
+	{name: "tr-prt", edits: ci("on:\n  pull_request:\n", "on:\n  pull_request_target:\n  pull_request:\n"),
+		wantTest: trig, wantMsg: "ci.yml: событие «pull_request_target» вне закрытого списка"},
+	{name: "tr-tag-pattern", edits: rel("      - \"v*\"\n", "      - \"*\"\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «push»: настройка"},
+	{name: "tr-release-branches", edits: rel("on:\n  push:\n", "on:\n  push:\n    branches: [main]\n"),
+		wantTest: trig, wantMsg: "release.yml: событие «push»: настройка"},
+	{name: "tr-ci-branches", edits: ci("    branches: [main]\n", "    branches: [main, dev]\n"),
+		wantTest: trig, wantMsg: "ci.yml: событие «push»: настройка"},
+	{name: "tr-missing", edits: ci("on:\n  pull_request:\n", "on:\n"),
+		wantTest: trig, wantMsg: "ci.yml: нет события «pull_request»"},
+	{name: "tr-form", edits: rel("on:\n  push:\n    tags:\n      - \"v*\"\n", "on: [push]\n"),
+		wantTest: trig, wantMsg: "release.yml: `on:` не в форме словаря событий"},
 	{name: "al-latest", edits: realWith(`@${ACTIONLINT_VERSION}"`, `@latest"`),
 		wantTest: "TestActionlintVersionSingleSource", also: []string{"TestActionlintPinnedInEveryExpectedFile"},
 		wantMsg: "версия actionlint «latest» вместо @${ACTIONLINT_VERSION}"},
@@ -284,7 +550,7 @@ var plants = []plant{
 	{name: "arch-step-defanged", edits: rel(`test "$actual" = "$DECLARED_ARCH" ||`, `test -n "$actual" ||`),
 		wantTest: arch, wantMsg: "RUNNER_ARCH=X64, matrix.arch=arm64: шаг прошёл"},
 	{name: "arch-after-build", edits: rel("    steps:\n      - name: Архитектура раннера против matrix.arch\n",
-		"    steps:\n      - name: Ранняя сборка\n        run: bash scripts/build-release.sh linux\n      - name: Архитектура раннера против matrix.arch\n"),
+		"    steps:\n      - name: Ранняя сборка\n        run: bash scripts/build-release.sh ${{ matrix.os }}\n      - name: Архитектура раннера против matrix.arch\n"),
 		wantTest: arch, wantMsg: "обязан стоять ДО сборки"},
 	{name: "arch-step-if", edits: rel("      - name: Архитектура раннера против matrix.arch\n", "      - name: Архитектура раннера против matrix.arch\n        if: matrix.os != 'nothing'\n"),
 		wantTest: arch, wantMsg: "шаг сверки архитектуры обеззублен"},
@@ -353,7 +619,10 @@ var plants = []plant{
 		wantTest: att, also: []string{keys}, wantMsg: "нет env ATTEST_SUBJECTS"},
 	{name: "attest-check-gone", edits: rel("        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n",
 		"        run: echo пропущено\n        x-old: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=()\n"),
-		wantTest: att, also: []string{keys}, wantMsg: "не найдены шаги: сумм №"},
+		// Тело шага с `sort -u | wc -l` уходит в x-old: читателей конвейера
+		// становится на два меньше, и точный счёт TestNoEarlyExitPipeReader
+		// обязан это заметить — поэтому pipes в also.
+		wantTest: att, also: []string{progs, keys, pipes}, wantMsg: "не найдены шаги: сумм №"},
 	{name: "attest-order", edits: []edit{
 		{releaseYML, "        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n", "        run: echo суммы-позже\n"},
 		{releaseYML, "\n      - uses: actions/attest-build-provenance", "\n      - name: Суммы поздно\n        run: cd dist && sha256sum amnezia-admin-* > SHA256SUMS\n\n      - uses: actions/attest-build-provenance"}},
@@ -383,6 +652,11 @@ var mainTests = []string{
 	"TestReleaseTestMatrixMatchesBuild",
 	"TestShellcheckCanaryStepLogic",
 	"TestWorkflowKeysClosedList",
+	"TestActionsPinnedBySHA",
+	"TestWorkflowTriggersClosedList",
+	"TestWorkflowFilesClosedList",
+	"TestShellParserTable",
+	"TestCommandProgramsClosedList",
 }
 
 func activePlant(t *testing.T) *plant {
@@ -435,6 +709,25 @@ func plantedTestDir(t *testing.T) string {
 		return p.extraDir
 	}
 	return ""
+}
+
+// plantedHiddenFiles — файлы, которые подсадка убирает из обхода .github.
+func plantedHiddenFiles(t *testing.T) []string {
+	t.Helper()
+	if p := activePlant(t); p != nil {
+		return p.hideFiles
+	}
+	return nil
+}
+
+// plantedExtraFiles — файлы, которые подсадка добавляет к результату обхода
+// .github (см. TestWorkflowFilesClosedList).
+func plantedExtraFiles(t *testing.T) []string {
+	t.Helper()
+	if p := activePlant(t); p != nil {
+		return p.extraFiles
+	}
+	return nil
 }
 
 var failLineRe = regexp.MustCompile(`(?m)^\s*--- FAIL: (Test[A-Za-z0-9_]+)`)
