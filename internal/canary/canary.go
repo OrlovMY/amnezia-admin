@@ -17,9 +17,7 @@ package canary
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"debug/buildinfo"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -340,10 +338,9 @@ func vcsOf(bi *debug.BuildInfo) (rev, modified string) {
 // judgeBuild — чистая часть П2 (таблица в тестах).
 func judgeBuild(ni *debug.BuildInfo, nerr error, si *debug.BuildInfo, sok bool, bin []byte, script string) Result {
 	r := Result{ID: "П2", Name: "сборка -new: ревизия и текст команды записи"}
-	sum := sha256.Sum256([]byte(script))
-	hsum := hex.EncodeToString(sum[:])
+	hsum := FingerprintLine()
 	if ni == nil {
-		r.Detail = fmt.Sprintf("сведения о сборке -new не прочитаны: %v; sha256(CASWriteScript канарейки)=%s", nerr, hsum)
+		r.Detail = fmt.Sprintf("сведения о сборке -new не прочитаны: %v; канарейка: %s", nerr, hsum)
 		return r
 	}
 	rev, mod := vcsOf(ni)
@@ -351,7 +348,7 @@ func judgeBuild(ni *debug.BuildInfo, nerr error, si *debug.BuildInfo, sok bool, 
 	if sok {
 		srev, smod = vcsOf(si)
 	}
-	head := fmt.Sprintf("-new: vcs.revision=%s vcs.modified=%s; канарейка: vcs.revision=%s vcs.modified=%s; sha256(CASWriteScript)=%s", orQ(rev), orQ(mod), orQ(srev), orQ(smod), hsum)
+	head := fmt.Sprintf("-new: vcs.revision=%s vcs.modified=%s; канарейка: vcs.revision=%s vcs.modified=%s; %s", orQ(rev), orQ(mod), orQ(srev), orQ(smod), hsum)
 	switch {
 	case rev == "" || mod == "":
 		r.Detail = head + " — ревизия -new неизвестна (собрано без git?)"
@@ -367,6 +364,14 @@ func judgeBuild(ni *debug.BuildInfo, nerr error, si *debug.BuildInfo, sok bool, 
 		r.Status, r.Detail = Pass, head+"; текст команды записи в -new найден дословно"
 	}
 	return r
+}
+
+// FingerprintLine — три суммы отпечатка записи этой сборки (core.CASFingerprint)
+// одной строкой: так же печатает `canary-a3b -print-fingerprint`, и перед
+// выпуском строки сверяются посимвольно (RELEASING.md).
+func FingerprintLine() string {
+	s, c, u := core.CASFingerprint()
+	return fmt.Sprintf("sha256(CASWriteScript)=%s sha256(CASWriteCommand)=%s sha256(CASWriteCommandSudo)=%s", s, c, u)
 }
 
 func orQ(s string) string {

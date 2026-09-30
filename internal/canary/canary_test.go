@@ -874,6 +874,12 @@ func TestBuildCheckRealBinary(t *testing.T) {
 	}
 	e := &Env{NewBin: bin, SelfBuild: func() (*debug.BuildInfo, bool) { return ni, true }}
 	r := e.buildCheck()
+	s, c, u := core.CASFingerprint()
+	for _, sum := range []string{"sha256(CASWriteScript)=" + s, "sha256(CASWriteCommand)=" + c, "sha256(CASWriteCommandSudo)=" + u} {
+		if !strings.Contains(r.Detail, sum) {
+			t.Errorf("в П2 нет суммы %s: %s", sum, r.Detail)
+		}
+	}
 	switch mod {
 	case "false":
 		if r.Status != Pass {

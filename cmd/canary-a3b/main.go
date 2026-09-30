@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -37,7 +38,24 @@ func run() int {
 	oldBin := flag.String("old", "", "путь к v0.2.0 (консольная) — для контроля гонки и К7")
 	hostkey := flag.String("hostkey", "", "отпечаток ключа сервера SHA256:… (иначе программа спросит)")
 	rounds := flag.Int("rounds", 20, "добавлений на писателя в К4")
+	printFP := flag.Bool("print-fingerprint", false, "напечатать ревизию сборки и три суммы команды записи и выйти (сервер не нужен)")
 	flag.Parse()
+
+	if *printFP {
+		rev, mod := "?", "?"
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			for _, kv := range bi.Settings {
+				switch kv.Key {
+				case "vcs.revision":
+					rev = kv.Value
+				case "vcs.modified":
+					mod = kv.Value
+				}
+			}
+		}
+		fmt.Printf("vcs.revision=%s vcs.modified=%s\n%s\n", rev, mod, canary.FingerprintLine())
+		return 0
+	}
 
 	if *confirm != canary.RequiredConfirmation {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ: канарейка запускается только на отдельном тестовом сервере.")
