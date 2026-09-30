@@ -288,20 +288,7 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 // Отсутствие файла known_hosts — не ошибка, а пустая база (сервер
 // неизвестен): рядом с ещё не созданным файлом "Настройки" его, очевидно,
 // нет при самом первом подключении когда-либо.
-func lookupKnownHost(path, addr string, remote net.Addr, key ssh.PublicKey) (keyErr *knownhosts.KeyError, err error) {
-	// Чтение — под тем же замком, что запись: на Windows rename поверх
-	// файла, открытого другим процессом, падает «файл занят».
-	lockErr := withKnownHostsLock(path, func() error {
-		keyErr, err = lookupKnownHostLocked(path, addr, remote, key)
-		return nil
-	})
-	if lockErr != nil {
-		return nil, lockErr
-	}
-	return keyErr, err
-}
-
-func lookupKnownHostLocked(path, addr string, remote net.Addr, key ssh.PublicKey) (*knownhosts.KeyError, error) {
+func lookupKnownHost(path, addr string, remote net.Addr, key ssh.PublicKey) (*knownhosts.KeyError, error) {
 	if _, statErr := os.Stat(path); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return &knownhosts.KeyError{}, nil
