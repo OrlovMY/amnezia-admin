@@ -264,7 +264,7 @@ func casDeniedBeforeWrite(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
+	s := strings.ToLower(stderrText(err)) // только stderr — см. stderrText
 	return strings.Contains(s, "permission denied") &&
 		(strings.Contains(s, "docker.sock") || strings.Contains(s, "docker daemon socket"))
 }
@@ -288,17 +288,26 @@ func casSudoRefused(err error) bool {
 	if err == nil || !errors.As(err, &es) || es.ExitStatus() != 1 {
 		return false
 	}
-	s := err.Error()
+	s := stderrText(err) // только stderr: в тексте команды — сам скрипт с метками
 	return reSudoDenied.MatchString(s) && !strings.Contains(s, "not moved:")
 }
 
-// stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
-func stderrTail(err error) string {
+// stderrText — stderr целиком: всё после последнего "stderr: " (формат
+// sshRunner и fakesrv). Признаки исхода смотрят ТОЛЬКО сюда: текст ошибки
+// sshRunner начинается с самой команды, а в ней — текст скрипта (в PR-3 — с
+// меткой «not moved: »), и поиск по всему тексту ошибки видел бы метки
+// скрипта там, где их вывел не скрипт (fix/a3b-texts 45dd2b2).
+func stderrText(err error) string {
 	s := err.Error()
 	if i := strings.LastIndex(s, "stderr: "); i >= 0 {
 		s = s[i+len("stderr: "):]
 	}
-	s = strings.TrimSpace(s)
+	return strings.TrimSpace(s)
+}
+
+// stderrTail — хвост после последнего "stderr: " (формат sshRunner и fakesrv).
+func stderrTail(err error) string {
+	s := stderrText(err)
 	if len(s) > 300 {
 		s = s[:300] + "…"
 	}

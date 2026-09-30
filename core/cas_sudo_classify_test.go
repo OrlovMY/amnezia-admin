@@ -37,6 +37,16 @@ func TestSudoRefusedClosedList(t *testing.T) {
 			t.Errorf("код %d, %q: отказ sudo = %v, ждали %v", tc.code, tc.stderr, got, tc.want)
 		}
 	}
+	// Ошибка настоящего sshRunner начинается с команды, а в команде — текст
+	// скрипта; метки в тексте КОМАНДЫ не должны влиять на вердикт.
+	sshStyle := errors.New(`команда "… echo \"not moved: clientsTable: $e\" … permission denied … docker.sock": ` +
+		`exit status 1; stderr: sudo: a password is required`)
+	if !casSudoRefused(&exitWrap{sshStyle, 1}) {
+		t.Error("метка «not moved:» в тексте команды погасила отказ sudo из stderr")
+	}
+	if casDeniedBeforeWrite(errors.New(`команда "… permission denied … docker.sock …": exit status 1; stderr: changed: wg0.conf`)) {
+		t.Error("слова про docker.sock в тексте команды дали «docker отказал до записи»")
+	}
 	if casSudoRefused(nil) {
 		t.Error("nil — не отказ sudo")
 	}
@@ -87,3 +97,12 @@ func TestSudoInfixMatchesCore(t *testing.T) {
 		t.Errorf("команда повтора %.90q не содержит fakesrv.CASSudoInfix %q", cmd, fakesrv.CASSudoInfix)
 	}
 }
+
+// exitWrap — ошибка с кодом выхода поверх готового текста.
+type exitWrap struct {
+	err  error
+	code int
+}
+
+func (e *exitWrap) Error() string   { return e.err.Error() }
+func (e *exitWrap) ExitStatus() int { return e.code }
