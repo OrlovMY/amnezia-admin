@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
@@ -212,7 +213,12 @@ func TestMenuSavedConfigNotSavedOffersRekey(t *testing.T) {
 			t.Errorf("в тексте «не найден» нет каталога поиска %q:\n%s", d.Path, txt)
 		}
 	}
-	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Перевыпустить — старый перестанет работать…"))
+	rk := buttonByText(t, topPopup(t, u.win.Canvas()), "Перевыпустить — старый перестанет работать…")
+	// UX-01 П1: не безобидный вид — опасная кнопка со значком предупреждения
+	if rk.Importance != widget.DangerImportance || rk.Icon != theme.WarningIcon() {
+		t.Errorf("кнопка перевыпуска выглядит безобидно: важность %v, значок %v", rk.Importance, rk.Icon)
+	}
+	test.Tap(rk)
 	if got := popupText(t, u); !strings.Contains(got, "Перевыпустить конфиг?") {
 		t.Errorf("«Перевыпустить…» не привела к подтверждению перевыпуска:\n%s", got)
 	}
