@@ -45,6 +45,87 @@ type SavedConfig struct {
 	Config  string // содержимое (State == SavedFound) — СЕКРЕТ
 	Matches int    // сколько файлов с этим ключом (взят первый по имени)
 	Why     string // почему не найден или не прочитан
+	Legacy  bool   // найден в каталоге прежних версий («Конфигурации» рядом с программой)
+}
+
+// SavedDir — каталог поиска. Err — каталог не определён. Legacy — каталог
+// прежних версий: только чтение, файлы там не трогаются и не переносятся
+// (решение владельца 19.09.2026).
+type SavedDir struct {
+	Path   string
+	Err    error
+	Legacy bool
+}
+
+// LegacyConfigDirs — где лежат .conf, сохранённые версиями ДО A4в
+// (42eafbd, 19.09.2026). Тогда путь был ОТНОСИТЕЛЬНЫМ —
+// filepath.Join("Конфигурации", имя) — то есть от ТЕКУЩЕГО каталога процесса,
+// а не от программы. При запуске двойным щелчком текущий каталог — папка
+// программы, поэтому ищем в обоих: «Конфигурации» в текущем каталоге и рядом
+// с исполняемым файлом (совпадают — один раз).
+func LegacyConfigDirs() []SavedDir {
+	var out []SavedDir
+	seen := map[string]bool{}
+	add := func(p string, err error) {
+		if err != nil {
+			out = append(out, SavedDir{Err: err, Legacy: true})
+			return
+		}
+		key := strings.ToLower(filepath.Clean(p))
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, SavedDir{Path: p, Legacy: true})
+	}
+	if wd, err := os.Getwd(); err != nil {
+		add("", fmt.Errorf("текущий каталог не определён: %w", err))
+	} else {
+		add(filepath.Join(wd, legacyConfigsDirName), nil)
+	}
+	if exe, err := os.Executable(); err != nil {
+		add("", fmt.Errorf("каталог программы не определён: %w", err))
+	} else {
+		add(filepath.Join(filepath.Dir(exe), legacyConfigsDirName), nil)
+	}
+	return out
+}
+
+const legacyConfigsDirName = "Конфигурации"
+
+// FindSavedConfigIn — поиск по нескольким каталогам (каталог данных ОС и
+// каталоги прежних версий). «Не сохранялся» — только если ВСЕ каталоги
+// прочитаны и совпадений нет; любой непрочитанный — «не прочитано»
+// (решение 01.10.2026: у владельца настоящие конфиги лежат в старом месте).
+// Найденный — первый по порядку каталогов, затем по имени файла.
+func FindSavedConfigIn(dirs []SavedDir, clientID string) SavedConfig {
+	var found SavedConfig
+	var unread, notFound []string
+	for _, d := range dirs {
+		r := FindSavedConfig(d.Path, d.Err, clientID)
+		switch r.State {
+		case SavedFound:
+			if found.State != SavedFound {
+				found = r
+				found.Legacy = d.Legacy
+				found.Matches = 0
+			}
+			found.Matches += r.Matches
+		case SavedNotFound:
+			notFound = append(notFound, r.Why)
+		default:
+			unread = append(unread, r.Why)
+		}
+	}
+	switch {
+	case found.State == SavedFound:
+		return found
+	case len(unread) > 0:
+		return SavedConfig{State: SavedUnreadable, Why: strings.Join(unread, "; ")}
+	case len(dirs) == 0:
+		return SavedConfig{State: SavedUnreadable, Why: "не задано ни одного каталога поиска"}
+	}
+	return SavedConfig{State: SavedNotFound, Why: strings.Join(notFound, "; ")}
 }
 
 // FindSavedConfig ищет в каталоге dir (каталог конфигураций, UserConfigsDir)

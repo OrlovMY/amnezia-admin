@@ -13,6 +13,9 @@ import (
 // текст — тот же, что в GUI).
 var errConfigNotSaved = errors.New("конфиг не найден")
 
+// legacyConfigDirs — каталоги прежних версий (тесты уводят во временный).
+var legacyConfigDirs = core.LegacyConfigDirs
+
 // showConfig — `show-config -name X [-print]`: сохранённый на этом
 // компьютере конфиг клиента, найденный по ПУБЛИЧНОМУ ключу (имени файла не
 // доверяем), и его сверка с сервером. Содержимое (с приватным ключом)
@@ -29,7 +32,7 @@ func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident stri
 	}
 	cl := clients[idx]
 	dir, dirErr := core.UserConfigsDir()
-	sc := core.FindSavedConfig(dir, dirErr, cl.ClientID)
+	sc := core.FindSavedConfigIn(append([]core.SavedDir{{Path: dir, Err: dirErr}}, legacyConfigDirs()...), cl.ClientID)
 	switch sc.State {
 	case core.SavedNotFound:
 		fmt.Fprintln(w, guiview.SavedNotFoundText)

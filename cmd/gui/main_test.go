@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"amnezia-admin/core"
 )
 
 // TestMain — у тестов пакета свой каталог для ui.json (см. uiStateDir):
@@ -22,6 +25,10 @@ func TestMain(m *testing.M) {
 	// переменные через t.Setenv поверх этих.
 	os.Setenv("LOCALAPPDATA", dir)
 	os.Setenv("XDG_CONFIG_HOME", dir)
+	// И каталоги прежних версий («Конфигурации» в текущем каталоге и рядом с
+	// программой): тест не читает настоящие конфиги владельца.
+	legacy := filepath.Join(dir, "legacy-Конфигурации")
+	legacyConfigDirs = func() []core.SavedDir { return []core.SavedDir{{Path: legacy, Legacy: true}} }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

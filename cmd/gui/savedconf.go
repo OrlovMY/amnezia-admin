@@ -25,9 +25,19 @@ import (
 	"amnezia-admin/internal/guiview"
 )
 
-// savedConfigsDir — каталог конфигураций (шов для тестов не нужен: тесты
-// задают LOCALAPPDATA/XDG_CONFIG_HOME, TestMain — свой каталог по умолчанию).
+// savedConfigsDir — каталог конфигураций (тесты задают LOCALAPPDATA/
+// XDG_CONFIG_HOME, TestMain — свой каталог по умолчанию).
 var savedConfigsDir = core.UserConfigsDir
+
+// legacyConfigDirs — каталоги прежних версий; TestMain уводит их во
+// временный каталог, чтобы тест не прочитал настоящие «Конфигурации».
+var legacyConfigDirs = core.LegacyConfigDirs
+
+// savedSearchDirs — где искать: каталог этой версии, затем прежних.
+func savedSearchDirs() []core.SavedDir {
+	dir, err := savedConfigsDir()
+	return append([]core.SavedDir{{Path: dir, Err: err}}, legacyConfigDirs()...)
+}
 
 // showSavedConfig — окно сохранённого конфига клиента строки row. save —
 // сразу предложить сохранить в выбранное место (пункт «Сохранить
@@ -37,8 +47,7 @@ func (u *ui) showSavedConfig(row int, save bool) {
 		return
 	}
 	cl := u.clients[row]
-	dir, dirErr := savedConfigsDir()
-	sc := core.FindSavedConfig(dir, dirErr, cl.ClientID)
+	sc := core.FindSavedConfigIn(savedSearchDirs(), cl.ClientID)
 	title := guiview.SavedConfigTitle(cl.Name())
 	switch sc.State {
 	case core.SavedFound:

@@ -36,6 +36,11 @@ func SavedUnreadableText(why string) string {
 // SavedFoundText — откуда взят конфиг.
 func SavedFoundText(sc core.SavedConfig) string {
 	s := "Конфиг из файла: " + sc.Path
+	if sc.Legacy {
+		s += "\nКаталог прежних версий («Конфигурации» рядом с программой); файл не перемещается."
+	} else {
+		s += "\nКаталог конфигураций этой версии."
+	}
 	if sc.Matches > 1 {
 		s += fmt.Sprintf("\nФайлов с ключом этого клиента: %d; показан первый по имени.", sc.Matches)
 	}
