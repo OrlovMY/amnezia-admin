@@ -16,6 +16,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	uiStateDir = func() string { return dir }
+	// Окно «Конфиг готов» сохраняет .conf САМО (задача 01.10.2026): без
+	// этого любой тест, открывший окно, писал бы в настоящий каталог
+	// конфигураций владельца. Тесты, которым нужен свой каталог, задают
+	// переменные через t.Setenv поверх этих.
+	os.Setenv("LOCALAPPDATA", dir)
+	os.Setenv("XDG_CONFIG_HOME", dir)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

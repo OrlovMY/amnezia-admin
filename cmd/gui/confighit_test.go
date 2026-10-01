@@ -5,7 +5,7 @@ package main
 // Решение владельца 29.09.2026: текст и QR диалога — в прокрутке, кнопки
 // действия — вне её. Два вопроса, оба про бой, а не про тестовый драйвер:
 //
-//  1. Кнопки «Сохранить .conf», «Скопировать путь», «Закрыть» ВИДНЫ целиком
+//  1. Кнопки «Сохранить ещё в…», «Скопировать путь», «Закрыть» ВИДНЫ целиком
 //     в окне любого допустимого размера (стартовое и минимальное) — иначе
 //     человек при минимальном окне их не найдёт.
 //  2. Прокрутка не становится целью левого клика там, где видны кнопки и QR.
@@ -113,8 +113,9 @@ func TestConfigDialogClicksByBootRule(t *testing.T) {
 		state   string
 		buttons []string
 	}{
-		{"", []string{"Сохранить .conf", "Закрыть"}},
-		{"сохранён", []string{"Сохранить .conf", "Скопировать путь", "Закрыть"}},
+		{"", []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}},
+		{"сохранён", []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}},
+		{"отказ", []string{"Сохранить ещё в…", "Закрыть"}},
 	}
 	for _, tc := range cases {
 		for _, size := range osmotrSizes {
@@ -169,7 +170,7 @@ func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 func TestConfigDialogNewTextInView(t *testing.T) {
 	for _, tc := range []struct{ state, prefix string }{
 		{"сохранён", "Это новое место."},
-		{"отказ", `Пользователь "Телефон Анны" на сервере`},
+		{"отказ", "Сохраните конфиг кнопкой «Сохранить ещё в…»"},
 	} {
 		for _, size := range osmotrSizes {
 			t.Run(tc.state+"/"+size, func(t *testing.T) {
@@ -219,7 +220,7 @@ func TestConfigSavedAcrossOSPathModels(t *testing.T) {
 					t.Errorf("ворота: %s", e)
 				}
 				_, pop := configScene(t, "сохранён", size)
-				checkConfigClicks(t, pop, []string{"Сохранить .conf", "Скопировать путь", "Закрыть"}, t.Errorf)
+				checkConfigClicks(t, pop, []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}, t.Errorf)
 				var path *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {
 					if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Конфиг сохранён: ") {

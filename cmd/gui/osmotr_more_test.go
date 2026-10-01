@@ -12,7 +12,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -124,9 +123,8 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
 		mins := osmotrFrame(pop, nil)
-		if state != "" {
-			test.Tap(buttonByText(t, pop, "Сохранить .conf"))
-		}
+		// Сохранение — само, при показе (задача 01.10.2026): нажимать нечего.
+		// state "" — каталог по умолчанию тестов (TestMain).
 		// Мерим диалог конфига, даже если поверх него окно ошибки.
 		return osmotrScene{root: pop, canvas: c, mins: mins}
 	}
@@ -213,7 +211,7 @@ var (
 	// один атом «прокрутка» и внутрь не идёт — названная граница, её
 	// содержимое смотрит снимок), кнопки действия — вне её.
 	invConfigBase = []string{
-		"подпись:Конфиг готов", "прокрутка:", "кнопка:Сохранить .conf", "кнопка:Закрыть",
+		"подпись:Конфиг готов", "прокрутка:", "кнопка:Сохранить ещё в…", "кнопка:Закрыть",
 	}
 	invActionTail = []string{"кнопка:Показать изменения", "подпись:", "кнопка:Отмена"}
 	// fyneIconOverflow — значок стандартного диалога Fyne (dialog.ShowError,
@@ -242,7 +240,7 @@ var moreForms = []osmotrForm{
 			"кнопка:Перевыпустить"}, invActionTail)},
 	// Д6 закрыт прокруткой (решение владельца 29.09.2026): разрешения
 	// knownD6 сняты, прибор показал их НЕИСПОЛЬЗОВАННЫМИ.
-	{name: "(д) конфиг готов", open: openConfig(""), width: 472, inventory: invConfigBase},
+	{name: "(д) конфиг готов", open: openConfig(""), width: 472, inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},

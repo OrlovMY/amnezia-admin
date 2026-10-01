@@ -12,6 +12,7 @@
 //	amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //	amnezia-admin toggle -key vpn://... -name Vasya
 //	amnezia-admin rekey  -key vpn://... -name Vasya
+//	amnezia-admin show-config -key vpn://... -name Vasya [-print]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -872,6 +873,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
+	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента)")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1055,8 +1057,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			e = saveUserConfig(stdout, u, cur.Proto)
 		}
 		err = e
+	case "show-config":
+		err = showConfig(stdout, sess, cur, *name, *printConf)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "Ошибка:", err)
