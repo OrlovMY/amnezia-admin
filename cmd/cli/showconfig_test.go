@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"amnezia-admin/core"
-	"amnezia-admin/internal/guiview"
 )
 
 // TestShowConfigCommand — ДОЕЗД `show-config` через run() по SSH к fakesrv:
@@ -55,14 +54,27 @@ func TestShowConfigCommand(t *testing.T) {
 
 	os.Remove(filepath.Join(dir, "другое.conf"))
 	code, out, e = runCLI("show-config", "-name", "Carol")
-	if code != 1 || !strings.Contains(out, guiview.SavedNotFoundText) || !strings.Contains(out, "rekey -name \"Carol\"") {
-		t.Errorf("«не сохранялся»: %d\n%s\n%s", code, out, e)
+	if code != 1 || !strings.Contains(out, "Конфигурация этого клиента не найдена на этом компьютере.") || !strings.Contains(out, "rekey -name \"Carol\"") {
+		t.Errorf("«не найден»: %d\n%s\n%s", code, out, e)
+	}
+	for _, d := range append([]string{dir}, legacyPaths()...) {
+		if !strings.Contains(out, d) {
+			t.Errorf("в выводе «не найден» нет каталога поиска %q:\n%s", d, out)
+		}
 	}
 
 	os.RemoveAll(dir)
 	os.WriteFile(dir, []byte("x"), 0o600)
 	code, out, e = runCLI("show-config", "-name", "Carol")
-	if code != 1 || !strings.Contains(e, "Не удалось прочитать каталог конфигураций или файл") || strings.Contains(out+e, guiview.SavedNotFoundText) || strings.Contains(out, "rekey") {
+	if code != 1 || !strings.Contains(e, "Не удалось прочитать каталог конфигураций или файл") || strings.Contains(out+e, "не найдена на этом компьютере") || strings.Contains(out, "rekey") {
 		t.Errorf("«не прочитано»: %d\n%s\n%s", code, out, e)
 	}
+}
+
+func legacyPaths() []string {
+	var out []string
+	for _, d := range legacyConfigDirs() {
+		out = append(out, d.Path)
+	}
+	return out
 }

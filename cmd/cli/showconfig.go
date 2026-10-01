@@ -9,7 +9,7 @@ import (
 	"amnezia-admin/internal/guiview"
 )
 
-// errConfigNotSaved — конфиг клиента на этом компьютере не сохранялся (код 1,
+// errConfigNotSaved — конфиг клиента в каталогах поиска не найден (код 1,
 // текст — тот же, что в GUI).
 var errConfigNotSaved = errors.New("конфиг не найден")
 
@@ -35,7 +35,7 @@ func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident stri
 	sc := core.FindSavedConfigIn(append([]core.SavedDir{{Path: dir, Err: dirErr}}, legacyConfigDirs()...), cl.ClientID)
 	switch sc.State {
 	case core.SavedNotFound:
-		fmt.Fprintln(w, guiview.SavedNotFoundText)
+		fmt.Fprintln(w, guiview.SavedNotFoundText(sc.Searched))
 		fmt.Fprintf(w, "Перевыпустить: amnezia-admin rekey -name %q\n", cl.Name())
 		return errConfigNotSaved
 	case core.SavedFound:

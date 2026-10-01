@@ -53,7 +53,7 @@ func (u *ui) showSavedConfig(row int, save bool) {
 	case core.SavedFound:
 		u.showFoundConfig(title, cl, sc, save)
 	case core.SavedNotFound:
-		text := widget.NewLabel(guiview.SavedNotFoundText)
+		text := widget.NewLabel(guiview.SavedNotFoundText(sc.Searched))
 		text.Wrapping = fyne.TextWrapWord
 		var d dialog.Dialog
 		box := container.NewVBox(text)

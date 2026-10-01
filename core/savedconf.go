@@ -30,7 +30,9 @@ const (
 	// нечитаемого конфиг этого клиента — неизвестно. Нулевое значение —
 	// именно «не знаем» (признак 2).
 	SavedUnreadable SavedConfState = iota
-	// SavedNotFound — всё прочитано, конфига этого клиента нет.
+	// SavedNotFound — НЕ НАЙДЕН: все каталоги поиска прочитаны, конфига этого
+	// клиента в них нет. Это не «не сохранялся»: его могли сохранить в
+	// другое место (другой рабочий каталог, «Сохранить ещё в…»).
 	SavedNotFound
 	// SavedFound — найден файл с приватным ключом этого клиента.
 	SavedFound
@@ -46,6 +48,9 @@ type SavedConfig struct {
 	Matches int    // сколько файлов с этим ключом (взят первый по имени)
 	Why     string // почему не найден или не прочитан
 	Legacy  bool   // найден в каталоге прежних версий («Конфигурации» рядом с программой)
+	// Searched — где искали (абсолютные пути), для «не найден»: человек должен
+	// видеть, ГДЕ не нашли, а не только что не нашли.
+	Searched []string
 }
 
 // SavedDir — каталог поиска. Err — каталог не определён. Legacy — каталог
@@ -106,8 +111,11 @@ var (
 // Найденный — первый по порядку каталогов, затем по имени файла.
 func FindSavedConfigIn(dirs []SavedDir, clientID string) SavedConfig {
 	var found SavedConfig
-	var unread, notFound []string
+	var unread, notFound, searched []string
 	for _, d := range dirs {
+		if d.Err == nil {
+			searched = append(searched, d.Path)
+		}
 		r := FindSavedConfig(d.Path, d.Err, clientID)
 		switch r.State {
 		case SavedFound:
@@ -131,7 +139,7 @@ func FindSavedConfigIn(dirs []SavedDir, clientID string) SavedConfig {
 	case len(dirs) == 0:
 		return SavedConfig{State: SavedUnreadable, Why: "не задано ни одного каталога поиска"}
 	}
-	return SavedConfig{State: SavedNotFound, Why: strings.Join(notFound, "; ")}
+	return SavedConfig{State: SavedNotFound, Why: strings.Join(notFound, "; "), Searched: searched}
 }
 
 // FindSavedConfig ищет в каталоге dir (каталог конфигураций, UserConfigsDir)

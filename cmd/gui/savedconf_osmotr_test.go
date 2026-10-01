@@ -83,7 +83,7 @@ func init() {
 			inventory: []string{"прокрутка:"}},
 		osmotrForm{name: "(м) конфигурация: найден", open: openSavedConfig("найден"), width: 472,
 			inventory: []string{"подпись:Конфигурация «Телефон Анны»", "прокрутка:", "кнопка:Сохранить ещё в…", "кнопка:Скопировать путь", "кнопка:Закрыть"}},
-		osmotrForm{name: "(м) конфигурация: не сохранялся", open: openSavedConfig("не сохранялся"), width: 472,
+		osmotrForm{name: "(м) конфигурация: не найден", open: openSavedConfig("не найден"), width: 472,
 			inventory: []string{"подпись:Конфигурация «Телефон Анны»", "подпись:" + firstLine(wantSavedNotFound), "кнопка:Перевыпустить…", "кнопка:Закрыть"}},
 		osmotrForm{name: "(м) конфигурация: не прочитано", open: openSavedConfig("не прочитано"), width: 472,
 			inventory: []string{"подпись:Конфигурация «Телефон Анны»", "подпись:" + firstLine(wantUnreadablePrefix), "кнопка:Закрыть"}},

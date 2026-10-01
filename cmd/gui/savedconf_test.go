@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	wantSavedNotFound = "Конфигурация этого клиента не сохранялась на этом компьютере. " +
-		"Восстановить её нельзя: ключ есть только у самого клиента. " +
-		"Можно перевыпустить конфиг — прежний конфиг клиента после этого работать не будет."
+	wantSavedNotFound    = "Конфигурация этого клиента не найдена на этом компьютере."
+	wantSavedNotFoundEnd = "Если вы сохраняли её в другое место, откройте файл оттуда. " +
+		"Иначе восстановить её нельзя — ключ есть только у самого клиента."
 	wantUnreadablePrefix = "Не удалось прочитать каталог конфигураций или файл, поэтому неизвестно, " +
 		"сохранён ли конфиг этого клиента на этом компьютере. Подробности: "
 )
@@ -202,8 +202,14 @@ func TestMenuSavedConfigNotSavedOffersRekey(t *testing.T) {
 	row := rowOf(t, u, "Carol")
 	u.cellMenu(widget.TableCellID{Row: row, Col: 1}).Items[3].Action()
 	txt := popupText(t, u)
-	if !strings.Contains(txt, wantSavedNotFound) || strings.Contains(txt, wantUnreadablePrefix) {
-		t.Fatalf("«не сохранялся»:\n%s", txt)
+	if !strings.Contains(txt, wantSavedNotFound) || !strings.Contains(txt, wantSavedNotFoundEnd) || strings.Contains(txt, wantUnreadablePrefix) {
+		t.Fatalf("«не найден»:\n%s", txt)
+	}
+	// перечень каталогов поиска — абсолютными путями, все
+	for _, d := range savedSearchDirs() {
+		if !filepath.IsAbs(d.Path) || !strings.Contains(txt, d.Path) {
+			t.Errorf("в тексте «не найден» нет каталога поиска %q:\n%s", d.Path, txt)
+		}
 	}
 	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Перевыпустить…"))
 	if got := popupText(t, u); !strings.Contains(got, "Перевыпустить конфиг?") {
