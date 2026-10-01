@@ -78,12 +78,12 @@ func LegacyConfigDirs() []SavedDir {
 		seen[key] = true
 		out = append(out, SavedDir{Path: p, Legacy: true})
 	}
-	if wd, err := os.Getwd(); err != nil {
+	if wd, err := legacyGetwd(); err != nil {
 		add("", fmt.Errorf("текущий каталог не определён: %w", err))
 	} else {
 		add(filepath.Join(wd, legacyConfigsDirName), nil)
 	}
-	if exe, err := os.Executable(); err != nil {
+	if exe, err := legacyExecutable(); err != nil {
 		add("", fmt.Errorf("каталог программы не определён: %w", err))
 	} else {
 		add(filepath.Join(filepath.Dir(exe), legacyConfigsDirName), nil)
@@ -92,6 +92,12 @@ func LegacyConfigDirs() []SavedDir {
 }
 
 const legacyConfigsDirName = "Конфигурации"
+
+// Швы для теста «каталог не определён».
+var (
+	legacyGetwd      = os.Getwd
+	legacyExecutable = os.Executable
+)
 
 // FindSavedConfigIn — поиск по нескольким каталогам (каталог данных ОС и
 // каталоги прежних версий). «Не сохранялся» — только если ВСЕ каталоги

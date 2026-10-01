@@ -59,3 +59,24 @@ func TestLegacyConfigDirsShape(t *testing.T) {
 		}
 	}
 }
+
+// TestLegacyConfigDirsUnknown — текущий каталог не определён: это запись с
+// ошибкой (а итог поиска — «не прочитано»), а не молчаливый пропуск.
+func TestLegacyConfigDirsUnknown(t *testing.T) {
+	old := legacyGetwd
+	legacyGetwd = func() (string, error) { return "", errors.New("getwd: сбой") }
+	defer func() { legacyGetwd = old }()
+	ds := LegacyConfigDirs()
+	hasErr := false
+	for _, d := range ds {
+		if d.Err != nil {
+			hasErr = true
+		}
+	}
+	if !hasErr {
+		t.Fatalf("сбой Getwd пропущен молча: %+v", ds)
+	}
+	if got := FindSavedConfigIn(ds, "ключ"); got.State != SavedUnreadable {
+		t.Errorf("итог при неопределённом каталоге: %v", got.State)
+	}
+}
