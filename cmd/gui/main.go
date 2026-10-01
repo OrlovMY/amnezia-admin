@@ -2800,15 +2800,18 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// «Скопировать путь») — под ней, вне прокрутки, как и «Закрыть» самого
 	// диалога: при любом окне они на виду. QR не уменьшается (сканируемость),
 	// путь не сжимается (переносится как был).
+	// АУДИТ-МЕНЮ-QR-UX Н1: QR — ВНЕ прокрутки, сверху: виден целиком при
+	// открытии на любом допустимом окне (сторож TestQRFullyVisible). Под
+	// ним в прокрутке — сначала «сохранён / НЕ сохранён» (громко), потом
+	// остальное.
 	info = container.NewVScroll(container.NewVBox(
-		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		savedLabel,
 		failHint,
+		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
-		container.NewCenter(qrObj),
 		hint,
 	))
-	content = container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	content = container.NewBorder(container.NewCenter(qrObj), container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.

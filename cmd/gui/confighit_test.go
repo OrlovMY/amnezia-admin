@@ -68,10 +68,12 @@ func checkConfigClicks(t *testing.T, pop *widget.PopUp, buttons []string, errf f
 			qr = i
 		}
 		if _, ok := o.(*container.Scroll); ok {
-			sc = o
+			if _, mouse := sc.(mouseScroll); !mouse {
+				sc = o
+			}
 		}
 		if _, ok := o.(mouseScroll); ok {
-			sc = o
+			sc = o // подсаженная мышиная обёртка — главнее обычной прокрутки
 		}
 	})
 	if qr == nil || sc == nil {
@@ -82,6 +84,11 @@ func checkConfigClicks(t *testing.T, pop *widget.PopUp, buttons []string, errf f
 	// сохранения прокрутка доведена до конца, и QR виден частично).
 	r, v := absRect(qr), absRect(sc)
 	top, bottom := max(r.pos.Y, v.pos.Y), min(r.bottom(), v.bottom())
+	// Раунд 5 (Н1): QR — вне прокрутки, над ней. Тогда он целиком на экране,
+	// и клик идёт в его центр, без прокрутки.
+	if r.bottom() <= v.pos.Y+0.5 {
+		top, bottom = r.pos.Y, r.bottom()
+	}
 	if bottom-top < 1 {
 		// После сохранения прокрутка доведена до конца, и при длинном пути
 		// (модели путей ОС) QR может уйти за край целиком. Человек, чтобы
@@ -134,21 +141,27 @@ type mouseScroll struct{ *container.Scroll }
 func (mouseScroll) MouseDown(*desktop.MouseEvent) {}
 func (mouseScroll) MouseUp(*desktop.MouseEvent)   {}
 
-// Канарейка: та же проверка обязана покраснеть, если прокрутка содержимого
-// становится мышиной целью — клик по QR уходит ей.
+// Канарейка: та же проверка обязана покраснеть, если над QR оказывается
+// мышиная цель — клик по QR уходит ей. Раунд 5 (Н1): QR вынесен из
+// прокрутки, поэтому мышиная прокрутка подсаживается ВОКРУГ QR.
 func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 	_, pop := configScene(t, "сохранён", "минимальный")
-	var sc *container.Scroll
+	var qr fyne.CanvasObject
 	walkVisible(pop, func(o fyne.CanvasObject) {
-		if s, ok := o.(*container.Scroll); ok {
-			sc = s
+		if i, ok := o.(*canvas.Image); ok && qr == nil {
+			qr = i
 		}
 	})
-	if sc == nil {
-		t.Fatal("канарейка ничего не значит: прокрутки в диалоге нет")
+	if qr == nil {
+		t.Fatal("канарейка ничего не значит: QR в диалоге нет")
 	}
-	ms := mouseScroll{sc}
-	replaceIn(t, pop, sc, ms)
+	holder := findParent(pop, qr)
+	if holder == nil {
+		t.Fatal("канарейка ничего не значит: у QR нет родителя")
+	}
+	ms := mouseScroll{container.NewScroll(container.NewCenter(qr))}
+	replaceIn(t, pop, holder, ms)
+	osmotrFrame(pop, nil)
 	var errs []string
 	checkConfigClicks(t, pop, []string{"Закрыть"}, func(f string, a ...any) {
 		msg := fmt.Sprintf(f, a...)
@@ -168,9 +181,14 @@ func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 // (последняя строка подсказки о новом месте / совета) видно в прокрутке, а
 // не спрятано под её краем: при окне ниже 756 т. иначе человек его не увидит.
 func TestConfigDialogNewTextInView(t *testing.T) {
+	// Раунд 5 (Н1): QR целиком над прокруткой, а прокрутка на минимальном
+	// окне — несколько строк. Видимой при открытии обязана быть ПЕРВАЯ
+	// строка итога сохранения («Конфиг сохранён: …» / «Конфиг НЕ сохранён:
+	// …») — первая в прокрутке; остальное (путь целиком, совет, подсказка о
+	// новом месте) — прокруткой.
 	for _, tc := range []struct{ state, prefix string }{
-		{"сохранён", "Это новое место."},
-		{"отказ", "Сохраните конфиг кнопкой «Сохранить ещё в…»"},
+		{"сохранён", "Конфиг сохранён: "},
+		{"отказ", "Конфиг НЕ сохранён: "},
 	} {
 		for _, size := range osmotrSizes {
 			t.Run(tc.state+"/"+size, func(t *testing.T) {
@@ -191,8 +209,9 @@ func TestConfigDialogNewTextInView(t *testing.T) {
 					t.Fatalf("проверка ничего не значит: прокрутка %v, подпись %v", sc != nil, l != nil)
 				}
 				v, r := absRect(sc), absRect(l)
-				if r.pos.Y < v.pos.Y-0.5 || r.bottom() > v.bottom()+0.5 {
-					t.Errorf("подпись «%s…» вне видимой части прокрутки: %v, видно %v", tc.prefix, r, v)
+				line := fyne.MeasureText("Ж", theme.TextSize(), fyne.TextStyle{Bold: true}).Height + theme.InnerPadding()
+				if r.pos.Y < v.pos.Y-0.5 || r.pos.Y+line > v.bottom()+0.5 {
+					t.Errorf("первая строка «%s…» вне видимой части прокрутки: %v, видно %v", tc.prefix, r, v)
 				}
 			})
 		}

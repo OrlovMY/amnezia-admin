@@ -120,8 +120,10 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	saveBtn := widget.NewButtonWithIcon("Сохранить ещё в…", theme.DocumentSaveIcon(), func() {
 		u.saveConfigAs(name, config)
 	})
-	info := container.NewVScroll(container.NewVBox(from, check, anyway, unverified, qrBox))
-	content := container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	// АУДИТ-МЕНЮ-QR-UX Н1: QR — вне прокрутки, сверху, целиком; пока он не
+	// разрешён, место пустое, и кнопки показа — первыми под сверкой.
+	info := container.NewVScroll(container.NewVBox(check, anyway, unverified, from))
+	content := container.NewBorder(qrBox, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
