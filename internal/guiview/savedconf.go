@@ -54,6 +54,15 @@ func SavedFoundText(sc core.SavedConfig) string {
 	return s
 }
 
+// SavedServerKeyDiffers — [Peer] PublicKey файла не ключ этого сервера:
+// конфиг ведёт клиента на ДРУГОЙ сервер (SEC-01 R1). QR скрыт.
+const SavedServerKeyDiffers = "ВНИМАНИЕ: ключ сервера (PublicKey) в файле НЕ совпадает с ключом этого сервера — " +
+	"конфиг подключит клиента к ДРУГОМУ серверу. Файл мог быть подменён. QR скрыт; не выдавайте этот конфиг, " +
+	"если не уверены, откуда он."
+
+// SavedShowQRAnyway — кнопка показа QR при несовпавшем ключе сервера.
+const SavedShowQRAnyway = "Всё равно показать QR"
+
 // SavedCheckPending — пока идёт сверка с сервером.
 const SavedCheckPending = "Сверяю с сервером…"
 
@@ -70,7 +79,21 @@ func SavedCheckText(ch core.SavedCheck) string {
 		}
 		return what + " с сервером не сверен" + reason(ch.Why) + "."
 	}
+	var server string
+	switch ch.ServerKey {
+	case core.CheckSame:
+		server = "Ключ сервера (PublicKey) совпадает с ключом этого сервера."
+	case core.CheckDiffer:
+		server = SavedServerKeyDiffers
+	default:
+		why := ch.Why
+		if why == "" {
+			why = ch.ServerKeyWhy
+		}
+		server = "Ключ сервера (PublicKey) с этим сервером не сверен" + reason(why) + "."
+	}
 	s := "Ключ клиента совпадает с ключом на сервере.\n" +
+		server + "\n" +
 		line("PresharedKey", ch.PSK) + "\n" +
 		line("Адрес клиента (Address)", ch.Address)
 	if ch.Endpoint != "" {

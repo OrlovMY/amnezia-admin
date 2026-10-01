@@ -30,9 +30,9 @@ func TestSavedConfigRoundTrip(t *testing.T) {
 	if got.State != core.SavedFound {
 		t.Fatalf("сохранённый конфиг не найден: %v %s", got.State, got.Why)
 	}
-	psk, addr, err := sess.ClientPeerParams(ct, cl)
-	ch := core.CheckSavedConfig(got.Config, psk, addr, err)
-	if ch.PSK != core.CheckSame || ch.Address != core.CheckSame {
+	sp, err := sess.ClientPeerParams(ct, cl)
+	ch := core.CheckSavedConfig(got.Config, sp, err)
+	if ch.PSK != core.CheckSame || ch.Address != core.CheckSame || ch.ServerKey != core.CheckSame {
 		t.Errorf("сверка с сервером: PSK %v адрес %v (%s)", ch.PSK, ch.Address, ch.Why)
 	}
 
@@ -41,8 +41,8 @@ func TestSavedConfigRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	cl = clientByName(t, sess, ct, "Carol")
-	psk, addr, err = sess.ClientPeerParams(ct, cl)
-	if ch := core.CheckSavedConfig(got.Config, psk, addr, err); ch.PSK != core.CheckSame || ch.Address != core.CheckSame {
+	sp, err = sess.ClientPeerParams(ct, cl)
+	if ch := core.CheckSavedConfig(got.Config, sp, err); ch.PSK != core.CheckSame || ch.Address != core.CheckSame || ch.ServerKey != core.CheckSame {
 		t.Errorf("отключённый: PSK %v адрес %v (%s)", ch.PSK, ch.Address, ch.Why)
 	}
 	if err := sess.SetEnabled(ct, cl.ClientID, true); err != nil {

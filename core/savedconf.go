@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -166,14 +167,22 @@ func FindSavedConfig(dir string, dirErr error, clientID string) SavedConfig {
 		return SavedConfig{State: SavedUnreadable, Why: "каталог конфигураций не прочитан: " + err.Error()}
 	}
 	names := make([]string, 0, len(entries))
+	var unreadable []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".conf") {
-			names = append(names, e.Name())
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".conf") {
+			continue
 		}
+		// Только обычные файлы (SEC-01 R2): FIFO с именем *.conf повесил бы
+		// чтение, устройство — тоже. Не обычный — «не прочитан», а не
+		// молчаливый пропуск: среди таких мог быть и нужный.
+		if !e.Type().IsRegular() {
+			unreadable = append(unreadable, filepath.Join(dir, e.Name())+": не обычный файл ("+e.Type().String()+")")
+			continue
+		}
+		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 	var found SavedConfig
-	var unreadable []string
 	for _, n := range names {
 		p := filepath.Join(dir, n)
 		b, err := readSavedFile(p)
@@ -203,8 +212,27 @@ func FindSavedConfig(dir string, dirErr error, clientID string) SavedConfig {
 	return SavedConfig{State: SavedNotFound, Why: "в каталоге " + dir + " конфига этого клиента нет"}
 }
 
-// readSavedFile — чтение файла (шов для теста «файл не читается»).
-var readSavedFile = os.ReadFile
+// maxSavedConf — предел размера .conf (SEC-01 R2): конфиг WireGuard меньше
+// 1 КБ; больший файл не читается целиком.
+const maxSavedConf = 64 << 10
+
+// readSavedFile — чтение файла не больше maxSavedConf (шов для теста «файл
+// не читается»).
+var readSavedFile = func(p string) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxSavedConf+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxSavedConf {
+		return nil, fmt.Errorf("%s: больше %d КБ — не конфиг WireGuard", p, maxSavedConf>>10)
+	}
+	return b, nil
+}
 
 // CheckState — сверка параметра файла с сервером: три состояния, нулевое —
 // «не сверено».
@@ -219,28 +247,44 @@ const (
 // SavedCheck — сверка сохранённого конфига с сервером.
 type SavedCheck struct {
 	PSK, Address CheckState
-	Why          string // почему не сверено (CheckUnknown)
+	// ServerKey — [Peer] PublicKey файла против ключа ЭТОГО сервера (SEC-01
+	// R1): файл с верным ключом клиента, но чужим сервером, отправил бы
+	// клиента на сервер атакующего.
+	ServerKey    CheckState
+	ServerKeyWhy string // почему ключ сервера не сверен
+	Why          string // почему не сверено ничего (сервер не прочитан)
 	Endpoint     string // Endpoint из файла — как есть (может отличаться от текущего адреса)
 }
 
-// CheckSavedConfig сверяет PresharedKey и Address файла с параметрами
-// сервера. serverErr != nil — сервер не прочитан: обе сверки CheckUnknown.
-func CheckSavedConfig(config, serverPSK, serverAddr string, serverErr error) SavedCheck {
+// ServerPeer — параметры клиента и ключ сервера по данным сервера.
+// ServerPubErr — ключ сервера не вычислен (остальное может быть известно).
+type ServerPeer struct {
+	PSK, Addr    string
+	ServerPub    string
+	ServerPubErr string
+}
+
+// CheckSavedConfig сверяет PresharedKey, Address и ключ сервера файла с
+// параметрами сервера. serverErr != nil — сервер не прочитан: все сверки
+// CheckUnknown.
+func CheckSavedConfig(config string, sp ServerPeer, serverErr error) SavedCheck {
 	conf := parseWgConf(config)
 	var ch SavedCheck
+	var peer map[string]string
 	if len(conf.peers) > 0 {
-		ch.Endpoint = conf.peers[0]["Endpoint"]
+		peer = conf.peers[0]
+		ch.Endpoint = peer["Endpoint"]
 	}
 	if serverErr != nil {
 		ch.Why = serverErr.Error()
 		return ch
 	}
-	filePSK := ""
-	if len(conf.peers) > 0 {
-		filePSK = conf.peers[0]["PresharedKey"]
+	ch.PSK = compareParam(peer["PresharedKey"], sp.PSK)
+	ch.Address = compareParam(normAddrs(conf.iface["Address"]), normAddrs(sp.Addr))
+	ch.ServerKey = compareParam(peer["PublicKey"], sp.ServerPub)
+	if ch.ServerKey == CheckUnknown {
+		ch.ServerKeyWhy = sp.ServerPubErr
 	}
-	ch.PSK = compareParam(filePSK, serverPSK)
-	ch.Address = compareParam(normAddrs(conf.iface["Address"]), normAddrs(serverAddr))
 	return ch
 }
 
@@ -268,27 +312,35 @@ func normAddrs(s string) string {
 
 // ClientPeerParams — PresharedKey и адрес клиента по данным сервера: из блока
 // [Peer] wg0.conf (активный) или из clientsTable (отключённый — peer'а в
-// wg0.conf нет, параметры сохранены в записи). Не найдено — ошибка, а не
-// пустые строки (признак 2).
-func (s *Session) ClientPeerParams(c *Container, cl ClientEntry) (psk, addr string, err error) {
-	if cl.EnabledState() == EnabledDisabled {
-		psk, addr = Str(cl.UserData, "psk"), Str(cl.UserData, "allowedIP")
-		if psk == "" || addr == "" {
-			return "", "", errors.New("клиент отключён, а параметры peer'а в его записи не сохранены")
-		}
-		return psk, addr, nil
-	}
+// wg0.conf нет, параметры сохранены в записи); ключ сервера — из PrivateKey
+// [Interface] wg0.conf. Не найдено — ошибка, а не пустые строки (признак 2).
+func (s *Session) ClientPeerParams(c *Container, cl ClientEntry) (ServerPeer, error) {
 	text, err := s.catIn(c, c.Dir+"/wg0.conf")
 	if err != nil {
-		return "", "", fmt.Errorf("wg0.conf не прочитан: %w", err)
+		return ServerPeer{}, fmt.Errorf("wg0.conf не прочитан: %w", err)
 	}
-	for _, p := range parseWgConf(text).peers {
+	conf := parseWgConf(text)
+	var sp ServerPeer
+	if pub, perr := pubFromPriv(conf.iface["PrivateKey"]); perr != nil {
+		sp.ServerPubErr = "ключ сервера в wg0.conf не разобран"
+	} else {
+		sp.ServerPub = pub
+	}
+	if cl.EnabledState() == EnabledDisabled {
+		sp.PSK, sp.Addr = Str(cl.UserData, "psk"), Str(cl.UserData, "allowedIP")
+		if sp.PSK == "" || sp.Addr == "" {
+			return ServerPeer{}, errors.New("клиент отключён, а параметры peer'а в его записи не сохранены")
+		}
+		return sp, nil
+	}
+	for _, p := range conf.peers {
 		if p["PublicKey"] == cl.ClientID {
 			if p["PresharedKey"] == "" || p["AllowedIPs"] == "" {
-				return "", "", errors.New("в wg0.conf у peer'а этого клиента нет PresharedKey или AllowedIPs")
+				return ServerPeer{}, errors.New("в wg0.conf у peer'а этого клиента нет PresharedKey или AllowedIPs")
 			}
-			return p["PresharedKey"], p["AllowedIPs"], nil
+			sp.PSK, sp.Addr = p["PresharedKey"], p["AllowedIPs"]
+			return sp, nil
 		}
 	}
-	return "", "", errors.New("peer этого клиента в wg0.conf не найден")
+	return ServerPeer{}, errors.New("peer этого клиента в wg0.conf не найден")
 }

@@ -89,23 +89,25 @@ func TestFindSavedConfigStates(t *testing.T) {
 func TestCheckSavedConfigTable(t *testing.T) {
 	conf := confWithKey(t, "KEY", "PSK1", "10.8.1.5/32")
 	for _, c := range []struct {
-		name         string
-		psk, addr    string
-		err          error
-		wantP, wantA CheckState
+		name                string
+		psk, addr, srv      string
+		err                 error
+		wantP, wantA, wantS CheckState
 	}{
-		{"всё совпало", "PSK1", "10.8.1.5/32", nil, CheckSame, CheckSame},
-		{"PSK другой", "PSK2", "10.8.1.5/32", nil, CheckDiffer, CheckSame},
-		{"адрес другой", "PSK1", "10.8.1.6/32", nil, CheckSame, CheckDiffer},
-		{"сервер не прочитан", "", "", errors.New("wg0.conf не прочитан"), CheckUnknown, CheckUnknown},
-		{"у сервера параметра нет", "", "", nil, CheckUnknown, CheckUnknown},
+		{"всё совпало", "PSK1", "10.8.1.5/32", "SRV=", nil, CheckSame, CheckSame, CheckSame},
+		{"PSK другой", "PSK2", "10.8.1.5/32", "SRV=", nil, CheckDiffer, CheckSame, CheckSame},
+		{"адрес другой", "PSK1", "10.8.1.6/32", "SRV=", nil, CheckSame, CheckDiffer, CheckSame},
+		{"ключ сервера другой", "PSK1", "10.8.1.5/32", "ДРУГОЙ=", nil, CheckSame, CheckSame, CheckDiffer},
+		{"ключ сервера не вычислен", "PSK1", "10.8.1.5/32", "", nil, CheckSame, CheckSame, CheckUnknown},
+		{"сервер не прочитан", "", "", "", errors.New("wg0.conf не прочитан"), CheckUnknown, CheckUnknown, CheckUnknown},
+		{"у сервера параметра нет", "", "", "", nil, CheckUnknown, CheckUnknown, CheckUnknown},
 		// ошибка сервера главнее частично полученных значений
-		{"ошибка при значениях", "PSK1", "10.8.1.5/32", errors.New("ответ неполон"), CheckUnknown, CheckUnknown},
-		{"адрес с пробелами", "PSK1", " 10.8.1.5/32 ", nil, CheckSame, CheckSame},
+		{"ошибка при значениях", "PSK1", "10.8.1.5/32", "SRV=", errors.New("ответ неполон"), CheckUnknown, CheckUnknown, CheckUnknown},
+		{"адрес с пробелами", "PSK1", " 10.8.1.5/32 ", "SRV=", nil, CheckSame, CheckSame, CheckSame},
 	} {
-		got := CheckSavedConfig(conf, c.psk, c.addr, c.err)
-		if got.PSK != c.wantP || got.Address != c.wantA {
-			t.Errorf("%s: PSK %v адрес %v", c.name, got.PSK, got.Address)
+		got := CheckSavedConfig(conf, ServerPeer{PSK: c.psk, Addr: c.addr, ServerPub: c.srv, ServerPubErr: "не разобран"}, c.err)
+		if got.PSK != c.wantP || got.Address != c.wantA || got.ServerKey != c.wantS {
+			t.Errorf("%s: PSK %v адрес %v сервер %v", c.name, got.PSK, got.Address, got.ServerKey)
 		}
 		if got.Endpoint != "203.0.113.10:51820" {
 			t.Errorf("%s: Endpoint %q", c.name, got.Endpoint)

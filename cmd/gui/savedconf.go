@@ -12,6 +12,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -84,7 +85,22 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	from.Wrapping = fyne.TextWrapWord
 	check := widget.NewLabel(guiview.SavedCheckPending)
 	check.Wrapping = fyne.TextWrapWord
+	// QR — только после сверки ключа сервера (SEC-01 R1): не совпал — скрыт,
+	// показ — по явному «Всё равно показать QR».
+	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
+	// показ диалога показывает всё содержимое.
 	qr := qrObject(cl.Name(), sc.Config)
+	qrBox := container.NewCenter()
+	showQR := func() {
+		if len(qrBox.Objects) == 0 {
+			qrBox.Add(qr)
+		}
+	}
+	var anyway *widget.Button
+	anyway = widget.NewButton(guiview.SavedShowQRAnyway, func() {
+		showQR()
+		anyway.Hide()
+	})
 
 	path := sc.Path
 	copyBtn := widget.NewButtonWithIcon("Скопировать путь", theme.ContentCopyIcon(), func() {
@@ -98,26 +114,35 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	saveBtn := widget.NewButtonWithIcon("Сохранить ещё в…", theme.DocumentSaveIcon(), func() {
 		u.saveConfigAs(name, config)
 	})
-	info := container.NewVScroll(container.NewVBox(from, check, container.NewCenter(qr)))
+	info := container.NewVScroll(container.NewVBox(from, check, anyway, qrBox))
 	content := container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
+	anyway.Hide() // после показа: d.Show() показывает всё содержимое
 
 	// Сверка с сервером — после показа: файл уже прочитан, сеть может быть
 	// медленной. Не удалось — «не сверено», а не «совпадает».
+	done := func(ch core.SavedCheck) {
+		check.SetText(guiview.SavedCheckText(ch))
+		if ch.ServerKey == core.CheckDiffer {
+			anyway.Show()
+			return // и окно сохранения само не открывается
+		}
+		showQR()
+		if save {
+			u.saveConfigAs(name, config)
+		}
+	}
 	sess, ctr := u.sess, u.cur
 	if sess == nil || ctr == nil {
-		check.SetText(guiview.SavedCheckText(core.CheckSavedConfig(config, "", "", errors.New("нет подключения к серверу"))))
+		done(core.CheckSavedConfig(config, core.ServerPeer{}, errors.New("нет подключения к серверу")))
 	} else {
 		goSafe(func() {
-			psk, addr, err := sess.ClientPeerParams(ctr, cl)
-			ch := core.CheckSavedConfig(config, psk, addr, err)
-			fyne.Do(func() { check.SetText(guiview.SavedCheckText(ch)) })
+			sp, err := sess.ClientPeerParams(ctr, cl)
+			ch := core.CheckSavedConfig(config, sp, err)
+			fyne.Do(func() { done(ch) })
 		})
-	}
-	if save {
-		u.saveConfigAs(name, config)
 	}
 }
 
@@ -136,6 +161,34 @@ func qrObject(name, config string) fyne.CanvasObject {
 	return img
 }
 
+// errPermsNotLimited — файл записан, но права 0600 поставить не удалось.
+var errPermsNotLimited = errors.New("права доступа не ограничены")
+
+// chmodChosen — шов для теста отказа chmod.
+var chmodChosen = os.Chmod
+
+// writeChosenConfig — запись в файл, выбранный в окне сохранения, и права
+// 0600 (SEC-01 M1): окно Fyne создаёт файл с правами по умолчанию (0644 на
+// Unix) — приватный ключ клиента прочли бы все пользователи компьютера.
+// Ошибка chmod — громко: файл записан, но открыт другим.
+func writeChosenConfig(w fyne.URIWriteCloser, config string) (string, error) {
+	where := w.URI().Path()
+	_, werr := w.Write([]byte(config))
+	cerr := w.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return where, fmt.Errorf("конфиг НЕ сохранён в %s: %w", where, werr)
+	}
+	if w.URI().Scheme() == "file" {
+		if err := chmodChosen(where, 0o600); err != nil {
+			return where, fmt.Errorf("конфиг сохранён в %s, но %w (%v): файл с приватным ключом клиента могут прочитать другие пользователи этого компьютера", where, errPermsNotLimited, err)
+		}
+	}
+	return where, nil
+}
+
 // saveConfigAs — «Сохранить ещё в…»: системное окно выбора файла, запись
 // туда. Ошибка — диалогом (тексты файловой системы, без содержимого).
 func (u *ui) saveConfigAs(name, config string) {
@@ -147,14 +200,12 @@ func (u *ui) saveConfigAs(name, config string) {
 		if w == nil {
 			return // отмена
 		}
-		where := w.URI().Path()
-		_, werr := w.Write([]byte(config))
-		cerr := w.Close()
-		if werr == nil {
-			werr = cerr
-		}
-		if werr != nil {
-			dialog.ShowError(fmt.Errorf("конфиг НЕ сохранён в %s: %w", where, werr), u.win)
+		where, err := writeChosenConfig(w, config)
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			if errors.Is(err, errPermsNotLimited) && u.status != nil {
+				u.status.SetText("Конфиг сохранён, но права НЕ ограничены: " + where)
+			}
 			return
 		}
 		if u.status != nil {

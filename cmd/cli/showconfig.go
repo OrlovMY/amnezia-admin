@@ -43,8 +43,8 @@ func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident stri
 		return errors.New(guiview.SavedUnreadableText(sc.Why))
 	}
 	fmt.Fprintln(w, guiview.SavedFoundText(sc))
-	psk, addr, perr := sess.ClientPeerParams(cur, cl)
-	fmt.Fprintln(w, guiview.SavedCheckText(core.CheckSavedConfig(sc.Config, psk, addr, perr)))
+	sp, perr := sess.ClientPeerParams(cur, cl)
+	fmt.Fprintln(w, guiview.SavedCheckText(core.CheckSavedConfig(sc.Config, sp, perr)))
 	if printContent {
 		fmt.Fprintln(w, "--- содержимое (приватный ключ клиента — никому не пересылайте) ---")
 		fmt.Fprint(w, sc.Config)
