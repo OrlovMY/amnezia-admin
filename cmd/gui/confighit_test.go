@@ -5,7 +5,7 @@ package main
 // Решение владельца 29.09.2026: текст и QR диалога — в прокрутке, кнопки
 // действия — вне её. Два вопроса, оба про бой, а не про тестовый драйвер:
 //
-//  1. Кнопки «Сохранить .conf», «Скопировать путь», «Закрыть» ВИДНЫ целиком
+//  1. Кнопки «Сохранить ещё в…», «Скопировать путь», «Закрыть» ВИДНЫ целиком
 //     в окне любого допустимого размера (стартовое и минимальное) — иначе
 //     человек при минимальном окне их не найдёт.
 //  2. Прокрутка не становится целью левого клика там, где видны кнопки и QR.
@@ -68,10 +68,12 @@ func checkConfigClicks(t *testing.T, pop *widget.PopUp, buttons []string, errf f
 			qr = i
 		}
 		if _, ok := o.(*container.Scroll); ok {
-			sc = o
+			if _, mouse := sc.(mouseScroll); !mouse {
+				sc = o
+			}
 		}
 		if _, ok := o.(mouseScroll); ok {
-			sc = o
+			sc = o // подсаженная мышиная обёртка — главнее обычной прокрутки
 		}
 	})
 	if qr == nil || sc == nil {
@@ -82,6 +84,11 @@ func checkConfigClicks(t *testing.T, pop *widget.PopUp, buttons []string, errf f
 	// сохранения прокрутка доведена до конца, и QR виден частично).
 	r, v := absRect(qr), absRect(sc)
 	top, bottom := max(r.pos.Y, v.pos.Y), min(r.bottom(), v.bottom())
+	// Раунд 5 (Н1): QR — вне прокрутки, над ней. Тогда он целиком на экране,
+	// и клик идёт в его центр, без прокрутки.
+	if r.bottom() <= v.pos.Y+0.5 {
+		top, bottom = r.pos.Y, r.bottom()
+	}
 	if bottom-top < 1 {
 		// После сохранения прокрутка доведена до конца, и при длинном пути
 		// (модели путей ОС) QR может уйти за край целиком. Человек, чтобы
@@ -113,8 +120,9 @@ func TestConfigDialogClicksByBootRule(t *testing.T) {
 		state   string
 		buttons []string
 	}{
-		{"", []string{"Сохранить .conf", "Закрыть"}},
-		{"сохранён", []string{"Сохранить .conf", "Скопировать путь", "Закрыть"}},
+		{"", []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}},
+		{"сохранён", []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}},
+		{"отказ", []string{"Сохранить ещё в…", "Закрыть"}},
 	}
 	for _, tc := range cases {
 		for _, size := range osmotrSizes {
@@ -133,21 +141,27 @@ type mouseScroll struct{ *container.Scroll }
 func (mouseScroll) MouseDown(*desktop.MouseEvent) {}
 func (mouseScroll) MouseUp(*desktop.MouseEvent)   {}
 
-// Канарейка: та же проверка обязана покраснеть, если прокрутка содержимого
-// становится мышиной целью — клик по QR уходит ей.
+// Канарейка: та же проверка обязана покраснеть, если над QR оказывается
+// мышиная цель — клик по QR уходит ей. Раунд 5 (Н1): QR вынесен из
+// прокрутки, поэтому мышиная прокрутка подсаживается ВОКРУГ QR.
 func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 	_, pop := configScene(t, "сохранён", "минимальный")
-	var sc *container.Scroll
+	var qr fyne.CanvasObject
 	walkVisible(pop, func(o fyne.CanvasObject) {
-		if s, ok := o.(*container.Scroll); ok {
-			sc = s
+		if i, ok := o.(*canvas.Image); ok && qr == nil {
+			qr = i
 		}
 	})
-	if sc == nil {
-		t.Fatal("канарейка ничего не значит: прокрутки в диалоге нет")
+	if qr == nil {
+		t.Fatal("канарейка ничего не значит: QR в диалоге нет")
 	}
-	ms := mouseScroll{sc}
-	replaceIn(t, pop, sc, ms)
+	holder := findParent(pop, qr)
+	if holder == nil {
+		t.Fatal("канарейка ничего не значит: у QR нет родителя")
+	}
+	ms := mouseScroll{container.NewScroll(container.NewCenter(qr))}
+	replaceIn(t, pop, holder, ms)
+	osmotrFrame(pop, nil)
 	var errs []string
 	checkConfigClicks(t, pop, []string{"Закрыть"}, func(f string, a ...any) {
 		msg := fmt.Sprintf(f, a...)
@@ -167,13 +181,28 @@ func TestConfigDialogClicksCanaryMouseScroll(t *testing.T) {
 // (последняя строка подсказки о новом месте / совета) видно в прокрутке, а
 // не спрятано под её краем: при окне ниже 756 т. иначе человек его не увидит.
 func TestConfigDialogNewTextInView(t *testing.T) {
+	// Раунд 5 (Н1): QR целиком над прокруткой, а прокрутка на минимальном
+	// окне — несколько строк. Видимой при открытии обязана быть ПЕРВАЯ
+	// строка итога сохранения («Конфиг сохранён: …» / «Конфиг НЕ сохранён:
+	// …») — первая в прокрутке; остальное (путь целиком, совет, подсказка о
+	// новом месте) — прокруткой.
 	for _, tc := range []struct{ state, prefix string }{
-		{"сохранён", "Это новое место."},
-		{"отказ", `Пользователь "Телефон Анны" на сервере`},
+		{"сохранён", "Конфиг сохранён: "},
+		{"отказ", "Конфиг НЕ сохранён. Сохраните его кнопкой «Сохранить ещё в…»"},
+		// раунд 6 (AU-UX П1): ошибка ОС с длинным абсолютным путём — совет
+		// всё равно первой строкой и виден без прокрутки
+		{"отказ, длинный путь", "Конфиг НЕ сохранён. Сохраните его кнопкой «Сохранить ещё в…»"},
 	} {
 		for _, size := range osmotrSizes {
 			t.Run(tc.state+"/"+size, func(t *testing.T) {
 				_, pop := configScene(t, tc.state, size)
+				if tc.state == "отказ, длинный путь" {
+					// сцена обязана нести длинную ошибку ОС с полным путём
+					all := strings.Join(visibleTexts(pop), " ")
+					if !strings.Contains(all, "Подробности: ") || !strings.Contains(all, "Application Support") {
+						t.Fatalf("сцена ничего не значит: нет ошибки ОС с длинным путём: %s", all)
+					}
+				}
 				var sc *container.Scroll
 				var l *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {
@@ -190,8 +219,9 @@ func TestConfigDialogNewTextInView(t *testing.T) {
 					t.Fatalf("проверка ничего не значит: прокрутка %v, подпись %v", sc != nil, l != nil)
 				}
 				v, r := absRect(sc), absRect(l)
-				if r.pos.Y < v.pos.Y-0.5 || r.bottom() > v.bottom()+0.5 {
-					t.Errorf("подпись «%s…» вне видимой части прокрутки: %v, видно %v", tc.prefix, r, v)
+				line := fyne.MeasureText("Ж", theme.TextSize(), fyne.TextStyle{Bold: true}).Height + theme.InnerPadding()
+				if r.pos.Y < v.pos.Y-0.5 || r.pos.Y+line > v.bottom()+0.5 {
+					t.Errorf("первая строка «%s…» вне видимой части прокрутки: %v, видно %v", tc.prefix, r, v)
 				}
 			})
 		}
@@ -219,7 +249,7 @@ func TestConfigSavedAcrossOSPathModels(t *testing.T) {
 					t.Errorf("ворота: %s", e)
 				}
 				_, pop := configScene(t, "сохранён", size)
-				checkConfigClicks(t, pop, []string{"Сохранить .conf", "Скопировать путь", "Закрыть"}, t.Errorf)
+				checkConfigClicks(t, pop, []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}, t.Errorf)
 				var path *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {
 					if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Конфиг сохранён: ") {
