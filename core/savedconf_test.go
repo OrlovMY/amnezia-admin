@@ -99,6 +99,8 @@ func TestCheckSavedConfigTable(t *testing.T) {
 		{"адрес другой", "PSK1", "10.8.1.6/32", nil, CheckSame, CheckDiffer},
 		{"сервер не прочитан", "", "", errors.New("wg0.conf не прочитан"), CheckUnknown, CheckUnknown},
 		{"у сервера параметра нет", "", "", nil, CheckUnknown, CheckUnknown},
+		// ошибка сервера главнее частично полученных значений
+		{"ошибка при значениях", "PSK1", "10.8.1.5/32", errors.New("ответ неполон"), CheckUnknown, CheckUnknown},
 		{"адрес с пробелами", "PSK1", " 10.8.1.5/32 ", nil, CheckSame, CheckSame},
 	} {
 		got := CheckSavedConfig(conf, c.psk, c.addr, c.err)
