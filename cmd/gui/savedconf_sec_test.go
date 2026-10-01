@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
+	"amnezia-admin/core"
 	"amnezia-admin/internal/guiview"
 )
 
@@ -126,5 +127,46 @@ func TestChosenConfigFilePerms(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "СЕКРЕТ") {
 		t.Error("ключ в тексте ошибки")
+	}
+}
+
+// TestQRDecisionTable — РАЗЛИЧЕНИЕ (SEC-01 R1-a): сами QR и окно
+// сохранения — ТОЛЬКО при «совпал»; «не совпал» и «не сверен» — разные кнопки.
+func TestQRDecisionTable(t *testing.T) {
+	for _, c := range []struct {
+		st   core.CheckState
+		want qrMode
+	}{
+		{core.CheckSame, qrAuto},
+		{core.CheckDiffer, qrForeign},
+		{core.CheckUnknown, qrUnverified},
+	} {
+		if got := qrDecision(core.SavedCheck{ServerKey: c.st}); got != c.want {
+			t.Errorf("ключ сервера %v: %v, ожидалось %v", c.st, got, c.want)
+		}
+	}
+}
+
+// TestMenuUnverifiedServerKeyNoAutoQR — ДОЕЗД «не сверен» через
+// showSavedConfig при u.sess == nil: QR сам не показан, окно сохранения
+// само не открыто; кнопка «Показать QR — ключ сервера не сверен» показывает.
+func TestMenuUnverifiedServerKeyNoAutoQR(t *testing.T) {
+	u, _, _ := savedFixture(t)
+	u.sess = nil
+	u.cellMenu(widget.TableCellID{Row: rowOf(t, u, "Carol"), Col: 1}).Items[3].Action() // «Сохранить конфигурацию…»
+	waitGUIGoroutines(t)
+	txt := popupText(t, u)
+	if !strings.Contains(txt, "Конфигурация «Carol»") {
+		t.Fatalf("поверх открылось окно сохранения при несверенном ключе сервера:\n%s", txt)
+	}
+	if !strings.Contains(txt, "Ключ сервера (PublicKey) с этим сервером не сверен: нет подключения к серверу.") {
+		t.Errorf("причина не названа:\n%s", txt)
+	}
+	if qrVisible(t, u) {
+		t.Error("QR показан сам при несверенном ключе сервера")
+	}
+	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), guiview.SavedShowQRUnverified))
+	if !qrVisible(t, u) {
+		t.Error("кнопка «Показать QR — ключ сервера не сверен» не показала QR")
 	}
 }

@@ -54,7 +54,7 @@ func TestShowConfigCommand(t *testing.T) {
 
 	os.Remove(filepath.Join(dir, "другое.conf"))
 	code, out, e = runCLI("show-config", "-name", "Carol")
-	if code != 1 || !strings.Contains(out, "Конфигурация этого клиента не найдена на этом компьютере.") || !strings.Contains(out, "rekey -name \"Carol\"") {
+	if code != 1 || !strings.Contains(out, "Конфигурация этого клиента не найдена в папках, где программа её ищет:") || !strings.Contains(out, "rekey -name \"Carol\"") {
 		t.Errorf("«не найден»: %d\n%s\n%s", code, out, e)
 	}
 	for _, d := range append([]string{dir}, legacyPaths()...) {
@@ -66,7 +66,7 @@ func TestShowConfigCommand(t *testing.T) {
 	os.RemoveAll(dir)
 	os.WriteFile(dir, []byte("x"), 0o600)
 	code, out, e = runCLI("show-config", "-name", "Carol")
-	if code != 1 || !strings.Contains(e, "Не удалось прочитать каталог конфигураций или файл") || strings.Contains(out+e, "не найдена на этом компьютере") || strings.Contains(out, "rekey") {
+	if code != 1 || !strings.Contains(e, "Не удалось прочитать папку конфигураций или файл в ней") || strings.Contains(out+e, "не найдена в папках") || strings.Contains(out, "rekey") {
 		t.Errorf("«не прочитано»: %d\n%s\n%s", code, out, e)
 	}
 }
@@ -77,4 +77,55 @@ func legacyPaths() []string {
 		out = append(out, d.Path)
 	}
 	return out
+}
+
+// TestShowConfigPrintNeedsVerifiedServer — SEC-01 R1-b: -print печатает
+// содержимое только при совпавшем ключе сервера; при чужом и не сверенном —
+// нет содержимого, код ≠ 0 и подсказка -print-unverified.
+func TestShowConfigPrintNeedsVerifiedServer(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("LOCALAPPDATA", base)
+	t.Setenv("XDG_CONFIG_HOME", base)
+	dir, err := core.UserConfigsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, kh, srv := setupFakeSSHForRunWithExec(t)
+	runCLI := func(args ...string) (int, string, string) {
+		var o, e bytes.Buffer
+		code := run(append(args, "-key", key), strings.NewReader(""), &o, &e, kh)
+		return code, o.String(), e.String()
+	}
+	if code, _, e := runCLI("add", "-name", "Carol"); code != 0 {
+		t.Fatalf("add: %s", e)
+	}
+	if code, out, _ := runCLI("show-config", "-name", "Carol", "-print"); code != 0 || !strings.Contains(out, "PrivateKey = ") {
+		t.Fatalf("ключ сервера совпал, а -print не напечатал: %d", code)
+	}
+	path := filepath.Join(dir, "Carol.conf")
+	conf, _ := os.ReadFile(path)
+	s := string(conf)
+	i := strings.Index(s, "[Peer]\nPublicKey = ") + len("[Peer]\nPublicKey = ")
+	j := strings.Index(s[i:], "\n")
+	forged := s[:i] + "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" + s[i+j:]
+	os.WriteFile(path, []byte(forged), 0o600)
+	check := func(what string) {
+		code, out, e := runCLI("show-config", "-name", "Carol", "-print")
+		if code == 0 || strings.Contains(out, "PrivateKey") || !strings.Contains(e, "-print-unverified") {
+			t.Errorf("%s: код %d, содержимое напечатано=%v, подсказка=%v", what, code, strings.Contains(out, "PrivateKey"), strings.Contains(e, "-print-unverified"))
+		}
+		if code, out, _ := runCLI("show-config", "-name", "Carol", "-print-unverified"); code != 0 || !strings.Contains(out, "PrivateKey = ") {
+			t.Errorf("%s: -print-unverified не напечатал: %d", what, code)
+		}
+	}
+	check("чужой сервер")
+
+	// не сверен: ключ сервера в wg0.conf не разбирается
+	os.WriteFile(path, conf, 0o600)
+	wg, _ := srv.File("/opt/amnezia/awg/wg0.conf")
+	w := string(wg)
+	a := strings.Index(w, "PrivateKey = ") + len("PrivateKey = ")
+	b := strings.Index(w[a:], "\n")
+	srv.SetFile("/opt/amnezia/awg/wg0.conf", []byte(w[:a]+"не-ключ"+w[a+b:]))
+	check("не сверен")
 }

@@ -59,13 +59,15 @@ func (u *ui) showSavedConfig(row int, save bool) {
 		var d dialog.Dialog
 		box := container.NewVBox(text)
 		if u.canManage && u.cur != nil && u.cur.Managed {
-			rekey := widget.NewButtonWithIcon("Перевыпустить…", theme.ViewRefreshIcon(), func() {
+			// UX-01 П1: кнопка не должна выглядеть безобидным «обновить».
+			rekey := widget.NewButtonWithIcon(guiview.SavedRekeyButton, theme.WarningIcon(), func() {
 				d.Hide()
 				// СУЩЕСТВУЮЩИЙ поток перевыпуска — с его подтверждением и
 				// предупреждением; ничего автоматически.
 				u.selectedRow = row
 				u.regenerateSelected()
 			})
+			rekey.Importance = widget.DangerImportance
 			box.Add(rekey)
 		}
 		d = dialog.NewCustom(title, "Закрыть", box, u.win)
@@ -96,10 +98,14 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 			qrBox.Add(qr)
 		}
 	}
-	var anyway *widget.Button
+	var anyway, unverified *widget.Button
 	anyway = widget.NewButton(guiview.SavedShowQRAnyway, func() {
 		showQR()
 		anyway.Hide()
+	})
+	unverified = widget.NewButton(guiview.SavedShowQRUnverified, func() {
+		showQR()
+		unverified.Hide()
 	})
 
 	path := sc.Path
@@ -114,24 +120,28 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	saveBtn := widget.NewButtonWithIcon("Сохранить ещё в…", theme.DocumentSaveIcon(), func() {
 		u.saveConfigAs(name, config)
 	})
-	info := container.NewVScroll(container.NewVBox(from, check, anyway, qrBox))
+	info := container.NewVScroll(container.NewVBox(from, check, anyway, unverified, qrBox))
 	content := container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
 	anyway.Hide() // после показа: d.Show() показывает всё содержимое
+	unverified.Hide()
 
 	// Сверка с сервером — после показа: файл уже прочитан, сеть может быть
 	// медленной. Не удалось — «не сверено», а не «совпадает».
 	done := func(ch core.SavedCheck) {
 		check.SetText(guiview.SavedCheckText(ch))
-		if ch.ServerKey == core.CheckDiffer {
-			anyway.Show()
-			return // и окно сохранения само не открывается
-		}
-		showQR()
-		if save {
-			u.saveConfigAs(name, config)
+		switch qrDecision(ch) {
+		case qrAuto:
+			showQR()
+			if save {
+				u.saveConfigAs(name, config)
+			}
+		case qrForeign:
+			anyway.Show() // окно сохранения само не открывается
+		default:
+			unverified.Show() // не сверено — ни QR, ни окна сохранения сами
 		}
 	}
 	sess, ctr := u.sess, u.cur
@@ -144,6 +154,27 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 			fyne.Do(func() { done(ch) })
 		})
 	}
+}
+
+// qrMode — что делать с QR и окном сохранения по итогу сверки ключа
+// сервера. Три состояния (SEC-01 R1-a, признак 1): САМИ — только при
+// «совпал»; «не совпал» и «не сверен» — по явной кнопке, у каждого своя.
+type qrMode int
+
+const (
+	qrUnverified qrMode = iota // нулевое — «не сверен»: осторожная сторона
+	qrAuto
+	qrForeign
+)
+
+func qrDecision(ch core.SavedCheck) qrMode {
+	switch ch.ServerKey {
+	case core.CheckSame:
+		return qrAuto
+	case core.CheckDiffer:
+		return qrForeign
+	}
+	return qrUnverified
 }
 
 // qrObject — QR конфига или честная надпись, что QR построить не удалось

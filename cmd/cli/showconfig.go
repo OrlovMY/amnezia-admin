@@ -13,6 +13,11 @@ import (
 // текст — тот же, что в GUI).
 var errConfigNotSaved = errors.New("конфиг не найден")
 
+// errUnverifiedNotPrinted — -print при несовпавшем или не сверенном ключе
+// сервера: содержимое не напечатано.
+var errUnverifiedNotPrinted = errors.New("содержимое НЕ напечатано: ключ сервера в файле не совпал с этим сервером или не сверен (см. выше). " +
+	"Если вы уверены в файле, повторите с -print-unverified")
+
 // legacyConfigDirs — каталоги прежних версий (тесты уводят во временный).
 var legacyConfigDirs = core.LegacyConfigDirs
 
@@ -21,7 +26,7 @@ var legacyConfigDirs = core.LegacyConfigDirs
 // доверяем), и его сверка с сервером. Содержимое (с приватным ключом)
 // печатается ТОЛЬКО по -print — по явной просьбе человека. QR в терминал не
 // выводится.
-func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident string, printContent bool) error {
+func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident string, printContent, printUnverified bool) error {
 	clients, err := sess.LoadClients(cur)
 	if err != nil {
 		return err
@@ -44,8 +49,14 @@ func showConfig(w io.Writer, sess *core.Session, cur *core.Container, ident stri
 	}
 	fmt.Fprintln(w, guiview.SavedFoundText(sc))
 	sp, perr := sess.ClientPeerParams(cur, cl)
-	fmt.Fprintln(w, guiview.SavedCheckText(core.CheckSavedConfig(sc.Config, sp, perr)))
-	if printContent {
+	ch := core.CheckSavedConfig(sc.Config, sp, perr)
+	fmt.Fprintln(w, guiview.SavedCheckText(ch))
+	// SEC-01 R1-b: содержимое — только при совпавшем ключе сервера; иначе —
+	// лишь по отдельному согласию -print-unverified.
+	if printContent && ch.ServerKey != core.CheckSame && !printUnverified {
+		return errUnverifiedNotPrinted
+	}
+	if printContent || printUnverified {
 		fmt.Fprintln(w, "--- содержимое (приватный ключ клиента — никому не пересылайте) ---")
 		fmt.Fprint(w, sc.Config)
 	}

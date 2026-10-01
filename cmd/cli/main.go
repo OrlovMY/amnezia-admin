@@ -873,7 +873,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
-	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента)")
+	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента) — только если ключ сервера сверен и совпал")
+	printUnverified := fs.Bool("print-unverified", false, "show-config: напечатать содержимое, даже если ключ сервера не совпал или не сверен")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1058,7 +1059,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = e
 	case "show-config":
-		err = showConfig(stdout, sess, cur, *name, *printConf)
+		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
 		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config)", cmd)
 	}

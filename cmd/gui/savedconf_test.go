@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	wantSavedNotFound    = "Конфигурация этого клиента не найдена на этом компьютере."
+	wantSavedNotFound    = "Конфигурация этого клиента не найдена в папках, где программа её ищет:"
 	wantSavedNotFoundEnd = "Если вы сохраняли её в другое место, откройте файл оттуда. " +
 		"Иначе восстановить её нельзя — ключ есть только у самого клиента."
-	wantUnreadablePrefix = "Не удалось прочитать каталог конфигураций или файл, поэтому неизвестно, " +
-		"сохранён ли конфиг этого клиента на этом компьютере. Подробности: "
+	wantUnreadablePrefix = "Не удалось прочитать папку конфигураций или файл в ней, поэтому неизвестно, " +
+		"сохранён ли там конфиг этого клиента. Не перевыпускайте его, пока это не выяснено: " +
+		"проверьте доступ к папке и откройте окно ещё раз. Подробности: "
 )
 
 // configsEnv — свой каталог данных пользователя; возвращает каталог конфигураций.
@@ -211,7 +212,7 @@ func TestMenuSavedConfigNotSavedOffersRekey(t *testing.T) {
 			t.Errorf("в тексте «не найден» нет каталога поиска %q:\n%s", d.Path, txt)
 		}
 	}
-	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Перевыпустить…"))
+	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Перевыпустить — старый перестанет работать…"))
 	if got := popupText(t, u); !strings.Contains(got, "Перевыпустить конфиг?") {
 		t.Errorf("«Перевыпустить…» не привела к подтверждению перевыпуска:\n%s", got)
 	}
@@ -232,7 +233,7 @@ func TestMenuSavedConfigNotSavedOffersRekey(t *testing.T) {
 	if !strings.Contains(txt, wantUnreadablePrefix) || strings.Contains(txt, wantSavedNotFound) {
 		t.Errorf("«не прочитано»:\n%s", txt)
 	}
-	for _, o := range []string{"Перевыпустить…"} {
+	for _, o := range []string{"Перевыпустить"} {
 		if strings.Contains(txt, o) {
 			t.Errorf("при «не прочитано» предложено %q — сохранён ли конфиг, неизвестно", o)
 		}
