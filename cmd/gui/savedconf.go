@@ -98,7 +98,11 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 			qrBox.Add(qr)
 		}
 	}
-	var anyway, unverified *widget.Button
+	var anyway, unverified, stale *widget.Button
+	stale = widget.NewButton(guiview.SavedShowQRStale, func() {
+		showQR()
+		stale.Hide()
+	})
 	anyway = widget.NewButton(guiview.SavedShowQRAnyway, func() {
 		showQR()
 		anyway.Hide()
@@ -122,13 +126,14 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	})
 	// АУДИТ-МЕНЮ-QR-UX Н1: QR — вне прокрутки, сверху, целиком; пока он не
 	// разрешён, место пустое, и кнопки показа — первыми под сверкой.
-	info := container.NewVScroll(container.NewVBox(check, anyway, unverified, from))
+	info := container.NewVScroll(container.NewVBox(check, anyway, unverified, stale, from))
 	content := container.NewBorder(qrBox, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
 	anyway.Hide() // после показа: d.Show() показывает всё содержимое
 	unverified.Hide()
+	stale.Hide()
 
 	// Сверка с сервером — после показа: файл уже прочитан, сеть может быть
 	// медленной. Не удалось — «не сверено», а не «совпадает».
@@ -142,6 +147,8 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 			}
 		case qrForeign:
 			anyway.Show() // окно сохранения само не открывается
+		case qrStale:
+			stale.Show()
 		default:
 			unverified.Show() // не сверено — ни QR, ни окна сохранения сами
 		}
@@ -167,14 +174,20 @@ const (
 	qrUnverified qrMode = iota // нулевое — «не сверен»: осторожная сторона
 	qrAuto
 	qrForeign
+	qrStale // ключ сервера совпал, а PSK или адрес в файле — нет
 )
 
+// qrDecision — сам QR и само окно сохранения ТОЛЬКО если совпали ВСЕ три
+// сверки (решение ядра, раунд 5): заведомо устаревший файл без явного шага
+// не выдаётся.
 func qrDecision(ch core.SavedCheck) qrMode {
-	switch ch.ServerKey {
-	case core.CheckSame:
-		return qrAuto
-	case core.CheckDiffer:
+	switch {
+	case ch.ServerKey == core.CheckDiffer:
 		return qrForeign
+	case ch.ServerKey == core.CheckSame && ch.PSK == core.CheckSame && ch.Address == core.CheckSame:
+		return qrAuto
+	case ch.PSK == core.CheckDiffer || ch.Address == core.CheckDiffer:
+		return qrStale
 	}
 	return qrUnverified
 }

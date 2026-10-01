@@ -55,6 +55,7 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/envcheck"
+	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/version"
 )
 
@@ -366,13 +367,18 @@ func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 // тест подставлял свой и не писал в настоящий каталог данных владельца — тот
 // же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
 func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
-	abs, createdDir, err := core.WriteClientConfig(dir, u.Name, u.Config)
+	res, err := core.SaveClientConfig(dir, u.Name, u.Config, u.Replaces)
+	abs, createdDir := res.Path, res.DirWasMissing
 	if err != nil {
 		return saveFailed(w, u, err)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
+	if res.Occupied != "" {
+		// К-1: имя занято конфигом другого клиента — его файл не тронут
+		fmt.Fprintln(w, cWarn(guiview.OccupiedText(res.Occupied, filepath.Base(abs))))
+	}
 	if createdDir {
 		// Одноразовая подсказка: каталога не было, значит в новое место
 		// сохраняется впервые (ревью UX-01).

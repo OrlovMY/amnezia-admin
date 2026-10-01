@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Куда сохраняются клиентские .conf (A4в).
@@ -98,19 +99,128 @@ func UserConfigsDir() (string, error) {
 // доезжало. Узость признака проверяема ровно потому, что значение не
 // затирается.
 func WriteClientConfig(dir, name, config string) (path string, dirWasMissing bool, err error) {
+	r, err := SaveClientConfig(dir, name, config, "")
+	return r.Path, r.DirWasMissing, err
+}
+
+// SaveResult — итог SaveClientConfig.
+type SaveResult struct {
+	Path          string
+	DirWasMissing bool
+	// Occupied — имя файла, занятого конфигом ДРУГОГО клиента (или
+	// непроверяемым файлом): сохранено под другим именем (Path). "" — нет.
+	Occupied string
+}
+
+// SaveClientConfig — запись конфига клиента name, которая НЕ затирает файл
+// другого клиента (АУДИТ-МЕНЮ-QR-LOGIC К-1: «Phone» переименован в «Old
+// phone», создан новый «Phone» — прежде Phone.conf, единственная копия
+// ключа «Old phone», затирался молча; то же для «Phone»/«phone» на Windows).
+//
+// Имя занято, если в каталоге есть файл с тем же именем БЕЗ учёта регистра
+// (на Windows и macOS это один файл). Перезаписать можно, только если его
+// PrivateKey даёт ключ ЭТОГО клиента или replaces (прежний ключ этого же
+// клиента при rekey). Другой ключ, не читается, не разбирается — файл не
+// трогается, берётся «<имя> (2).conf», «(3)»… и Occupied называет занятое.
+// Запись атомарная: временный файл 0600 в том же каталоге и rename.
+func SaveClientConfig(dir, name, config, replaces string) (SaveResult, error) {
+	var r SaveResult
 	if !filepath.IsAbs(dir) {
-		return "", false, fmt.Errorf("каталог для конфигов %q не абсолютный — конфиг не сохранён", dir)
+		return r, fmt.Errorf("каталог для конфигов %q не абсолютный — конфиг не сохранён", dir)
 	}
 	_, statErr := os.Stat(dir)
-	dirWasMissing = errors.Is(statErr, fs.ErrNotExist)
+	r.DirWasMissing = errors.Is(statErr, fs.ErrNotExist)
 	if err := os.MkdirAll(dir, configsDirPerm); err != nil {
-		return "", dirWasMissing, err
+		return r, err
 	}
-	path = filepath.Join(dir, SanitizeName(name)+".conf")
-	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
-		return "", dirWasMissing, err
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return r, fmt.Errorf("каталог конфигов %s не прочитан — не проверить, не занято ли имя; конфиг не сохранён: %w", dir, err)
 	}
-	return path, dirWasMissing, nil
+	mine := ""
+	if pub, err := pubFromPriv(parseWgConf(config).iface["PrivateKey"]); err == nil {
+		mine = pub
+	}
+	base := SanitizeName(name)
+	for n := 1; n <= 1000; n++ {
+		cand := base + ".conf"
+		if n > 1 {
+			cand = fmt.Sprintf("%s (%d).conf", base, n)
+		}
+		existing := ""
+		for _, e := range entries {
+			if strings.EqualFold(e.Name(), cand) {
+				existing = e.Name()
+				break
+			}
+		}
+		if existing != "" {
+			if !sameClientFile(filepath.Join(dir, existing), mine, replaces) {
+				if r.Occupied == "" {
+					r.Occupied = existing
+				}
+				continue
+			}
+			cand = existing // тот же файл — писать под его настоящим именем
+		}
+		r.Path = filepath.Join(dir, cand)
+		if err := atomicWrite0600(dir, r.Path, []byte(config)); err != nil {
+			return SaveResult{DirWasMissing: r.DirWasMissing}, err
+		}
+		return r, nil
+	}
+	return SaveResult{DirWasMissing: r.DirWasMissing}, fmt.Errorf("в каталоге %s заняты все имена %q (1…1000) — конфиг не сохранён", dir, base)
+}
+
+// sameClientFile — файл p содержит конфиг клиента с ключом mine или
+// replaces. Не читается, не разбирается, не обычный — НЕ этот клиент
+// (перезаписывать нельзя).
+func sameClientFile(p, mine, replaces string) bool {
+	b, err := readSavedFile(p)
+	if err != nil {
+		return false
+	}
+	pub, err := pubFromPriv(parseWgConf(string(b)).iface["PrivateKey"])
+	if err != nil {
+		return false
+	}
+	return (mine != "" && pub == mine) || (replaces != "" && pub == replaces)
+}
+
+// atomicWrite0600 — временный файл 0600 в каталоге dir, затем rename на
+// path: при сбое прежний файл цел.
+func atomicWrite0600(dir, path string, data []byte) error {
+	f, err := os.CreateTemp(dir, ".amnezia-conf-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // SaveFailedAdvice — ЧТО ДЕЛАТЬ, когда конфиг сохранить не удалось.

@@ -19,6 +19,7 @@ func TestShowConfigCommand(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("LOCALAPPDATA", base)
 	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("HOME", base) // macOS: UserConfigsDir от HOME
 	dir, err := core.UserConfigsDir()
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +87,7 @@ func TestShowConfigPrintNeedsVerifiedServer(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("LOCALAPPDATA", base)
 	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("HOME", base) // macOS: UserConfigsDir от HOME
 	dir, err := core.UserConfigsDir()
 	if err != nil {
 		t.Fatal(err)

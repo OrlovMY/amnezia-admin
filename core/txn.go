@@ -1235,7 +1235,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
-		result:     &NewUser{Name: name, IP: clientIP, Config: config},
+		result:     &NewUser{Name: name, IP: clientIP, Config: config, Replaces: clientID},
 	}
 	s.fillSHA(p)
 	return p, nil

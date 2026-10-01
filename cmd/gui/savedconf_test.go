@@ -40,6 +40,7 @@ func configsEnv(t *testing.T) string {
 	base := t.TempDir()
 	t.Setenv("LOCALAPPDATA", base)
 	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("HOME", base) // macOS: UserConfigsDir от HOME
 	d, err := core.UserConfigsDir()
 	if err != nil {
 		t.Fatal(err)

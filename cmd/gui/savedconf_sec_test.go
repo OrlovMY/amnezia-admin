@@ -133,16 +133,25 @@ func TestChosenConfigFilePerms(t *testing.T) {
 // TestQRDecisionTable — РАЗЛИЧЕНИЕ (SEC-01 R1-a): сами QR и окно
 // сохранения — ТОЛЬКО при «совпал»; «не совпал» и «не сверен» — разные кнопки.
 func TestQRDecisionTable(t *testing.T) {
+	S, D, U := core.CheckSame, core.CheckDiffer, core.CheckUnknown
 	for _, c := range []struct {
-		st   core.CheckState
-		want qrMode
+		srv, psk, addr core.CheckState
+		want           qrMode
 	}{
-		{core.CheckSame, qrAuto},
-		{core.CheckDiffer, qrForeign},
-		{core.CheckUnknown, qrUnverified},
+		{S, S, S, qrAuto},
+		{D, S, S, qrForeign},
+		{D, D, U, qrForeign},
+		{U, S, S, qrUnverified},
+		{U, U, U, qrUnverified},
+		// раунд 5: сам — только если совпали ВСЕ три
+		{S, D, S, qrStale},
+		{S, S, D, qrStale},
+		{S, U, S, qrUnverified},
+		{S, S, U, qrUnverified},
+		{U, D, S, qrStale},
 	} {
-		if got := qrDecision(core.SavedCheck{ServerKey: c.st}); got != c.want {
-			t.Errorf("ключ сервера %v: %v, ожидалось %v", c.st, got, c.want)
+		if got := qrDecision(core.SavedCheck{ServerKey: c.srv, PSK: c.psk, Address: c.addr}); got != c.want {
+			t.Errorf("сервер %v PSK %v адрес %v: %v, ожидалось %v", c.srv, c.psk, c.addr, got, c.want)
 		}
 	}
 }

@@ -17,6 +17,12 @@ const (
 	MenuSaveConfig = "Сохранить конфигурацию…"
 )
 
+// OccupiedText — имя файла было занято конфигом другого клиента
+// (АУДИТ-МЕНЮ-QR-LOGIC К-1): чужой файл не тронут, сохранено под другим.
+func OccupiedText(occupied, savedAs string) string {
+	return "Файл " + occupied + " уже занят конфигом другого клиента — сохранено как " + savedAs + "."
+}
+
 // SavedConfigTitle — заголовок окна.
 func SavedConfigTitle(name string) string {
 	return fmt.Sprintf("Конфигурация «%s»", name)
@@ -67,6 +73,10 @@ const SavedShowQRAnyway = "Всё равно показать QR"
 // SavedShowQRUnverified — кнопка показа QR, когда ключ сервера сверить не
 // удалось (причина — в строке сверки над кнопкой).
 const SavedShowQRUnverified = "Показать QR — ключ сервера не сверен"
+
+// SavedShowQRStale — кнопка показа QR, когда ключ сервера совпал, а
+// PresharedKey или адрес в файле — нет (файл устарел, АУДИТ-МЕНЮ-QR-LOGIC).
+const SavedShowQRStale = "Показать QR — файл не совпал с сервером"
 
 // SavedRekeyButton — перевыпуск из окна «не найден» (UX-01 П1).
 const SavedRekeyButton = "Перевыпустить — старый перестанет работать…" // полная «(старый конфиг перестанет работать)» раздувала рамку до 482.5 (UX-01 П1, запасной вариант)

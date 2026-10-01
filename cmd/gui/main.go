@@ -2701,7 +2701,22 @@ func (u *ui) writeConfigFile(nu *core.NewUser) (string, bool, error) {
 // свой и не писал в настоящий каталог данных владельца, — тот же приём, что с
 // writeCrashLog(dir,…) и saveSortStateTo(dir,…).
 func writeConfigFileTo(dir string, nu *core.NewUser) (string, bool, error) {
-	return core.WriteClientConfig(dir, nu.Name, nu.Config)
+	r, err := saveConfigFileTo(dir, nu)
+	return r.Path, r.DirWasMissing, err
+}
+
+// saveConfigFileTo — запись, не затирающая файл ДРУГОГО клиента (К-1):
+// занятое имя — сохранено под «<имя> (2).conf», и r.Occupied это называет.
+func saveConfigFileTo(dir string, nu *core.NewUser) (core.SaveResult, error) {
+	return core.SaveClientConfig(dir, nu.Name, nu.Config, nu.Replaces)
+}
+
+func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
+	dir, err := core.UserConfigsDir()
+	if err != nil {
+		return core.SaveResult{}, err
+	}
+	return saveConfigFileTo(dir, nu)
 }
 
 // showConfigDialog показывает готовый клиентский конфиг в виде QR-кода
@@ -2759,7 +2774,8 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		u.saveConfigAs(nu.Name, nu.Config)
 	})
 	autoSave := func() {
-		abs, createdDir, err := u.writeConfigFile(nu)
+		res, err := u.saveConfigFile(nu)
+		abs, createdDir := res.Path, res.DirWasMissing
 		if err != nil {
 			// Громко и в самом окне (признак 4): конфиг существует только в
 			// памяти — окно закроется, и ключи клиента потеряны.
@@ -2773,7 +2789,12 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		}
 		// Одно событие — одно слово: и здесь, и в строке состояния «Конфиг
 		// сохранён» (ревью UX-01).
-		savedLabel.SetText("Конфиг сохранён: " + abs)
+		saved := "Конфиг сохранён: " + abs
+		if res.Occupied != "" {
+			// К-1: громко — файл с этим именем принадлежит другому клиенту
+			saved += "\n" + guiview.OccupiedText(res.Occupied, filepath.Base(abs))
+		}
+		savedLabel.SetText(saved)
 		copyBtn.OnTapped = func() {
 			fyne.CurrentApp().Clipboard().SetContent(abs)
 			if u.status != nil {

@@ -49,3 +49,25 @@ func TestMenuFindsLegacyConfig(t *testing.T) {
 		t.Errorf("прежний каталог не читается — ожидалось «не прочитано»:\n%s", txt)
 	}
 }
+
+// TestConfigDialogOccupiedName — К-1 в окне: имя занято файлом другого
+// клиента — его файл цел, сохранено под «(2)», и окно говорит это прямо.
+func TestConfigDialogOccupiedName(t *testing.T) {
+	u := testUI(t)
+	dir := configsEnv(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := []byte("[Interface]\nPrivateKey = чужой\n")
+	if err := os.WriteFile(filepath.Join(dir, "Петя.conf"), other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u.showConfigDialog(&core.NewUser{Name: "Петя", IP: "10.8.1.8", Config: "[Interface]\nPrivateKey = СЕКРЕТ\n"}, "создан")
+	txt := popupText(t, u)
+	if !strings.Contains(txt, "Файл Петя.conf уже занят конфигом другого клиента — сохранено как Петя (2).conf.") {
+		t.Errorf("занятое имя не названо:\n%s", txt)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "Петя.conf")); string(b) != string(other) {
+		t.Error("файл другого клиента перезаписан")
+	}
+}
