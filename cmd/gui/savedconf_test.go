@@ -108,7 +108,7 @@ func TestConfigDialogAutoSaves(t *testing.T) {
 	t.Setenv("HOME", "")
 	u.showConfigDialog(&core.NewUser{Name: "Вася", IP: "10.8.1.9", Config: "[Interface]\nPrivateKey = СЕКРЕТ\n"}, "создан")
 	txt = popupText(t, u)
-	if !strings.Contains(txt, "Конфиг НЕ сохранён: ") || !strings.Contains(txt, "Сохраните конфиг кнопкой «Сохранить ещё в…»") {
+	if !strings.Contains(txt, "Конфиг НЕ сохранён. Сохраните его кнопкой «Сохранить ещё в…» до закрытия окна.") || !strings.Contains(txt, "Подробности: ") {
 		t.Errorf("сбой автосохранения не назван в окне: %s", txt)
 	}
 	if strings.Contains(txt, "СЕКРЕТ") || strings.Contains(u.status.Text, "СЕКРЕТ") {

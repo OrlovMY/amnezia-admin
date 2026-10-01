@@ -188,11 +188,21 @@ func TestConfigDialogNewTextInView(t *testing.T) {
 	// новом месте) — прокруткой.
 	for _, tc := range []struct{ state, prefix string }{
 		{"сохранён", "Конфиг сохранён: "},
-		{"отказ", "Конфиг НЕ сохранён: "},
+		{"отказ", "Конфиг НЕ сохранён. Сохраните его кнопкой «Сохранить ещё в…»"},
+		// раунд 6 (AU-UX П1): ошибка ОС с длинным абсолютным путём — совет
+		// всё равно первой строкой и виден без прокрутки
+		{"отказ, длинный путь", "Конфиг НЕ сохранён. Сохраните его кнопкой «Сохранить ещё в…»"},
 	} {
 		for _, size := range osmotrSizes {
 			t.Run(tc.state+"/"+size, func(t *testing.T) {
 				_, pop := configScene(t, tc.state, size)
+				if tc.state == "отказ, длинный путь" {
+					// сцена обязана нести длинную ошибку ОС с полным путём
+					all := strings.Join(visibleTexts(pop), " ")
+					if !strings.Contains(all, "Подробности: ") || !strings.Contains(all, "Application Support") {
+						t.Fatalf("сцена ничего не значит: нет ошибки ОС с длинным путём: %s", all)
+					}
+				}
 				var sc *container.Scroll
 				var l *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {

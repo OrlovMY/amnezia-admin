@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Куда сохраняются клиентские .conf (A4в).
@@ -133,6 +134,57 @@ func SaveClientConfig(dir, name, config, replaces string) (SaveResult, error) {
 	if err := os.MkdirAll(dir, configsDirPerm); err != nil {
 		return r, err
 	}
+	// Выбор имени и запись — под межпроцессным замком каталога
+	// (АУДИТ-МЕНЮ-QR-LOGIC М-2): две копии программы, сохраняющие одно имя
+	// (или одно без учёта регистра), иначе обе видят имя свободным и вторая
+	// затирает первую. Тот же механизм, что у known_hosts (PR #31).
+	err := withConfigsLock(dir, func() error {
+		var err error
+		r, err = saveClientConfigLocked(dir, name, config, replaces, r)
+		return err
+	})
+	return r, err
+}
+
+// ErrConfigsBusy — каталог конфигураций занят другой копией программы
+// дольше configsLockWait: конфиг НЕ сохранён.
+var ErrConfigsBusy = errors.New("каталог конфигураций занят другой копией программы — конфиг не сохранён, повторите")
+
+// configsLockWait — сколько ждать замок каталога конфигураций.
+var configsLockWait = 10 * time.Second
+
+// configsLockName — файл замка в каталоге конфигураций (не *.conf: поиск
+// конфигов его не видит).
+const configsLockName = ".configs.lock"
+
+// withConfigsLock — fn под межпроцессным замком каталога dir (файл
+// .configs.lock, 0600; flock/LockFileEx через tryLockFile). Ждём не дольше
+// configsLockWait, затем — громкий отказ ErrConfigsBusy.
+func withConfigsLock(dir string, fn func() error) error {
+	lf, err := os.OpenFile(filepath.Join(dir, configsLockName), os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return fmt.Errorf("замок каталога конфигураций: %w — конфиг не сохранён", err)
+	}
+	defer lf.Close()
+	deadline := time.Now().Add(configsLockWait)
+	for {
+		busy, err := tryLockFile(lf)
+		if err != nil {
+			return fmt.Errorf("замок каталога конфигураций: %w — конфиг не сохранён", err)
+		}
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w (ждали %v): %s", ErrConfigsBusy, configsLockWait, dir)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer unlockFile(lf)
+	return fn()
+}
+
+func saveClientConfigLocked(dir, name, config, replaces string, r SaveResult) (SaveResult, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return r, fmt.Errorf("каталог конфигов %s не прочитан — не проверить, не занято ли имя; конфиг не сохранён: %w", dir, err)

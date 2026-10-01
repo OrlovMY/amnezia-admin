@@ -112,6 +112,21 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 		switch state {
 		case "сохранён":
 			configDirEnv(t)
+		case "отказ, длинный путь":
+			// каталог данных — длинный абсолютный путь (модель macOS), а на
+			// месте каталога конфигураций — ФАЙЛ: MkdirAll отвечает ошибкой ОС
+			// с полным путём (3–4 строки в окне)
+			configDirEnv(t)
+			d, err := core.UserConfigsDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(d, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		case "отказ":
 			// Каталог данных не определяется ни на одной ОС: относительный
 			// путь отвергают и core (Windows), и os.UserConfigDir.
@@ -244,6 +259,7 @@ var moreForms = []osmotrForm{
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},
+	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",

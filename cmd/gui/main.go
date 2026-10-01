@@ -2761,10 +2761,14 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
 	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
 	// перевыпустить: кнопкой «Перевыпустить» в главном окне.
-	failHint := widget.NewLabel("Сохраните конфиг кнопкой «Сохранить ещё в…» в другое место, пока это окно открыто. " +
-		core.SaveFailedAdvice(nu.Name) + " Это делает кнопка «Перевыпустить» в главном окне.")
+	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) + " Это делает кнопка «Перевыпустить» в главном окне.")
 	failHint.Wrapping = fyne.TextWrapWord
 	failHint.Hide()
+	// AU-UX П1 (раунд 6): ошибка ОС с полным путём — 3–4 строки; она идёт
+	// ПОСЛЕ совета, иначе совет уезжал под прокрутку на 1194×517.
+	failDetail := widget.NewLabel("")
+	failDetail.Wrapping = fyne.TextWrapWord
+	failDetail.Hide()
 
 	// Задача владельца 01.10.2026 («админ создал УЗ, но забыл сохранить
 	// конфигурацию»): конфиг сохраняется САМ, сразу при показе окна, в
@@ -2779,9 +2783,12 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		if err != nil {
 			// Громко и в самом окне (признак 4): конфиг существует только в
 			// памяти — окно закроется, и ключи клиента потеряны.
-			savedLabel.SetText("Конфиг НЕ сохранён: " + err.Error())
+			// Первым — что делать, пока окно открыто (AU-UX П1, раунд 6).
+			savedLabel.SetText(guiview.SaveFailedHeadline)
 			savedLabel.TextStyle = fyne.TextStyle{Bold: true}
 			failHint.Show()
+			failDetail.SetText("Подробности: " + err.Error())
+			failDetail.Show()
 			if u.status != nil {
 				u.status.SetText("Конфиг НЕ сохранён")
 			}
@@ -2828,6 +2835,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	info = container.NewVScroll(container.NewVBox(
 		savedLabel,
 		failHint,
+		failDetail,
 		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
 		hint,
