@@ -1003,6 +1003,9 @@ type NewUser struct {
 	Name   string
 	IP     string
 	Config string // готовый клиентский .conf (WireGuard/AmneziaWG)
+	// Replaces — прежний ключ клиента (rekey): файл с ним — этого же
+	// клиента, ключ мёртв, перезапись допустима (SaveClientConfig).
+	Replaces string
 }
 
 // AddUser создаёт пользователя: peer в wg0.conf, запись в clientsTable, wg syncconf.
