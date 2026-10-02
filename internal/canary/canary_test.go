@@ -143,7 +143,7 @@ func emptyFakeOn(t *testing.T, fs *fakesrv.Server, ctr *core.Container, withClie
 	t.Cleanup(sess.Close)
 	// К4: канарейка играет старую версию прежней командой записи — fakesrv
 	// принимает её только по явному разрешению.
-	fs.AllowLegacyWrite = true
+	fs.Configure(func(s *fakesrv.Server) { s.AllowLegacyWrite = true })
 	// Каталог данных дочерних программ — временный БЕЗ имени теста: путь
 	// попадает в вопросы К8, а имя теста («как ожидается…») — в проверку
 	// «вопрос не подсказывает ответ».
@@ -628,7 +628,7 @@ func TestRaceRealCASPass(t *testing.T) {
 		// задержка как у настоящего сервера: иначе пауза опроса замка
 		// known_hosts (PR #31, 20 мс) разводит две копии во времени, и
 		// fakesrv, отвечающий за доли мс, гонку не воспроизводит
-		f.exec.CommandDelay = 30 * time.Millisecond
+		f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 30 * time.Millisecond })
 		f.env.NewBin, f.env.OldBin, f.env.RaceRounds = cli, old, 3
 		r := f.env.race()
 		if r.Status != Pass {
@@ -850,13 +850,15 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 						return "", nil
 					case strings.Contains(cmd, "syncconf ] &&"):
 						if c.install {
-							f.exec.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
+							f.exec.Configure(func(s *fakesrv.Server) {
+								s.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
+							})
 						}
-						f.exec.LockBusy = c.busy
+						f.exec.Configure(func(s *fakesrv.Server) { s.LockBusy = c.busy })
 						return "", nil
 					case strings.HasSuffix(cmd, "sh -c 'mv -f /usr/bin/wg.canary-orig /usr/bin/wg'"):
-						f.exec.FailSyncconf = nil
-						f.exec.LockBusy = false
+						f.exec.Configure(func(s *fakesrv.Server) { s.FailSyncconf = nil })
+						f.exec.Configure(func(s *fakesrv.Server) { s.LockBusy = false })
 						restored = true
 						return "", nil
 					case strings.Contains(cmd, "sha256sum "):
@@ -865,11 +867,11 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 						if c.drop && sums == 2 { // второй подсчёт — сразу после исхода
 							f.exec.SetFile("/tmp/canary-empty/wg0.conf", []byte("[Interface]\n"))
 							saved := f.exec.FailSyncconf
-							f.exec.FailSyncconf = nil
+							f.exec.Configure(func(s *fakesrv.Server) { s.FailSyncconf = nil })
 							if _, err := f.exec.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /tmp/canary-empty/wg0.conf)'", nil); err != nil {
 								t.Fatalf("модель потери peer'ов: %v", err)
 							}
-							f.exec.FailSyncconf = saved
+							f.exec.Configure(func(s *fakesrv.Server) { s.FailSyncconf = saved })
 						}
 						return out, nil
 					}
@@ -1001,7 +1003,7 @@ func TestCleanupFailureInSummary(t *testing.T) {
 			if r := f.env.cli(cli, f.env.KeyEnv, "add", "-name", "canary-left"); r.code != 0 {
 				t.Errorf("canary-left: %d %s", r.code, r.title)
 			}
-			f.exec.LockBusy = true
+			f.exec.Configure(func(s *fakesrv.Server) { s.LockBusy = true })
 		}
 		return pre(cmd)
 	}

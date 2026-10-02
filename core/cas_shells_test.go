@@ -623,6 +623,11 @@ func TestCASScriptRealShellsCanary(t *testing.T) {
 	}
 	for _, pl := range plants {
 		t.Run(pl.name, func(t *testing.T) {
+			// Посадки — отдельные процессы со своими временными каталогами:
+			// идут параллельно. CI 02.10 (linux, -race): по очереди четыре
+			// прохода около двух минут каждый вместе с основным прогоном
+			// выходили за 10 минут go test, и пакет core падал по тайм-ауту.
+			t.Parallel()
 			cmd := exec.Command(os.Args[0], "-test.run", "^TestCASScriptRealShells$", "-test.count=1")
 			// Без GITHUB_STEP_SUMMARY: итог посаженного прогона не должен
 			// попасть в сводку job рядом с настоящим.

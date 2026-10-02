@@ -71,3 +71,16 @@ func TestFilesError(t *testing.T) {
 		t.Errorf("обход несуществующего каталога без ошибки")
 	}
 }
+
+// TestLeaksIgnoresOnlyGoTelemetry — исключение ровно одно: телеметрия Go.
+func TestLeaksIgnoresOnlyGoTelemetry(t *testing.T) {
+	got := Leaks([]string{
+		filepath.FromSlash("go/telemetry/local/go@go1.26.3.count"),
+		filepath.FromSlash("go/env"),
+		filepath.FromSlash("amnezia-admin/Конфигурации/canary-x.conf"),
+		filepath.FromSlash("gotelemetry/x"),
+	})
+	if len(got) != 3 {
+		t.Errorf("утечки %v, ждали всё, кроме go/telemetry/…", got)
+	}
+}

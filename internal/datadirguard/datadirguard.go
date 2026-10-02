@@ -52,7 +52,8 @@ func Run(m *testing.M, dir *string) int {
 		*dir = d
 	}
 	code := m.Run()
-	leaked, werr := Files(d)
+	all, werr := Files(d)
+	leaked := Leaks(all)
 	if werr != nil {
 		// QA-01 Н4: каталог не обойти — «утечек нет» не утверждается.
 		fmt.Fprintf(os.Stderr, "СТОРОЖ datadirguard: унаследованный каталог данных не обойти (%v) — есть ли в нём записи, неизвестно\n", werr)
@@ -64,6 +65,26 @@ func Run(m *testing.M, dir *string) int {
 		return 1
 	}
 	return code
+}
+
+// toolchainPrefix — единственное, что в унаследованном каталоге данных
+// пишет НЕ программа: счётчики телеметрии самого Go (go build/go env в
+// тестах; os.UserConfigDir/go/telemetry — на Linux и macOS он от
+// XDG_CONFIG_HOME/HOME). CI 02.10: без этого исключения сторож краснел на
+// linux и macos по файлам go/telemetry/local/*.count. Закрытый список из
+// одного префикса: всё остальное — утечка.
+const toolchainPrefix = "go/telemetry/"
+
+// Leaks — файлы из Files, которые считаются записью в каталог данных
+// (всё, кроме телеметрии Go).
+func Leaks(files []string) []string {
+	var out []string
+	for _, f := range files {
+		if !strings.HasPrefix(filepath.ToSlash(f), toolchainPrefix) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Files — файлы под dir, имена относительно dir (содержимое не читается).

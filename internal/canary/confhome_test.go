@@ -33,7 +33,7 @@ func filesUnder(dir string) []string {
 	if err != nil {
 		return []string{"ОБХОД НЕ УДАЛСЯ: " + err.Error()}
 	}
-	return fs
+	return datadirguard.Leaks(fs)
 }
 
 // TestChildConfigsInConfHome — дочерний amnezia-admin (настоящий, против

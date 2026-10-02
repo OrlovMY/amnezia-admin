@@ -11,9 +11,11 @@ package canary
 //     не на запись под замком.
 
 import (
+	"amnezia-admin/internal/fakesrv"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,8 +29,8 @@ func TestK4TmpCollisionIsRace(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 3
-	f.exec.LegacyTmpSplit = true
-	f.exec.LegacyTmpGap = 80 * time.Millisecond
+	f.exec.Configure(func(s *fakesrv.Server) { s.LegacyTmpSplit = true })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LegacyTmpGap = 80 * time.Millisecond })
 	r := f.env.race()
 	if r.Status != Pass {
 		t.Fatalf("К4 со столкновениями на .tmp: %s — %s", r.Status, r.Detail)
@@ -55,11 +57,10 @@ func TestK4OtherFailureNotRace(t *testing.T) {
 			f.env.NewBin = serialFake(t, newCLI(t))
 			f.env.RaceRounds = 2
 			orig := f.env.RemoteIn
-			n := 0
+			var n atomic.Int32 // прежние записи идут из двух горутин
 			f.env.RemoteIn = func(cmd string, stdin []byte) (string, error) {
 				if strings.Contains(cmd, "cat > ") {
-					n++
-					if n == c.nth {
+					if int(n.Add(1)) == c.nth {
 						return "sh: can't create /opt/amnezia/awg/wg0.conf.tmp: Permission denied vpn://СЕКРЕТНЫЙ-КЛЮЧ", errors.New("Process exited with status 1")
 					}
 				}
@@ -191,9 +192,9 @@ func lslocksHook(f *fakeServer, foreign bool) {
 func TestK5HitsWriteUnderLock(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
-	f.exec.CommandDelay = 150 * time.Millisecond
-	f.exec.LockHoldFor = 1500 * time.Millisecond
-	f.exec.LockHoldAbort = true
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 150 * time.Millisecond })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldFor = 1500 * time.Millisecond })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldAbort = true })
 	lslocksHook(f, false)
 	r := f.env.breakWrite()
 	if r.Status != Pass {
@@ -269,8 +270,8 @@ func TestJudgeK5Second(t *testing.T) {
 func TestK5CutWriteLanded(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
-	f.exec.CommandDelay = 150 * time.Millisecond
-	f.exec.LockHoldFor = 1500 * time.Millisecond
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 150 * time.Millisecond })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldFor = 1500 * time.Millisecond })
 	lslocksHook(f, false)
 	r := f.env.breakWrite()
 	if r.Status != Pass || !strings.Contains(r.Detail, "оборванная запись завершилась") {
@@ -285,7 +286,7 @@ func TestK5CutWriteLanded(t *testing.T) {
 func TestK5ForeignAppearsLater(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
-	f.exec.CommandDelay = 100 * time.Millisecond
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 100 * time.Millisecond })
 	calls := 0
 	inner := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {
@@ -313,10 +314,10 @@ func TestK5ForeignAppearsLater(t *testing.T) {
 func TestK5WaitNotMeasured(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
-	f.exec.CommandDelay = 150 * time.Millisecond
-	f.exec.LockHoldFor = 1500 * time.Millisecond
-	f.exec.LockHoldAbort = true
-	f.exec.LockShared = true
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 150 * time.Millisecond })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldFor = 1500 * time.Millisecond })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldAbort = true })
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockShared = true })
 	lslocksHook(f, false)
 	r := f.env.breakWrite()
 	if r.Status != Pass || !strings.Contains(r.Detail, "ждала ли она замка, не измерено") || strings.Contains(r.Detail, "исход: ждёт") {
@@ -330,7 +331,7 @@ func TestK5WaitNotMeasured(t *testing.T) {
 func TestK5LabelWrongSum(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
-	f.exec.CommandDelay = 100 * time.Millisecond
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 100 * time.Millisecond })
 	calls := 0
 	inner := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {

@@ -325,24 +325,31 @@ var (
 // Commands() ДО обработки (в том числе отклонённая хуками) — тесты проверяют
 // "ни одной записи не произошло" именно по этому журналу.
 func (s *Server) Run(cmd string, stdin []byte) (string, error) {
-	if d := s.CommandDelay; d > 0 {
-		time.Sleep(d)
+	// Настройки, действующие ВНЕ общего мьютекса, читаются под ним одним
+	// снимком (CI -race 02.10: тесты меняют их через Configure, пока
+	// сессии SSH уже обслуживаются).
+	s.mu.Lock()
+	delay, hold, shared, abort := s.CommandDelay, s.LockHoldFor, s.LockShared, s.LockHoldAbort
+	split, gap := s.AllowLegacyWrite && s.LegacyTmpSplit, s.LegacyTmpGap
+	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
 	}
-	if s.LockHoldFor > 0 && reCASWrite.MatchString(cmd) {
-		if !s.LockShared {
+	if hold > 0 && reCASWrite.MatchString(cmd) {
+		if !shared {
 			s.lockMu.Lock()
 			defer s.lockMu.Unlock()
 		}
 		pid := s.addHeld(cmd)
 		defer s.delHeld(pid)
-		time.Sleep(s.LockHoldFor)
-		if s.LockHoldAbort && s.lockAborted.CompareAndSwap(false, true) {
+		time.Sleep(hold)
+		if abort && s.lockAborted.CompareAndSwap(false, true) {
 			return "", &ExitError{Cmd: cmd, Status: 124, Stderr: "timeout: прервано (модель обрыва)"}
 		}
 	}
-	if s.AllowLegacyWrite && s.LegacyTmpSplit {
+	if split {
 		if m := reLegacyWrite.FindStringSubmatch(cmd); m != nil && m[2] == m[3] && m[2] == m[4] {
-			return s.legacySplit(cmd, m[2], stdin)
+			return s.legacySplit(cmd, m[2], stdin, gap)
 		}
 	}
 	s.mu.Lock()
@@ -377,6 +384,14 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	return s.dispatch(actual, stdin)
 }
 
+// Configure — изменить настройки сервера под его мьютексом: так тест
+// меняет их, пока сессии SSH уже обслуживаются, без гонки с Run.
+func (s *Server) Configure(f func(*Server)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f(s)
+}
+
 // Held — держатели замка сейчас: «PID» → командная строка (см. LockHoldFor).
 func (s *Server) Held() map[string]string {
 	s.heldMu.Lock()
@@ -407,7 +422,7 @@ func (s *Server) delHeld(pid string) {
 }
 
 // legacySplit — см. LegacyTmpSplit.
-func (s *Server) legacySplit(cmd, path string, stdin []byte) (string, error) {
+func (s *Server) legacySplit(cmd, path string, stdin []byte, gap time.Duration) (string, error) {
 	tmp := path + ".tmp"
 	s.mu.Lock()
 	s.commands = append(s.commands, cmd)
@@ -416,7 +431,6 @@ func (s *Server) legacySplit(cmd, path string, stdin []byte) (string, error) {
 	}
 	s.files[tmp] = append([]byte(nil), stdin...)
 	s.mu.Unlock()
-	gap := s.LegacyTmpGap
 	if gap <= 0 {
 		gap = 20 * time.Millisecond
 	}

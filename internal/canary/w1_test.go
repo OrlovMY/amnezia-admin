@@ -4,6 +4,7 @@ package canary
 // amnezia-awg2 — «НЕ ПРИМЕНИМО», файл конфигурации из таблицы.
 
 import (
+	"amnezia-admin/internal/fakesrv"
 	"os"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 // возвращает оба файла к состоянию до контроля; потеря при этом измерена.
 func TestOldWriterRestoresFiles(t *testing.T) {
 	f := emptyFake(t, false)
-	f.exec.CommandDelay = 30 * time.Millisecond
+	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 30 * time.Millisecond })
 	f.env.RaceRounds = 3
 	confBefore, _ := f.exec.File("/opt/amnezia/awg/wg0.conf")
 	if _, ok := f.exec.File("/opt/amnezia/awg/clientsTable"); ok {

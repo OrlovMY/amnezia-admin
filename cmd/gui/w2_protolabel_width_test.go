@@ -66,8 +66,14 @@ func TestProtoLabelFits(t *testing.T) {
 			u := focusTestUI(t)
 			osmotrMain(u)
 			u.containers = []core.Container{c}
-			u.cur = &u.containers[0]
+			// Протокол выбирается ПОСЛЕ построения экрана и без обработчика —
+			// как в osmotrMain: при u.cur, заданном до showMainScreen, выбор
+			// внутри mainScreen запускает refresh, и тестовый драйвер
+			// исполняет его fyne.Do в фоновой горутине одновременно со
+			// стройкой экрана (go test -race в CI linux/macos ловил гонку).
+			u.cur = nil
 			u.showMainScreen()
+			u.cur = &u.containers[0]
 			u.protoSelect.Selected = u.protoSelect.Options[0]
 			u.protoSelect.Refresh()
 			switch size {
