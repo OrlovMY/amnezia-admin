@@ -52,8 +52,10 @@ func TestAWG2DiscoveryDir(t *testing.T) {
 	if c.Dir != "/opt/amnezia/awg" {
 		t.Errorf("каталог amnezia-awg2 = %q, ждали /opt/amnezia/awg", c.Dir)
 	}
-	if c.Managed {
-		t.Errorf("управление amnezia-awg2 включает PR-W3 (определение формата), а не PR-W1")
+	// PR-W3: формат awg0.conf известен (S3/S4, диапазоны H) — управление
+	// включено, подпись — версия.
+	if !c.Managed || c.Proto != "AmneziaWG 2" {
+		t.Errorf("amnezia-awg2 с известным форматом: Managed=%v, Proto=%q (ждали true, «AmneziaWG 2»)", c.Managed, c.Proto)
 	}
 }
 

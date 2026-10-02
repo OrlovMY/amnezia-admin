@@ -87,7 +87,9 @@ var containersWasNow = []struct {
 	{"amnezia-sftp", "SFTP", false, false},
 	{"amnezia-tor", "Tor site", false, false},
 	{"amnezia-dns", "DNS", false, false},
-	{"amnezia-awg2", "awg2", false, true},
+	// PR-W3: подпись amnezia-awg2 — версия по awg0.conf; здесь awg0.conf нет
+	// → «не прочитан», управление выключено.
+	{"amnezia-awg2", "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)", false, true},
 	{"amnezia-foo", "foo", false, false},
 }
 

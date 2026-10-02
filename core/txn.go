@@ -1012,6 +1012,9 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
+	}
 	conf := parseWgConf(raw)
 
 	serverPriv := conf.iface["PrivateKey"]
@@ -1059,6 +1062,13 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 	}
 
 	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+	note := ""
+	if isAWG2(c) {
+		// amnezia-awg2: клиентский конфиг по template.conf (PR-W3, Р3-2) и
+		// строка честности — параметры взяты из файла сервера.
+		config = buildClientConfigAWG2(raw, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+		note = AWG2ConfigNote
+	}
 
 	p := &Plan{
 		Container:  c,
@@ -1069,7 +1079,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
-		result:     &NewUser{Name: name, IP: clientIP, Config: config},
+		result:     &NewUser{Name: name, IP: clientIP, Config: config, Note: note},
 	}
 	s.fillSHA(p)
 	return p, nil
@@ -1101,6 +1111,9 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
+	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
 	}
 	newConf, err := removePeerFromConf(raw, clientID)
 	if err != nil {
@@ -1162,6 +1175,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
+	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
 	}
 	conf := parseWgConf(raw)
 
@@ -1225,6 +1241,13 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 	}
 
 	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+	note := ""
+	if isAWG2(c) {
+		// amnezia-awg2: клиентский конфиг по template.conf (PR-W3, Р3-2) и
+		// строка честности — параметры взяты из файла сервера.
+		config = buildClientConfigAWG2(raw, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+		note = AWG2ConfigNote
+	}
 
 	p := &Plan{
 		Container:  c,
@@ -1235,7 +1258,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
-		result:     &NewUser{Name: name, IP: clientIP, Config: config, Replaces: clientID},
+		result:     &NewUser{Name: name, IP: clientIP, Config: config, Replaces: clientID, Note: note},
 	}
 	s.fillSHA(p)
 	return p, nil
@@ -1273,6 +1296,9 @@ func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Pla
 	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
+	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
 	}
 
 	p := &Plan{
@@ -1326,6 +1352,9 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
+	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
 	}
 	conf := parseWgConf(raw)
 	var peer map[string]string
@@ -1429,6 +1458,9 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
+	}
+	if err := checkAWG2Writable(c, raw); err != nil {
+		return nil, err
 	}
 	conf := parseWgConf(raw)
 

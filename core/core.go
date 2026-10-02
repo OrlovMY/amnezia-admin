@@ -219,6 +219,16 @@ func (s *Session) FindContainers() ([]Container, error) {
 	if len(found) == 0 {
 		return nil, fmt.Errorf("контейнеры Amnezia на сервере не найдены; запущено: %s", strings.Join(names, ", "))
 	}
+	// amnezia-awg2 (PR-W3): управление — только при ИЗВЕСТНОМ формате
+	// awg0.conf; подпись — версия по awgVersionOf. Незнакомый параметр или
+	// непрочитанный файл — только просмотр, причина — в подписи.
+	for i := range found {
+		if isAWG2(&found[i]) {
+			f := s.AWGFormatOf(&found[i])
+			found[i].Proto = AWGVersionLabel(f)
+			found[i].Managed = f.State == FormatKnown
+		}
+	}
 	return found, nil
 }
 
@@ -1018,6 +1028,9 @@ type NewUser struct {
 	// Replaces — прежний ключ клиента (rekey): файл с ним — этого же
 	// клиента, ключ мёртв, перезапись допустима (SaveClientConfig).
 	Replaces string
+	// Note — что человек обязан узнать при выдаче (amnezia-awg2: параметры
+	// маскировки взяты из файла сервера, AWG2ConfigNote); "" — нечего.
+	Note string
 }
 
 // AddUser создаёт пользователя: peer в wg0.conf, запись в clientsTable, wg syncconf.
