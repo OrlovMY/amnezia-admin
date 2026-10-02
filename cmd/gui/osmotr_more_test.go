@@ -134,7 +134,13 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 			t.Setenv("XDG_CONFIG_HOME", "rel")
 			t.Setenv("HOME", "")
 		}
-		u.showConfigDialog(osmotrNewUser(), "создан")
+		nu := osmotrNewUser()
+		if state == "AmneziaWG 2" {
+			// UX W3 В4: строка честности amnezia-awg2 в окне — постоянная
+			// сцена, а не только подмена ревьюера.
+			nu.Note = core.AWG2ConfigNote
+		}
+		u.showConfigDialog(nu, "создан")
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
 		mins := osmotrFrame(pop, nil)
@@ -259,6 +265,8 @@ var moreForms = []osmotrForm{
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},
+	{name: "(д) конфиг готов, AmneziaWG 2", open: openConfig("AmneziaWG 2"), width: 472,
+		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
