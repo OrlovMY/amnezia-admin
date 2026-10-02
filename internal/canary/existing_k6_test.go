@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -72,7 +73,10 @@ func TestP0K6Window(t *testing.T) {
 	for _, c := range []struct {
 		name         string
 		inK6, atLock func(t *testing.T, f *fakeServer, id string)
-		failAfter    bool
+		// afterK6 — правка сразу после чтения файла конфигурации снимком
+		// «после К6» (таблица им уже снята): отрезок «после К6 → конец».
+		afterK6   func(t *testing.T, f *fakeServer, id string)
+		failAfter bool
 		status       Status
 		want         []string
 	}{
@@ -81,6 +85,10 @@ func TestP0K6Window(t *testing.T) {
 		{name: "вне окна — НЕ ПРОЙДЕН",
 			inK6:   func(t *testing.T, f *fakeServer, _ string) { addAppUser(t, f) },
 			atLock: allowedIPs, status: Fail,
+			want: []string{"изменилась (поля: allowed_ips: было нет"}},
+		{name: "после К6 — НЕ ПРОЙДЕН",
+			inK6:    func(t *testing.T, f *fakeServer, _ string) { addAppUser(t, f) },
+			afterK6: allowedIPs, status: Fail,
 			want: []string{"изменилась (поля: allowed_ips: было нет"}},
 		{name: "[Peer] в окне К6 — НЕ ПРОЙДЕН",
 			inK6:   func(t *testing.T, f *fakeServer, id string) { appRewrite(t, f, id); peerTouch(t, f) },
@@ -92,8 +100,17 @@ func TestP0K6Window(t *testing.T) {
 			f, id := withAdmin(t, true)
 			preflight(t, f)
 			real := f.env.Remote
-			locked, broke := false, false
+			locked, broke, asked, after := false, false, false, false
+			var mu sync.Mutex // Remote зовут конкурентно (К4)
 			f.env.Remote = func(cmd string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if c.afterK6 != nil && asked && !after {
+					after = true
+					out, err := real(cmd)
+					c.afterK6(t, f, id)
+					return out, err
+				}
 				if c.atLock != nil && !locked && strings.Contains(cmd, "lslocks") {
 					locked = true
 					c.atLock(t, f, id)
@@ -104,12 +121,12 @@ func TestP0K6Window(t *testing.T) {
 				}
 				return real(cmd)
 			}
-			asked := false
 			f.env.Ask = func(q string) Answer {
 				if strings.HasPrefix(q, "К6:") {
-					asked = true
 					c.inK6(t, f, id)
-					broke = c.failAfter
+					mu.Lock()
+					asked, broke = true, c.failAfter
+					mu.Unlock()
 				}
 				return AnswerYes
 			}
@@ -120,6 +137,9 @@ func TestP0K6Window(t *testing.T) {
 			m := byID(rs)
 			if !asked || m["К6"].Status != Pass {
 				t.Fatalf("К6 не прошёл — проверка ничего не значит: %+v", m["К6"])
+			}
+			if c.afterK6 != nil && !after {
+				t.Fatal("правка после К6 не выполнялась")
 			}
 			if c.atLock != nil && !locked {
 				t.Fatal("правка вне окна не выполнялась")
@@ -137,7 +157,66 @@ func TestP0K6Window(t *testing.T) {
 	}
 }
 
-// TestFieldDiff — перечень полей: не-секретные с было/стало, прочие —
+// TestP0K6BeforeUnread — снимок «до К6» не снят (обрыв на чтении файла
+// конфигурации непосредственно перед вопросом К6), приложение в окне правит
+// запись администратора → П0-итог НЕ ПРОВЕРЕНО. Номер чтения перед
+// вопросом берётся из пробного прогона того же стенда; обрыв обязан
+// прийтись на последнюю команду перед вопросом — иначе тест падает.
+func TestP0K6BeforeUnread(t *testing.T) {
+	run := func(breakAt int) (k6, p0 Result, atAsk int, adjacent bool) {
+		f, id := withAdmin(t, true)
+		preflight(t, f)
+		real := f.env.Remote
+		suffix := " cat " + f.env.Ctr.Dir + "/" + f.env.fam.File
+		n, last, asked, brokeLast := 0, -1, false, false
+		var mu sync.Mutex // Remote зовут конкурентно (К4)
+		f.env.Remote = func(cmd string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			brokeLast = false
+			if !asked && strings.HasSuffix(cmd, suffix) {
+				n++
+				last = n
+				if n == breakAt {
+					brokeLast = true
+					return "", errors.New("обрыв связи")
+				}
+			}
+			return real(cmd)
+		}
+		f.env.Ask = func(q string) Answer {
+			if strings.HasPrefix(q, "К6:") {
+				mu.Lock()
+				asked, atAsk, adjacent = true, last, brokeLast
+				mu.Unlock()
+				appRewrite(t, f, id)
+			}
+			return AnswerYes
+		}
+		rs, err := Run(f.env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := byID(rs)
+		return m["К6"], m["П0-итог"], atAsk, adjacent
+	}
+	_, _, at, _ := run(0)
+	if at <= 0 {
+		t.Fatal("пробный прогон: чтения файла конфигурации перед К6 нет")
+	}
+	k6, r, _, adjacent := run(at)
+	if !adjacent {
+		t.Fatal("обрыв пришёлся не на последнюю команду перед вопросом К6 — проверка ничего не значит")
+	}
+	if k6.Status != Pass {
+		t.Fatalf("К6: %+v", k6)
+	}
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "снимок до К6 не снят") {
+		t.Fatalf("П0-итог: %v: %s", r.Status, r.Detail)
+	}
+}
+
+// TestFieldDiff —перечень полей: не-секретные с было/стало, прочие —
 // только имя; неразобранная запись — так и сказано.
 func TestFieldDiff(t *testing.T) {
 	a := `{"clientId":"k","userData":{"clientName":"A","token":"s1"}}`
