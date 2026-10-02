@@ -375,7 +375,35 @@ func TestK5HolderGoneRetries(t *testing.T) {
 		return inner(cmd)
 	}
 	r := f.env.breakWrite()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "попыток 5 из 5") || !strings.Contains(r.Detail, "не прочитана (процесс вышел)") {
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "попыток 5 из 5") || !strings.Contains(r.Detail, "не прочитана (процесс вышел или /proc скрыт)") {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5BusyBeforeAttempt — QA-01 Н5, таблица предусловия: держатель есть
+// до попытки — «чужой» только при прочитанной строке без метки; строка не
+// прочитана или с меткой — «занят до попытки».
+func TestK5BusyBeforeAttempt(t *testing.T) {
+	for _, c := range []struct {
+		name, cmd, want, not string
+	}{
+		{"строка не прочитана", "", "замок занят до попытки", "чужой"},
+		{"метка записи", "flock /run/lock/ docker exec -i c sh -c x amnezia-admin-apply", "замок занят до попытки", "чужой"},
+		{"чужой процесс", "sleep 1000", "замок держит чужой", "занят до попытки"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := emptyFake(t, false)
+			f.env.NewBin = "не-вызывается"
+			f.env.Remote = func(cmd string) (string, error) {
+				if cmd == lslocksCmdlineCmd {
+					return locksOut([2]string{"321", c.cmd}), nil
+				}
+				return "", errors.New("не ждали: " + cmd)
+			}
+			a := f.env.killUnderLock("canary-k5a-1")
+			if !strings.Contains(a.stop, c.want) || strings.Contains(a.stop, c.not) {
+				t.Errorf("%q", a.stop)
+			}
+		})
 	}
 }

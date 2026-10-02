@@ -702,6 +702,25 @@ func (e *Env) traces() Result {
 		return r
 	}
 	var found []string
+	// AU-LOGIC раунд 3: следы canary-* — во ВСЕХ контейнерах семейства WG
+	// (v0.2.0 в К7 пишет в первый). Не прочитано — П1 не пройден проверкой.
+	wg, werr := e.wgContainers()
+	if werr != nil {
+		r.Detail = "контейнеры семейства WG не перечислены: " + oneLine(werr.Error())
+		return r
+	}
+	for i := range wg {
+		cl, err := e.Sess.LoadClients(&wg[i])
+		if err != nil {
+			r.Detail = "список " + wg[i].Name + " не прочитан: " + oneLine(err.Error())
+			return r
+		}
+		for _, x := range cl {
+			if strings.HasPrefix(x.Name(), "canary-") {
+				found = append(found, "в "+wg[i].Name+" есть "+x.Name()+" от прошлого прогона")
+			}
+		}
+	}
 	if strings.Contains(host, "USER") {
 		found = append(found, "пользователь "+TempUser+" уже есть (удалите вручную: userdel "+TempUser+")")
 	}
@@ -1526,6 +1545,11 @@ func (e *Env) holdersPID() ([]lockHolder, bool, string) {
 	if err != nil {
 		return nil, false, "lslocks не выполнился: " + err.Error()
 	}
+	return parseHoldersCmd(out)
+}
+
+// parseHoldersCmd — разбор вывода lslocksCmdlineCmd (см. holdersPID).
+func parseHoldersCmd(out string) ([]lockHolder, bool, string) {
 	locks, cmdPart, _ := strings.Cut(out, "\nCMDLINES\n")
 	hs, ok, why := lockHoldersFrom(locks)
 	if !ok {
@@ -1578,7 +1602,7 @@ func classifyHolder(h lockHolder, sha string) (kind holderKind, why string) {
 	pid, out := h.pid, h.cmd
 	switch {
 	case out == "":
-		return holderGone, "командная строка PID " + pid + " не прочитана (процесс вышел)"
+		return holderGone, "командная строка PID " + pid + " не прочитана (процесс вышел или /proc скрыт)"
 	case !strings.Contains(out, core.CASLabelApply):
 		return holderForeign, ""
 	case !strings.Contains(out, sha):
@@ -1781,6 +1805,19 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	if e.OldBin == "" {
 		return Result{Detail: "программа v0.2.0 не задана"}
 	}
+	// AU-LOGIC раунд 3 High-2: canary-k7 до add не должно быть НИ В ОДНОМ
+	// контейнере семейства WG — иначе «появилась после add» не доказать.
+	wg, err := e.wgContainers()
+	if err != nil {
+		return Result{Detail: "контейнеры семейства WG не перечислены (" + oneLine(err.Error()) + ") — К7 не выполнялся"}
+	}
+	before, err := e.whereName(wg, "canary-k7")
+	if err != nil {
+		return Result{Detail: "до add: " + err.Error() + " — К7 не выполнялся"}
+	}
+	if len(before) > 0 {
+		return Result{Detail: "canary-k7 уже есть до add в " + strings.Join(before, ", ") + " — след прошлого прогона (уберите его); К7 не выполнялся"}
+	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "list"); r.code != 0 {
 		return Result{Status: Fail, Detail: "v0.2.0 list: код " + strconv.Itoa(r.code) + ": " + r.title}
 	}
@@ -1792,10 +1829,16 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	if m, err := e.names(); err != nil {
 		return Result{Detail: "v0.2.0 add прошёл; список " + e.Ctr.Name + " не прочитан: " + err.Error()}
 	} else if _, ok := m["canary-k7"]; !ok {
-		return e.k7Elsewhere()
+		return e.k7Elsewhere(wg)
 	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "del", "-name", "canary-k7", "-yes"); r.code != 0 {
 		return Result{Status: Fail, Detail: "v0.2.0 del: код " + strconv.Itoa(r.code) + ": " + r.title}
+	}
+	// del — по повторному чтению, не по коду возврата
+	if m, err := e.names(); err != nil {
+		return Result{Detail: "v0.2.0 del: код 0; список " + e.Ctr.Name + " после не прочитан: " + err.Error()}
+	} else if _, ok := m["canary-k7"]; ok {
+		return Result{Status: Fail, Detail: "v0.2.0 del: код 0, но canary-k7 в " + e.Ctr.Name + " осталась"}
 	}
 	now, err := e.Remote("ls -ld /run/lock")
 	fn, fb := strings.Fields(now), strings.Fields(lockBefore)
@@ -1808,17 +1851,11 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	return Result{Status: Pass, Detail: "v0.2.0 list/add/del прошли; /run/lock не изменился"}
 }
 
-// k7Elsewhere — v0.2.0 add прошёл, но не в этом контейнере. НЕ ПРИМЕНИМО
-// по существу — только если ДОКАЗАНО: на сервере не меньше двух
-// контейнеров семейства WG, и запись canary-k7 найдена в ДРУГОМ из них
-// (v0.2.0 выбирать контейнер не умеет и берёт первый управляемый). Тогда
-// запись убирается той же v0.2.0 (del выберет тот же контейнер). Иначе —
-// НЕ ПРОВЕРЕНО с причиной (живой прогон 02.10, amnezia-wireguard).
-func (e *Env) k7Elsewhere() Result {
-	base := "v0.2.0 add прошёл, но не в " + e.Ctr.Name
+// wgContainers — контейнеры семейства WG на сервере.
+func (e *Env) wgContainers() ([]core.Container, error) {
 	cs, err := e.Sess.FindContainers()
 	if err != nil {
-		return Result{Detail: base + "; контейнеры сервера не перечислены (" + oneLine(err.Error()) + ") — где запись, неизвестно; К7 не проверен"}
+		return nil, err
 	}
 	var wg []core.Container
 	for _, c := range cs {
@@ -1826,49 +1863,99 @@ func (e *Env) k7Elsewhere() Result {
 			wg = append(wg, c)
 		}
 	}
-	found := ""
+	return wg, nil
+}
+
+// whereName — в каких из контейнеров wg есть клиент name. Список хоть
+// одного не прочитан — ошибка (где запись, неизвестно).
+func (e *Env) whereName(wg []core.Container, name string) ([]string, error) {
+	var in []string
 	for i := range wg {
-		c := &wg[i]
-		if c.Name == e.Ctr.Name {
-			continue
-		}
-		cl, err := e.Sess.LoadClients(c)
+		cl, err := e.Sess.LoadClients(&wg[i])
 		if err != nil {
-			return Result{Detail: base + "; список " + c.Name + " не прочитан (" + oneLine(err.Error()) + ") — где запись, неизвестно; К7 не проверен"}
+			return nil, fmt.Errorf("список %s не прочитан (%s)", wg[i].Name, oneLine(err.Error()))
 		}
 		for _, x := range cl {
-			if x.Name() == "canary-k7" {
-				found = c.Name
+			if x.Name() == name {
+				in = append(in, wg[i].Name)
+				break
 			}
 		}
 	}
-	if len(wg) < 2 || found == "" {
-		return Result{Detail: fmt.Sprintf("%s; контейнеров семейства WG %d, canary-k7 в других не найдена — куда записала v0.2.0, не доказано; К7 не проверен", base, len(wg))}
+	return in, nil
+}
+
+// k7Elsewhere — v0.2.0 add прошёл, но не в этом контейнере. НЕ ПРИМЕНИМО
+// по существу — только если ДОКАЗАНО (AU-LOGIC раунд 3 High-2): до add
+// canary-k7 не было ни в одном контейнере семейства WG (проверено в
+// oldWorks), после add она появилась в ДРУГОМ из них (контейнеров не
+// меньше двух; v0.2.0 выбирать контейнер не умеет и берёт первый
+// управляемый), и после del той же v0.2.0 её там нет ПО ПОВТОРНОМУ ЧТЕНИЮ.
+// Иначе — НЕ ПРОВЕРЕНО или НЕ ПРОЙДЕН с причиной (живой прогон 02.10,
+// amnezia-wireguard).
+func (e *Env) k7Elsewhere(wg []core.Container) Result {
+	base := "v0.2.0 add прошёл, но не в " + e.Ctr.Name
+	var others []core.Container
+	for _, c := range wg {
+		if c.Name != e.Ctr.Name {
+			others = append(others, c)
+		}
+	}
+	found, err := e.whereName(others, "canary-k7")
+	if err != nil {
+		return Result{Detail: base + "; " + err.Error() + " — где запись, неизвестно; К7 не проверен"}
+	}
+	if len(wg) < 2 || len(found) != 1 {
+		return Result{Detail: fmt.Sprintf("%s; контейнеров семейства WG %d, canary-k7 после add найдена в: %v — куда записала v0.2.0, не доказано; К7 не проверен", base, len(wg), found)}
 	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "del", "-name", "canary-k7", "-yes"); r.code != 0 {
-		return Result{Status: Fail, Detail: "v0.2.0 записала canary-k7 в " + found + ", а del не прошёл: код " + strconv.Itoa(r.code) + ": " + r.title}
+		return Result{Status: Fail, Detail: "v0.2.0 записала canary-k7 в " + found[0] + ", а del не прошёл: код " + strconv.Itoa(r.code) + ": " + r.title}
 	}
-	return Result{Status: NotApplicable, Detail: fmt.Sprintf("v0.2.0 выбирать контейнер не умеет: на сервере %d контейнера семейства WG, её запись ушла в %s (там и удалена) — на %s К7 по существу не применим", len(wg), found, e.Ctr.Name)}
+	after, err := e.whereName(wg, "canary-k7")
+	switch {
+	case err != nil:
+		return Result{Detail: "v0.2.0 записала canary-k7 в " + found[0] + ", del: код 0; " + err.Error() + " — удалена ли, неизвестно"}
+	case len(after) > 0:
+		return Result{Status: Fail, Detail: "v0.2.0 записала canary-k7 в " + found[0] + ", del: код 0, но запись осталась в " + strings.Join(after, ", ")}
+	}
+	return Result{Status: NotApplicable, Detail: fmt.Sprintf("v0.2.0 выбирать контейнер не умеет: на сервере %d контейнера семейства WG; до add canary-k7 не было нигде, после add она появилась в %s, после del её нет (сверено повторным чтением) — на %s К7 по существу не применим", len(wg), found[0], e.Ctr.Name)}
 }
 
 // cleanup — удаляет всех «canary-*», кроме добавленного в приложении
 // Amnezia. Раунд 4 (AU-LOGIC L2): ошибка — не только в журнал, а наружу.
 func (e *Env) cleanup() error {
-	cl, err := e.Sess.LoadClients(e.Ctr)
-	if err != nil {
-		return fmt.Errorf("уборка: список не прочитан: %w", err)
+	// AU-LOGIC раунд 3: по ВСЕМ контейнерам семейства WG — v0.2.0 пишет в
+	// первый, а не в проверяемый. Перечислить не удалось — хотя бы свой.
+	ctrs := []core.Container{*e.Ctr}
+	wg, werr := e.wgContainers()
+	if werr == nil && len(wg) > 0 {
+		ctrs = wg
 	}
 	var left []string
-	for _, c := range cl {
-		if strings.HasPrefix(c.Name(), "canary-") {
-			if err := e.Sess.DeleteByID(e.Ctr, c.ClientID); err != nil {
-				left = append(left, c.Name())
+	for i := range ctrs {
+		c := &ctrs[i]
+		if c.Name == e.Ctr.Name {
+			c = e.Ctr
+		}
+		cl, err := e.Sess.LoadClients(c)
+		if err != nil {
+			return fmt.Errorf("уборка: список %s не прочитан: %w", c.Name, err)
+		}
+		for _, x := range cl {
+			if strings.HasPrefix(x.Name(), "canary-") {
+				if err := e.Sess.DeleteByID(c, x.ClientID); err != nil {
+					left = append(left, c.Name+": "+x.Name())
+				}
 			}
 		}
 	}
 	if len(left) > 0 {
 		sort.Strings(left)
 		return fmt.Errorf("уборка: не удалены: %s", strings.Join(left, ", "))
+	}
+	if werr != nil {
+		// QA-01 T6: не молча — свой контейнер убран, остальные не проверены
+		return fmt.Errorf("уборка: контейнеры семейства WG не перечислены (%s) — убран только %s, в остальных canary-* могли остаться", oneLine(werr.Error()), e.Ctr.Name)
 	}
 	return nil
 }

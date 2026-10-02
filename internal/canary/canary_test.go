@@ -384,8 +384,34 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case strings.HasPrefix(base, "fakecli-serial"):
 		os.Exit(serialCLI())
+	case strings.HasPrefix(base, "fakecli-first"):
+		os.Exit(firstCLI())
 	}
 	os.Exit(runIsolated(m))
+}
+
+// firstCLI — подставная «v0.2.0» для К7: настоящая программа (путь — в
+// файле .real рядом), но контейнер выбирает сама — всегда amnezia-awg,
+// первый, как v0.2.0. Файл .nodel рядом — del «успешен» без действия.
+func firstCLI() int {
+	self, _ := os.Executable()
+	real, err := os.ReadFile(self + ".real")
+	if err != nil {
+		return 97
+	}
+	if _, err := os.Stat(self + ".nodel"); err == nil && len(os.Args) > 1 && os.Args[1] == "del" {
+		return 0
+	}
+	cmd := exec.Command(string(real), append(os.Args[1:], "-container", "amnezia-awg")...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 98
+	}
+	return 0
 }
 
 // serialCLI — настоящая программа, но вызовы идут по одному (замок —
