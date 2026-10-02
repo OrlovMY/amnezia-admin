@@ -422,6 +422,16 @@ var plants = []plant{
 		wantTest: progs, wantMsg: `команда с подстановкой или кавычками в имени «"$@"»`},
 	{name: "r1-quoted-shell-arg", edits: sh(`printf '%s' "bash"`),
 		wantTest: progs, wantMsg: `оболочка «"bash"» аргументом`},
+	// --- A3б PR-2: исключение allowedPackageInstalls — только вызов целиком, ровно один раз ---
+	{name: "a3b-install-extra-shell", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox sh\n"),
+		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox sh»"},
+	{name: "a3b-install-twice", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox\n          sudo apt-get install -y busybox\n"),
+		wantTest: progs, wantMsg: "встречается 2 раз вместо одного"},
+	{name: "a3b-install-in-release", edits: rel("        # заголовков он не соберёт даже типы.\n        if: matrix.os == 'linux'\n        run: |\n          sudo apt-get update\n",
+		"        # заголовков он не соберёт даже типы.\n        if: matrix.os == 'linux'\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y busybox\n"),
+		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox»"},
+	{name: "a3b-install-gone", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox-static\n"),
+		wantTest: progs, wantMsg: "не встречается ни разу слово в слово"},
 	{name: "r1-dyn-place-moved", edits: rel(`              out="$("./$bin" version)"`, `              out="$("./$bin" version 2>&1)"`),
 		wantTest: progs, wantMsg: `место allowedDynPlaces «../../.github/workflows/release.yml|out="$("./$bin" version)"|"./$bin"» встречается 0 раз`},
 	// --- раунд 4: R2 — trap ---
