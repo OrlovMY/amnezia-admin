@@ -60,7 +60,23 @@ func newCLI(t *testing.T) string {
 	if buildErr != nil {
 		t.Fatalf("сборка cmd/cli: %v", buildErr)
 	}
-	return cliPath
+	// Своя копия на тест: known_hosts программы лежит рядом с ней
+	// («Настройки»), а эфемерные порты fakesrv повторяются между тестами с
+	// РАЗНЫМИ ключами хоста — общая копия ловила «Ключ сервера ИЗМЕНИЛСЯ».
+	dir, err := os.MkdirTemp("", "canary-cli-copy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	b, err := os.ReadFile(cliPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := filepath.Join(dir, filepath.Base(cliPath))
+	if err := os.WriteFile(cp, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return cp
 }
 
 type fakeServer struct {
@@ -538,7 +554,7 @@ func TestRaceControlWithoutLossNotChecked(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 2
-	f.env.oldRace = func() (int, int, error) { return 0, 4, nil }
+	f.env.oldRace = func() (OldRaceStats, error) { return OldRaceStats{Done: 4}, nil }
 	r := f.env.race()
 	if r.Status != NotChecked || !strings.Contains(r.Detail, "гонку не удалось вызвать") {
 		t.Fatalf("К4 с контролем без потери: %s — %s", r.Status, r.Detail)

@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -95,6 +96,29 @@ type Server struct {
 
 	// AllowLegacyWrite — принимать прежнюю запись v0.2.0 (см. reLegacyWrite).
 	AllowLegacyWrite bool
+
+	// LegacyTmpSplit — прежняя запись идёт ДВУМЯ шагами, как на настоящем
+	// сервере: `cat > P.tmp`, пауза LegacyTmpGap вне мьютекса, затем
+	// `mv P.tmp P`. Два писателя сталкиваются на общем P.tmp: mv второго
+	// не находит файла — «mv: can't rename 'P.tmp': No such file or
+	// directory», код 1 (прогон канарейки 02.10). Без этого флага прежняя
+	// запись атомарна и столкновения не моделирует.
+	LegacyTmpSplit bool
+	LegacyTmpGap   time.Duration
+
+	// LockHoldFor — команда записи под замком (reCASWrite) перед исполнением
+	// «держит замок /run/lock» столько времени вне мьютекса; LockHeld()
+	// в это время true. Модель окна, в которое К5 канарейки обязан оборвать
+	// запись. Обрыв клиента команду на «сервере» не прерывает — как у
+	// настоящего flock+timeout на хосте.
+	LockHoldFor time.Duration
+	// LockHoldAbort — первая удержанная запись после паузы НЕ выполняется
+	// (код 124, как timeout на хосте): модель записи, умершей вместе с
+	// оборванным клиентом. Без флага она завершается — модель записи,
+	// пережившей клиента.
+	LockHoldAbort bool
+	lockHeld      atomic.Int32
+	lockAborted   atomic.Bool
 
 	// LockBusy — замок на хосте занят: команда записи возвращает код 4
 	// (flock -E 4), ничего не записав.
@@ -296,6 +320,19 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	if d := s.CommandDelay; d > 0 {
 		time.Sleep(d)
 	}
+	if s.LockHoldFor > 0 && reCASWrite.MatchString(cmd) {
+		s.lockHeld.Add(1)
+		defer s.lockHeld.Add(-1)
+		time.Sleep(s.LockHoldFor)
+		if s.LockHoldAbort && s.lockAborted.CompareAndSwap(false, true) {
+			return "", &ExitError{Cmd: cmd, Status: 124, Stderr: "timeout: прервано (модель обрыва)"}
+		}
+	}
+	if s.AllowLegacyWrite && s.LegacyTmpSplit {
+		if m := reLegacyWrite.FindStringSubmatch(cmd); m != nil && m[2] == m[3] && m[2] == m[4] {
+			return s.legacySplit(cmd, m[2], stdin)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, cmd)
@@ -326,6 +363,35 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	}
 
 	return s.dispatch(actual, stdin)
+}
+
+// LockHeld — идёт ли сейчас запись под замком (см. LockHoldFor).
+func (s *Server) LockHeld() bool { return s.lockHeld.Load() > 0 }
+
+// legacySplit — см. LegacyTmpSplit.
+func (s *Server) legacySplit(cmd, path string, stdin []byte) (string, error) {
+	tmp := path + ".tmp"
+	s.mu.Lock()
+	s.commands = append(s.commands, cmd)
+	if s.files == nil {
+		s.files = map[string][]byte{}
+	}
+	s.files[tmp] = append([]byte(nil), stdin...)
+	s.mu.Unlock()
+	gap := s.LegacyTmpGap
+	if gap <= 0 {
+		gap = 20 * time.Millisecond
+	}
+	time.Sleep(gap)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.files[tmp]
+	if !ok {
+		return "", &ExitError{Cmd: cmd, Status: 1, Stderr: "mv: can't rename '" + tmp + "': No such file or directory"}
+	}
+	s.files[path] = data
+	delete(s.files, tmp)
+	return "", nil
 }
 
 func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {

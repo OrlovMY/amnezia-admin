@@ -41,7 +41,7 @@ func TestOldWriterTableUnknownNotRun(t *testing.T) {
 				}
 				return orig(cmd)
 			}
-			_, _, err := f.env.oldWriterRace()
+			_, err := f.env.oldWriterRace()
 			if err == nil || !strings.Contains(err.Error(), "контроль не выполнялся") {
 				t.Fatalf("ждали отказ «контроль не выполнялся», получено %v", err)
 			}
@@ -62,7 +62,7 @@ func TestOldWriterTableUnknownNotRun(t *testing.T) {
 func TestOldWriterMissingTableRestoredEmpty(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.RaceRounds = 2
-	if _, _, err := f.env.oldWriterRace(); err != nil {
+	if _, err := f.env.oldWriterRace(); err != nil {
 		t.Fatalf("таблицы нет — контроль обязан выполниться: %v", err)
 	}
 	if now, _ := f.exec.File("/opt/amnezia/awg/clientsTable"); string(now) != "[]" {
@@ -86,7 +86,7 @@ func TestOldWriterRestoreInCleanup(t *testing.T) {
 		}
 		return orig(cmd, stdin)
 	}
-	if _, _, err := f.env.oldWriterRace(); err != nil {
+	if _, err := f.env.oldWriterRace(); err != nil {
 		t.Fatal(err)
 	}
 	if registered != 1 {

@@ -22,14 +22,14 @@ func TestOldWriterRestoresFiles(t *testing.T) {
 	if _, ok := f.exec.File("/opt/amnezia/awg/clientsTable"); ok {
 		t.Fatal("тест ждёт сервер без clientsTable")
 	}
-	lost, total, err := f.env.oldWriterRace()
+	o, err := f.env.oldWriterRace()
 	if err != nil {
 		t.Fatalf("контроль: %v", err)
 	}
-	if total != 6 {
-		t.Errorf("записей старого писателя %d, ждали 6", total)
+	if o.Done+o.Collided != 6 {
+		t.Errorf("записей старого писателя %d (+%d упало на .tmp), ждали 6", o.Done, o.Collided)
 	}
-	t.Logf("потеряно %d из %d", lost, total)
+	t.Logf("потеряно %d из %d", o.Lost, o.Done)
 	confAfter, _ := f.exec.File("/opt/amnezia/awg/wg0.conf")
 	tblAfter, _ := f.exec.File("/opt/amnezia/awg/clientsTable")
 	if string(confAfter) != string(confBefore) {

@@ -136,7 +136,7 @@ type Env struct {
 	fam core.WGFamily // файл, утилита, интерфейс контейнера Ctr (PR-W1)
 
 	// oldRace — шов теста для контроля К4 (nil — oldWriterRace).
-	oldRace func() (lost, total int, err error)
+	oldRace func() (OldRaceStats, error)
 
 	awgVariant string // К8: какой вариант AWG проверен вживую ("" — не дошли)
 
@@ -1160,14 +1160,22 @@ func (e *Env) race() Result {
 	if oldRace == nil {
 		oldRace = e.oldWriterRace
 	}
-	lost, total, err := oldRace()
+	o, err := oldRace()
 	if err != nil {
 		return Result{Detail: "новая версия: " + st.summary() + "; контроль (прежняя запись без замка): " + err.Error()}
 	}
-	if lost == 0 {
-		return Result{Detail: fmt.Sprintf("новая версия: %s; контроль прежней записью без замка потери НЕ показал (%d записей) — гонку не удалось вызвать, проверка недействительна", st.summary(), total)}
+	// Гонка воспроизведена, если прежняя запись теряла молча ИЛИ падала на
+	// общем .tmp (второй писатель увёл файл — у v0.2.0 человек видел ошибку
+	// вместо записи). Иные ошибки до сюда не доходят: oldWriterRace
+	// возвращает их ошибкой (НЕ ПРОВЕРЕНО).
+	ctl := fmt.Sprintf("прежняя запись без замка: «готово» %d, из них потеряно %d; упало на общем .tmp %d", o.Done, o.Lost, o.Collided)
+	if o.Collided > 0 {
+		ctl += " (например: " + o.Example + ")"
 	}
-	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %s; прежняя запись без замка: потеряно %d из %d — стенд гонку воспроизводит", st.summary(), lost, total)}
+	if o.Lost == 0 && o.Collided == 0 {
+		return Result{Detail: fmt.Sprintf("новая версия: %s; контроль: %s — гонку не удалось вызвать, проверка недействительна", st.summary(), ctl)}
+	}
+	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %s; %s — стенд гонку воспроизводит", st.summary(), ctl)}
 }
 
 // raceStats — исходы гонки: попытки, «готово», пропавшие из них, остальные
@@ -1298,19 +1306,42 @@ func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 // рвётся); замок в это время держится, следующая запись ждёт или получает
 // «занято», файлы — целиком старые или целиком новые, а затем запись идёт.
 func (e *Env) breakWrite() Result {
-	cenv, cerr := e.childEnv(e.KeyEnv)
-	if cerr != nil {
-		return Result{Detail: "первая запись не запущена: " + cerr.Error()}
+	// Прогон 02.10: обрыв дважды подряд «не на запись под замком». Прежде
+	// процесс убивался через ФИКСИРОВАННЫЕ 300 мс после запуска, а на
+	// настоящем сервере к записи под замком программа приходит через
+	// секунды (SSH-рукопожатие, сверка ключа, чтение файлов — вторая запись
+	// того же прогона шла 5 с): обрыв систематически приходился на
+	// подключение. Теперь обрыв — по факту: опрашиваем держателя замка
+	// /run/lock и убиваем программу, как только он появился; не успели
+	// (программа закончила раньше) — новая попытка, до k5Attempts.
+	// Попытка удачна, если держатель был в момент обрыва И остался сразу
+	// после него (иначе вторая запись ждать нечего — повторяем).
+	attempts, hits := 0, 0
+	var holders []string
+	known, why := true, ""
+	for attempts < k5Attempts {
+		attempts++
+		h, k, w, err := e.killUnderLock(fmt.Sprintf("canary-k5a-%d", attempts))
+		if err != nil {
+			return Result{Detail: fmt.Sprintf("первая запись (попытка %d): %v", attempts, err)}
+		}
+		if !k {
+			return Result{Detail: fmt.Sprintf("держателя замка на /run/lock узнать не удалось (%s) — момент обрыва не выбрать, ожидание второй записи не проверено", w)}
+		}
+		if !h {
+			continue
+		}
+		hits++
+		holders, known, why = e.lockHolders()
+		if !known || len(holders) > 0 {
+			break
+		}
 	}
-	cmd := exec.Command(e.NewBin, "add", "-name", "canary-k5a", "-hostkey", e.HostKey)
-	cmd.Env = cenv
-	if err := cmd.Start(); err != nil {
-		return Result{Detail: "первая запись не запущена: " + err.Error()}
+	hit := hits > 0
+	if !hit {
+		holders, known, why = e.lockHolders()
 	}
-	time.Sleep(300 * time.Millisecond)
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	holders, known, why := e.lockHolders()
+	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали запись под замком: %d", attempts, k5Attempts, hits)
 	holder := strings.Join(holders, "; ")
 	if !known {
 		holder = why
@@ -1320,8 +1351,8 @@ func (e *Env) breakWrite() Result {
 	second := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b")
 	consistent, why := e.consistent()
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
-	detail := fmt.Sprintf("держатель замка сразу после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s",
-		oneLine(holder), second.code, second.dur.Seconds(), second.title, third.code, why)
+	detail := fmt.Sprintf("%s; держатель замка сразу после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s",
+		tries, oneLine(holder), second.code, second.dur.Seconds(), second.title, third.code, why)
 	switch {
 	case !consistent:
 		return Result{Status: Fail, Detail: detail}
@@ -1329,12 +1360,70 @@ func (e *Env) breakWrite() Result {
 		return Result{Status: Fail, Detail: detail + " — замок завис"}
 	case !known:
 		return Result{Detail: detail + " — держателя замка на /run/lock узнать не удалось: ожидание второй записи не проверено"}
+	case !hit:
+		return Result{Detail: detail + " — ни одна попытка не застала запись под замком: ожидание второй записи не проверено"}
 	case len(holders) == 0:
-		return Result{Detail: detail + " — обрыв пришёлся не на запись под замком (или lslocks нет): ожидание второй записи не проверено"}
+		return Result{Detail: detail + " — после обрыва замок уже свободен: ожидание второй записи не проверено"}
 	case second.code != 0 && !isBusy(second):
 		return Result{Status: Fail, Detail: detail + " — вторая запись не прошла и не «занято»"}
 	}
 	return Result{Status: Pass, Detail: detail}
+}
+
+// k5Attempts — сколько раз К5 пытается оборвать запись именно под замком.
+const k5Attempts = 5
+
+// k5Poll — пауза между опросами держателя замка; k5Deadline — сколько
+// ждать замка в одной попытке.
+var (
+	k5Poll     = 20 * time.Millisecond
+	k5Deadline = 90 * time.Second
+)
+
+// killUnderLock — запустить add -name name и убить его, как только на
+// /run/lock появился держатель замка. hit=false — программа завершилась (или
+// вышел срок), а держателя так и не увидели. known=false — lslocks не
+// ответил: why — почему.
+func (e *Env) killUnderLock(name string) (hit, known bool, why string, err error) {
+	cenv, cerr := e.childEnv(e.KeyEnv)
+	if cerr != nil {
+		return false, true, "", cerr
+	}
+	args := []string{"add", "-name", name, "-hostkey", e.HostKey}
+	if e.Ctr != nil {
+		args = append(args, "-container", e.Ctr.Name)
+	}
+	cmd := exec.Command(e.NewBin, args...)
+	cmd.Env = cenv
+	cmd.Stdin = strings.NewReader("")
+	if err := cmd.Start(); err != nil {
+		return false, true, "", fmt.Errorf("не запущена: %w", err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	defer func() { <-done }()
+	deadline := time.Now().Add(k5Deadline)
+	for {
+		select {
+		case <-done:
+			return false, true, "", nil
+		default:
+		}
+		holders, ok, w := e.lockHolders()
+		if !ok {
+			_ = cmd.Process.Kill()
+			return false, false, w, nil
+		}
+		if len(holders) > 0 {
+			_ = cmd.Process.Kill()
+			return true, true, "", nil
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			return false, true, "", nil
+		}
+		time.Sleep(k5Poll)
+	}
 }
 
 // isBusy — «занято» так же, как в К4: код 1 и заголовок дословно (раунд 4,
@@ -1351,7 +1440,7 @@ func (e *Env) consistent() (bool, string) {
 	if err != nil {
 		return false, "список не прочитан: " + err.Error()
 	}
-	wg, err := e.dexec(`cat ` + e.conf())
+	wg, err := e.catFile(e.conf())
 	if err != nil {
 		return false, e.fam.File + " не прочитан: " + err.Error()
 	}
@@ -1471,9 +1560,18 @@ func firstLine(s string) string {
 }
 
 func oneLine(s string) string {
+	s = maskKeys(s)
 	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > 200 {
 		s = string(r[:200]) + "…"
 	}
 	return s
 }
+
+// reSecret — ключ vpn:// и значение PrivateKey: на границе печати (oneLine —
+// через неё идёт любой чужой текст: stderr дочерних программ, вывод команд
+// сервера) заменяются на «***».
+var reSecret = regexp.MustCompile(`(vpn://)\S+|(PrivateKey\s*=\s*)\S+`)
+
+// maskKeys — см. reSecret.
+func maskKeys(s string) string { return reSecret.ReplaceAllString(s, "${1}${2}***") }

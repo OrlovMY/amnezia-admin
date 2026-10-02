@@ -26,28 +26,66 @@ func (e *Env) catFile(path string) (string, error) {
 }
 
 // legacyWrite — прежняя запись v0.2.0: без замка, без сверки, общий .tmp.
+// Ошибка несёт вывод команды (прогон 02.10: «Process exited with status 1»
+// без причины не давал понять, что упало); oneLine маскирует ключи.
 func (e *Env) legacyWrite(path string, data []byte) error {
-	_, err := e.RemoteIn(e.docker+" exec -i "+e.Ctr.Name+" sh -c 'cat > "+path+".tmp && mv "+path+".tmp "+path+"'", data)
-	return err
+	out, err := e.RemoteIn(e.docker+" exec -i "+e.Ctr.Name+" sh -c 'cat > "+path+".tmp && mv "+path+".tmp "+path+"'", data)
+	if err != nil {
+		if o := tailLine(out); o != "" {
+			return fmt.Errorf("%s: %s", oneLine(err.Error()), o)
+		}
+		return fmt.Errorf("%s (вывода нет)", oneLine(err.Error()))
+	}
+	return nil
 }
 
-// oldWriterRace — lost: сколько из total записей старого писателя пропало
-// (нет в таблице или нет peer'а в файле конфигурации).
-func (e *Env) oldWriterRace() (lost, total int, err error) {
+// OldRaceStats — итог контроля К4 (прежняя запись без замка).
+type OldRaceStats struct {
+	Done     int    // записей, о которых прежняя запись сказала «готово»
+	Lost     int    // из Done нет на сервере — молчаливая потеря
+	Collided int    // записей, упавших на общем .tmp (второй писатель увёл файл)
+	Example  string // текст первой такой ошибки
+}
+
+// isTmpCollision — прежняя запись упала потому, что общий P.tmp увёл
+// второй писатель (его mv прошёл раньше): mv не находит P.tmp. Это гонка
+// v0.2.0 ровно так, как её видит человек (ошибка вместо записи). Иная
+// ошибка — НЕ гонка: что случилось, неизвестно.
+func isTmpCollision(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, ".tmp") && strings.Contains(s, "mv") && strings.Contains(s, "No such file")
+}
+
+// tailLine — вывод команды одной строкой, КОНЕЦ (там сообщение mv/sh), не
+// длиннее 200 знаков; ключи замаскированы (oneLine).
+func tailLine(s string) string {
+	s = strings.Join(strings.Fields(maskKeys(s)), " ")
+	if r := []rune(s); len(r) > 200 {
+		s = "…" + string(r[len(r)-200:])
+	}
+	return s
+}
+
+// oldWriterRace — итог контроля: сколько записей старого писателя пропало
+// молча (нет в таблице или нет peer'а в файле конфигурации) и сколько упало
+// на общем .tmp. Прочие ошибки записи — ошибка контроля (НЕ ПРОВЕРЕНО).
+func (e *Env) oldWriterRace() (st OldRaceStats, err error) {
+	lost, total := 0, 0
+	defer func() { st.Lost, st.Done = lost, total }()
 	if e.RemoteIn == nil {
-		return 0, 0, fmt.Errorf("команда со stdin не задана (RemoteIn)")
+		return st, fmt.Errorf("команда со stdin не задана (RemoteIn)")
 	}
 	tblPath := e.Ctr.Dir + "/clientsTable"
 	confBefore, err := e.catFile(e.conf())
 	if err != nil {
-		return 0, 0, fmt.Errorf("%s не прочитан: %w", e.fam.File, err)
+		return st, fmt.Errorf("%s не прочитан: %w", e.fam.File, err)
 	}
 	// SEC W-R3 (признак 2): «таблицы нет» — только по явному ответу
 	// test -f; иная ошибка чтения — контроль НЕ выполняется (иначе при
 	// возврате настоящая таблица заменилась бы пустой).
 	tblBefore, existed, terr := e.tableBefore(tblPath)
 	if terr != nil {
-		return 0, 0, terr
+		return st, terr
 	}
 	if !existed {
 		// Таблицы до контроля не было — возвращается пустая: для программы
@@ -82,6 +120,12 @@ func (e *Env) oldWriterRace() (lost, total int, err error) {
 	type rec struct{ name, key string }
 	var mu sync.Mutex
 	var done []rec
+	// Одиночная прежняя запись ДО гонки (файл как есть, без изменений):
+	// упала — прежняя запись на этом стенде не работает вовсе, гонка
+	// ничего не скажет.
+	if perr := e.legacyWrite(e.conf(), []byte(confBefore)); perr != nil {
+		return st, fmt.Errorf("прежняя запись не выполнилась даже без гонки: %w", perr)
+	}
 	var firstErr error
 	var wg sync.WaitGroup
 	for w := 0; w < 2; w++ {
@@ -95,7 +139,13 @@ func (e *Env) oldWriterRace() (lost, total int, err error) {
 					kerr = e.oldAdd(tblPath, name, key, 100+w*e.RaceRounds+i)
 				}
 				mu.Lock()
-				if kerr != nil && firstErr == nil {
+				switch {
+				case kerr != nil && isTmpCollision(kerr):
+					st.Collided++
+					if st.Example == "" {
+						st.Example = kerr.Error()
+					}
+				case kerr != nil && firstErr == nil:
 					firstErr = kerr
 				}
 				if kerr == nil {
@@ -106,23 +156,24 @@ func (e *Env) oldWriterRace() (lost, total int, err error) {
 		}(w)
 	}
 	wg.Wait()
+	total = len(done)
 	if firstErr != nil {
-		return 0, len(done), fmt.Errorf("прежняя запись не выполнилась: %w", firstErr)
+		return st, fmt.Errorf("прежняя запись не выполнилась: %w", firstErr)
 	}
 	conf, err := e.catFile(e.conf())
 	if err != nil {
-		return 0, len(done), fmt.Errorf("%s после контроля не прочитан: %w", e.fam.File, err)
+		return st, fmt.Errorf("%s после контроля не прочитан: %w", e.fam.File, err)
 	}
 	tbl, err := e.catFile(tblPath)
 	if err != nil {
-		return 0, len(done), fmt.Errorf("clientsTable после контроля не прочитана: %w", err)
+		return st, fmt.Errorf("clientsTable после контроля не прочитана: %w", err)
 	}
 	for _, r := range done {
 		if !strings.Contains(conf, "PublicKey = "+r.key) || !strings.Contains(tbl, `"`+r.name+`"`) {
 			lost++
 		}
 	}
-	return lost, len(done), nil
+	return st, nil
 }
 
 // tableBefore — clientsTable до контроля: (текст, true) — есть; ("", false) —
