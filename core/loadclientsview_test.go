@@ -93,8 +93,8 @@ var containersWasNow = []struct {
 	// голый суффикс); amnezia-foo — незнакомый: Proto пуст, каталог не
 	// подставлен, внутрь не заходим.
 	// Сведение W2+W3: Proto — имя с версией (AWGName); awg0.conf здесь нет →
-	// «версия неизвестна», только просмотр с причиной (см. awg2Reason ниже).
-	{"amnezia-awg2", "AmneziaWG (версия неизвестна)", false, true},
+	// только просмотр с причиной, без версии (AU-UX Л1; см. awg2Reason ниже).
+	{"amnezia-awg2", "AmneziaWG", false, true},
 	{"amnezia-foo", "", false, false},
 }
 

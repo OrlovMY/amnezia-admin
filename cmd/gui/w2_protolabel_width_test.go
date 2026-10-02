@@ -59,45 +59,59 @@ func TestProtoLabelFits(t *testing.T) {
 	if len(unknown.Name) != 40 {
 		t.Fatalf("имя %d символов", len(unknown.Name))
 	}
-	for _, c := range []core.Container{longest, unknown} {
-		label := guiview.ProtoLabel(c)
-		u := focusTestUI(t)
-		osmotrMain(u)
-		u.containers = []core.Container{c}
-		u.cur = &u.containers[0]
-		u.showMainScreen()
-		u.protoSelect.Selected = u.protoSelect.Options[0]
-		u.protoSelect.Refresh()
-		u.win.Resize(fyne.NewSize(1194.2, 517))
-		sel := u.protoSelect
-		var text fyne.CanvasObject
-		walkObjects(sel, func(o fyne.CanvasObject) {
-			switch x := o.(type) {
-			case *canvas.Text:
-				if x.Text == label {
-					text = x
+	// Финальный раунд (AU-UX): и на минимальном окне 972, и на 1194.
+	for _, size := range []string{"минимальный", "972x517", "1194x517"} {
+		for _, c := range []core.Container{longest, unknown} {
+			label := guiview.ProtoLabel(c)
+			u := focusTestUI(t)
+			osmotrMain(u)
+			u.containers = []core.Container{c}
+			u.cur = &u.containers[0]
+			u.showMainScreen()
+			u.protoSelect.Selected = u.protoSelect.Options[0]
+			u.protoSelect.Refresh()
+			switch size {
+			case "минимальный":
+				sizeWindow(u, "минимальный")()
+				// длинная подпись не раздвигает минимум окна
+				if w := u.win.Canvas().Size().Width; w > 972.5 {
+					t.Errorf("%q: минимальная ширина окна %.1f т. больше 972", label, w)
 				}
-			case *widget.RichText:
-				if x.String() == label {
-					text = x
-				}
+			case "972x517":
+				u.win.Resize(fyne.NewSize(972, 517))
+			default:
+				u.win.Resize(fyne.NewSize(1194.2, 517))
 			}
-		})
-		if text == nil {
-			t.Fatalf("подпись %q в поле не найдена", label)
-		}
-		// MinSize усечённого текста мала (многоточие) — меряем ПОЛНУЮ ширину строки
-		need := fyne.MeasureText(label, theme.TextSize(), fyne.TextStyle{}).Width
-		have := text.Size().Width
-		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(sel)
-		right, win := pos.X+sel.Size().Width, u.win.Canvas().Size().Width
-		t.Logf("%q: текст %.1f т., отведено %.1f т., поле %.1f т., правый край %.1f из %.1f",
-			label, need, have, sel.Size().Width, right, win)
-		if have+0.5 < need {
-			t.Errorf("подпись %q обрезана: текст %.1f т., отведено %.1f т.", label, need, have)
-		}
-		if right > win+0.5 {
-			t.Errorf("поле с %q выходит за окно: правый край %.1f при ширине %.1f", label, right, win)
+			sel := u.protoSelect
+			var text fyne.CanvasObject
+			walkObjects(sel, func(o fyne.CanvasObject) {
+				switch x := o.(type) {
+				case *canvas.Text:
+					if x.Text == label {
+						text = x
+					}
+				case *widget.RichText:
+					if x.String() == label {
+						text = x
+					}
+				}
+			})
+			if text == nil {
+				t.Fatalf("подпись %q в поле не найдена", label)
+			}
+			// MinSize усечённого текста мала (многоточие) — меряем ПОЛНУЮ ширину строки
+			need := fyne.MeasureText(label, theme.TextSize(), fyne.TextStyle{}).Width
+			have := text.Size().Width
+			pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(sel)
+			right, win := pos.X+sel.Size().Width, u.win.Canvas().Size().Width
+			t.Logf("[%s] %q: текст %.1f т., отведено %.1f т., поле %.1f т., правый край %.1f из %.1f",
+				size, label, need, have, sel.Size().Width, right, win)
+			if have+0.5 < need {
+				t.Errorf("подпись %q обрезана: текст %.1f т., отведено %.1f т.", label, need, have)
+			}
+			if right > win+0.5 {
+				t.Errorf("поле с %q выходит за окно: правый край %.1f при ширине %.1f", label, right, win)
+			}
 		}
 	}
 }

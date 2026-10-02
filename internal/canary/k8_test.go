@@ -3,6 +3,7 @@ package canary
 // PR-W3: К8 на amnezia-awg2 против fakesrv — через собранную программу и SSH.
 
 import (
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -29,41 +30,58 @@ func awg2Server(extra string) *fakesrv.Server {
 const k8AWG3 = "Jc = 4\nS3 = 15\nH1 = 100-200\nHeaderProtectionKey = hpk\nRandomTrailers = on\n# I1 = <b 0x01>\n"
 
 // TestK8OnFakesrv — шаги по серверу (К8.1, К8.2, К8.6, К8.8) ПРОЙДЕН;
-// шаги на устройствах — по ответу человека: да → ПРОЙДЕН, нет → НЕ ПРОЙДЕН,
-// пропуск → НЕ ПРОВЕРЕНО. Вариант AWG назван.
+// шаги на устройствах — по введённому адресу (финальный раунд, AU-UX М2):
+// совпал с сервером там, где ждём связь, — ПРОЙДЕН; иной — НЕ ПРОЙДЕН;
+// пусто — НЕ ПРОВЕРЕНО. Где связи быть не должно (выключен, прежний
+// конфиг) — наоборот. Вариант AWG назван.
 func TestK8OnFakesrv(t *testing.T) {
-	// expected — ответ «как ожидается» по подсказке в скобках вопроса.
-	expected := func(q string) Answer {
-		if strings.Contains(q, "(ожидается: нет") {
-			return AnswerNo
-		}
-		return AnswerYes
-	}
-	flip := func(a Answer) Answer {
-		if a == AnswerYes {
-			return AnswerNo
-		}
-		return AnswerYes
+	const other = "198.51.100.7" // чужой адрес: телефон вышел мимо сервера
+	// noVia — вопросы, где связи через сервер быть НЕ должно.
+	noVia := func(q string) bool {
+		return strings.Contains(q, "ВЫКЛЮЧИЛА") || strings.Contains(q, "ПРЕЖНИЙ")
 	}
 	type want struct{ k3, k4, k5, k7 Status }
 	for _, c := range []struct {
 		name string
-		ask  func(string) Answer
+		ip   func(q, server string) string
 		w    want
 	}{
-		{"как ожидается", expected, want{Pass, Pass, Pass, Pass}},
-		{"наоборот", func(q string) Answer { return flip(expected(q)) }, want{Fail, Fail, Fail, Fail}},
-		// UX W3 В2: «да» на «Открывается?» у выключенного и у прежнего —
-		// провал; знак держит этот случай.
-		{"всегда да", func(string) Answer { return AnswerYes }, want{Pass, Fail, Fail, Pass}},
-		{"всегда нет", func(string) Answer { return AnswerNo }, want{Fail, Fail, Fail, Fail}},
-		{"пропуск", func(string) Answer { return AnswerSkip }, want{NotChecked, NotChecked, NotChecked, NotChecked}},
+		{"как ожидается: сервер / чужой", func(q, srv string) string {
+			if noVia(q) {
+				return other
+			}
+			return srv
+		}, want{Pass, Pass, Pass, Pass}},
+		{"как ожидается: сервер / сайт не открылся", func(q, srv string) string {
+			if noVia(q) {
+				return "не открылся"
+			}
+			return srv
+		}, want{Pass, Pass, Pass, Pass}},
+		{"наоборот", func(q, srv string) string {
+			if noVia(q) {
+				return srv
+			}
+			return other
+		}, want{Fail, Fail, Fail, Fail}},
+		// AU-UX М2: туннель тихо выключен — сайт открылся, но адрес чужой.
+		{"всегда чужой адрес", func(string, string) string { return other }, want{Fail, Fail, Fail, Fail}},
+		{"всегда адрес сервера", func(_, srv string) string { return srv }, want{Pass, Fail, Fail, Pass}},
+		{"всегда «не открылся»", func(string, string) string { return "не открылся" }, want{Fail, Fail, Fail, Fail}},
+		{"пропуск (Enter)", func(string, string) string { return "" }, want{NotChecked, NotChecked, NotChecked, NotChecked}},
+		{"«пропустить»", func(string, string) string { return "пропустить" }, want{NotChecked, NotChecked, NotChecked, NotChecked}},
+		{"«да» вместо адреса", func(string, string) string { return "да" }, want{NotChecked, NotChecked, NotChecked, NotChecked}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := emptyFakeOn(t, awg2Server(k8AWG3), awg2Ctr(), false)
 			f.env.NewBin = newCLI(t)
+			srv := f.env.Sess.Creds.Host
+			if net.ParseIP(srv) == nil {
+				t.Fatalf("адрес стенда %q — не IP, тест ничего не значит", srv)
+			}
 			var qs []string
-			f.env.Ask = func(q string) Answer { qs = append(qs, q); return c.ask(q) }
+			f.env.Ask = func(q string) Answer { t.Errorf("вопрос «да/нет» в К8: %s", q); return AnswerYes }
+			f.env.AskIP = func(q string) string { qs = append(qs, q); return c.ip(q, srv) }
 			rs := f.env.k8()
 			// QA W3 M2: набор ID шагов, а не их число.
 			var got []string
@@ -79,11 +97,13 @@ func TestK8OnFakesrv(t *testing.T) {
 					t.Errorf("%s %s: %s (%s), ждали %s", r.ID, r.Name, r.Status, r.Detail, ws[r.ID])
 				}
 			}
-			// названные человеку файлы существуют (раунд 2: раньше вместо
-			// пути называлась строка-подсказка CLI)
+			if len(qs) != 6 {
+				t.Errorf("вопросов об адресе %d, ждали 6", len(qs))
+			}
+			// названные человеку файлы существуют
 			for _, q := range qs {
 				for _, pre := range []string{"файл ", "ПРЕЖНИЙ конфиг ", "НОВЫЙ конфиг "} {
-					if i := strings.Index(q, pre); i >= 0 && c.name == "как ожидается" {
+					if i := strings.Index(q, pre); i >= 0 && strings.HasPrefix(c.name, "как ожидается") {
 						p := q[i+len(pre):]
 						p = p[:strings.Index(p, " и подключитесь")]
 						if _, err := os.Stat(p); err != nil {
@@ -96,8 +116,12 @@ func TestK8OnFakesrv(t *testing.T) {
 				if strings.Contains(q, "НЕТ?") || strings.Contains(q, "ЕСТЬ?") || strings.Contains(q, "К6") || strings.Contains(q, "К8.2") {
 					t.Errorf("вопрос с отрицанием или ссылкой на номер шага: %s", q)
 				}
-				if !strings.Contains(q, "(ожидается: ") {
-					t.Errorf("вопрос без ожидаемого ответа: %s", q)
+				// финальный раунд: ожидаемый ответ не подсказывается
+				if strings.Contains(q, "ожидается") || strings.Contains(q, srv) {
+					t.Errorf("вопрос подсказывает ответ: %s", q)
+				}
+				if !strings.Contains(q, "https://ifconfig.me") || !strings.Contains(q, "введите адрес") {
+					t.Errorf("вопрос без сайта проверки IP: %s", q)
 				}
 			}
 			if !strings.Contains(rs[0].Detail, "AmneziaWG (версия 3.1)") || !strings.Contains(rs[0].Detail, "проверено на AWG3; AWG2 — только на тестовом стенде") {
@@ -107,6 +131,54 @@ func TestK8OnFakesrv(t *testing.T) {
 				t.Errorf("К8.1 напечатал значения параметров: %s", rs[0].Detail)
 			}
 		})
+	}
+}
+
+// TestIPStatus — таблица сверки адреса: ждём связь через сервер / ждём,
+// что её нет; совпал / иной / «не открылся» / пусто / не IP / адрес
+// сервера не определён. Подмена «любой ввод — да» роняет строки «иной» и
+// «не IP».
+func TestIPStatus(t *testing.T) {
+	srv := []net.IP{net.ParseIP("203.0.113.10")}
+	for _, c := range []struct {
+		in     string
+		server []net.IP
+		via    bool
+		want   Status
+	}{
+		{"203.0.113.10", srv, true, Pass},
+		{" 203.0.113.10\n", srv, true, Pass},
+		{"198.51.100.7", srv, true, Fail},
+		{"не открылся", srv, true, Fail},
+		{"Сайт НЕ ОТКРЫЛСЯ", srv, true, Fail},
+		{"", srv, true, NotChecked},
+		{"пропустить", srv, true, NotChecked},
+		{"да", srv, true, NotChecked},
+		{"203.0.113", srv, true, NotChecked},
+		{"203.0.113.10", nil, true, NotChecked},
+		{"203.0.113.10", srv, false, Fail},
+		{"198.51.100.7", srv, false, Pass},
+		{"не открылся", srv, false, Pass},
+		{"", srv, false, NotChecked},
+		{"да", srv, false, NotChecked},
+		{"198.51.100.7", nil, false, NotChecked},
+		{"::ffff:203.0.113.10", srv, true, Pass},
+	} {
+		if got, d := ipStatus(c.in, c.server, c.via); got != c.want {
+			t.Errorf("ввод %q, сервер %v, ждём связь=%v: %s (%s), ждали %s", c.in, c.server, c.via, got, d, c.want)
+		}
+	}
+}
+
+// TestK8NoAskIP — AskIP не задан: шаги на устройствах НЕ ПРОВЕРЕНО, не ПРОЙДЕН.
+func TestK8NoAskIP(t *testing.T) {
+	f := emptyFakeOn(t, awg2Server(k8AWG3), awg2Ctr(), false)
+	f.env.NewBin = newCLI(t)
+	f.env.AskIP = nil
+	for _, r := range f.env.k8() {
+		if (r.ID == "К8.3" || r.ID == "К8.4" || r.ID == "К8.5" || r.ID == "К8.7") && r.Status != NotChecked {
+			t.Errorf("%s без ввода адреса: %s (%s)", r.ID, r.Status, r.Detail)
+		}
 	}
 }
 

@@ -13,11 +13,11 @@ func TestK8DeleteLeftKey(t *testing.T) {
 	f := emptyFakeOn(t, awg2Server(k8AWG3), awg2Ctr(), false)
 	f.env.NewBin = newCLI(t)
 	var live []string
-	f.env.Ask = func(q string) Answer {
+	f.env.AskIP = func(q string) string {
 		if strings.HasPrefix(q, "К8.5") {
 			live = f.exec.RuntimePeers()
 		}
-		return AnswerYes
+		return f.env.Sess.Creds.Host
 	}
 	orig := f.env.Remote
 	n := 0

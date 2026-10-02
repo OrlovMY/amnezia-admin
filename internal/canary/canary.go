@@ -46,6 +46,11 @@ const (
 	// amnezia-awg2: v0.2.0 его не знает). Причина — в Detail. Не «пройдено»
 	// и не «не проверено»: итог по нему не меняется.
 	NotApplicable
+	// PassPartial — финальный раунд (AU-LOGIC M-1): все исполненные шаги
+	// пройдены, но обязательное семейство пропущено флагом -skip-family —
+	// вживую не проверено. Отдельное состояние, не Pass: и строка итога, и
+	// код выхода (3) говорят «частично». Только у итога (FinalSummary).
+	PassPartial
 )
 
 func (s Status) String() string {
@@ -56,6 +61,8 @@ func (s Status) String() string {
 		return "НЕ ПРОЙДЕН"
 	case NotApplicable:
 		return "НЕ ПРИМЕНИМО"
+	case PassPartial:
+		return "ПРОЙДЕН ЧАСТИЧНО"
 	}
 	return "НЕ ПРОВЕРЕНО"
 }
@@ -97,7 +104,10 @@ type Env struct {
 	MakeSudoKey func() (env []string, undo func() error, err error)
 
 	Ask func(question string) Answer
-	Out io.Writer
+	// AskIP — вопрос, на который человек вводит строку (К8: адрес с сайта
+	// проверки IP; сверяет канарейка). nil — такие шаги НЕ ПРОВЕРЕНО.
+	AskIP func(question string) string
+	Out   io.Writer
 
 	// RaceRounds — сколько добавлений делает каждый из двух писателей в К4.
 	RaceRounds int

@@ -74,13 +74,18 @@ func FamilyPlan(selected []string, skip []string) (rows []Result, skipped, notes
 	return rows, skipped, notes, nil
 }
 
-// FinalSummary — итог с учётом пропущенных семейств: ПРОЙДЕН с пропуском —
-// отдельной громкой строкой «ПРОЙДЕН, БЕЗ ЖИВОЙ ПРОВЕРКИ: …».
+// FinalSummary — итог с учётом пропущенных семейств. Пропуск обязательного
+// семейства флагом — не ПРОЙДЕН, а ПРОЙДЕН ЧАСТИЧНО (AU-LOGIC M-1): первая
+// строка итога — «ИТОГ: ПРОЙДЕН ЧАСТИЧНО — без живой проверки: …», статус
+// PassPartial, код выхода канарейки — 3. Выпуск по такому итогу — только
+// явным решением владельца (RELEASING 6а).
 func FinalSummary(rs []Result, runErr error, skipped []string) (Status, string) {
 	st, line := Summary(rs, runErr)
 	if st == Pass && len(skipped) > 0 {
-		line += "\nИТОГ: ПРОЙДЕН, БЕЗ ЖИВОЙ ПРОВЕРКИ: " + strings.Join(skipped, ", ") +
-			" — эти семейства на живом сервере НЕ исполнялись (флаг -skip-family)"
+		counts := strings.TrimPrefix(line, "ИТОГ: ПРОЙДЕН ")
+		return PassPartial, "ИТОГ: ПРОЙДЕН ЧАСТИЧНО — без живой проверки: " + strings.Join(skipped, ", ") +
+			" (флаг -skip-family: эти семейства на живом сервере НЕ исполнялись) " + counts +
+			"\nВыпуск по частичному итогу — только явным решением владельца (RELEASING 6а)."
 	}
 	return st, line
 }
@@ -161,4 +166,16 @@ func MountsCheck(remote func(string) (string, error), names []string) Result {
 		r.Detail = "каталоги хоста разные: " + strings.Join(desc, "; ")
 	}
 	return r
+}
+
+// ExitCode — код выхода канарейки по итогу: 0 — ПРОЙДЕН; 3 — ПРОЙДЕН
+// ЧАСТИЧНО (-skip-family, AU-LOGIC M-1); 1 — всё прочее.
+func ExitCode(st Status) int {
+	switch st {
+	case Pass:
+		return 0
+	case PassPartial:
+		return 3
+	}
+	return 1
 }

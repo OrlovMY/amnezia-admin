@@ -265,8 +265,10 @@ var moreForms = []osmotrForm{
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},
-	{name: "(д) конфиг готов, AmneziaWG 2", open: openConfig("AmneziaWG 2"), width: 472,
-		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
+	// Финальный раунд (AU-UX М1): строка честности — вне прокрутки, справа
+	// от QR, диалог шире (awg2ConfigDialogWidth − 8 = 752).
+	{name: "(д) конфиг готов, AmneziaWG 2", open: openConfig("AmneziaWG 2"), width: awg2ConfigDialogWidth - 8,
+		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь", "подпись:Параметры маскировки взяты из файла серв…"})},
 	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),

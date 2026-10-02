@@ -162,9 +162,14 @@ func run() int {
 			RemoteIn: remoteIn,
 			Sess:     sess, Ctr: ctr,
 			NewBin: *newBin, OldBin: *oldBin,
-			KeyEnv:     []string{"AMNEZIA_KEY=" + key},
-			HostKey:    sess.HostKeyFingerprint,
-			Ask:        ask,
+			KeyEnv:  []string{"AMNEZIA_KEY=" + key},
+			HostKey: sess.HostKeyFingerprint,
+			Ask:     ask,
+			AskIP: func(q string) string {
+				fmt.Printf("%s\nАдрес: ", q)
+				line, _ := in.ReadString('\n')
+				return strings.TrimSpace(line)
+			},
 			Out:        os.Stdout,
 			RaceRounds: *rounds,
 		}
@@ -258,8 +263,6 @@ func run() int {
 		st, line = canary.Fail, "ИТОГ: НЕ ПРОЙДЕН — уборка на тестовом сервере не удалась (см. выше)"
 	}
 	fmt.Println(line)
-	if st != canary.Pass {
-		return 1
-	}
-	return 0
+	// 0 — ПРОЙДЕН, 3 — ПРОЙДЕН ЧАСТИЧНО (-skip-family), 1 — прочее.
+	return canary.ExitCode(st)
 }

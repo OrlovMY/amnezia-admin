@@ -217,13 +217,13 @@ func awgSpecialJunk(text string) map[string]string {
 
 // AWGName — имя протокола amnezia-awg2 (решение ядра, W3 раунд 2, по
 // awgProtocolConfig.cpp:433-439): «AmneziaWG», версия параметров — в
-// скобках. При незнакомом ключе или неполном файле версию не пишем (решение
-// ядра при сведении W2+W3): формат не распознан — и версия не установлена.
+// скобках. Версия пишется ТОЛЬКО у известного формата: при незнакомом ключе,
+// неполном или непрочитанном файле — просто «AmneziaWG» (решения ядра при
+// сведении W2+W3 и AU-UX Л1: «(версия неизвестна) — только просмотр» звучало
+// как управляемое «(версия параметров не определена)»).
 // Старый контейнер amnezia-awg подписан «AmneziaWG (старый)» (containerTypes).
 func AWGName(f AWGFormat) string {
 	switch f.State {
-	case FormatUnreadable:
-		return "AmneziaWG (версия неизвестна)"
 	case FormatKnown:
 		switch f.Version {
 		case "3.1", "2", "1.5":
@@ -320,6 +320,12 @@ func buildClientConfigAWG2(raw string, serverPub, host, listenPort, clientPriv, 
 		v := iface[k]
 		if strings.HasPrefix(k, "I") && len(k) == 2 {
 			v = junk[k]
+		}
+		// AU-LOGIC L1: RandomTrailers/DisableCookies = off клиент Amnezia
+		// заменяет пустым значением, и строки в конфиге нет
+		// (scriptsRegistry.cpp:270-272) — так же и здесь.
+		if (k == "RandomTrailers" || k == "DisableCookies") && !isToggleEnabled(v) {
+			continue
 		}
 		if strings.TrimSpace(v) != "" {
 			fmt.Fprintf(&b, "%s = %s\n", k, v)

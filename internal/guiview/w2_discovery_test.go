@@ -72,8 +72,8 @@ func TestW2DiscoveryTable(t *testing.T) {
 			[]w2want{{"amnezia-ikev2", core.SupportKnownNo, "IPsec" + viewOnly}, {"amnezia-tor", core.SupportKnownNo, "Website in Tor network" + viewOnly}}, "amnezia-ikev2", ""},
 		{"amnezia-foo", []string{"amnezia-foo"},
 			[]w2want{{"amnezia-foo", core.SupportUnknown, "незнакомый контейнер amnezia-foo"}}, "amnezia-foo", ""},
-		{"amnezia-awg2 без awg0.conf (сведение W2+W3: версия неизвестна, причина)", []string{"amnezia-awg2"},
-			[]w2want{{"amnezia-awg2", core.SupportKnownNo, "AmneziaWG (версия неизвестна)" + viewOnly + ": файл настроек сервера не прочитан"}}, "amnezia-awg2", ""},
+		{"amnezia-awg2 без awg0.conf (сведение W2+W3: без версии, с причиной)", []string{"amnezia-awg2"},
+			[]w2want{{"amnezia-awg2", core.SupportKnownNo, "AmneziaWG" + viewOnly + ": файл настроек сервера не прочитан"}}, "amnezia-awg2", ""},
 		{"пусто", nil, nil, "", "контейнеры Amnezia на сервере не найдены"},
 		// «только остановленные» — вне W2: docker ps -a вынесен после релиза
 		// (Р3-5). Вместо этой строки — все 16 типов разом: каждый опознан.

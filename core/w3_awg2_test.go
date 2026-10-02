@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"amnezia-admin/core"
-	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/fakesrv"
+	"amnezia-admin/internal/guiview"
 )
 
 // awg2Iface — сервер amnezia-awg2 с [Interface] из extra (строки после
@@ -65,7 +65,7 @@ func TestAWG2DiscoveryMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cs) != 1 || cs[0].Managed() || guiview.ProtoLabel(cs[0]) != "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан" {
+	if len(cs) != 1 || cs[0].Managed() || guiview.ProtoLabel(cs[0]) != "AmneziaWG — только просмотр: файл настроек сервера не прочитан" {
 		t.Errorf("%+v, ждали только просмотр с причиной «не прочитан»", cs)
 	}
 }
@@ -217,5 +217,29 @@ func TestAWG2AllOperations(t *testing.T) {
 	conf, _ := srv.File("/opt/amnezia/awg/awg0.conf")
 	if !strings.Contains(string(conf), "HeaderProtectionKey = hpk-value") || !strings.Contains(string(conf), "# I1 = <r 2><b 0x8580>") {
 		t.Errorf("после операций параметры AWG3 или комментарии I1 в awg0.conf потеряны:\n%s", conf)
+	}
+}
+
+// TestAWG2ClientConfigToggleOff — AU-LOGIC L1: RandomTrailers/DisableCookies
+// со значением off (в любом регистре) в клиентский конфиг не переносятся —
+// как у клиента Amnezia; on — переносятся (TestAWG2ClientConfig выше).
+func TestAWG2ClientConfigToggleOff(t *testing.T) {
+	srv := awg2With(t, "Jc = 4\nS3 = 15\nRandomTrailers = off\nDisableCookies = OFF\n")
+	sess := core.NewSessionWithRunner(srv, raceCreds())
+	cs, err := sess.FindContainers()
+	if err != nil || len(cs) != 1 || !cs[0].Managed() {
+		t.Fatalf("%v %+v", err, cs)
+	}
+	u, err := sess.AddUser(&cs[0], "Dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"RandomTrailers", "DisableCookies"} {
+		if strings.Contains(u.Config, bad) {
+			t.Errorf("в клиентском конфиге %q при off:\n%s", bad, u.Config)
+		}
+	}
+	if !strings.Contains(u.Config, "S3 = 15\n") {
+		t.Errorf("прочие параметры потеряны:\n%s", u.Config)
 	}
 }

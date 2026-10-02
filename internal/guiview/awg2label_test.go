@@ -55,10 +55,11 @@ func TestAWG2LabelSameAsProtoLabel(t *testing.T) {
 		if (f.State == core.FormatKnown) == strings.Contains(got, "— только просмотр") {
 			t.Errorf("%s: состояние %v, подпись %q", name, f.State, got)
 		}
-		if f.State == core.FormatUnknownKey || f.State == core.FormatIncomplete {
-			if strings.Contains(got, "версия") {
-				t.Errorf("%s: при незнакомом ключе или неполном файле версия не пишется: %q", name, got)
-			}
+		// AU-UX Л1: версия — только у известного формата; у только-просмотра
+		// (незнакомый ключ, неполный, НЕ ПРОЧИТАННЫЙ файл) слова «версия» нет,
+		// и две подписи не звучат одинаково.
+		if f.State != core.FormatKnown && strings.Contains(got, "версия") {
+			t.Errorf("%s: у только-просмотра версия не пишется: %q", name, got)
 		}
 	}
 	if len(states) != 4 {

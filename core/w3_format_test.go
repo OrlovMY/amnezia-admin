@@ -114,7 +114,7 @@ func TestAWGVersionLabel(t *testing.T) {
 		{State: FormatKnown}:                 "AmneziaWG (версия параметров не определена)",
 		{State: FormatUnknownKey, Key: "X", Reason: "на сервере незнакомый параметр «X»"}: "AmneziaWG — только просмотр: на сервере незнакомый параметр «X»",
 		{State: FormatIncomplete, Reason: "файл настроек сервера пуст"}:                   "AmneziaWG — только просмотр: файл настроек сервера пуст",
-		{State: FormatUnreadable}: "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан",
+		{State: FormatUnreadable}: "AmneziaWG — только просмотр: файл настроек сервера не прочитан",
 	} {
 		if got := AWGVersionLabel(f); got != want {
 			t.Errorf("%+v: %q, ждали %q", f, got, want)

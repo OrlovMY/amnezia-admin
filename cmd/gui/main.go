@@ -2763,6 +2763,10 @@ func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
 // (для сканирования приложением AmneziaWG на телефоне) и кнопку сохранения
 // .conf на диск. Используется и после создания нового пользователя, и после
 // перевыпуска (re-key) — verb это причастие в диалоге ("создан"/"перевыпущен").
+// awg2ConfigDialogWidth — ширина «Конфиг готов» со строкой честности
+// AmneziaWG 2 (QR и строка рядом). Меньше минимального окна 972.
+const awg2ConfigDialogWidth = 760
+
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	var qrObj fyne.CanvasObject
 	if png, err := core.QRPNG(nu.Config, 256); err == nil {
@@ -2886,15 +2890,26 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
 		hint,
-		noteLabel,
 	))
-	content = container.NewBorder(container.NewCenter(qrObj), container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	// Финальный раунд (AU-UX М1): строка честности AmneziaWG 2 — ВНЕ
+	// прокрутки, справа от QR: видна целиком при открытии на любом
+	// допустимом окне (сторож TestAWG2NoteFullyVisible). В прокрутке она
+	// не помещалась даже первой: подпись 111.4 т. при видимой прокрутке
+	// 104.9 т. (1229×620) и 61.9 т. (972×517). Диалог с ней шире
+	// (awg2ConfigDialogWidth), чтобы рядом с QR она шла в 4–5 строк.
+	var qrTop fyne.CanvasObject = container.NewCenter(qrObj)
+	dialogW := float32(480)
+	if nu.Note != "" {
+		qrTop = container.NewBorder(nil, nil, qrObj, nil, container.NewVBox(noteLabel))
+		dialogW = awg2ConfigDialogWidth
+	}
+	content = container.NewBorder(qrTop, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	autoSave()
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(480, 560))
+	d.Resize(fyne.NewSize(dialogW, 560))
 	d.Show()
 }
 
