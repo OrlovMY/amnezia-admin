@@ -117,8 +117,13 @@ type Server struct {
 	// оборванным клиентом. Без флага она завершается — модель записи,
 	// пережившей клиента.
 	LockHoldAbort bool
-	lockHeld      atomic.Int32
 	lockAborted   atomic.Bool
+	// lockMu — сам замок /run/lock: записи под замком при LockHoldFor > 0
+	// взаимоисключающие, как у flock (вторая ЖДЁТ первую).
+	lockMu  sync.Mutex
+	heldMu  sync.Mutex
+	held    map[string]string // «PID» держателя → командная строка
+	nextPID int
 
 	// LockBusy — замок на хосте занят: команда записи возвращает код 4
 	// (flock -E 4), ничего не записав.
@@ -309,7 +314,7 @@ var (
 	// без замка и без сверки. Продукт её больше не шлёт (T7); принимается
 	// ТОЛЬКО при AllowLegacyWrite — для канарейки, которая играет роль
 	// старой версии в К4 (PR-W1).
-	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
+	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) (?:env LC_ALL=C )?sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
 	reWgShow      = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
 )
 
@@ -321,8 +326,10 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 		time.Sleep(d)
 	}
 	if s.LockHoldFor > 0 && reCASWrite.MatchString(cmd) {
-		s.lockHeld.Add(1)
-		defer s.lockHeld.Add(-1)
+		s.lockMu.Lock()
+		defer s.lockMu.Unlock()
+		pid := s.addHeld(cmd)
+		defer s.delHeld(pid)
 		time.Sleep(s.LockHoldFor)
 		if s.LockHoldAbort && s.lockAborted.CompareAndSwap(false, true) {
 			return "", &ExitError{Cmd: cmd, Status: 124, Stderr: "timeout: прервано (модель обрыва)"}
@@ -365,8 +372,34 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	return s.dispatch(actual, stdin)
 }
 
-// LockHeld — идёт ли сейчас запись под замком (см. LockHoldFor).
-func (s *Server) LockHeld() bool { return s.lockHeld.Load() > 0 }
+// Held — держатели замка сейчас: «PID» → командная строка (см. LockHoldFor).
+func (s *Server) Held() map[string]string {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	out := map[string]string{}
+	for k, v := range s.held {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Server) addHeld(cmd string) string {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	if s.held == nil {
+		s.held = map[string]string{}
+	}
+	s.nextPID++
+	pid := fmt.Sprint(5000 + s.nextPID)
+	s.held[pid] = cmd
+	return pid
+}
+
+func (s *Server) delHeld(pid string) {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	delete(s.held, pid)
+}
 
 // legacySplit — см. LegacyTmpSplit.
 func (s *Server) legacySplit(cmd, path string, stdin []byte) (string, error) {

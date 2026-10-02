@@ -17,7 +17,9 @@ package canary
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"debug/buildinfo"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1306,82 +1308,133 @@ func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 // рвётся); замок в это время держится, следующая запись ждёт или получает
 // «занято», файлы — целиком старые или целиком новые, а затем запись идёт.
 func (e *Env) breakWrite() Result {
-	// Прогон 02.10: обрыв дважды подряд «не на запись под замком». Прежде
-	// процесс убивался через ФИКСИРОВАННЫЕ 300 мс после запуска, а на
-	// настоящем сервере к записи под замком программа приходит через
-	// секунды (SSH-рукопожатие, сверка ключа, чтение файлов — вторая запись
-	// того же прогона шла 5 с): обрыв систематически приходился на
-	// подключение. Теперь обрыв — по факту: опрашиваем держателя замка
-	// /run/lock и убиваем программу, как только он появился; не успели
-	// (программа закончила раньше) — новая попытка, до k5Attempts.
-	// Попытка удачна, если держатель был в момент обрыва И остался сразу
-	// после него (иначе вторая запись ждать нечего — повторяем).
+	// Прогон 02.10: обрыв через ФИКСИРОВАННЫЕ 300 мс приходился на
+	// подключение (до записи под замком программа идёт секунды). Теперь
+	// обрыв — по факту: опрашиваем держателей /run/lock и убиваем
+	// программу, как только замок взяла ИМЕННО НАША запись (AU-LOGIC
+	// High-1: прежде попаданием считался любой держатель). Не успели —
+	// новая попытка, до k5Attempts.
 	attempts, hits := 0, 0
-	cutName := "" // оборванная запись последнего попадания
-	var holders []string
-	known, why := true, ""
+	cutName := ""        // оборванная запись последнего попадания
+	var cutPIDs []string // её держатели замка, оставшиеся после обрыва
 	for attempts < k5Attempts {
 		attempts++
 		name := fmt.Sprintf("canary-k5a-%d", attempts)
-		h, k, w, err := e.killUnderLock(name)
-		if err != nil {
-			return Result{Detail: fmt.Sprintf("первая запись (попытка %d): %v", attempts, err)}
+		a := e.killUnderLock(name)
+		if a.stop != "" {
+			return Result{Detail: fmt.Sprintf("обрыв под замком, попытка %d из %d: %s — ожидание второй записи не проверено", attempts, k5Attempts, a.stop)}
 		}
-		if !k {
-			return Result{Detail: fmt.Sprintf("держателя замка на /run/lock узнать не удалось (%s) — момент обрыва не выбрать, ожидание второй записи не проверено", w)}
-		}
-		if !h {
+		if !a.hit {
 			continue
 		}
 		hits++
 		cutName = name
-		holders, known, why = e.lockHolders()
-		if !known || len(holders) > 0 {
+		after, ok, why := e.holdersPID()
+		if !ok {
+			return Result{Detail: fmt.Sprintf("держателя замка после обрыва узнать не удалось (%s) — ожидание второй записи не проверено", why)}
+		}
+		cutPIDs = nil
+		for _, h := range after {
+			if contains(a.pids, h.pid) {
+				cutPIDs = append(cutPIDs, h.pid)
+			}
+		}
+		if len(cutPIDs) > 0 {
 			break
 		}
 	}
-	hit := hits > 0
-	if !hit {
-		holders, known, why = e.lockHolders()
+	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали нашу запись под замком: %d", attempts, k5Attempts, hits)
+	if len(cutPIDs) == 0 {
+		why := " — ни одна попытка не застала нашу запись под замком"
+		if hits > 0 {
+			why = " — после обрыва замок уже свободен"
+		}
+		return Result{Detail: tries + why + ": ожидание второй записи не проверено"}
 	}
-	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали запись под замком: %d", attempts, k5Attempts, hits)
-	holder := strings.Join(holders, "; ")
-	if !known {
-		holder = why
-	} else if holder == "" {
-		holder = "нет"
+	// Вторая запись — пока держится замок оборванной. Ожидание измеряется:
+	// держатели опрашиваются, пока вторая идёт; «ждала» — только если
+	// замок оборванной освободился ПОСЛЕ начала второй, вторая закончилась
+	// ПОСЛЕ этого и чужих (не оборванной) держателей, пока держала
+	// оборванная, не было (AU-LOGIC Medium-1).
+	ch := make(chan cliRun, 1)
+	start := time.Now()
+	go func() { ch <- e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b") }()
+	var second cliRun
+	var freedAt time.Time
+	overlap, pollFail := false, ""
+poll:
+	for {
+		select {
+		case second = <-ch:
+			break poll
+		default:
+		}
+		hs, ok, why := e.holdersPID()
+		switch {
+		case !ok:
+			pollFail = why
+		case freedAt.IsZero():
+			cut, other := false, false
+			for _, h := range hs {
+				if contains(cutPIDs, h.pid) {
+					cut = true
+				} else {
+					other = true
+				}
+			}
+			if cut && other {
+				overlap = true
+			}
+			if !cut {
+				freedAt = time.Now()
+			}
+		}
+		time.Sleep(k5Poll)
 	}
-	second := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b")
+	end := time.Now()
+	waited := !freedAt.IsZero() && end.After(freedAt) && freedAt.After(start) && !overlap && pollFail == ""
+	wait := "ожидание не измерено"
+	switch {
+	case waited:
+		wait = fmt.Sprintf("ждала: замок оборванной записи освободился через %.1f с после начала второй", freedAt.Sub(start).Seconds())
+	case overlap:
+		wait = "ожидание не измерено: пока держала оборванная запись, у замка был ещё держатель"
+	case pollFail != "":
+		wait = "ожидание не измерено: " + pollFail
+	case freedAt.IsZero():
+		wait = "ожидание не измерено: вторая закончилась, пока замок держала оборванная"
+	}
 	consistent, why := e.consistent()
 	// Решение ядра 02.10: завершилась ли оборванная запись — по
 	// СОДЕРЖИМОМУ (клиент в таблице; consistent сверил таблицу с файлом
 	// конфигурации), не по коду возврата. Таблица не прочитана — неизвестно.
 	landed := landedUnknown
-	if cutName != "" {
-		if m, err := e.names(); err == nil {
-			landed = landedNo
-			if _, ok := m[cutName]; ok {
-				landed = landedYes
-			}
+	if m, err := e.names(); err == nil {
+		landed = landedNo
+		if _, ok := m[cutName]; ok {
+			landed = landedYes
 		}
 	}
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
-	detail := fmt.Sprintf("%s; держатель замка сразу после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s",
-		tries, oneLine(holder), second.code, second.dur.Seconds(), second.title, third.code, why)
+	detail := fmt.Sprintf("%s; держатель замка сразу после обрыва: PID %s; вторая запись: код %d за %.1f с (%s), %s; третья: код %d; файлы: %s",
+		tries, strings.Join(cutPIDs, ","), second.code, second.dur.Seconds(), second.title, wait, third.code, why)
 	switch {
 	case !consistent:
 		return Result{Status: Fail, Detail: detail}
 	case third.code != 0:
 		return Result{Status: Fail, Detail: detail + " — замок завис"}
-	case !known:
-		return Result{Detail: detail + " — держателя замка на /run/lock узнать не удалось: ожидание второй записи не проверено"}
-	case !hit:
-		return Result{Detail: detail + " — ни одна попытка не застала запись под замком: ожидание второй записи не проверено"}
-	case len(holders) == 0:
-		return Result{Detail: detail + " — после обрыва замок уже свободен: ожидание второй записи не проверено"}
 	}
-	st, outcome := judgeK5Second(second, landed)
+	st, outcome := judgeK5Second(second, landed, waited)
 	return Result{Status: st, Detail: detail + " — " + outcome}
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 // landedState — завершилась ли оборванная запись на сервере (по
@@ -1395,16 +1448,19 @@ const (
 )
 
 // judgeK5Second — исход второй записи К5 (решение ядра 02.10):
-//   - код 0 — ждала замок и записала: ПРОЙДЕН «ждёт»;
+//   - код 0 — ПРОЙДЕН (замок не завис); «ждёт» — только при измеренном
+//     ожидании (waited), иначе «ждала ли, не измерено»;
 //   - «занято» — ПРОЙДЕН «занято»;
 //   - «изменили в другом месте» — ПРОЙДЕН, только если оборванная запись
 //     доказанно завершилась на сервере (landedYes); её нет — CAS
 //     необъясним, НЕ ПРОЙДЕН; не узнать — НЕ ПРОВЕРЕНО;
 //   - иное — НЕ ПРОЙДЕН.
-func judgeK5Second(second cliRun, landed landedState) (Status, string) {
+func judgeK5Second(second cliRun, landed landedState, waited bool) (Status, string) {
 	switch {
-	case second.code == 0:
+	case second.code == 0 && waited:
 		return Pass, "исход: ждёт (вторая запись дождалась замка и записала)"
+	case second.code == 0:
+		return Pass, "исход: вторая запись прошла (код 0); ждала ли она замка, не измерено"
 	case isBusy(second):
 		return Pass, "исход: занято"
 	case isChanged(second):
@@ -1435,14 +1491,82 @@ var (
 	k5Deadline = 90 * time.Second
 )
 
-// killUnderLock — запустить add -name name и убить его, как только на
-// /run/lock появился держатель замка. hit=false — программа завершилась (или
-// вышел срок), а держателя так и не увидели. known=false — lslocks не
-// ответил: why — почему.
-func (e *Env) killUnderLock(name string) (hit, known bool, why string, err error) {
+// lockHolder — держатель /run/lock: PID и строка lslocks.
+type lockHolder struct{ pid, line string }
+
+// holdersPID — lockHolders с PID (второй столбец: lslocksCmd задаёт
+// порядок COMMAND,PID,TYPE,PATH). PID не число — ответ не разобран.
+func (e *Env) holdersPID() ([]lockHolder, bool, string) {
+	hs, ok, why := e.lockHolders()
+	if !ok {
+		return nil, false, why
+	}
+	var out []lockHolder
+	for _, l := range hs {
+		f := strings.Fields(l)
+		if len(f) < 2 || !isDigits(f[1]) {
+			return nil, false, "PID держателя не разобран: " + l
+		}
+		out = append(out, lockHolder{f[1], l})
+	}
+	return out, true, ""
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// procCmdlineCmd — командная строка процесса на хосте (pid — только цифры).
+func procCmdlineCmd(pid string) string { return "tr '\\0' ' ' < /proc/" + pid + "/cmdline" }
+
+// isOurWrite — держатель pid — НАША запись (AU-LOGIC High-1). Почему так
+// надёжно: команда записи под замком несёт метку core.CASLabelApply и
+// sha256 файла конфигурации, который программа прочитала и сверяет под
+// замком; эту сумму канарейка считает по тому же файлу ПЕРЕД запуском
+// программы, а перед запуском держателей нет совсем (иначе попытка не
+// делается). Совпасть может только запись amnezia-admin, начатая с того же
+// содержимого после нашего запуска — на тестовом сервере, где пишет одна
+// канарейка, это наша. Командная строка не прочитана (процесс уже вышел) —
+// не наша: попаданием не считается.
+func (e *Env) isOurWrite(pid, sha string) bool {
+	out, err := e.Remote(procCmdlineCmd(pid))
+	return err == nil && strings.Contains(out, core.CASLabelApply) && strings.Contains(out, sha)
+}
+
+// k5Attempt — итог одной попытки обрыва.
+type k5Attempt struct {
+	hit  bool     // убили, пока замок держала наша запись
+	pids []string // её держатели в момент обрыва
+	stop string   // попытка невозможна (замок чужой, lslocks молчит…) — К5 НЕ ПРОВЕРЕНО
+}
+
+// killUnderLock — запустить add -name name и убить его, как только замок
+// /run/lock взяла наша запись. Перед запуском держателей быть не должно.
+func (e *Env) killUnderLock(name string) k5Attempt {
+	hs, ok, why := e.holdersPID()
+	if !ok {
+		return k5Attempt{stop: "держателя замка на /run/lock узнать не удалось (" + why + ")"}
+	}
+	if len(hs) > 0 {
+		return k5Attempt{stop: "замок держит чужой: " + oneLine(holderLines(hs))}
+	}
+	conf, err := e.catFile(e.conf())
+	if err != nil {
+		return k5Attempt{stop: e.fam.File + " перед попыткой не прочитан: " + oneLine(err.Error())}
+	}
+	sum := sha256.Sum256([]byte(conf))
+	sha := hex.EncodeToString(sum[:])
 	cenv, cerr := e.childEnv(e.KeyEnv)
 	if cerr != nil {
-		return false, true, "", cerr
+		return k5Attempt{stop: cerr.Error()}
 	}
 	args := []string{"add", "-name", name, "-hostkey", e.HostKey}
 	if e.Ctr != nil {
@@ -1452,7 +1576,7 @@ func (e *Env) killUnderLock(name string) (hit, known bool, why string, err error
 	cmd.Env = cenv
 	cmd.Stdin = strings.NewReader("")
 	if err := cmd.Start(); err != nil {
-		return false, true, "", fmt.Errorf("не запущена: %w", err)
+		return k5Attempt{stop: "первая запись не запущена: " + err.Error()}
 	}
 	done := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(done) }()
@@ -1461,24 +1585,45 @@ func (e *Env) killUnderLock(name string) (hit, known bool, why string, err error
 	for {
 		select {
 		case <-done:
-			return false, true, "", nil
+			return k5Attempt{}
 		default:
 		}
-		holders, ok, w := e.lockHolders()
+		hs, ok, why := e.holdersPID()
 		if !ok {
 			_ = cmd.Process.Kill()
-			return false, false, w, nil
+			return k5Attempt{stop: "держателя замка на /run/lock узнать не удалось (" + why + ")"}
 		}
-		if len(holders) > 0 {
+		var ours []string
+		var foreign []lockHolder
+		for _, h := range hs {
+			if e.isOurWrite(h.pid, sha) {
+				ours = append(ours, h.pid)
+			} else {
+				foreign = append(foreign, h)
+			}
+		}
+		if len(ours) > 0 {
 			_ = cmd.Process.Kill()
-			return true, true, "", nil
+			return k5Attempt{hit: true, pids: ours}
+		}
+		if len(foreign) > 0 {
+			_ = cmd.Process.Kill()
+			return k5Attempt{stop: "замок держит чужой: " + oneLine(holderLines(foreign))}
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
-			return false, true, "", nil
+			return k5Attempt{}
 		}
 		time.Sleep(k5Poll)
 	}
+}
+
+func holderLines(hs []lockHolder) string {
+	var ls []string
+	for _, h := range hs {
+		ls = append(ls, h.line)
+	}
+	return strings.Join(ls, "; ")
 }
 
 // isBusy — «занято» так же, как в К4: код 1 и заголовок дословно (раунд 4,

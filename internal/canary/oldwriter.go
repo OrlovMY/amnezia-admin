@@ -29,7 +29,9 @@ func (e *Env) catFile(path string) (string, error) {
 // Ошибка несёт вывод команды (прогон 02.10: «Process exited with status 1»
 // без причины не давал понять, что упало); oneLine маскирует ключи.
 func (e *Env) legacyWrite(path string, data []byte) error {
-	out, err := e.RemoteIn(e.docker+" exec -i "+e.Ctr.Name+" sh -c 'cat > "+path+".tmp && mv "+path+".tmp "+path+"'", data)
+	// LC_ALL=C — сообщения mv/sh на английском при любой локали сервера
+	// (AU-LOGIC Low-1: от них зависит признак столкновения).
+	out, err := e.RemoteIn(e.docker+" exec -i "+e.Ctr.Name+" env LC_ALL=C sh -c 'cat > "+path+".tmp && mv "+path+".tmp "+path+"'", data)
 	if err != nil {
 		if o := tailLine(out); o != "" {
 			return fmt.Errorf("%s: %s", oneLine(err.Error()), o)
@@ -51,9 +53,20 @@ type OldRaceStats struct {
 // второй писатель (его mv прошёл раньше): mv не находит P.tmp. Это гонка
 // v0.2.0 ровно так, как её видит человек (ошибка вместо записи). Иная
 // ошибка — НЕ гонка: что случилось, неизвестно.
-func isTmpCollision(err error) bool {
+//
+// Сопоставление — по сообщению mv («mv: …») с ПОЛНЫМ путём 'P.tmp' одного
+// из файлов записи (AU-LOGIC Low-1: подстрока «mv» встречалась и в путях).
+func isTmpCollision(err error, paths ...string) bool {
 	s := err.Error()
-	return strings.Contains(s, ".tmp") && strings.Contains(s, "mv") && strings.Contains(s, "No such file")
+	if !strings.Contains(s, "mv: ") || !strings.Contains(s, "No such file") {
+		return false
+	}
+	for _, p := range paths {
+		if strings.Contains(s, "'"+p+".tmp'") {
+			return true
+		}
+	}
+	return false
 }
 
 // tailLine — вывод команды одной строкой, КОНЕЦ (там сообщение mv/sh), не
@@ -140,7 +153,7 @@ func (e *Env) oldWriterRace() (st OldRaceStats, err error) {
 				}
 				mu.Lock()
 				switch {
-				case kerr != nil && isTmpCollision(kerr):
+				case kerr != nil && isTmpCollision(kerr, e.conf(), tblPath):
 					st.Collided++
 					if st.Example == "" {
 						st.Example = kerr.Error()
