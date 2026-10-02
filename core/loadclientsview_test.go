@@ -161,6 +161,11 @@ func TestContainersWasNowTable(t *testing.T) {
 				srv := fakesrv.New()
 				srv.Names = containerNames()
 				dir := "/opt/amnezia/" + strings.TrimPrefix(spec.name, "amnezia-")
+				if spec.name == "amnezia-awg2" {
+					// PR-W1: каталог awg2 — /opt/amnezia/awg (исходники
+					// amnezia-client), а не угаданный по суффиксу /opt/amnezia/awg2.
+					dir = "/opt/amnezia/awg"
+				}
 				path := dir + "/clientsTable"
 				setVariant(srv, path, variant)
 				sess := core.NewSessionWithRunner(srv, viewCreds())

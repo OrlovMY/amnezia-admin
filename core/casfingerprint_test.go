@@ -22,8 +22,8 @@ func TestCASFingerprintTracksTemplate(t *testing.T) {
 		}
 	}
 	// изменение шаблона (любой формы) и скрипта меняет сумму
-	changed := func(label, container, dir, wantWg, wantTbl string, sudo bool) (string, error) {
-		c, err := casWriteCommand(label, container, dir, wantWg, wantTbl, sudo)
+	changed := func(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error) {
+		c, err := casWriteCommand(label, container, dir, file, wantWg, wantTbl, sudo)
 		return strings.Replace(c, "-w 15", "-w 16", 1), err
 	}
 	s3, c3, u3 := casFingerprintWith(changed, CASWriteScript)
@@ -34,7 +34,7 @@ func TestCASFingerprintTracksTemplate(t *testing.T) {
 		t.Errorf("изменение скрипта не изменило отпечаток")
 	}
 	// реальный построитель и CASWriteCommand/Sudo дают одно и то же
-	cmd, _ := CASWriteCommand(CASLabelApply, casFPContainer, casFPDir, casFPSum, CASAbsent)
+	cmd, _ := CASWriteCommand(CASLabelApply, casFPContainer, casFPDir, casFPFile, casFPSum, CASAbsent)
 	if !strings.Contains(cmd, "-w 15") {
 		t.Fatalf("тест ничего не значит: в шаблоне нет «-w 15»: %.80s", cmd)
 	}

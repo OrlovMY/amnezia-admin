@@ -89,7 +89,7 @@ func TestSudoPassedScriptFailedIsUnknown(t *testing.T) {
 // TestSudoInfixMatchesCore — копия формы повтора в fakesrv совпадает с
 // командой ядра (иначе второй признак F1 в fakesrv онемеет, AU-LOGIC M-2).
 func TestSudoInfixMatchesCore(t *testing.T) {
-	cmd, err := CASWriteCommandSudo(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", strings.Repeat("a", 64), CASAbsent)
+	cmd, err := CASWriteCommandSudo(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", strings.Repeat("a", 64), CASAbsent)
 	if err != nil {
 		t.Fatal(err)
 	}

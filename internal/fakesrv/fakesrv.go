@@ -266,15 +266,19 @@ var (
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
 	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
 	// TestCASLockLineRealFlock (Linux).
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
-		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
+		`cp (\S+)/(wg0\.conf|awg0\.conf) (\S+)/backup/(wg0\.conf|awg0\.conf)\.\$ts && ` +
 		`\(cp (\S+)/clientsTable (\S+)/backup/clientsTable\.\$ts 2>/dev/null; ` +
-		`ls -1t (\S+)/backup/wg0\.conf\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
+		`ls -1t (\S+)/backup/(wg0\.conf|awg0\.conf)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
 		`ls -1t (\S+)/backup/clientsTable\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
-	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c 'wg syncconf wg0 <\(wg-quick strip (\S+)/wg0\.conf\)'$`)
-	reWgShow   = regexp.MustCompile(`^docker exec (\S+) wg show wg0 dump$`)
+	// PR-W1: утилита, интерфейс и файл — из таблицы семейства WG; fakesrv
+	// принимает только согласованные тройки (wg, wg0, wg0.conf) и (awg,
+	// awg0, awg0.conf) — смешение (awg + wg0.conf и т.п.) — неизвестная
+	// команда.
+	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c '(wg|awg) syncconf (wg0|awg0) <\((wg|awg)-quick strip (\S+)/(wg0\.conf|awg0\.conf)\)'$`)
+	reWgShow   = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -355,21 +359,24 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			return "", s.FailBackup
 		}
 		m := reBackup.FindStringSubmatch(cmd)
-		dir := m[2]
-		for _, g := range m[3:] {
+		dir, file := m[2], m[4]
+		for _, g := range []string{m[3], m[5], m[7], m[8], m[9], m[11]} {
 			if g != dir {
 				return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 			}
 		}
-		wg0, ok := s.files[dir+"/wg0.conf"]
+		if m[6] != file || m[10] != file {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		wg0, ok := s.files[dir+"/"+file]
 		if !ok {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: cp: %s/wg0.conf: No such file or directory", cmd, dir)
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: cp: %s/%s: No such file or directory", cmd, dir, file)
 		}
 		ts := time.Now().Format("20060102-150405")
 		if s.files == nil {
 			s.files = map[string][]byte{}
 		}
-		s.files[dir+"/backup/wg0.conf."+ts] = append([]byte(nil), wg0...)
+		s.files[dir+"/backup/"+file+"."+ts] = append([]byte(nil), wg0...)
 		if ct, ok := s.files[dir+"/clientsTable"]; ok {
 			s.files[dir+"/backup/clientsTable."+ts] = append([]byte(nil), ct...)
 		}
@@ -377,7 +384,10 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 
 	case reSyncconf.MatchString(cmd):
 		m := reSyncconf.FindStringSubmatch(cmd)
-		dir := m[2]
+		if !wgTriple(m[2], m[3], m[6]) || m[4] != m[2] {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		dir, file := m[5], m[6]
 		s.syncconfCalls++
 		if s.FailSyncconf != nil {
 			return "", s.FailSyncconf
@@ -385,9 +395,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		if s.FailSyncconfFrom > 0 && s.syncconfCalls >= s.FailSyncconfFrom {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg syncconf: имитированный отказ (вызов №%d)", cmd, s.syncconfCalls)
 		}
-		wg0, ok := s.files[dir+"/wg0.conf"]
+		wg0, ok := s.files[dir+"/"+file]
 		if !ok {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg-quick: %s/wg0.conf: No such file or directory", cmd, dir)
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: %s-quick: %s/%s: No such file or directory", cmd, m[2], dir, file)
 		}
 		peers := peerKeysFromConf(string(wg0))
 		if s.DropPeerOnSync != "" {
@@ -397,6 +407,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return "", nil
 
 	case reWgShow.MatchString(cmd):
+		if m := reWgShow.FindStringSubmatch(cmd); !wgTriple(m[2], m[3], "") {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
 		s.wgShowCalls++
 		if s.FailWgShowFrom > 0 && s.wgShowCalls >= s.FailWgShowFrom {
 			return "", fmt.Errorf("fakesrv: имитированный отказ wg show (вызов №%d)", s.wgShowCalls)
@@ -467,7 +480,7 @@ const CASSudoInfix = "env LC_ALL=C sudo -n docker exec"
 // timeout/flock) — модель, тело скрипта — настоящий sh (execScript). Весь Run
 // идёт под s.mu, поэтому две команды записи взаимно исключены, как под flock.
 func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) {
-	dir, wantWg, wantTbl := m[4], m[5], m[6]
+	dir, wantWg, wantTbl, file := m[4], m[5], m[6], m[7]
 	fail := func(code int, stderr string) (string, error) {
 		return "", &ExitError{Cmd: cmd, Status: code, Stderr: stderr}
 	}
@@ -492,7 +505,7 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(fault.Code, "имитированный отказ записи")
 	}
 
-	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, stdin)
+	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, file, stdin)
 	if err != nil {
 		return "", err
 	}
@@ -513,7 +526,8 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 // sh на временном каталоге с копией двух файлов, затем забирает результат
 // обратно в память. Замок flock моделирует s.mu: весь Run идёт под ним.
 // Нет sh — громкий отказ с причиной, а не тихая подмена моделью.
-func (s *Server) execScript(script, label, dir, wantWg, wantTbl string, stdin []byte) (int, string, error) {
+func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, stdin []byte) (int, string, error) {
+	casFiles := []string{file, "clientsTable"}
 	sh, err := FindSh()
 	if err != nil {
 		return 0, "", err
@@ -542,7 +556,7 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl string, stdin []
 		}
 		env = append(env, "PATH="+shim)
 	}
-	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl)
+	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl, file)
 	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(stdin)
 	var errb bytes.Buffer
@@ -573,8 +587,6 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl string, stdin []
 	s.TempLeft += len(left)
 	return code, strings.TrimSpace(errb.String()), nil
 }
-
-var casFiles = []string{"wg0.conf", "clientsTable"}
 
 // FindSh — путь к POSIX sh: из PATH, а на Windows ещё и из Git for Windows.
 // Ошибка называет причину: без sh fakesrv не может исполнить скрипт записи.
@@ -631,4 +643,31 @@ func (s *Server) toolShim(sh, tmp string) (string, error) {
 		}
 	}
 	return shim, nil
+}
+
+// wgTriple — согласованы ли утилита, интерфейс и (если задан) файл:
+// (wg, wg0, wg0.conf) или (awg, awg0, awg0.conf).
+func wgTriple(tool, iface, file string) bool {
+	switch tool {
+	case "wg":
+		return iface == "wg0" && (file == "" || file == "wg0.conf")
+	case "awg":
+		return iface == "awg0" && (file == "" || file == "awg0.conf")
+	}
+	return false
+}
+
+// NewAWG2 — сервер с контейнером amnezia-awg2 (AWG2/AWG3: каталог
+// /opt/amnezia/awg, файл awg0.conf, утилиты awg/awg-quick, интерфейс awg0)
+// и тем же начальным содержимым, что New(), плюс параметры AWG2 в
+// [Interface]. wg0.conf в каталоге нет.
+func NewAWG2() *Server {
+	s := New()
+	s.Names = []string{"amnezia-awg2"}
+	wg0 := s.files["/opt/amnezia/awg/wg0.conf"]
+	delete(s.files, "/opt/amnezia/awg/wg0.conf")
+	awg := strings.Replace(string(wg0), "ListenPort = 51820\n",
+		"ListenPort = 51820\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 20\nS2 = 30\nS3 = 15\nS4 = 25\nH1 = 100-200\nH2 = 300-400\nH3 = 500-600\nH4 = 700-800\n# I1 = <b 0xdeadbeef>\n", 1)
+	s.files["/opt/amnezia/awg/awg0.conf"] = []byte(awg)
+	return s
 }

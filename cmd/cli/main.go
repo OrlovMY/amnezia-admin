@@ -882,6 +882,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента) — только если ключ сервера сверен и совпал")
 	printUnverified := fs.Bool("print-unverified", false, "show-config: напечатать содержимое, даже если ключ сервера не совпал или не сверен")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
+	container := fs.String("container", "", "контейнер протокола (например amnezia-awg2); по умолчанию — первый управляемый")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -938,6 +939,25 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		if containers[i].Managed {
 			cur = &containers[i]
 			break
+		}
+	}
+	// -container (PR-W1): выбрать протокол явно — канарейка проходит по
+	// всем контейнерам семейства WG. Нет такого на сервере — отказ, а не
+	// молчаливый выбор другого.
+	if *container != "" {
+		cur = nil
+		for i := range containers {
+			if containers[i].Name == *container {
+				cur = &containers[i]
+			}
+		}
+		if cur == nil {
+			var names []string
+			for _, c := range containers {
+				names = append(names, c.Name)
+			}
+			fmt.Fprintf(stderr, "Ошибка: контейнера %s на сервере нет (есть: %s)\n", *container, strings.Join(names, ", "))
+			return 1
 		}
 	}
 

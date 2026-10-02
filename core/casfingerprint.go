@@ -11,6 +11,7 @@ const (
 	casFPContainer = "fingerprint"
 	casFPDir       = "/fingerprint"
 	casFPSum       = "0000000000000000000000000000000000000000000000000000000000000000"
+	casFPFile      = "wg0.conf" // имя файла — аргумент $4 (PR-W1); шаблон от него не зависит
 )
 
 // CASFingerprint — отпечаток текста записи этой сборки: sha256 скрипта
@@ -25,16 +26,16 @@ func CASFingerprint() (script, command, sudoCommand string) {
 
 // casFingerprintWith — отпечаток по построителю команды (шов для теста:
 // изменённый шаблон обязан менять сумму).
-func casFingerprintWith(build func(label, container, dir, wantWg, wantTbl string, sudo bool) (string, error), scriptText string) (script, command, sudoCommand string) {
+func casFingerprintWith(build func(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error), scriptText string) (script, command, sudoCommand string) {
 	h := func(s string) string {
 		sum := sha256.Sum256([]byte(s))
 		return hex.EncodeToString(sum[:])
 	}
-	cmd, err := build(CASLabelApply, casFPContainer, casFPDir, casFPSum, CASAbsent, false)
+	cmd, err := build(CASLabelApply, casFPContainer, casFPDir, casFPFile, casFPSum, CASAbsent, false)
 	if err != nil {
 		panic("CASFingerprint: заглушки не прошли проверку: " + err.Error())
 	}
-	sudo, err := build(CASLabelApply, casFPContainer, casFPDir, casFPSum, CASAbsent, true)
+	sudo, err := build(CASLabelApply, casFPContainer, casFPDir, casFPFile, casFPSum, CASAbsent, true)
 	if err != nil {
 		panic("CASFingerprint: заглушки не прошли проверку: " + err.Error())
 	}

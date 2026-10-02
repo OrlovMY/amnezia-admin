@@ -1008,7 +1008,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		}
 	}
 
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1098,7 +1098,7 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 	name := clients[idx].Name() // Subject — имя, не ключ (review changes-requested, Low)
 	newClients, _ := filterClientsByID(clients, clientID)
 
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1159,7 +1159,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		return nil, fmt.Errorf("пользователь %q отключён — сначала включите его, затем перевыпускайте конфиг", name)
 	}
 
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1270,7 +1270,7 @@ func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Pla
 	// wgAfter делается байт-в-байт равным wgBefore, и Apply не пишет
 	// wg0.conf и не вызывает syncconf, пока план ничего в конфиге не меняет
 	// (Г1) — переименование не должно рвать соединения, как и раньше.
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1323,7 +1323,7 @@ func (s *Session) planDisableLocked(c *Container, clientID string) (*Plan, error
 		return nil, fmt.Errorf("пользователь %q уже отключён", clients[idx].Name())
 	}
 
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1426,7 +1426,7 @@ func (s *Session) planEnableLocked(c *Container, clientID string) (*Plan, error)
 		return nil, fmt.Errorf("невозможно включить: параметры peer не сохранены, пересоздайте пользователя")
 	}
 
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -1566,7 +1566,7 @@ func (s *Session) applySteps(c *Container, p *Plan, wgChanged bool) error {
 // или PSK возможно только как расхождение РАНТАЙМА с файлом — оно исчезает
 // после перезапуска контейнера или повторного применения.
 func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
-	wgNow, err := s.catIn(c, c.Dir+"/wg0.conf")
+	wgNow, err := s.catConf(c)
 	if err != nil {
 		return fmt.Errorf("проверка wg0.conf: %w", err)
 	}
@@ -1749,7 +1749,7 @@ var rollbackOutcome = map[rollbackCell]error{
 
 // measureFilesAfterRollback — совпали ли оба файла с прежними байтами.
 func (s *Session) measureFilesAfterRollback(c *Container, wgBefore, tblBefore []byte) (checkState, string) {
-	wgNow, wgErr := s.catIn(c, c.Dir+"/wg0.conf")
+	wgNow, wgErr := s.catConf(c)
 	if wgErr != nil {
 		return checkUnknown, fmt.Sprintf("wg0.conf не прочитан: %v", wgErr)
 	}

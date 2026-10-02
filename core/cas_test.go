@@ -248,18 +248,26 @@ func TestCASWriteCommandRejectsBadArgs(t *testing.T) {
 	if strings.Contains(CASWriteScript, "'") {
 		t.Fatal("в CASWriteScript есть одинарная кавычка — команда разорвётся")
 	}
-	if _, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", good, CASAbsent); err != nil {
-		t.Fatalf("корректные аргументы отвергнуты: %v", err)
+	for _, f := range []string{"wg0.conf", "awg0.conf"} {
+		if _, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", f, good, CASAbsent); err != nil {
+			t.Fatalf("корректные аргументы (%s) отвергнуты: %v", f, err)
+		}
 	}
-	bad := [][5]string{
-		{"x", "amnezia-awg", "/opt/amnezia/awg", good, good},
-		{CASLabelApply, "a;rm", "/opt/amnezia/awg", good, good},
-		{CASLabelApply, "amnezia-awg", "/opt/a b", good, good},
-		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "zz", good},
-		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", good, "' ; x"},
+	bad := [][6]string{
+		{"x", "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", good, good},
+		{CASLabelApply, "a;rm", "/opt/amnezia/awg", "wg0.conf", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/a b", "wg0.conf", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", "zz", good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", good, "' ; x"},
+		// PR-W1: имя файла — закрытый список {wg0.conf, awg0.conf}
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "../wg0.conf", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "x.conf", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf x", good, good},
+		{CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "clientsTable", good, good},
 	}
 	for _, a := range bad {
-		if _, err := CASWriteCommand(a[0], a[1], a[2], a[3], a[4]); err == nil {
+		if _, err := CASWriteCommand(a[0], a[1], a[2], a[3], a[4], a[5]); err == nil {
 			t.Errorf("CASWriteCommand%q: ждали отказ", a)
 		}
 	}

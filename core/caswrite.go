@@ -88,20 +88,20 @@ const (
 // read, а не head -c: head на канале читает с запасом и съел бы начало
 // второй строки; read в POSIX sh читает по байту.
 const CASWriteScript = `umask 077
-d=$1; ww=$2; wt=$3
+d=$1; ww=$2; wt=$3; cf=$4
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
-nw="$d/wg0.conf` + CASTempInfix + `$$"; nt="$d/clientsTable` + CASTempInfix + `$$"
-rm -f "$d"/wg0.conf` + CASTempInfix + `* "$d"/clientsTable` + CASTempInfix + `* || exit 1
+nw="$d/$cf` + CASTempInfix + `$$"; nt="$d/clientsTable` + CASTempInfix + `$$"
+rm -f "$d/$cf"` + CASTempInfix + `* "$d"/clientsTable` + CASTempInfix + `* || exit 1
 IFS= read -r W || exit 1
 IFS= read -r T || exit 1
 if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
 printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
 hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
-hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
+hw=$(hsum "$d/$cf") || { rm -f "$nw" "$nt"; exit 1; }
 ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
-if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
+if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: $cf" >&2; exit 3; fi
 if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/wg0.conf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: wg0.conf: $e" >&2; exit 1; }; fi
+if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: $cf: $e" >&2; exit 1; }; fi
 e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
 exit 0`
 
@@ -115,8 +115,11 @@ var (
 // (flock на каталоге CASLockDir), ожидание замка casLockWait, вся команда —
 // не дольше casOuterTimeout. Аргументы проверяются до сборки: в текст
 // команды не может попасть ничего, кроме имени, пути и сумм.
-func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, error) {
-	return casWriteCommand(label, container, dir, wantWg, wantTbl, false)
+//
+// file — имя файла конфигурации сервера (аргумент $4 скрипта) из закрытого
+// списка casConfFiles: wg0.conf | awg0.conf (PR-W1).
+func CASWriteCommand(label, container, dir, file, wantWg, wantTbl string) (string, error) {
+	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, false)
 }
 
 // CASWriteCommandSudo — та же команда для повтора под sudo (AU-LOGIC PR-4,
@@ -127,11 +130,14 @@ func CASWriteCommand(label, container, dir, wantWg, wantTbl string) (string, err
 // (`sudo docker exec …`) писать позволял. timeout и flock идут от
 // пользователя: замок на каталоге открывается без прав. `-n` — sudo не ждёт
 // пароль внутри замка, а сразу отказывает.
-func CASWriteCommandSudo(label, container, dir, wantWg, wantTbl string) (string, error) {
-	return casWriteCommand(label, container, dir, wantWg, wantTbl, true)
+func CASWriteCommandSudo(label, container, dir, file, wantWg, wantTbl string) (string, error) {
+	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, true)
 }
 
-func casWriteCommand(label, container, dir, wantWg, wantTbl string, sudo bool) (string, error) {
+func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error) {
+	if !casConfFiles[file] {
+		return "", fmt.Errorf("недопустимое имя файла конфигурации %q (допустимы: wg0.conf, awg0.conf)", file)
+	}
 	if label != CASLabelApply && label != CASLabelRollback {
 		return "", fmt.Errorf("недопустимая метка записи %q", label)
 	}
@@ -153,8 +159,8 @@ func casWriteCommand(label, container, dir, wantWg, wantTbl string, sudo bool) (
 		// себя — по-прежнему docker.
 		docker = "env LC_ALL=C sudo -n docker"
 	}
-	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s",
-		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl), nil
+	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s %s",
+		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl, file), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
@@ -367,7 +373,11 @@ func stderrTail(err error) string {
 // casWrite заменяет оба файла, только если их текущие суммы равны
 // wantWg/wantTbl. nil — записано; иначе *casWriteError с исходом.
 func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl []byte) error {
-	cmd, err := CASWriteCommand(label, c.Name, c.Dir, wantWg, wantTbl)
+	fam, err := WGFamilyOf(c)
+	if err != nil {
+		return fmt.Errorf("запись не выполнена: %w", err)
+	}
+	cmd, err := CASWriteCommand(label, c.Name, c.Dir, fam.File, wantWg, wantTbl)
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", notStarted{err})
 	}
@@ -379,7 +389,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	_, runErr := s.run(cmd, stdin)
 	sudoRefused := false
 	if casDeniedBeforeWrite(runErr) {
-		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, wantWg, wantTbl)
+		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, fam.File, wantWg, wantTbl)
 		if err != nil {
 			return fmt.Errorf("запись не выполнена: %w", err)
 		}

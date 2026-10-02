@@ -18,7 +18,7 @@ import (
 func TestFakesrvRunsRealScript(t *testing.T) {
 	srv := fakesrv.New()
 	c := awgContainer()
-	cmd, err := CASWriteCommand(CASLabelApply, c.Name, c.Dir, strings.Repeat("0", 64), CASAbsent)
+	cmd, err := CASWriteCommand(CASLabelApply, c.Name, c.Dir, "wg0.conf", strings.Repeat("0", 64), CASAbsent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +119,8 @@ func (r *denyDockerOnce) Run(cmd string, stdin []byte) (string, error) {
 // TestCASTempInfixIsProtocol — QA: имена временных файлов — часть протокола.
 func TestCASTempInfixIsProtocol(t *testing.T) {
 	for _, want := range []string{
-		`"$d/wg0.conf` + CASTempInfix + `$$"`, `"$d/clientsTable` + CASTempInfix + `$$"`,
-		`"$d"/wg0.conf` + CASTempInfix + `*`, `"$d"/clientsTable` + CASTempInfix + `*`,
+		`"$d/$cf` + CASTempInfix + `$$"`, `"$d/clientsTable` + CASTempInfix + `$$"`,
+		`"$d/$cf"` + CASTempInfix + `*`, `"$d"/clientsTable` + CASTempInfix + `*`,
 	} {
 		if !strings.Contains(CASWriteScript, want) {
 			t.Errorf("скрипт не использует имя временного файла по протоколу: %s", want)

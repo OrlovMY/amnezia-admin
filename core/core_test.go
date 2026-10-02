@@ -1214,33 +1214,33 @@ var cmdTemplates = []string{
 // casScriptLiteral — ДОСЛОВНАЯ копия core.CASWriteScript. Копия, а не ссылка
 // на константу: сторож обязан краснеть, если текст скрипта изменят.
 const casScriptLiteral = `umask 077
-d=$1; ww=$2; wt=$3
+d=$1; ww=$2; wt=$3; cf=$4
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
-nw="$d/wg0.conf.aa.$$"; nt="$d/clientsTable.aa.$$"
-rm -f "$d"/wg0.conf.aa.* "$d"/clientsTable.aa.* || exit 1
+nw="$d/$cf.aa.$$"; nt="$d/clientsTable.aa.$$"
+rm -f "$d/$cf".aa.* "$d"/clientsTable.aa.* || exit 1
 IFS= read -r W || exit 1
 IFS= read -r T || exit 1
 if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
 printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
 hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
-hw=$(hsum "$d/wg0.conf") || { rm -f "$nw" "$nt"; exit 1; }
+hw=$(hsum "$d/$cf") || { rm -f "$nw" "$nt"; exit 1; }
 ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
-if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: wg0.conf" >&2; exit 3; fi
+if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: $cf" >&2; exit 3; fi
 if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/wg0.conf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: wg0.conf: $e" >&2; exit 1; }; fi
+if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: $cf: $e" >&2; exit 1; }; fi
 e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
 exit 0`
 
 func casWriteTemplate(label string) string {
 	return "timeout 75 flock -w 15 -E 4 /run/lock/ docker exec -i " + dyn +
-		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
+		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn + " " + dyn
 }
 
 // casWriteTemplateSudo — повтор записи под sudo (AU-LOGIC PR-4, H1): sudo
 // внутри замка, прямо перед docker.
 func casWriteTemplateSudo(label string) string {
 	return "timeout 75 flock -w 15 -E 4 /run/lock/ env LC_ALL=C sudo -n docker exec -i " + dyn +
-		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn
+		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn + " " + dyn
 }
 
 // sockDeniedRunner — docker без sudo не пускает к сокету: запись без sudo
@@ -1516,7 +1516,7 @@ func TestCASTimeoutInvariant(t *testing.T) {
 	if casOuterTimeout <= casLockWait+casInnerTimeout {
 		t.Errorf("внешний таймаут %d не больше ожидания замка %d + внутреннего %d", casOuterTimeout, casLockWait, casInnerTimeout)
 	}
-	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", strings.Repeat("a", 64), CASAbsent)
+	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", strings.Repeat("a", 64), CASAbsent)
 	if err != nil {
 		t.Fatal(err)
 	}

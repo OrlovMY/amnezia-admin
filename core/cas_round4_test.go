@@ -112,7 +112,7 @@ var errBoom = &fakesrv.ExitError{Cmd: "wg syncconf", Status: 1, Stderr: "I/O err
 // casLockPrefix — настоящая строка замка из CASWriteCommand (до docker exec).
 func casLockPrefix(t *testing.T) string {
 	t.Helper()
-	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", strings.Repeat("a", 64), CASAbsent)
+	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", strings.Repeat("a", 64), CASAbsent)
 	if err != nil {
 		t.Fatal(err)
 	}

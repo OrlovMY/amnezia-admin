@@ -163,6 +163,11 @@ type Container struct {
 var knownContainers = []Container{
 	{"amnezia-awg", "/opt/amnezia/awg", "AmneziaWG", true},
 	{"amnezia-wireguard", "/opt/amnezia/wireguard", "WireGuard", true},
+	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg, а НЕ
+	// /opt/amnezia/awg2, как прежде угадывалось по суффиксу имени (PR-W1).
+	// Управление включается в PR-W3 (определение формата); здесь — только
+	// верный каталог, нужный записи.
+	{"amnezia-awg2", "/opt/amnezia/awg", "awg2", false},
 	{"amnezia-xray", "/opt/amnezia/xray", "XRay", false},
 	{"amnezia-openvpn", "/opt/amnezia/openvpn", "OpenVPN", false},
 	{"amnezia-shadowsocks", "/opt/amnezia/shadowsocks", "OpenVPN+ShadowSocks", false},
@@ -229,13 +234,20 @@ func (s *Session) catIn(c *Container, path string) (string, error) {
 // провалившейся. clientsTable может отсутствовать (например, до первого
 // пользователя) — для неё отсутствие файла не является ошибкой.
 func (s *Session) backup(c *Container) error {
+	// Имя файла — из таблицы семейства WG (PR-W1): wg0.conf | awg0.conf.
+	// Для wg0.conf команда байт в байт прежняя.
+	fam, err := WGFamilyOf(c)
+	if err != nil {
+		return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{err})
+	}
+	f := fam.File
 	cmd := fmt.Sprintf(
 		"docker exec %s sh -c 'mkdir -p %s/backup && ts=$(date +%%Y%%m%%d-%%H%%M%%S) && "+
-			"cp %s/wg0.conf %s/backup/wg0.conf.$ts && "+
+			"cp %s/%s %s/backup/%s.$ts && "+
 			"(cp %s/clientsTable %s/backup/clientsTable.$ts 2>/dev/null; "+
-			"ls -1t %s/backup/wg0.conf.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done; "+
+			"ls -1t %s/backup/%s.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done; "+
 			"ls -1t %s/backup/clientsTable.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done)'",
-		c.Name, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir, c.Dir)
+		c.Name, c.Dir, c.Dir, f, c.Dir, f, c.Dir, c.Dir, c.Dir, f, c.Dir)
 	if _, err := s.docker(cmd, nil); err != nil {
 		return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{err})
 	}
@@ -419,13 +431,18 @@ func parsePeerStats(out string) (map[string]PeerStat, error) {
 
 // GetPeerStats возвращает статистику по каждому peer'у (handshake, трафик)
 func (s *Session) GetPeerStats(c *Container) (map[string]PeerStat, error) {
-	out, err := s.docker(fmt.Sprintf("docker exec %s wg show wg0 dump", c.Name), nil)
+	fam, err := WGFamilyOf(c)
 	if err != nil {
-		return nil, fmt.Errorf("wg show wg0 dump: %w", err)
+		return nil, fmt.Errorf("статистика не запрошена: %w", err)
+	}
+	show := fmt.Sprintf("%s show %s dump", fam.Tool, fam.Iface)
+	out, err := s.docker(fmt.Sprintf("docker exec %s %s", c.Name, show), nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", show, err)
 	}
 	stats, err := parsePeerStats(out)
 	if err != nil {
-		return nil, fmt.Errorf("wg show wg0 dump: %w", err)
+		return nil, fmt.Errorf("%s: %w", show, err)
 	}
 	return stats, nil
 }
@@ -829,7 +846,7 @@ func SortByActivity(clients []ClientEntry, stats map[string]PeerStat) {
 // list молчал ровно так же, как на чистом сервере, и человек не узнавал,
 // что проверка не состоялась.
 func (s *Session) OrphanPeers(c *Container, clients []ClientEntry) ([]string, error) {
-	raw, err := s.catIn(c, c.Dir+"/wg0.conf")
+	raw, err := s.catConf(c)
 	if err != nil {
 		return nil, fmt.Errorf("чтение wg0.conf: %w", err)
 	}
@@ -971,8 +988,14 @@ func pubFromPriv(privB64 string) (string, error) {
 // ---------- операции ----------
 
 func (s *Session) syncWg(c *Container) error {
-	_, err := s.docker(
-		fmt.Sprintf("docker exec %s bash -c 'wg syncconf wg0 <(wg-quick strip %s/wg0.conf)'", c.Name, c.Dir), nil)
+	// Утилита, интерфейс и файл — из таблицы семейства WG (PR-W1); для
+	// amnezia-awg команда байт в байт прежняя.
+	fam, err := WGFamilyOf(c)
+	if err != nil {
+		return err
+	}
+	_, err = s.docker(
+		fmt.Sprintf("docker exec %s bash -c '%s syncconf %s <(%s-quick strip %s/%s)'", c.Name, fam.Tool, fam.Iface, fam.Tool, c.Dir, fam.File), nil)
 	return err
 }
 
