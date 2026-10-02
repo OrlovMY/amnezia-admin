@@ -88,7 +88,7 @@ func TestApplyErrorsClassified(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			srv := fakesrv.New()
 			sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 			plan, err := sess.PlanAddUser(ct, "Mallory")
 			if err != nil {
 				t.Fatalf("PlanAddUser: %v", err)
@@ -162,7 +162,7 @@ func TestApplyErrorsClassified(t *testing.T) {
 		t.Run("файлы "+c.files+", сервер "+c.runtime, func(t *testing.T) {
 			srv := fakesrv.New()
 			sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 			plan, err := sess.PlanAddUser(ct, "Mallory")
 			if err != nil {
 				t.Fatalf("PlanAddUser: %v", err)
@@ -209,7 +209,7 @@ func TestApplySudoDeniedClassified(t *testing.T) {
 			srv := fakesrv.New()
 			r := &sudoDenyRunner{srv: srv, from: c.denyFrom}
 			sess := core.NewSessionWithRunner(r, &core.ServerCreds{Host: "203.0.113.10", User: "u", Password: "x"})
-			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+			ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 			plan, err := sess.PlanAddUser(ct, "Mallory")
 			if err != nil {
 				t.Fatalf("PlanAddUser: %v", err)

@@ -215,27 +215,48 @@ func awgSpecialJunk(text string) map[string]string {
 	return out
 }
 
-// AWGVersionLabel — подпись протокола amnezia-awg2 (решение ядра, W3 раунд
-// 2, по awgProtocolConfig.cpp:433-439): имя «AmneziaWG», версия параметров —
-// в скобках; только просмотр — «… — только просмотр: <причина>».
-// Старый контейнер amnezia-awg подписан «AmneziaWG (старый)» (knownContainers).
-func AWGVersionLabel(f AWGFormat) string {
-	base := "AmneziaWG (версия параметров не определена)"
-	switch f.Version {
-	case "3.1", "2", "1.5":
-		base = "AmneziaWG (версия " + f.Version + ")"
+// AWGName — имя протокола amnezia-awg2 (решение ядра, W3 раунд 2, по
+// awgProtocolConfig.cpp:433-439): «AmneziaWG», версия параметров — в
+// скобках. При незнакомом ключе или неполном файле версию не пишем (решение
+// ядра при сведении W2+W3): формат не распознан — и версия не установлена.
+// Старый контейнер amnezia-awg подписан «AmneziaWG (старый)» (containerTypes).
+func AWGName(f AWGFormat) string {
+	switch f.State {
+	case FormatUnreadable:
+		return "AmneziaWG (версия неизвестна)"
+	case FormatKnown:
+		switch f.Version {
+		case "3.1", "2", "1.5":
+			return "AmneziaWG (версия " + f.Version + ")"
+		}
+		return "AmneziaWG (версия параметров не определена)"
 	}
+	return "AmneziaWG"
+}
+
+// AWGReason — причина «только просмотр» для amnezia-awg2; "" у FormatKnown.
+func AWGReason(f AWGFormat) string {
 	switch f.State {
 	case FormatKnown:
-		return base
+		return ""
 	case FormatUnreadable:
-		return "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан"
+		return "файл настроек сервера не прочитан"
 	}
-	reason := f.Reason
-	if reason == "" {
-		reason = "формат файла настроек сервера не распознан"
+	if f.Reason == "" {
+		return "формат файла настроек сервера не распознан"
 	}
-	return "AmneziaWG — только просмотр: " + reason
+	return f.Reason
+}
+
+// AWGVersionLabel — полная подпись amnezia-awg2 так, как её покажет
+// guiview.ProtoLabel: AWGName, а для не известного формата —
+// «… — только просмотр: <AWGReason>». Совпадение с ProtoLabel сторожит
+// TestAWG2LabelSameAsProtoLabel.
+func AWGVersionLabel(f AWGFormat) string {
+	if r := AWGReason(f); r != "" {
+		return AWGName(f) + " — только просмотр: " + r
+	}
+	return AWGName(f)
 }
 
 // AWGFormatOf — формат awg0.conf контейнера (только для amnezia-awg2).

@@ -63,7 +63,7 @@ func TestCLIPrintedErrorHasNoSecret(t *testing.T) {
 		Name:    "amnezia-awg",
 		Dir:     "/opt/amnezia/PresharedKey = " + fakeCLISecret,
 		Proto:   "AmneziaWG",
-		Managed: true,
+		Support: core.SupportYes,
 	}
 	_, planErr := sess.PlanAddUser(bogus, "Канарейка")
 	if planErr == nil {

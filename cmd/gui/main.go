@@ -1034,7 +1034,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			u.containers = containers
 			u.cur = &u.containers[0]
 			for i := range u.containers {
-				if u.containers[i].Managed {
+				if u.containers[i].Managed() {
 					u.cur = &u.containers[i]
 					break
 				}
@@ -1445,9 +1445,14 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	addBtn.Importance = widget.HighImportance
 	u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn = refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn
 
-	top := container.NewBorder(nil, nil,
-		container.NewHBox(server, widget.NewLabel("Протокол:"), u.protoSelect),
-		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn),
+	// W2 раунд 2 (UX-01 Р4): список протоколов — отдельной строкой на всю
+	// ширину окна. В одной строке с кнопками поле было 127.9 т., а подписи
+	// W2 доходят до 505 т. — Select усекал их многоточием, и «— только
+	// просмотр» / «— не поддерживается» не было видно. Сторож — TestProtoLabelFits.
+	top := container.NewVBox(
+		container.NewBorder(nil, nil, server,
+			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
+		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
 }
@@ -2273,12 +2278,12 @@ func (u *ui) setBusy(busy bool) {
 // !Managed обрывался ранним guard'ом — "LoadClients для !Managed падает",
 // предпосылка не проверялась и была неверна; см. секцию А задания).
 //
-// refresh() НЕ содержит собственных условий по Container.Managed (Э3а,
+// refresh() НЕ содержит собственных условий по Container.Managed() (Э3а,
 // решение ядра 15.09): что грузить (LoadClientsView — всегда), нужна ли
 // серверная статистика (wg show), доступно ли управление и что написать в
 // статусе — решает ТОЛЬКО guiview.ViewState по результату LoadClientsView.
 // Так табличный тест на подмену ViewState (Э3б) реально ловит регресс: если
-// бы refresh() держал свой параллельный guard "if !cur.Managed", подмена в
+// бы refresh() держал свой параллельный guard "if !cur.Managed()", подмена в
 // guiview его бы не увидела.
 //
 // Снимок cur делается дважды: один раз здесь (для запроса к нужному
@@ -2641,9 +2646,9 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 // ---------- создание ----------
 
 func (u *ui) addDialog() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	entry := widget.NewEntry()
@@ -2910,9 +2915,9 @@ func scrollToEnd(outer *fyne.Container, s *container.Scroll) {
 // ---------- переименование ----------
 
 func (u *ui) renameSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -2999,9 +3004,9 @@ func (u *ui) renameSelected() {
 // ---------- отключение/включение ----------
 
 func (u *ui) toggleSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3093,9 +3098,9 @@ func (u *ui) toggleSelected() {
 // ---------- перевыпуск конфига (re-key) ----------
 
 func (u *ui) regenerateSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3181,9 +3186,9 @@ func (u *ui) regenerateSelected() {
 var errProtoSwitched = errors.New("протокол переключён, пока шёл запрос активности")
 
 func (u *ui) deleteSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow

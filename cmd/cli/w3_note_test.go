@@ -20,8 +20,8 @@ func TestAWG2NotePrinted(t *testing.T) {
 		ct   core.Container
 		want bool
 	}{
-		{"awg2", fakesrv.NewAWG2(), core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG 2", Managed: true}, true},
-		{"awg", fakesrv.New(), core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}, false},
+		{"awg2", fakesrv.NewAWG2(), core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG (версия 2)", Support: core.SupportYes}, true},
+		{"awg", fakesrv.New(), core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG (старый)", Support: core.SupportYes}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sess := core.NewSessionWithRunner(c.srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})

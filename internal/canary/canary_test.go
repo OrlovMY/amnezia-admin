@@ -79,7 +79,7 @@ func noopSudoKey() ([]string, func() error, error) {
 // [Interface], clientsTable нет), Env настроен как у владельца.
 func emptyFake(t *testing.T, withClients bool) *fakeServer {
 	t.Helper()
-	return emptyFakeOn(t, fakesrv.New(), &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}, withClients)
+	return emptyFakeOn(t, fakesrv.New(), &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG (старый)", Support: core.SupportYes}, withClients)
 }
 
 // emptyFakeOn — то же для любого контейнера семейства WG (PR-W3: К8 на

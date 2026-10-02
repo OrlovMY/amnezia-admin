@@ -8,12 +8,12 @@
 // ViewState — единственное место, откуда refresh() в cmd/gui/main.go берёт
 // решения "грузить список / запрашивать статистику / доступно управление /
 // текст статуса" (Э3а, решение ядра 15.09): сама refresh() не содержит
-// собственных условий по Container.Managed.
+// собственных условий по Container.Managed().
 package guiview
 
 import (
+	"errors"
 	"fmt"
-	"strings"
 
 	"amnezia-admin/core"
 )
@@ -57,52 +57,73 @@ type View struct {
 // имя протокола как есть для управляемых, "<Proto> (только просмотр)" для
 // неуправляемых. ЕДИНСТВЕННОЕ место этой подписи (Д2) — второго суффикса
 // быть не должно (ни в core.Container.Proto, ни второй раз в GUI).
+//
+// PR-W2: три состояния — поддерживается (имя протокола как есть), известен,
+// но не поддерживается (имя + «не поддерживается этой программой»),
+// незнакомый (голое имя контейнера с пометкой — не похоже на протокол).
 func ProtoLabel(c core.Container) string {
-	// W3 раунд 2: подпись amnezia-awg2 «… — только просмотр: <причина>»
-	// уже несёт и признак, и причину (одна форма в CLI и GUI) — второй
-	// суффикс не дописывается.
-	if c.Managed || strings.Contains(c.Proto, "— только просмотр") {
+	// Раунд 2 (UX-01 Р1): ЧЕТЫРЕ подписи для человека — что с протоколом
+	// можно: управлять / только смотреть список / ничего не показать /
+	// незнакомый.
+	switch {
+	case c.Support == core.SupportYes:
 		return c.Proto
+	case c.Support == core.SupportKnownNo && c.Dir != "" && c.Reason != "":
+		// сведение W2+W3: причина экземпляра (amnezia-awg2) — после формы W2
+		return c.Proto + " — только просмотр: " + c.Reason
+	case c.Support == core.SupportKnownNo && c.Dir != "":
+		return c.Proto + " — только просмотр"
+	case c.Support == core.SupportKnownNo:
+		return c.Proto + " — не поддерживается, пользователей не показать"
 	}
-	return fmt.Sprintf("%s (только просмотр)", c.Proto)
+	return "незнакомый контейнер " + c.Name
 }
 
 // ViewState решает состояние GUI для контейнера c по результату
 // c.LoadClientsView (clients, existed, err), см. таблицу дословных строк в
-// задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed — единственная
+// задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed() — единственная
 // переменная, влияющая на них; err/existed влияют только на текст Status.
 func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err error) View {
 	v := View{
 		LoadList:  true, // Д2: список пробуем читать для ЛЮБОГО amnezia-*
-		LoadStats: c.Managed,
-		CanManage: c.Managed,
+		LoadStats: c.Managed(),
+		CanManage: c.Managed(),
 	}
 	switch {
-	case c.Managed && err != nil:
+	// PR-W2: незнакомый и «каталог не известен» — ДО общих веток: внутрь не
+	// заходили, сказать «не ведёт список» или «ошибка чтения» было бы неверно.
+	case c.Support == core.SupportUnknown:
+		v.LoadStats, v.CanManage = false, false
+		v.Status = fmt.Sprintf("Незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет. Пользователи этого контейнера здесь не показаны. Если это протокол Amnezia — управляйте им в приложении Amnezia.", c.Name)
+	case !c.Managed() && errors.Is(err, core.ErrContainerDirUnknown):
+		// UX-01 Р2: сказать, что список НЕ показан и почему — иначе пустая
+		// таблица выглядит как «пользователей нет» (признак 2)
+		v.Status = fmt.Sprintf("%s установлен на сервере, но эта программа не знает, где он хранит пользователей, поэтому список не показан. Управлять его пользователями можно в приложении Amnezia.", c.Proto)
+	case c.Managed() && err != nil:
 		// Место № 4 задания A1: таблица сохраняет прежние данные (решение
 		// FIX-VIEW не отменяется), но молчать об этом нельзя — иначе
 		// решения принимаются по данным, про которые человек думает, что
 		// они свежие.
 		v.Status = "Ошибка: " + err.Error() + " · показаны данные прошлого чтения."
 		v.StaleShown = true
-	case c.Managed:
+	case c.Managed():
 		v.Status = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
-	case strings.Contains(c.Proto, "— только просмотр"):
+	case !c.Managed() && c.Reason != "":
 		// W3 раунд 2: причина «только просмотр» уже в подписи — не
 		// повторять её и не говорить «не поддерживается» про управляемый
 		// по сути протокол.
 		switch {
 		case err != nil:
-			v.Status = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", c.Proto, err.Error())
+			v.Status = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", ProtoLabel(c), err.Error())
 		case !existed:
-			v.Status = fmt.Sprintf("%s. Списка пользователей на сервере нет.", c.Proto)
+			v.Status = fmt.Sprintf("%s. Списка пользователей на сервере нет.", ProtoLabel(c))
 		default:
-			v.Status = fmt.Sprintf("%s. Пользователей: %d.", c.Proto, len(clients))
+			v.Status = fmt.Sprintf("%s. Пользователей: %d.", ProtoLabel(c), len(clients))
 		}
 	case err != nil:
 		v.Status = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", c.Proto, err.Error())
 	case !existed:
-		v.Status = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой утилите — только просмотр.", c.Proto)
+		v.Status = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой программе — только просмотр.", c.Proto)
 	default:
 		v.Status = fmt.Sprintf("Пользователей: %d — только просмотр: управление для протокола %s не поддерживается.", len(clients), c.Proto)
 	}

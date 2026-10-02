@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/fakesrv"
 )
 
@@ -46,8 +47,9 @@ func TestAWG2DiscoveryByFormat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(cs) != 1 || cs[0].Proto != c.proto || cs[0].Managed != c.managed {
-				t.Errorf("%+v, ждали Proto=%q Managed=%v", cs, c.proto, c.managed)
+			// сведение W2+W3: итоговая подпись — guiview.ProtoLabel (одна в CLI и GUI)
+			if len(cs) != 1 || guiview.ProtoLabel(cs[0]) != c.proto || cs[0].Managed() != c.managed {
+				t.Errorf("%+v, ждали подпись %q Managed=%v", cs, c.proto, c.managed)
 			}
 		})
 	}
@@ -63,7 +65,7 @@ func TestAWG2DiscoveryMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cs) != 1 || cs[0].Managed || cs[0].Proto != "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан" {
+	if len(cs) != 1 || cs[0].Managed() || guiview.ProtoLabel(cs[0]) != "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан" {
 		t.Errorf("%+v, ждали только просмотр с причиной «не прочитан»", cs)
 	}
 }
@@ -90,11 +92,11 @@ func TestAWG2AlongsideAWG(t *testing.T) {
 		switch cs[i].Name {
 		case "amnezia-awg2":
 			awg2 = &cs[i]
-			if cs[i].Proto != "AmneziaWG (версия 3.1)" || !cs[i].Managed {
+			if cs[i].Proto != "AmneziaWG (версия 3.1)" || !cs[i].Managed() {
 				t.Errorf("amnezia-awg2: %+v", cs[i])
 			}
 		case "amnezia-awg":
-			if cs[i].Proto != "AmneziaWG (старый)" || !cs[i].Managed {
+			if cs[i].Proto != "AmneziaWG (старый)" || !cs[i].Managed() {
 				t.Errorf("amnezia-awg получил подпись awg2 или не управляется: %+v", cs[i])
 			}
 		}
@@ -144,7 +146,7 @@ func TestAWG2ClientConfigFromServer(t *testing.T) {
 func TestAWG2UnknownKeyRefusesWrite(t *testing.T) {
 	srv := awg2With(t, "S3 = 15\nPostUp = echo x\n")
 	before, _ := srv.File("/opt/amnezia/awg/awg0.conf")
-	c := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Managed: true}
+	c := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	_, err := core.NewSessionWithRunner(srv, raceCreds()).AddUser(c, "Carol")
 	if err == nil || !strings.Contains(err.Error(), "PostUp") {
 		t.Errorf("запись при незнакомом параметре: %v", err)

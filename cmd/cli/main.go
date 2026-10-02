@@ -181,8 +181,12 @@ func pad(s string, n int) string {
 // run() — свой stdout io.Writer, чтобы TestNonTTYUnknownHostNeedsHostkey мог
 // перехватить вывод подкоманды list без чтения реального os.Stdout.
 func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
-	if !c.Managed {
-		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG и WireGuard)", c.Proto)
+	if c.Support == core.SupportUnknown {
+		// QA раунд 1: незнакомый — не «протокол»
+		return nil, fmt.Errorf("незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет", c.Name)
+	}
+	if !c.Managed() {
+		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG (старый) и WireGuard)", c.Title())
 	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
@@ -413,13 +417,16 @@ func saveFailed(w io.Writer, u *core.NewUser, err error) error {
 	return err
 }
 
+// printContainers — список протоколов сервера в трёх состояниях (PR-W2):
+// подпись — guiview.ProtoLabel, та же, что в GUI. withNotes — показать
+// подпись состояния; без него — только имя протокола (выбор при смене).
 func printContainers(containers []core.Container, withNotes bool) {
 	for i, c := range containers {
-		note := ""
-		if withNotes && !c.Managed && !strings.Contains(c.Proto, "— только просмотр") {
-			note = cDim(" (только просмотр, управление не поддерживается)")
+		label := c.Title()
+		if withNotes {
+			label = guiview.ProtoLabel(c)
 		}
-		fmt.Printf("  %s %s %s%s\n", cNum(strconv.Itoa(i+1)+"."), c.Proto, cDim("["+c.Name+"]"), note)
+		fmt.Printf("  %s %s %s\n", cNum(strconv.Itoa(i+1)+"."), label, cDim("["+c.Name+"]"))
 	}
 }
 
@@ -616,14 +623,14 @@ func interactive() (code int) {
 
 	cur := &containers[0]
 	for i := range containers {
-		if containers[i].Managed {
+		if containers[i].Managed() {
 			cur = &containers[i]
 			break
 		}
 	}
 
 	for {
-		title := fmt.Sprintf(" Протокол: %s ", cur.Proto)
+		title := fmt.Sprintf(" Протокол: %s ", guiview.ProtoLabel(*cur))
 		width := 58
 		side := (width - len([]rune(title))) / 2
 		if side < 3 {
@@ -634,7 +641,7 @@ func interactive() (code int) {
 		fmt.Println(cDim(strings.Repeat("═", side)) + cTitle(title) + cDim(strings.Repeat("═", side)))
 		item := func(n, text string) { fmt.Println("  " + cNum(n+".") + " " + text) }
 		item("1", "Показать пользователей")
-		if cur.Managed {
+		if cur.Managed() {
 			item("2", "Создать пользователя")
 			item("3", "Удалить пользователя")
 			item("6", "Переименовать пользователя")
@@ -664,8 +671,8 @@ func interactive() (code int) {
 				printErr(err)
 			}
 		case "3":
-			if !cur.Managed {
-				printErr(fmt.Errorf("удаление пользователей для %s не поддерживается этой утилитой", cur.Proto))
+			if !cur.Managed() {
+				printErr(fmt.Errorf("удаление пользователей для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			// listUsers возвращает список в том же (отсортированном) порядке,
@@ -696,8 +703,8 @@ func interactive() (code int) {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q удалён.", victim.Name())))
 			}
 		case "6":
-			if !cur.Managed {
-				printErr(fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", cur.Proto))
+			if !cur.Managed() {
+				printErr(fmt.Errorf("переименование пользователей для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)
@@ -724,8 +731,8 @@ func interactive() (code int) {
 				fmt.Println(cOK(fmt.Sprintf("Пользователь %q переименован в %q.", victim.Name(), strings.TrimSpace(newName))))
 			}
 		case "7":
-			if !cur.Managed {
-				printErr(fmt.Errorf("управление пользователями для %s не поддерживается этой утилитой", cur.Proto))
+			if !cur.Managed() {
+				printErr(fmt.Errorf("управление пользователями для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)
@@ -772,8 +779,8 @@ func interactive() (code int) {
 				}
 			}
 		case "8":
-			if !cur.Managed {
-				printErr(fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", cur.Proto))
+			if !cur.Managed() {
+				printErr(fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)
@@ -940,7 +947,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	}
 	cur := &containers[0]
 	for i := range containers {
-		if containers[i].Managed {
+		if containers[i].Managed() {
 			cur = &containers[i]
 			break
 		}

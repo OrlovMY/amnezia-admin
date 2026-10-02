@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -155,81 +156,190 @@ func (s *Session) docker(cmd string, stdin []byte) (string, error) {
 
 // ---------- контейнеры Amnezia ----------
 
+// SupportState — что программа умеет с контейнером. ТРИ состояния
+// (PR-W2, БК-ПРОТОКОЛЫ Р2-1): прежний Managed bool сливал «известный, но
+// не поддерживаемый» и «незнакомый» — у второго угадывались и тип (по
+// суффиксу имени), и каталог (/opt/amnezia/<суффикс>). Нулевое значение —
+// «незнакомый»: о контейнере, которого нет в списке, ничего не знаем.
+type SupportState int
+
+const (
+	// SupportUnknown — имя amnezia-*, но в закрытом списке типов его нет:
+	// тип не угадываем, каталог не подставляем, внутрь не заходим.
+	SupportUnknown SupportState = iota
+	// SupportKnownNo — тип из закрытого списка, но драйвера у программы нет:
+	// показывается с человеческим именем и «не поддерживается этой
+	// программой», не скрывается.
+	SupportKnownNo
+	// SupportYes — тип в списке и программа управляет его пользователями.
+	SupportYes
+)
+
 type Container struct {
 	Name, Dir, Proto string
-	Managed          bool // умеем ли управлять пользователями (WG-семейство)
+	// Support — см. SupportState. Dir пуст, если каталог не известен по
+	// исходникам или прежнему коду: тогда внутрь контейнера не заходим.
+	Support SupportState
+	// Reason — почему только просмотр, когда тип поддерживается программой,
+	// но именно этот экземпляр — нет (amnezia-awg2 с незнакомым или
+	// непрочитанным форматом, PR-W3). "" — причины сверх Support нет.
+	// Подпись «— только просмотр: <Reason>» строит guiview.ProtoLabel.
+	Reason string
 }
 
-var knownContainers = []Container{
-	{"amnezia-awg", "/opt/amnezia/awg", "AmneziaWG (старый)", true},
-	{"amnezia-wireguard", "/opt/amnezia/wireguard", "WireGuard", true},
-	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg, а НЕ
-	// /opt/amnezia/awg2, как прежде угадывалось по суффиксу имени (PR-W1).
-	// Управление включается в PR-W3 (определение формата); здесь — только
-	// верный каталог, нужный записи.
-	{"amnezia-awg2", "/opt/amnezia/awg", "awg2", false},
-	{"amnezia-xray", "/opt/amnezia/xray", "XRay", false},
-	{"amnezia-openvpn", "/opt/amnezia/openvpn", "OpenVPN", false},
-	{"amnezia-shadowsocks", "/opt/amnezia/shadowsocks", "OpenVPN+ShadowSocks", false},
-	{"amnezia-openvpn-cloak", "/opt/amnezia/openvpn-cloak", "OpenVPN+Cloak", false},
-	{"amnezia-ikev2", "/opt/amnezia/ikev2", "IKEv2", false},
-	{"amnezia-sftp", "/opt/amnezia/sftp", "SFTP", false},
-	{"amnezia-tor", "/opt/amnezia/tor", "Tor site", false},
-	{"amnezia-dns", "/opt/amnezia/dns", "DNS", false},
+// Managed — управляет ли программа пользователями этого контейнера.
+func (c Container) Managed() bool { return c.Support == SupportYes }
+
+// Title — как назвать контейнер в тексте: имя протокола, а у незнакомого
+// (Proto пуст — тип не угадываем) — имя контейнера.
+func (c Container) Title() string {
+	if c.Proto != "" {
+		return c.Proto
+	}
+	return c.Name
 }
 
+// amneziaClientRevision — ревизия amnezia-client, по которой составлен
+// закрытый список типов контейнеров: client/core/utils/containers/
+// containerUtils.cpp (containerToString, containerHumanNames), dev 94b51df.
+// Тест сверяет, что перечислены все 16 типов перечисления.
+const amneziaClientRevision = "amnezia-client dev 94b51df"
+
+// containerType — один тип контейнера Amnezia. Enum — имя значения
+// перечисления DockerContainer в amnezia-client. Names — имена контейнера:
+// первое — по исходникам (особый случай или правило "amnezia-" + имя в
+// нижнем регистре), остальные — СИНОНИМЫ из прежнего кода (amnezia-ikev2,
+// amnezia-tor): старые выпуски клиента могли называть так [ПРИНЯТО].
+// Dir — каталог, если известен (прежний список программы; у awg2 — по
+// исходникам, PR-W1); "" — не известен, внутрь не заходим.
+//
+// Proto — человеческое имя ДОСЛОВНО из amnezia-client 94b51df
+// (решение ядра, раунд 2 W2): containerHumanNames в
+// client/core/utils/containers/containerUtils.cpp:63–84 — их владелец видит
+// в приложении Amnezia. Исключение — Awg (уточнение ядра к п.5, QA-01 по
+// awgProtocolConfig.cpp:433–439): клиент зовёт awg2 «AmneziaWG» и дописывает
+// версию суффиксом (это сделает W3: «AmneziaWG (версия 3.1)»), поэтому
+// amnezia-awg — «AmneziaWG (старый)»; так они различимы на одном сервере.
+// W3 обязан дать те же имена. Сверка — TestContainerHumanNames.
+type containerType struct {
+	Enum    string
+	Names   []string
+	Dir     string
+	Proto   string
+	Support SupportState
+	// LegacyDir — каталог для имени-синонима из прежнего списка программы
+	// (amnezia-ikev2, amnezia-tor): поведение по этим именам не меняется.
+	LegacyDir string
+}
+
+// containerTypes — закрытый список в ФИКСИРОВАННОМ порядке: по нему
+// FindContainers упорядочивает найденное, и протокол по умолчанию (первый
+// поддерживаемый) не зависит от порядка вывода docker ps (Р2-2).
+var containerTypes = []containerType{
+	{"Awg", []string{"amnezia-awg"}, "/opt/amnezia/awg", "AmneziaWG (старый)", SupportYes, ""},
+	{"WireGuard", []string{"amnezia-wireguard"}, "/opt/amnezia/wireguard", "WireGuard", SupportYes, ""},
+	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg (PR-W1, по
+	// исходникам). Support уточняется по формату awg0.conf в FindContainers
+	// (PR-W3); Proto «AmneziaWG» там же дополняется версией (AWGName).
+	{"Awg2", []string{"amnezia-awg2"}, "/opt/amnezia/awg", "AmneziaWG", SupportKnownNo, ""},
+	{"Xray", []string{"amnezia-xray"}, "/opt/amnezia/xray", "XRay", SupportKnownNo, ""},
+	{"OpenVpn", []string{"amnezia-openvpn"}, "/opt/amnezia/openvpn", "OpenVPN", SupportKnownNo, ""},
+	{"ShadowSocks", []string{"amnezia-shadowsocks"}, "/opt/amnezia/shadowsocks", "OpenVPN over SS", SupportKnownNo, ""},
+	// Cloak: каталог /opt/amnezia/cloak по исходникам (usersController.cpp:326
+	// "/opt/amnezia/%1/clientsTable" с containerTypeToString; protocolConstants.h:127),
+	// а не прежний /opt/amnezia/openvpn-cloak (QA раунд 1).
+	{"Cloak", []string{"amnezia-openvpn-cloak"}, "/opt/amnezia/cloak", "OpenVPN over Cloak", SupportKnownNo, ""},
+	// Ipsec: каталог /opt/amnezia/ikev2 подтверждён исходниками (там же,
+	// containerTypeToString(Ipsec) = "ikev2"); amnezia-ikev2 — синоним.
+	{"Ipsec", []string{"amnezia-ipsec", "amnezia-ikev2"}, "/opt/amnezia/ikev2", "IPsec", SupportKnownNo, ""},
+	{"SSXray", []string{"amnezia-ssxray"}, "", "Shadowsocks", SupportKnownNo, ""},
+	// TorWebSite: каталог по правилу клиента — /opt/amnezia/torwebsite, на
+	// живом сервере не сверен — «не известен»; синоним amnezia-tor держит
+	// прежний каталог программы.
+	{"TorWebSite", []string{"amnezia-torwebsite", "amnezia-tor"}, "", "Website in Tor network", SupportKnownNo, "/opt/amnezia/tor"},
+	{"Dns", []string{"amnezia-dns"}, "/opt/amnezia/dns", "AmneziaDNS", SupportKnownNo, ""},
+	{"Sftp", []string{"amnezia-sftp"}, "/opt/amnezia/sftp", "SFTP file sharing service", SupportKnownNo, ""},
+	{"Socks5Proxy", []string{"amnezia-socks5proxy"}, "", "SOCKS5 proxy server", SupportKnownNo, ""},
+	{"MtProxy", []string{"amnezia-mtproxy"}, "", "MTProxy (Telegram)", SupportKnownNo, ""},
+	{"Telemt", []string{"amnezia-telemt"}, "", "Telemt (Telegram)", SupportKnownNo, ""},
+	{"TProxy", []string{"amnezia-tproxy"}, "", "TProxy (Telegram WEB)", SupportKnownNo, ""},
+}
+
+// lookupContainer — тип по имени контейнера (с синонимами); rank — место
+// в фиксированном порядке; ok=false — незнакомый.
+func lookupContainer(name string) (c Container, rank int, ok bool) {
+	for i, t := range containerTypes {
+		for k, n := range t.Names {
+			if n == name {
+				dir := t.Dir
+				if k > 0 && t.LegacyDir != "" {
+					dir = t.LegacyDir // синоним из прежнего списка — прежний каталог
+				}
+				return Container{Name: name, Dir: dir, Proto: t.Proto, Support: t.Support}, i, true
+			}
+		}
+	}
+	return Container{}, len(containerTypes), false
+}
+
+// FindContainers — контейнеры Amnezia на сервере (только запущенные: docker
+// ps без -a; остановленные — после релиза, Р2-1). Порядок — фиксированный
+// порядок типов, незнакомые — в конце по имени; чужие (не amnezia-*) не
+// показываются.
 func (s *Session) FindContainers() ([]Container, error) {
 	out, err := s.docker("docker ps --format '{{.Names}}'", nil)
 	if err != nil {
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
 	names := strings.Fields(out)
-	var found []Container
+	type ranked struct {
+		c    Container
+		rank int
+	}
+	var found []ranked
 	for _, n := range names {
-		matched := false
-		for _, kc := range knownContainers {
-			if n == kc.Name {
-				found = append(found, kc)
-				matched = true
-				break
-			}
+		if c, rank, ok := lookupContainer(n); ok {
+			found = append(found, ranked{c, rank})
+			continue
 		}
-		if !matched && strings.HasPrefix(n, "amnezia-") {
-			suffix := strings.TrimPrefix(n, "amnezia-")
-			// Неизвестный контейнер (в т.ч. amnezia-awg2 и подобные) — не наш
-			// формат конфига (у awg2 файл называется awg0.conf, а не wg0.conf),
-			// поэтому не управляем; раньше здесь угадывался Managed=true по
-			// префиксу имени, из-за чего awg2 читался как "пустой сервер"
-			// (аудит-2026-09-14, Backlog).
-			//
-			// Proto — голый суффикс, БЕЗ пометки "(не поддерживается...)":
-			// такая пометка ранее жила здесь и дублировалась GUI (":836",
-			// "+= "(просмотр)""), из-за чего строка протокола рисковала нести
-			// два разных суффикса. Единственное место подписи "только
-			// просмотр" — internal/guiview.ProtoLabel (FIX-VIEW, решение
-			// ядра Э1, 15.09).
-			found = append(found, Container{
-				Name:    n,
-				Dir:     "/opt/amnezia/" + suffix,
-				Proto:   suffix,
-				Managed: false,
-			})
+		if strings.HasPrefix(n, "amnezia-") {
+			// Незнакомый: тип и каталог НЕ угадываются (прежде Dir был
+			// "/opt/amnezia/<суффикс>", Proto — голый суффикс, неотличимый
+			// от подписи известного протокола). Proto пуст: подпись
+			// «незнакомый контейнер <имя>» строит guiview.ProtoLabel.
+			found = append(found, ranked{Container{Name: n, Support: SupportUnknown}, len(containerTypes)})
 		}
 	}
 	if len(found) == 0 {
 		return nil, fmt.Errorf("контейнеры Amnezia на сервере не найдены; запущено: %s", strings.Join(names, ", "))
 	}
-	// amnezia-awg2 (PR-W3): управление — только при ИЗВЕСТНОМ формате
-	// awg0.conf; подпись — версия по awgVersionOf. Незнакомый параметр или
-	// непрочитанный файл — только просмотр, причина — в подписи.
-	for i := range found {
-		if isAWG2(&found[i]) {
-			f := s.AWGFormatOf(&found[i])
-			found[i].Proto = AWGVersionLabel(f)
-			found[i].Managed = f.State == FormatKnown
+	sort.SliceStable(found, func(i, j int) bool {
+		if found[i].rank != found[j].rank {
+			return found[i].rank < found[j].rank
+		}
+		return found[i].c.Name < found[j].c.Name
+	})
+	res := make([]Container, len(found))
+	for i, r := range found {
+		res[i] = r.c
+	}
+	// amnezia-awg2 (PR-W3, сведение W2+W3): ВТОРАЯ ось — формат awg0.conf.
+	// Известен — «поддерживается»; иначе — известный тип, только просмотр,
+	// причина — в Reason (подпись строит guiview.ProtoLabel). Proto — имя
+	// с версией (AWGName), без суффикса состояния.
+	for i := range res {
+		if isAWG2(&res[i]) {
+			f := s.AWGFormatOf(&res[i])
+			res[i].Proto = AWGName(f)
+			res[i].Reason = AWGReason(f)
+			if f.State == FormatKnown {
+				res[i].Support = SupportYes
+			} else {
+				res[i].Support = SupportKnownNo
+			}
 		}
 	}
-	return found, nil
+	return res, nil
 }
 
 func (s *Session) catIn(c *Container, path string) (string, error) {
@@ -375,6 +485,11 @@ func (s *Session) LoadClients(c *Container) ([]ClientEntry, error) {
 // для этого: она намеренно схлопывает "файла нет" в пустой список без
 // признака существования (FIX-VIEW, задание Д1).
 func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed bool, err error) {
+	// Каталог не известен (незнакомый контейнер или тип без известного
+	// каталога, PR-W2) — внутрь не заходим: ни одной команды docker exec.
+	if c.Dir == "" {
+		return nil, false, ErrContainerDirUnknown
+	}
 	data, existed, err := s.readClientsTableRaw(c)
 	if err != nil {
 		return nil, existed, err
@@ -385,6 +500,11 @@ func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed 
 	clients, err = parseClientsTable(data)
 	return clients, true, err
 }
+
+// ErrContainerDirUnknown — каталог данных контейнера программе не известен
+// (незнакомый контейнер или тип без подтверждённого каталога): внутрь не
+// заходим и ничего не угадываем.
+var ErrContainerDirUnknown = errors.New("каталог данных этого контейнера программе не известен — ничего не прочитано")
 
 // PeerStat — статистика по одному peer'у из `wg show wg0 dump`
 type PeerStat struct {

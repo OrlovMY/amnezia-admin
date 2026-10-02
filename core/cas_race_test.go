@@ -26,7 +26,7 @@ func raceCreds() *core.ServerCreds {
 }
 
 func raceContainer() *core.Container {
-	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 }
 
 // hookRunner — Runner сессии A: перед командой, для которой when() вернёт

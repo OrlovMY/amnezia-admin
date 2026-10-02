@@ -43,7 +43,7 @@ func TestOldWriterRestoresFiles(t *testing.T) {
 // TestK7NotApplicableOnAWG2 — К7 (v0.2.0 после всего) для amnezia-awg2 —
 // «НЕ ПРИМЕНИМО» с причиной; v0.2.0 при этом не запускается.
 func TestK7NotApplicableOnAWG2(t *testing.T) {
-	ctr := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Managed: true}
+	ctr := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Support: core.SupportYes}
 	fam, err := core.WGFamilyOf(ctr)
 	if err != nil {
 		t.Fatal(err)

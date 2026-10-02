@@ -12,7 +12,7 @@ import (
 )
 
 func awg2Ctr() *core.Container {
-	return &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG 2", Managed: true}
+	return &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG (версия 3.1)", Support: core.SupportYes}
 }
 
 // awg2Server — fakesrv amnezia-awg2 с [Interface] после ListenPort = extra.

@@ -261,7 +261,7 @@ AllowedIPs = 10.8.1.2/32
 
 	srv := fakesrv.New()
 	sess := NewSessionWithRunner(srv, &ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: SupportYes}
 	if err := sess.DeleteByID(c, ""); err == nil {
 		t.Fatal("DeleteByID(\"\") должен вернуть ошибку")
 	}
@@ -1079,7 +1079,7 @@ func testCreds() *ServerCreds {
 }
 
 func awgContainer() *Container {
-	return &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: SupportYes}
 }
 
 // TestLoadClientsMissingVsError — "нет файла" не ошибка, "не удалось
@@ -1161,7 +1161,7 @@ func TestAwg2Unsupported(t *testing.T) {
 	if awg2 == nil {
 		t.Fatalf("amnezia-awg2 не найден среди контейнеров: %+v", containers)
 	}
-	if awg2.Managed {
+	if awg2.Managed() {
 		t.Error("amnezia-awg2 должен быть Managed == false")
 	}
 

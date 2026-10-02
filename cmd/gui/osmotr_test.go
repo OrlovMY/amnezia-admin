@@ -581,7 +581,7 @@ func osmotrUI(t *testing.T, variant fyne.ThemeVariant) *ui {
 // osmotrMain — главное окно с таблицей в боевом виде, без сервера.
 func osmotrMain(u *ui) {
 	u.sess = core.NewSessionWithRunner(osmotrNoServer{}, &core.ServerCreds{Host: "203.0.113.10", User: "root"})
-	u.containers = []core.Container{{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}}
+	u.containers = []core.Container{{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}}
 	u.clients = []core.ClientEntry{
 		{ClientID: testKey, UserData: map[string]any{"clientName": "Ноутбук", "creationDate": "2026-09-22T12:34:56.789Z"}},
 		{ClientID: repeatKey('Q'), UserData: map[string]any{"clientName": "Телефон Анны", "creationDate": "2026-09-20T08:00:00.000Z"}},
@@ -1086,7 +1086,7 @@ func TestOsmotrCanaryPushedOutOfWindow(t *testing.T) {
 			t.Fatal("канарейка ничего не значит: нет подписи «Сервер: …»")
 		}
 		server.SetText("Сервер: root@203.0.113.10" + strings.Repeat(" очень-длинное-имя", 12))
-	}, "вылезание: подпись «Протокол:»: справа")
+	}, "вылезание: подпись «Сервер: root@203.0.113.10 очень-длинное-…»: справа") // W2 раунд 2: «Протокол:» теперь отдельной строкой
 }
 
 // К3 — СЖАТИЕ (случай QA-01 «б»): резерв подсказки в диалоге пин-кода

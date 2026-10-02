@@ -32,7 +32,7 @@ func guiDesync(t *testing.T) (*gatedRunner, *core.Session, *core.Container, []st
 	srv := fakesrv.New()
 	g := &gatedRunner{inner: srv}
 	sess := core.NewSessionWithRunner(g, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	add, err := sess.PlanAddUser(c, "Carol")
 	if err != nil {
 		t.Fatalf("PlanAddUser: %v", err)
@@ -172,7 +172,7 @@ func TestTrafficAbsentReachesTableAndClipboard(t *testing.T) {
 func TestTrafficDisabledReachesTable(t *testing.T) {
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	clients, err := sess.LoadClients(c)
 	if err != nil || len(clients) < 2 {
 		t.Fatalf("LoadClients: %v, %d", err, len(clients))

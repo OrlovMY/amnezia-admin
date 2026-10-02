@@ -58,7 +58,7 @@ func (u *ui) showSavedConfig(row int, save bool) {
 		text.Wrapping = fyne.TextWrapWord
 		var d dialog.Dialog
 		box := container.NewVBox(text)
-		if u.canManage && u.cur != nil && u.cur.Managed {
+		if u.canManage && u.cur != nil && u.cur.Managed() {
 			// UX-01 П1: кнопка не должна выглядеть безобидным «обновить».
 			rekey := widget.NewButtonWithIcon(guiview.SavedRekeyButton, theme.WarningIcon(), func() {
 				d.Hide()

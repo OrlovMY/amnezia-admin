@@ -77,20 +77,25 @@ var containersWasNow = []struct {
 	managed            bool // на 8c20da1 + FIX-VIEW — текущее состояние
 	wasManagedOriginal bool // на d6b3a5a
 }{
+	// W2 раунд 2: человеческие имена — дословно amnezia-client 94b51df
+	// (TestContainerHumanNames), у awg — «AmneziaWG (старый)», как в приложении.
 	{"amnezia-awg", "AmneziaWG (старый)", true, true},
 	{"amnezia-wireguard", "WireGuard", true, true},
 	{"amnezia-xray", "XRay", false, false},
 	{"amnezia-openvpn", "OpenVPN", false, false},
-	{"amnezia-shadowsocks", "OpenVPN+ShadowSocks", false, false},
-	{"amnezia-openvpn-cloak", "OpenVPN+Cloak", false, false},
-	{"amnezia-ikev2", "IKEv2", false, false},
-	{"amnezia-sftp", "SFTP", false, false},
-	{"amnezia-tor", "Tor site", false, false},
-	{"amnezia-dns", "DNS", false, false},
-	// PR-W3: подпись amnezia-awg2 — версия по awg0.conf; здесь awg0.conf нет
-	// → «не прочитан», управление выключено.
-	{"amnezia-awg2", "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан", false, true},
-	{"amnezia-foo", "foo", false, false},
+	{"amnezia-shadowsocks", "OpenVPN over SS", false, false},
+	{"amnezia-openvpn-cloak", "OpenVPN over Cloak", false, false},
+	{"amnezia-ikev2", "IPsec", false, false},
+	{"amnezia-sftp", "SFTP file sharing service", false, false},
+	{"amnezia-tor", "Website in Tor network", false, false},
+	{"amnezia-dns", "AmneziaDNS", false, false},
+	// PR-W2: awg2 — известный тип с человеческим именем (было "awg2" —
+	// голый суффикс); amnezia-foo — незнакомый: Proto пуст, каталог не
+	// подставлен, внутрь не заходим.
+	// Сведение W2+W3: Proto — имя с версией (AWGName); awg0.conf здесь нет →
+	// «версия неизвестна», только просмотр с причиной (см. awg2Reason ниже).
+	{"amnezia-awg2", "AmneziaWG (версия неизвестна)", false, true},
+	{"amnezia-foo", "", false, false},
 }
 
 func containerNames() []string {
@@ -168,6 +173,12 @@ func TestContainersWasNowTable(t *testing.T) {
 					// amnezia-client), а не угаданный по суффиксу /opt/amnezia/awg2.
 					dir = "/opt/amnezia/awg"
 				}
+				if spec.name == "amnezia-foo" {
+					dir = "" // PR-W2: каталог незнакомого не подставляется
+				}
+				if spec.name == "amnezia-openvpn-cloak" {
+					dir = "/opt/amnezia/cloak" // W2 раунд 2: по исходникам клиента
+				}
 				path := dir + "/clientsTable"
 				setVariant(srv, path, variant)
 				sess := core.NewSessionWithRunner(srv, viewCreds())
@@ -191,14 +202,33 @@ func TestContainersWasNowTable(t *testing.T) {
 					t.Errorf("Proto = %q, want %q (Э1: без хвоста «не поддерживается»)", c.Proto, spec.proto)
 				}
 				// (а), реш. Б: Managed сейчас (может отличаться от d6b3a5a — awg2)
-				if c.Managed != spec.managed {
-					t.Errorf("Managed = %v, want %v (was %v on d6b3a5a)", c.Managed, spec.managed, spec.wasManagedOriginal)
+				if c.Managed() != spec.managed {
+					t.Errorf("Managed = %v, want %v (was %v on d6b3a5a)", c.Managed(), spec.managed, spec.wasManagedOriginal)
 				}
 				if c.Dir != dir {
 					t.Fatalf("Dir = %q, want %q (тест держит их согласованными)", c.Dir, dir)
 				}
 
 				clients, existed, loadErr := sess.LoadClientsView(c)
+
+				if spec.name == "amnezia-foo" {
+					// PR-W2: незнакомый — ни одной команды внутрь, ошибка
+					// «каталог не известен», статус «незнакомый контейнер»
+					if !errors.Is(loadErr, core.ErrContainerDirUnknown) {
+						t.Fatalf("LoadClientsView незнакомого: %v", loadErr)
+					}
+					for _, cmd := range srv.Commands() {
+						if strings.Contains(cmd, "exec amnezia-foo") {
+							t.Errorf("команда внутрь незнакомого контейнера: %s", cmd)
+						}
+					}
+					view := guiview.ViewState(*c, clients, existed, loadErr)
+					want := "Незнакомый контейнер amnezia-foo: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет. Пользователи этого контейнера здесь не показаны. Если это протокол Amnezia — управляйте им в приложении Amnezia."
+					if view.Status != want || view.CanManage || view.LoadStats {
+						t.Errorf("незнакомый: %+v", view)
+					}
+					return
+				}
 
 				switch variant {
 				case "ok":
@@ -243,6 +273,16 @@ func TestContainersWasNowTable(t *testing.T) {
 					t.Error("LoadList = false, want true (Д2: всегда true для amnezia-*)")
 				}
 
+				// Сведение W2+W3: причина «только просмотр» экземпляра
+				// (amnezia-awg2 без awg0.conf) — в подписи после формы W2.
+				awg2Reason := map[string]string{"amnezia-awg2": "файл настроек сервера не прочитан"}[spec.name]
+				full := spec.proto
+				if awg2Reason != "" {
+					full += " — только просмотр: " + awg2Reason
+				}
+				if got := guiview.ProtoLabel(*c); awg2Reason != "" && got != full {
+					t.Errorf("ProtoLabel = %q, want %q", got, full)
+				}
 				var want string
 				switch {
 				case spec.managed && loadErr != nil:
@@ -253,16 +293,16 @@ func TestContainersWasNowTable(t *testing.T) {
 					want = "Ошибка: " + loadErr.Error() + " · показаны данные прошлого чтения."
 				case spec.managed:
 					want = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
-				case strings.Contains(spec.proto, "— только просмотр") && loadErr != nil:
-					want = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", spec.proto, loadErr.Error())
-				case strings.Contains(spec.proto, "— только просмотр") && !existed:
-					want = spec.proto + ". Списка пользователей на сервере нет."
-				case strings.Contains(spec.proto, "— только просмотр"):
-					want = fmt.Sprintf("%s. Пользователей: %d.", spec.proto, len(clients))
+				case awg2Reason != "" && loadErr != nil:
+					want = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", full, loadErr.Error())
+				case awg2Reason != "" && !existed:
+					want = full + ". Списка пользователей на сервере нет."
+				case awg2Reason != "":
+					want = fmt.Sprintf("%s. Пользователей: %d.", full, len(clients))
 				case loadErr != nil:
 					want = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", spec.proto, loadErr.Error())
 				case !existed:
-					want = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой утилите — только просмотр.", spec.proto)
+					want = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой программе — только просмотр.", spec.proto)
 				default:
 					want = fmt.Sprintf("Пользователей: %d — только просмотр: управление для протокола %s не поддерживается.", len(clients), spec.proto)
 				}
@@ -290,7 +330,7 @@ func TestLoadClientsViewNoExtraCommands(t *testing.T) {
 			dir := "/opt/amnezia/" + suffix
 			setVariant(srv, dir+"/clientsTable", "ok")
 			sess := core.NewSessionWithRunner(srv, viewCreds())
-			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Managed: false}
+			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Support: core.SupportKnownNo}
 
 			if _, _, err := sess.LoadClientsView(c); err != nil {
 				t.Fatalf("LoadClientsView: %v", err)
@@ -311,7 +351,7 @@ func TestLoadClientsViewNoExtraCommands(t *testing.T) {
 			dir := "/opt/amnezia/" + suffix
 			setVariant(srv, dir+"/clientsTable", "missing")
 			sess := core.NewSessionWithRunner(srv, viewCreds())
-			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Managed: false}
+			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Support: core.SupportKnownNo}
 
 			if _, _, err := sess.LoadClientsView(c); err != nil {
 				t.Fatalf("LoadClientsView: %v", err)

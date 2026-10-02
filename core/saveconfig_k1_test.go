@@ -19,7 +19,7 @@ func k1Session(t *testing.T) (*core.Session, *core.Container) {
 	t.Helper()
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	return sess, &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return sess, &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 }
 
 func k1Found(t *testing.T, sess *core.Session, ct *core.Container, dir, name string) core.SavedConfig {
