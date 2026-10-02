@@ -68,6 +68,48 @@ func TestAWG2DiscoveryMissingFile(t *testing.T) {
 	}
 }
 
+// TestAWG2AlongsideAWG — amnezia-awg и amnezia-awg2 на одном сервере: оба
+// найдены, у каждого своя подпись; запись в amnezia-awg2 не трогает
+// wg0.conf. Ограничение fakesrv: файлы у него общие по пути, а clientsTable
+// у двух контейнеров в бою разные — поэтому таблица здесь не сверяется.
+func TestAWG2AlongsideAWG(t *testing.T) {
+	srv := fakesrv.New()
+	srv.Names = []string{"amnezia-awg", "amnezia-awg2"}
+	wg, _ := srv.File("/opt/amnezia/awg/wg0.conf")
+	srv.SetFile("/opt/amnezia/awg/awg0.conf", []byte(strings.Replace(string(wg), "ListenPort = 51820\n", "ListenPort = 51820\n"+awg3Extra, 1)))
+	sess := core.NewSessionWithRunner(srv, raceCreds())
+	cs, err := sess.FindContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 2 {
+		t.Fatalf("найдено %d контейнеров, ждали ровно 2: %+v", len(cs), cs)
+	}
+	var awg2 *core.Container
+	for i := range cs {
+		switch cs[i].Name {
+		case "amnezia-awg2":
+			awg2 = &cs[i]
+			if cs[i].Proto != "AmneziaWG 3" || !cs[i].Managed {
+				t.Errorf("amnezia-awg2: %+v", cs[i])
+			}
+		case "amnezia-awg":
+			if strings.Contains(cs[i].Proto, "AmneziaWG 2") || strings.Contains(cs[i].Proto, "AmneziaWG 3") || !cs[i].Managed {
+				t.Errorf("amnezia-awg получил подпись awg2 или не управляется: %+v", cs[i])
+			}
+		}
+	}
+	if awg2 == nil {
+		t.Fatal("amnezia-awg2 не найден")
+	}
+	if _, err := sess.AddUser(awg2, "Carol"); err != nil {
+		t.Fatalf("AddUser на amnezia-awg2: %v", err)
+	}
+	if now, _ := srv.File("/opt/amnezia/awg/wg0.conf"); string(now) != string(wg) {
+		t.Errorf("запись в amnezia-awg2 изменила wg0.conf")
+	}
+}
+
 // TestAWG2ClientConfigFromServer — доезд: выданный на AWG3 конфиг собран по
 // template.conf из серверного файла: параметры маскировки, I1/I2 из
 // комментариев, без серверных ключей; PersistentKeepalive = 25.
