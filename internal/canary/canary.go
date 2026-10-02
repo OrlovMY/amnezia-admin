@@ -114,6 +114,7 @@ type Env struct {
 	// клиентов и сверяет их в П0-итог; "" — сервер обязан быть пуст.
 	ServerIP    string
 	existing    *existingSnap
+	k6          k6Window // снимки существующих клиентов вокруг окна К6
 	preflightOK bool // Preflight пройдена для этого Env (SEC П-2)
 	Out         io.Writer
 
@@ -1862,8 +1863,19 @@ func (e *Env) amneziaApp() Result {
 	if err != nil {
 		return Result{Detail: "план не построен: " + err.Error()}
 	}
+	// П0-К6: приложение Amnezia переписывает clientsTable целиком (и может
+	// дописать поля в записи существующих клиентов) — снимок до вопроса и
+	// сразу после «да» отделяет его правки от наших (П0-итог).
+	e.k6 = k6Window{}
+	if e.existing != nil {
+		e.k6.before, e.k6.beforeWhy = e.takeSnap()
+	}
 	if e.Ask("К6: добавьте сейчас одного пользователя в приложении Amnezia на этом сервере. Добавили?") != AnswerYes {
 		return Result{Detail: "пользователь в приложении Amnezia не добавлен"}
+	}
+	e.k6.opened = true
+	if e.existing != nil {
+		e.k6.after, e.k6.afterWhy = e.takeSnap()
 	}
 	_, err = e.Sess.Apply(plan)
 	after, lerr := e.names()

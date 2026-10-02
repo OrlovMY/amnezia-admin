@@ -205,7 +205,7 @@ func Preflight(remote func(string) (string, error), envs []*Env, names []string,
 	// Прежняя отметка не переживает новую предпроверку (признак 4): не
 	// прошла — снимков и отметки нет, даже если раньше проходила.
 	for _, e := range envs {
-		e.existing, e.preflightOK = nil, false
+		e.existing, e.preflightOK, e.k6 = nil, false, k6Window{}
 	}
 	age := AgeCheck(remote, names, now)
 	cnt := Result{ID: "П0-сервер", Name: fmt.Sprintf("клиентов на сервере до проверки не больше %d", MaxExisting)}
@@ -358,7 +358,85 @@ func (e *Env) existingAllowed() Result {
 	return r
 }
 
+// k6Window — снимки существующих клиентов непосредственно до вопроса К6 и
+// сразу после ответа «да». opened — человек ответил «да» (приложение
+// Amnezia могло писать на сервер); снимок nil — не снят (why — почему).
+type k6Window struct {
+	opened              bool
+	before, after       *existingSnap
+	beforeWhy, afterWhy string
+}
+
+// plainFields — поля userData, значения которых печатаются (не секреты).
+// Значения прочих полей не печатаются: состав clientsTable задаёт не только
+// наша программа.
+var plainFields = map[string]bool{"clientName": true, "creationDate": true, "allowed_ips": true, "disabled": true}
+
+// fieldDiff — перечень изменённых полей userData двух записей clientsTable
+// (JSON ClientEntry): «поле: было X, стало Y»; отсутствие поля — «нет».
+// Запись не разобрана — так и сказано (не «полей нет»).
+func fieldDiff(was, got string) string {
+	var a, b core.ClientEntry
+	if json.Unmarshal([]byte(was), &a) != nil || json.Unmarshal([]byte(got), &b) != nil {
+		return "поля не разобраны"
+	}
+	keys := map[string]bool{}
+	for k := range a.UserData {
+		keys[k] = true
+	}
+	for k := range b.UserData {
+		keys[k] = true
+	}
+	val := func(m map[string]any, k string) (string, bool) {
+		v, ok := m[k]
+		if !ok {
+			return "нет", false
+		}
+		j, _ := json.Marshal(v)
+		return string(j), true
+	}
+	var out []string
+	for k := range keys {
+		x, _ := val(a.UserData, k)
+		y, _ := val(b.UserData, k)
+		if x == y {
+			continue
+		}
+		if plainFields[k] {
+			out = append(out, fmt.Sprintf("%s: было %s, стало %s", k, x, y))
+		} else {
+			out = append(out, k+" (значение не печатается)")
+		}
+	}
+	if len(out) == 0 {
+		return "userData та же, отличается запись вне userData"
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
+
+// tableDiff — записи clientsTable из ids: пропала или изменилась от a к b.
+func tableDiff(ids map[string]string, a, b *existingSnap) (gone, changed []string) {
+	for id := range ids {
+		was, ok := a.table[id]
+		if !ok {
+			continue // пропала раньше — сказано на своём отрезке
+		}
+		if got, ok := b.table[id]; !ok {
+			gone = append(gone, "запись clientsTable "+short(id)+" пропала")
+		} else if got != was {
+			changed = append(changed, "запись clientsTable "+short(id)+" изменилась (поля: "+fieldDiff(was, got)+")")
+		}
+	}
+	return gone, changed
+}
+
 // existingIntact — П0-итог: каждый клиент из снимка на месте и не изменён.
+// Окно К6 (человек добавлял пользователя в приложении Amnezia, оно
+// переписывает clientsTable): изменение записи внутри окна — сведение;
+// пропажа записи, [Peer] и peer работающего сервера — НЕ ПРОЙДЕН всегда.
+// Вне окна — любое изменение НЕ ПРОЙДЕН. Окно открыто, а снимок до или
+// после него не снят — НЕ ПРОВЕРЕНО: чья правка, не различить.
 func (e *Env) existingIntact() Result {
 	r := Result{ID: "П0-итог", Name: "существующие клиенты не изменились"}
 	if e.existing == nil {
@@ -374,13 +452,32 @@ func (e *Env) existingIntact() Result {
 		r.Detail = why
 		return r
 	}
-	var bad []string
-	for id, was := range e.existing.table {
-		if got, ok := now.table[id]; !ok {
-			bad = append(bad, "запись clientsTable "+short(id)+" пропала")
-		} else if got != was {
-			bad = append(bad, "запись clientsTable "+short(id)+" изменилась")
+	var bad, info []string
+	ids := e.existing.table
+	if e.k6.opened {
+		switch {
+		case e.k6.before == nil:
+			r.Detail = "снимок до К6 не снят (" + e.k6.beforeWhy + ") — правки приложения Amnezia от наших не отличить"
+			return r
+		case e.k6.after == nil:
+			r.Detail = "снимок после К6 не снят (" + e.k6.afterWhy + ") — правки приложения Amnezia от наших не отличить"
+			return r
 		}
+		g, c := tableDiff(ids, e.existing, e.k6.before)
+		bad = append(bad, g...)
+		bad = append(bad, c...)
+		g, c = tableDiff(ids, e.k6.before, e.k6.after)
+		bad = append(bad, g...)
+		for _, x := range c {
+			info = append(info, "приложение Amnezia (окно К6) "+strings.TrimPrefix(x, "запись clientsTable "))
+		}
+		g, c = tableDiff(ids, e.k6.after, now)
+		bad = append(bad, g...)
+		bad = append(bad, c...)
+	} else {
+		g, c := tableDiff(ids, e.existing, now)
+		bad = append(bad, g...)
+		bad = append(bad, c...)
 	}
 	for k, was := range e.existing.peers {
 		if got, ok := now.peers[k]; !ok {
@@ -394,9 +491,18 @@ func (e *Env) existingIntact() Result {
 			bad = append(bad, "peer "+short(k)+" пропал из работающего сервера")
 		}
 	}
+	sort.Strings(info)
+	note := ""
+	if len(info) > 0 {
+		note = "; сведение: " + strings.Join(info, "; ")
+	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		r.Status, r.Detail = Fail, strings.Join(bad, "; ")
+		r.Status, r.Detail = Fail, strings.Join(bad, "; ")+note
+		return r
+	}
+	if len(info) > 0 {
+		r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — %s и работающий сервер байт в байт прежние; таблица изменена только приложением Amnezia в окне К6%s", e.existing.count(), e.fam.File, note)
 		return r
 	}
 	r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — таблица, %s и работающий сервер байт в байт прежние", e.existing.count(), e.fam.File)
