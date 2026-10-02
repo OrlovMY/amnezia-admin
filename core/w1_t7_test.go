@@ -8,6 +8,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ var awg2Templates = []string{
 }
 
 // awg2Want — точное число команд каждого шаблона в сценарии ниже.
-var awg2Want = []int{8, 2, 3, 3, 2, 2, 1}
+var awg2Want = []int{13, 3, 4, 4, 4, 3, 1}
 
 func TestServerCommandsAWG2(t *testing.T) {
 	srv := fakesrv.NewAWG2()
@@ -39,8 +40,35 @@ func TestServerCommandsAWG2(t *testing.T) {
 	if _, err := sess.GetPeerStats(c); err != nil {
 		t.Fatalf("GetPeerStats: %v", err)
 	}
-	if _, err := sess.AddUser(c, "Carol"); err != nil {
+	nu, err := sess.AddUser(c, "Carol")
+	if err != nil {
 		t.Fatalf("AddUser: %v", err)
+	}
+	// Посадки канарейки (TestServerCommandsGuardCanary, ревью QA W1): только
+	// в дочернем процессе, по переменной окружения.
+	plant := os.Getenv(t7PlantEnv)
+	if plant != "drop-delete" {
+		cl, err := sess.LoadClients(c)
+		if err != nil {
+			t.Fatalf("LoadClients: %v", err)
+		}
+		id := ""
+		for _, x := range cl {
+			if x.Name() == nu.Name {
+				id = x.ClientID
+			}
+		}
+		if err := sess.DeleteByID(c, id); err != nil {
+			t.Fatalf("DeleteByID: %v", err)
+		}
+	}
+	if plant == "extra-stats" {
+		if _, err := sess.GetPeerStats(c); err != nil {
+			t.Fatalf("GetPeerStats: %v", err)
+		}
+	}
+	if plant == "alien-cmd" {
+		_, _ = sess.r.Run("docker exec amnezia-awg2 rm -f /opt/amnezia/awg/awg0.conf", nil)
 	}
 	srv.FailSyncconf = fmt.Errorf("awg: syncconf: I/O error")
 	if _, err := sess.AddUser(c, "Dave"); err == nil {
@@ -50,32 +78,25 @@ func TestServerCommandsAWG2(t *testing.T) {
 	for i, tmpl := range awg2Templates {
 		res[i] = mustTemplateRegex(tmpl)
 	}
-	seen := make([]int, len(res))
-	for _, cmd := range srv.Commands() {
-		m := -1
-		for i, re := range res {
-			if re.MatchString(cmd) {
-				m = i
-				break
-			}
+	// Вердикт — общий с T7 (serverCommandsVerdict), его держит канарейка.
+	for _, msg := range awg2Verdict(res, srv.Commands()) {
+		t.Errorf("%s %s", t7Marker, msg)
+	}
+}
+
+// awg2Verdict — общий вердикт T7 по таблице awg2 плюс привязка к файлу
+// семейства: запись несёт awg0.conf, к wg0.conf обращений нет.
+func awg2Verdict(res []*regexp.Regexp, cmds []string) []string {
+	bad := serverCommandsVerdict(res, awg2Templates, awg2Want, cmds)
+	for _, cmd := range cmds {
+		if (res[5].MatchString(cmd) || res[6].MatchString(cmd)) && !strings.HasSuffix(cmd, " awg0.conf") {
+			bad = append(bad, fmt.Sprintf("команда записи amnezia-awg2 несёт не awg0.conf: %.140q", cmd))
 		}
-		if m < 0 {
-			t.Errorf("%s команда amnezia-awg2 вне шаблонов: %.140q", t7Marker, cmd)
-			continue
-		}
-		seen[m]++
-		if m >= 5 && !strings.HasSuffix(cmd, " awg0.conf") {
-			t.Errorf("%s команда записи amnezia-awg2 несёт не awg0.conf: …%q", t7Marker, cmd[len(cmd)-40:])
-		}
-		if strings.Contains(cmd, "wg0.conf") && !strings.Contains(cmd, "awg0.conf") {
-			t.Errorf("%s amnezia-awg2 обратился к wg0.conf: %.140q", t7Marker, cmd)
+		if strings.Contains(strings.ReplaceAll(cmd, "awg0.conf", ""), "wg0.conf") {
+			bad = append(bad, fmt.Sprintf("amnezia-awg2 обратился к wg0.conf: %.140q", cmd))
 		}
 	}
-	for i := range res {
-		if seen[i] != awg2Want[i] {
-			t.Errorf("%s шаблон awg2 #%d: команд %d, ждали ровно %d: %.70s", t7Marker, i, seen[i], awg2Want[i], awg2Templates[i])
-		}
-	}
+	return bad
 }
 
 // TestWGFamilyTable — таблица семейства WG: amnezia-awg и amnezia-wireguard —
@@ -91,9 +112,19 @@ func TestWGFamilyTable(t *testing.T) {
 		t.Errorf("строк в таблице %d, ждали ровно %d", len(WGFamilies()), len(want))
 	}
 	for name, w := range want {
-		got, err := WGFamilyOf(&Container{Name: name})
+		got, err := WGFamilyOf(&Container{Name: name, Dir: w.Dir})
 		if err != nil || got != w {
 			t.Errorf("%s: %+v (%v), ждали %+v", name, got, err, w)
+		}
+	}
+	// SEC W-R1: каталог контейнера расходится с таблицей — отказ.
+	for _, c := range []Container{
+		{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg2"},
+		{Name: "amnezia-awg", Dir: "/opt/amnezia/wireguard"},
+		{Name: "amnezia-awg", Dir: ""},
+	} {
+		if _, err := WGFamilyOf(&c); err == nil || !strings.Contains(err.Error(), "расходится") {
+			t.Errorf("%+v: ждали отказ «каталог расходится», получено %v", c, err)
 		}
 	}
 	for _, name := range []string{"amnezia-xray", "amnezia-awg3", "amnezia-foo", ""} {

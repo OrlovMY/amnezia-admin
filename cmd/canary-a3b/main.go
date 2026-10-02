@@ -33,6 +33,12 @@ import (
 
 func main() { os.Exit(run()) }
 
+// multiFlag — повторяемый флаг (-skip-family a -skip-family b).
+type multiFlag []string
+
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
 func run() int {
 	confirm := flag.String("not-production", "", "подтверждение, что сервер НЕ боевой: ровно "+canary.RequiredConfirmation)
 	newBin := flag.String("new", "", "путь к собранной новой версии (консольная, amnezia-admin)")
@@ -40,6 +46,8 @@ func run() int {
 	hostkey := flag.String("hostkey", "", "отпечаток ключа сервера SHA256:… (иначе программа спросит)")
 	rounds := flag.Int("rounds", 20, "добавлений на писателя в К4")
 	only := flag.String("container", "", "проверить только этот контейнер семейства WG (amnezia-awg, amnezia-awg2, amnezia-wireguard); по умолчанию — все найденные")
+	var skipFam multiFlag
+	flag.Var(&skipFam, "skip-family", "осознанно пропустить обязательное семейство WG, которого нет на сервере (повторяемый); итог тогда — «ПРОЙДЕН, БЕЗ ЖИВОЙ ПРОВЕРКИ: …»")
 	printFP := flag.Bool("print-fingerprint", false, "напечатать ревизию сборки и три суммы команды записи и выйти (сервер не нужен)")
 	flag.Parse()
 
@@ -116,6 +124,17 @@ func run() int {
 		fmt.Println("ИТОГ: НЕ ПРОВЕРЕНО — выпуск по этой канарейке НЕЛЬЗЯ")
 		return 1
 	}
+	// W1 раунд 2 (QA, находка 4): обязательные семейства. Ненайденное — шаг
+	// «НЕ ПРОВЕРЕНО» в итоге, если не пропущено флагом -skip-family.
+	var selNames []string
+	for _, c := range sel {
+		selNames = append(selNames, c.Name)
+	}
+	famRows, skipped, famNotes, ferr := canary.FamilyPlan(selNames, skipFam)
+	if ferr != nil {
+		fmt.Fprintln(os.Stderr, "ОТКАЗ:", ferr)
+		return 2
+	}
 	remote := func(cmd string) (string, error) {
 		s, err := sess.Client.NewSession()
 		if err != nil {
@@ -189,6 +208,20 @@ func run() int {
 	// PR-W1: канарейка проходит по ВСЕМ контейнерам семейства WG (или по
 	// одному — флаг -container); итог — таблица «шаг × контейнер».
 	var all []canary.Result
+	// SEC W-R2: общий каталог данных awg/awg2 — СТОП до любой записи;
+	// отказ inspect — НЕ ПРОВЕРЕНО (шлюз).
+	var foundNames []string
+	for _, c := range cs {
+		foundNames = append(foundNames, c.Name)
+	}
+	mr := canary.MountsCheck(remote, foundNames)
+	fmt.Printf("[%s] %s %s — %s\n", mr.Status, mr.ID, mr.Name, mr.Detail)
+	if mr.Status != canary.Pass && mr.Status != canary.NotApplicable {
+		_, line := canary.Summary([]canary.Result{mr}, nil)
+		fmt.Println(line)
+		return 1
+	}
+	all = append(all, mr)
 	var order []string
 	per := map[string][]canary.Result{}
 	var runErr error
@@ -213,7 +246,14 @@ func run() int {
 		all = append(all, rs...)
 	}
 	fmt.Println("\n" + canary.Table(order, per))
-	st, line := canary.Summary(all, runErr)
+	for _, r := range famRows {
+		fmt.Printf("[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+	}
+	for _, n := range famNotes {
+		fmt.Println(n)
+	}
+	all = append(all, famRows...)
+	st, line := canary.FinalSummary(all, runErr, skipped)
 	if cleanFailed {
 		st, line = canary.Fail, "ИТОГ: НЕ ПРОЙДЕН — уборка на тестовом сервере не удалась (см. выше)"
 	}

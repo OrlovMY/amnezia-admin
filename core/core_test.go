@@ -1409,7 +1409,7 @@ func TestServerCommandsUnchanged(t *testing.T) {
 	for i, tmpl := range cmdTemplates {
 		templates[i] = mustTemplateRegex(tmpl)
 	}
-	for _, msg := range serverCommandsVerdict(templates, srv.Commands()) {
+	for _, msg := range serverCommandsVerdict(templates, cmdTemplates, t7Want, srv.Commands()) {
 		t.Errorf("%s %s", t7Marker, msg)
 	}
 }
@@ -1435,7 +1435,9 @@ var t7Want = []int{
 }
 
 // serverCommandsVerdict — вердикт сторожа: список нарушений (пустой — чисто).
-func serverCommandsVerdict(templates []*regexp.Regexp, cmds []string) []string {
+// Общий для всех семейств (W1, ревью QA: у T7-awg2 был свой, немой):
+// templates — регулярки шаблонов raw, want — ТОЧНОЕ число команд каждого.
+func serverCommandsVerdict(templates []*regexp.Regexp, raw []string, want []int, cmds []string) []string {
 	var bad []string
 	seen := make([]int, len(templates))
 	for _, cmd := range cmds {
@@ -1452,13 +1454,13 @@ func serverCommandsVerdict(templates []*regexp.Regexp, cmds []string) []string {
 		}
 		seen[matched]++
 	}
-	if len(t7Want) != len(templates) {
-		bad = append(bad, fmt.Sprintf("t7Want: %d чисел на %d шаблонов", len(t7Want), len(templates)))
+	if len(want) != len(templates) || len(raw) != len(templates) {
+		bad = append(bad, fmt.Sprintf("эталон: %d чисел и %d шаблонов на %d регулярок", len(want), len(raw), len(templates)))
 		return bad
 	}
 	for i := range templates {
-		if seen[i] != t7Want[i] {
-			bad = append(bad, fmt.Sprintf("шаблон #%d: команд %d, ждали ровно %d: %.80s", i, seen[i], t7Want[i], cmdTemplates[i]))
+		if seen[i] != want[i] {
+			bad = append(bad, fmt.Sprintf("шаблон #%d: команд %d, ждали ровно %d: %.80s", i, seen[i], want[i], raw[i]))
 		}
 	}
 	return bad
@@ -1474,32 +1476,36 @@ func TestServerCommandsGuardCanary(t *testing.T) {
 	if os.Getenv(t7PlantEnv) != "" {
 		t.Skip("дочерний процесс")
 	}
-	for _, plant := range []string{"drop-delete", "extra-stats", "alien-cmd"} {
-		t.Run(plant, func(t *testing.T) {
-			// Без -test.v: вывод t.Logf прошедшего теста не печатается вовсе,
-			// а метка ищется только в блоке упавшего теста (от строки
-			// «--- FAIL: TestServerCommandsUnchanged» до следующей «---»).
-			cmd := exec.Command(os.Args[0], "-test.run", "^TestServerCommandsUnchanged$", "-test.count=1")
-			cmd.Env = append(os.Environ(), t7PlantEnv+"="+plant)
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("сторож не уронил прогон на посадке %q:\n%s", plant, out)
-			}
-			if !t7FailBlockHasMarker(string(out)) {
-				t.Fatalf("прогон упал не по вердикту сторожа (нет %q в блоке провала) на посадке %q:\n%s", t7Marker, plant, out)
-			}
-		})
+	// W1, ревью QA (блокер): те же три посадки — и для сторожа amnezia-awg2
+	// (TestServerCommandsAWG2 на fakesrv.NewAWG2()).
+	for _, guard := range []string{"TestServerCommandsUnchanged", "TestServerCommandsAWG2"} {
+		for _, plant := range []string{"drop-delete", "extra-stats", "alien-cmd"} {
+			guard, plant := guard, plant
+			t.Run(guard+"/"+plant, func(t *testing.T) {
+				// Без -test.v: вывод t.Logf прошедшего теста не печатается вовсе,
+				// а метка ищется только в блоке упавшего теста (от строки
+				// «--- FAIL: <сторож>» до следующей «---»).
+				cmd := exec.Command(os.Args[0], "-test.run", "^"+guard+"$", "-test.count=1")
+				cmd.Env = append(os.Environ(), t7PlantEnv+"="+plant)
+				out, err := cmd.CombinedOutput()
+				if err == nil {
+					t.Fatalf("сторож %s не уронил прогон на посадке %q:\n%s", guard, plant, out)
+				}
+				if !t7FailBlockHasMarker(string(out), guard) {
+					t.Fatalf("прогон упал не по вердикту сторожа (нет %q в блоке провала %s) на посадке %q:\n%s", t7Marker, guard, plant, out)
+				}
+			})
+		}
 	}
 }
 
-// t7FailBlockHasMarker — есть ли метка вердикта в блоке провала
-// TestServerCommandsUnchanged.
-func t7FailBlockHasMarker(out string) bool {
+// t7FailBlockHasMarker — есть ли метка вердикта в блоке провала сторожа guard.
+func t7FailBlockHasMarker(out, guard string) bool {
 	in := false
 	for _, l := range strings.Split(out, "\n") {
 		trim := strings.TrimSpace(l)
 		switch {
-		case strings.HasPrefix(trim, "--- FAIL: TestServerCommandsUnchanged "):
+		case strings.HasPrefix(trim, "--- FAIL: "+guard+" "):
 			in = true
 		case strings.HasPrefix(trim, "---") || trim == "FAIL" || trim == "PASS":
 			in = false
