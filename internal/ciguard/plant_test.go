@@ -667,6 +667,7 @@ var mainTests = []string{
 	"TestWorkflowFilesClosedList",
 	"TestShellParserTable",
 	"TestCommandProgramsClosedList",
+	"TestDatadirguardCanary",
 }
 
 func activePlant(t *testing.T) *plant {

@@ -15,6 +15,11 @@ import (
 )
 
 func TestDatadirguardCanary(t *testing.T) {
+	// Подсадки в файлы CI этого сторожа не касаются — в их прогонах он
+	// не нужен (и стоил бы по дочернему go test на подсадку).
+	if activePlant(t) != nil {
+		t.Skip("прогон с подсадкой в CI-файл")
+	}
 	for _, leak := range []bool{true, false} {
 		cmd := exec.Command("go", "test", "-count=1", "-run", "^TestLeakChild$", "amnezia-admin/internal/datadirguard")
 		cmd.Env = os.Environ()
