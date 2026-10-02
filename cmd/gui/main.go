@@ -2088,7 +2088,7 @@ func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
 	if !ok {
 		return nil
 	}
-	col := id.Col
+	col, row := id.Col, id.Row
 	return fyne.NewMenu("",
 		fyne.NewMenuItem(guiview.MenuCopyValue, func() {
 			u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)
@@ -2096,6 +2096,10 @@ func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
 		fyne.NewMenuItem(guiview.MenuCopyRow, func() {
 			u.copyToClipboard(guiview.CopyRow(r), guiview.CopiedRowStatus(r))
 		}),
+		// Задача владельца 01.10.2026: QR и сохранение конфигурации для
+		// каждого ключа — из сохранённого на этом компьютере .conf.
+		fyne.NewMenuItem(guiview.MenuShowQR, func() { u.showSavedConfig(row, false) }),
+		fyne.NewMenuItem(guiview.MenuSaveConfig, func() { u.showSavedConfig(row, true) }),
 	)
 }
 
@@ -2697,7 +2701,22 @@ func (u *ui) writeConfigFile(nu *core.NewUser) (string, bool, error) {
 // свой и не писал в настоящий каталог данных владельца, — тот же приём, что с
 // writeCrashLog(dir,…) и saveSortStateTo(dir,…).
 func writeConfigFileTo(dir string, nu *core.NewUser) (string, bool, error) {
-	return core.WriteClientConfig(dir, nu.Name, nu.Config)
+	r, err := saveConfigFileTo(dir, nu)
+	return r.Path, r.DirWasMissing, err
+}
+
+// saveConfigFileTo — запись, не затирающая файл ДРУГОГО клиента (К-1):
+// занятое имя — сохранено под «<имя> (2).conf», и r.Occupied это называет.
+func saveConfigFileTo(dir string, nu *core.NewUser) (core.SaveResult, error) {
+	return core.SaveClientConfig(dir, nu.Name, nu.Config, nu.Replaces)
+}
+
+func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
+	dir, err := core.UserConfigsDir()
+	if err != nil {
+		return core.SaveResult{}, err
+	}
+	return saveConfigFileTo(dir, nu)
 }
 
 // showConfigDialog показывает готовый клиентский конфиг в виде QR-кода
@@ -2742,27 +2761,47 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
 	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
 	// перевыпустить: кнопкой «Перевыпустить» в главном окне.
-	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) +
-		" Это делает кнопка «Перевыпустить» в главном окне.")
+	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) + " Это делает кнопка «Перевыпустить» в главном окне.")
 	failHint.Wrapping = fyne.TextWrapWord
 	failHint.Hide()
+	// AU-UX П1 (раунд 6): ошибка ОС с полным путём — 3–4 строки; она идёт
+	// ПОСЛЕ совета, иначе совет уезжал под прокрутку на 1194×517.
+	failDetail := widget.NewLabel("")
+	failDetail.Wrapping = fyne.TextWrapWord
+	failDetail.Hide()
 
-	saveBtn = widget.NewButtonWithIcon("Сохранить .conf", theme.DocumentSaveIcon(), func() {
-		abs, createdDir, err := u.writeConfigFile(nu)
+	// Задача владельца 01.10.2026 («админ создал УЗ, но забыл сохранить
+	// конфигурацию»): конфиг сохраняется САМ, сразу при показе окна, в
+	// каталог конфигураций — по нему потом работает меню «Показать QR».
+	// Кнопка — сохранить ЕЩЁ и в другое место.
+	saveBtn = widget.NewButtonWithIcon("Сохранить ещё в…", theme.DocumentSaveIcon(), func() {
+		u.saveConfigAs(nu.Name, nu.Config)
+	})
+	autoSave := func() {
+		res, err := u.saveConfigFile(nu)
+		abs, createdDir := res.Path, res.DirWasMissing
 		if err != nil {
-			dialog.ShowError(err, u.win)
-			// Диалог ошибки человек закроет, а совет обязан остаться перед
-			// глазами: конфиг существует только в памяти, окно закроется — и
-			// ключи клиента потеряны.
+			// Громко и в самом окне (признак 4): конфиг существует только в
+			// памяти — окно закроется, и ключи клиента потеряны.
+			// Первым — что делать, пока окно открыто (AU-UX П1, раунд 6).
+			savedLabel.SetText(guiview.SaveFailedHeadline)
+			savedLabel.TextStyle = fyne.TextStyle{Bold: true}
 			failHint.Show()
-			scrollToEnd(content, info)
+			failDetail.SetText("Подробности: " + err.Error())
+			failDetail.Show()
+			if u.status != nil {
+				u.status.SetText("Конфиг НЕ сохранён")
+			}
 			return
 		}
-		failHint.Hide()
-		saveBtn.Disable()
 		// Одно событие — одно слово: и здесь, и в строке состояния «Конфиг
 		// сохранён» (ревью UX-01).
-		savedLabel.SetText("Конфиг сохранён: " + abs)
+		saved := "Конфиг сохранён: " + abs
+		if res.Occupied != "" {
+			// К-1: громко — файл с этим именем принадлежит другому клиенту
+			saved += "\n" + guiview.OccupiedText(res.Occupied, filepath.Base(abs))
+		}
+		savedLabel.SetText(saved)
 		copyBtn.OnTapped = func() {
 			fyne.CurrentApp().Clipboard().SetContent(abs)
 			if u.status != nil {
@@ -2773,11 +2812,10 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		if createdDir {
 			moveHint.Show()
 		}
-		scrollToEnd(content, info)
 		if u.status != nil {
 			u.status.SetText(fmt.Sprintf("Конфиг сохранён: %s", abs))
 		}
-	})
+	}
 
 	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
 	hint.Wrapping = fyne.TextWrapWord
@@ -2790,18 +2828,23 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// «Скопировать путь») — под ней, вне прокрутки, как и «Закрыть» самого
 	// диалога: при любом окне они на виду. QR не уменьшается (сканируемость),
 	// путь не сжимается (переносится как был).
+	// АУДИТ-МЕНЮ-QR-UX Н1: QR — ВНЕ прокрутки, сверху: виден целиком при
+	// открытии на любом допустимом окне (сторож TestQRFullyVisible). Под
+	// ним в прокрутке — сначала «сохранён / НЕ сохранён» (громко), потом
+	// остальное.
 	info = container.NewVScroll(container.NewVBox(
-		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		container.NewCenter(qrObj),
-		hint,
 		savedLabel,
-		moveHint,
 		failHint,
+		failDetail,
+		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		moveHint,
+		hint,
 	))
-	content = container.NewBorder(nil, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	content = container.NewBorder(container.NewCenter(qrObj), container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
+	autoSave()
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
