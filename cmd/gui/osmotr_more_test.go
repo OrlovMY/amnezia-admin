@@ -12,7 +12,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -113,6 +112,21 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 		switch state {
 		case "сохранён":
 			configDirEnv(t)
+		case "отказ, длинный путь":
+			// каталог данных — длинный абсолютный путь (модель macOS), а на
+			// месте каталога конфигураций — ФАЙЛ: MkdirAll отвечает ошибкой ОС
+			// с полным путём (3–4 строки в окне)
+			configDirEnv(t)
+			d, err := core.UserConfigsDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(d, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		case "отказ":
 			// Каталог данных не определяется ни на одной ОС: относительный
 			// путь отвергают и core (Windows), и os.UserConfigDir.
@@ -124,9 +138,8 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
 		mins := osmotrFrame(pop, nil)
-		if state != "" {
-			test.Tap(buttonByText(t, pop, "Сохранить .conf"))
-		}
+		// Сохранение — само, при показе (задача 01.10.2026): нажимать нечего.
+		// state "" — каталог по умолчанию тестов (TestMain).
 		// Мерим диалог конфига, даже если поверх него окно ошибки.
 		return osmotrScene{root: pop, canvas: c, mins: mins}
 	}
@@ -213,7 +226,7 @@ var (
 	// один атом «прокрутка» и внутрь не идёт — названная граница, её
 	// содержимое смотрит снимок), кнопки действия — вне её.
 	invConfigBase = []string{
-		"подпись:Конфиг готов", "прокрутка:", "кнопка:Сохранить .conf", "кнопка:Закрыть",
+		"подпись:Конфиг готов", "изображение:", "прокрутка:", "кнопка:Сохранить ещё в…", "кнопка:Закрыть",
 	}
 	invActionTail = []string{"кнопка:Показать изменения", "подпись:", "кнопка:Отмена"}
 	// fyneIconOverflow — значок стандартного диалога Fyne (dialog.ShowError,
@@ -242,10 +255,11 @@ var moreForms = []osmotrForm{
 			"кнопка:Перевыпустить"}, invActionTail)},
 	// Д6 закрыт прокруткой (решение владельца 29.09.2026): разрешения
 	// knownD6 сняты, прибор показал их НЕИСПОЛЬЗОВАННЫМИ.
-	{name: "(д) конфиг готов", open: openConfig(""), width: 472, inventory: invConfigBase},
+	{name: "(д) конфиг готов", open: openConfig(""), width: 472, inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},
+	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
