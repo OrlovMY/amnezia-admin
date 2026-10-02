@@ -779,7 +779,16 @@ func TestForgetHostKeyKnownHostsWriteFails(t *testing.T) {
 		t.Fatalf("known_hosts до Forget: %v", err)
 	}
 
-	mkVaultTmpBlocker(t, khPath) // removeKnownHostLines упадёт на os.WriteFile(khPath+".tmp", ...)
+	// removeKnownHostLines упадёт на открытии замка known_hosts.lock: на его
+	// месте каталог. (Прежний блокировщик — каталог known_hosts.tmp — больше
+	// не действует: временное имя теперь уникально, os.CreateTemp.)
+	// Файл замка остался от appendKnownHost выше — убрать и поставить каталог.
+	if err := os.Remove(khPath + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(khPath+".lock", 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	err = ForgetHostKey(pin, vaultPath, khPath, addr)
 	if err == nil {
