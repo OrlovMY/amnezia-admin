@@ -790,75 +790,91 @@ func TestRollbackModelOnFakesrv(t *testing.T) {
 		{"иной исход («занято») — НЕ ПРОЙДЕН, хотя файлы и сервер прежние", true, true, false, Fail, "исход не"},
 		{"исход верный, но работающий сервер не прежний — НЕ ПРОЙДЕН", true, false, true, Fail, "не прежний"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			f := emptyFake(t, false)
-			f.env.NewBin = newCLI(t)
-			f.env.docker = "docker"
-			if r := f.env.cli(f.env.NewBin, f.env.KeyEnv, "add", "-name", "canary-perm"); r.code != 0 {
-				t.Fatalf("остаток PR4.4: %d %s", r.code, r.title)
+		// Правка П0: и с существующим клиентом администратора — откат
+		// возвращает файлы, не стирая его.
+		for _, admin := range []bool{false, true} {
+			name := c.name
+			if admin {
+				name += " (есть клиент администратора)"
 			}
-			real := f.env.Remote
-			restored := false
-			sums := 0
-			sum := func(path string) string {
-				b, _ := f.exec.File(path)
-				h := sha256.Sum256(b)
-				return hex.EncodeToString(h[:]) + "  " + path
-			}
-			f.env.Remote = func(cmd string) (string, error) {
-				switch {
-				case strings.HasSuffix(cmd, "sh -c 'command -v wg'"):
-					return "/usr/bin/wg\n", nil
-				case strings.HasSuffix(cmd, "sh -c 'mv /usr/bin/wg /usr/bin/wg.canary-orig'"):
-					return "", nil
-				case strings.Contains(cmd, "syncconf ] &&"):
-					if c.install {
-						f.exec.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
+			t.Run(name, func(t *testing.T) {
+				f := emptyFake(t, false)
+				if admin {
+					if _, err := f.env.Sess.AddUser(f.env.Ctr, adminName); err != nil {
+						t.Fatal(err)
 					}
-					f.exec.LockBusy = c.busy
-					return "", nil
-				case strings.HasSuffix(cmd, "sh -c 'mv -f /usr/bin/wg.canary-orig /usr/bin/wg'"):
-					f.exec.FailSyncconf = nil
-					f.exec.LockBusy = false
-					restored = true
-					return "", nil
-				case strings.Contains(cmd, "sha256sum "):
-					out := sum("/opt/amnezia/awg/wg0.conf") + "\n" + sum("/opt/amnezia/awg/clientsTable") + "\n"
-					sums++
-					if c.drop && sums == 2 { // второй подсчёт — сразу после исхода
-						f.exec.SetFile("/tmp/canary-empty/wg0.conf", []byte("[Interface]\n"))
-						saved := f.exec.FailSyncconf
-						f.exec.FailSyncconf = nil
-						if _, err := f.exec.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /tmp/canary-empty/wg0.conf)'", nil); err != nil {
-							t.Fatalf("модель потери peer'ов: %v", err)
-						}
-						f.exec.FailSyncconf = saved
-					}
-					return out, nil
 				}
-				return real(cmd)
-			}
-			r := f.env.rollback()
-			if r.Status != c.want || !strings.Contains(r.Detail, c.why) {
-				t.Fatalf("PR4.1: %s — %s", r.Status, r.Detail)
-			}
-			if !restored {
-				t.Errorf("wg не возвращён")
-			}
-			m, err := f.env.names()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := m["canary-perm"]; ok {
-				t.Errorf("остаток PR4.4 не убран перед откатом")
-			}
-			if _, ok := m["canary-rb0"]; !ok {
-				t.Errorf("опорного canary-rb0 нет")
-			}
-			if _, ok := m["canary-rb"]; ok != !c.install {
-				t.Errorf("canary-rb: есть=%v при действующей обёртке=%v", ok, c.install)
-			}
-		})
+				f.env.NewBin = newCLI(t)
+				f.env.docker = "docker"
+				if r := f.env.cli(f.env.NewBin, f.env.KeyEnv, "add", "-name", "canary-perm"); r.code != 0 {
+					t.Fatalf("остаток PR4.4: %d %s", r.code, r.title)
+				}
+				real := f.env.Remote
+				restored := false
+				sums := 0
+				sum := func(path string) string {
+					b, _ := f.exec.File(path)
+					h := sha256.Sum256(b)
+					return hex.EncodeToString(h[:]) + "  " + path
+				}
+				f.env.Remote = func(cmd string) (string, error) {
+					switch {
+					case strings.HasSuffix(cmd, "sh -c 'command -v wg'"):
+						return "/usr/bin/wg\n", nil
+					case strings.HasSuffix(cmd, "sh -c 'mv /usr/bin/wg /usr/bin/wg.canary-orig'"):
+						return "", nil
+					case strings.Contains(cmd, "syncconf ] &&"):
+						if c.install {
+							f.exec.FailSyncconf = errors.New("exit status 1; stderr: canary: syncconf disabled")
+						}
+						f.exec.LockBusy = c.busy
+						return "", nil
+					case strings.HasSuffix(cmd, "sh -c 'mv -f /usr/bin/wg.canary-orig /usr/bin/wg'"):
+						f.exec.FailSyncconf = nil
+						f.exec.LockBusy = false
+						restored = true
+						return "", nil
+					case strings.Contains(cmd, "sha256sum "):
+						out := sum("/opt/amnezia/awg/wg0.conf") + "\n" + sum("/opt/amnezia/awg/clientsTable") + "\n"
+						sums++
+						if c.drop && sums == 2 { // второй подсчёт — сразу после исхода
+							f.exec.SetFile("/tmp/canary-empty/wg0.conf", []byte("[Interface]\n"))
+							saved := f.exec.FailSyncconf
+							f.exec.FailSyncconf = nil
+							if _, err := f.exec.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /tmp/canary-empty/wg0.conf)'", nil); err != nil {
+								t.Fatalf("модель потери peer'ов: %v", err)
+							}
+							f.exec.FailSyncconf = saved
+						}
+						return out, nil
+					}
+					return real(cmd)
+				}
+				r := f.env.rollback()
+				if r.Status != c.want || !strings.Contains(r.Detail, c.why) {
+					t.Fatalf("PR4.1: %s — %s", r.Status, r.Detail)
+				}
+				if !restored {
+					t.Errorf("wg не возвращён")
+				}
+				m, err := f.env.names()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := m["canary-perm"]; ok {
+					t.Errorf("остаток PR4.4 не убран перед откатом")
+				}
+				if _, ok := m["canary-rb0"]; !ok {
+					t.Errorf("опорного canary-rb0 нет")
+				}
+				if _, ok := m["canary-rb"]; ok != !c.install {
+					t.Errorf("canary-rb: есть=%v при действующей обёртке=%v", ok, c.install)
+				}
+				if _, ok := m[adminName]; ok != admin {
+					t.Errorf("клиент администратора: есть=%v, ждали %v", ok, admin)
+				}
+			})
+		}
 	}
 }
 

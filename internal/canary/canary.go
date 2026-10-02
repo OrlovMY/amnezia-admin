@@ -107,7 +107,12 @@ type Env struct {
 	// AskIP — вопрос, на который человек вводит строку (К8: адрес с сайта
 	// проверки IP; сверяет канарейка). nil — такие шаги НЕ ПРОВЕРЕНО.
 	AskIP func(question string) string
-	Out   io.Writer
+	// ServerIP — значение -server-ip, уже сверенное с адресом из ключа
+	// (CheckServerIP). Задан — П0 допускает до MaxExisting существующих
+	// клиентов и сверяет их в П0-итог; "" — сервер обязан быть пуст.
+	ServerIP string
+	existing *existingSnap
+	Out      io.Writer
 
 	// RaceRounds — сколько добавлений делает каждый из двух писателей в К4.
 	RaceRounds int
@@ -179,7 +184,11 @@ func Run(e *Env) ([]Result, error) {
 	// НЕ ПРОВЕРЕНО, а значит, и итог не ПРОЙДЕН.
 	add(e.buildCheck())
 
-	if r := e.serverEmpty(); r.Status != Pass {
+	p0 := e.serverEmpty
+	if e.ServerIP != "" {
+		p0 = e.existingAllowed
+	}
+	if r := p0(); r.Status != Pass {
 		add(r)
 		return rs, fmt.Errorf("%w: не удалось убедиться, что на сервере нет клиентов", ErrStop)
 	} else {
@@ -255,6 +264,11 @@ func Run(e *Env) ([]Result, error) {
 			su.Status, su.Detail = Pass, "удалён и проверено"
 		}
 		add(su)
+	}
+	// Правка П0: существующие клиенты (клиент администратора приложения
+	// Amnezia) — не изменились ни в одном из трёх источников.
+	if e.existing != nil {
+		add(e.existingIntact())
 	}
 	return rs, nil
 }
@@ -875,8 +889,8 @@ func (e *Env) k3() Result {
 	if d.code != 0 {
 		return Result{Status: Fail, Detail: "удалить: код " + strconv.Itoa(d.code) + ": " + d.title}
 	}
-	if m, err := e.names(); err != nil || len(m) != 0 {
-		return Result{Status: Fail, Detail: "удалить: список после удаления не пуст или не прочитан"}
+	if m, err := e.names(); err != nil || canaryCount(canaryNames(m)) != 0 {
+		return Result{Status: Fail, Detail: "удалить: canary-* после удаления остались или список не прочитан"}
 	}
 	log = append(log, "удалить")
 	res := Result{Status: Pass, Detail: "по серверу: " + strings.Join(log, ", ") + " — состав верный"}
@@ -954,8 +968,13 @@ func (e *Env) rollback() (res Result) {
 	if err := e.cleanup(); err != nil {
 		return Result{Detail: "перед откатом canary-* не убраны: " + err.Error()}
 	}
-	if m, err := e.names(); err != nil || len(m) != 0 {
-		return Result{Detail: fmt.Sprintf("перед откатом список не пуст (%d) или не прочитан (%v)", len(m), err)}
+	if m, err := e.names(); err != nil || canaryCount(canaryNames(m)) != 0 {
+		return Result{Detail: fmt.Sprintf("перед откатом canary-* в списке есть (%d) или список не прочитан (%v)", canaryCount(canaryNames(m)), err)}
+	}
+	// Правка П0: существующие клиенты в работающем сервере — до опорного.
+	peersBase, err := e.Sess.GetPeerStats(e.Ctr)
+	if err != nil {
+		return Result{Detail: "работающий сервер до опорного клиента не опрошен: " + err.Error()}
 	}
 	if r := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-rb0"); r.code != 0 {
 		return Result{Status: Fail, Detail: "опорный клиент canary-rb0: код " + strconv.Itoa(r.code) + ": " + r.title}
@@ -964,8 +983,8 @@ func (e *Env) rollback() (res Result) {
 	if err != nil {
 		return Result{Detail: "работающий сервер до отката не опрошен: " + err.Error()}
 	}
-	if len(peersBefore) != 1 {
-		return Result{Status: Fail, Detail: fmt.Sprintf("после «готово» для canary-rb0 peer'ов в работающем сервере %d, ожидался 1", len(peersBefore))}
+	if len(peersBefore) != len(peersBase)+1 {
+		return Result{Status: Fail, Detail: fmt.Sprintf("после «готово» для canary-rb0 peer'ов в работающем сервере %d, ожидалось %d", len(peersBefore), len(peersBase)+1)}
 	}
 	p, err := e.dexec(`command -v ` + e.fam.Tool)
 	p = strings.TrimSpace(p)

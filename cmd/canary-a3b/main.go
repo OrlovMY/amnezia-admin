@@ -48,6 +48,7 @@ func run() int {
 	only := flag.String("container", "", "проверить только этот контейнер семейства WG (amnezia-awg, amnezia-awg2, amnezia-wireguard); по умолчанию — все найденные")
 	var skipFam multiFlag
 	flag.Var(&skipFam, "skip-family", "осознанно пропустить обязательное семейство WG, которого нет на сервере (повторяемый); итог тогда — «ПРОЙДЕН, БЕЗ ЖИВОЙ ПРОВЕРКИ: …»")
+	serverIP := flag.String("server-ip", "", "IP тестового сервера; сверяется с адресом из ключа ДО подключения (не совпал — отказ). С ним П0 допускает до "+fmt.Sprint(canary.MaxExisting)+" уже существующих клиентов (клиент администратора приложения Amnezia) и сверяет в конце, что они не изменились; без него сервер обязан быть пуст")
 	printFP := flag.Bool("print-fingerprint", false, "напечатать ревизию сборки и три суммы команды записи и выйти (сервер не нужен)")
 	flag.Parse()
 
@@ -86,6 +87,14 @@ func run() int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
 		return 2
+	}
+	// Правка П0: второй фактор против боевого сервера — IP, названный
+	// человеком, против адреса из ключа; ДО подключения.
+	if *serverIP != "" {
+		if err := canary.CheckServerIP(*serverIP, creds.Host); err != nil {
+			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+			return 2
+		}
 	}
 	in := bufio.NewReader(os.Stdin)
 	ask := func(q string) canary.Answer {
@@ -172,6 +181,7 @@ func run() int {
 			},
 			Out:        os.Stdout,
 			RaceRounds: *rounds,
+			ServerIP:   *serverIP,
 		}
 		if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
 			env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
