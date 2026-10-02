@@ -623,6 +623,11 @@ func (e *Env) lockHolders() (holders []string, known bool, why string) {
 	if err != nil {
 		return nil, false, "lslocks не выполнился: " + err.Error()
 	}
+	return lockHoldersFrom(out)
+}
+
+// lockHoldersFrom — разбор вывода lslocksCmd (см. lockHolders).
+func lockHoldersFrom(out string) (holders []string, known bool, why string) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "NO-LSLOCKS" {
 		return nil, false, "lslocks на хосте нет — держателя не узнать"
@@ -1315,6 +1320,7 @@ func (e *Env) breakWrite() Result {
 	// High-1: прежде попаданием считался любой держатель). Не успели —
 	// новая попытка, до k5Attempts.
 	attempts, hits := 0, 0
+	lastGone := ""       // последний держатель, вышедший до опознания
 	cutName := ""        // оборванная запись последнего попадания
 	var cutPIDs []string // её держатели замка, оставшиеся после обрыва
 	for attempts < k5Attempts {
@@ -1325,6 +1331,9 @@ func (e *Env) breakWrite() Result {
 			return Result{Detail: fmt.Sprintf("обрыв под замком, попытка %d из %d: %s — ожидание второй записи не проверено", attempts, k5Attempts, a.stop)}
 		}
 		if !a.hit {
+			if a.gone != "" {
+				lastGone = a.gone
+			}
 			continue
 		}
 		hits++
@@ -1346,6 +1355,9 @@ func (e *Env) breakWrite() Result {
 	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали нашу запись под замком: %d", attempts, k5Attempts, hits)
 	if len(cutPIDs) == 0 {
 		why := " — ни одна попытка не застала нашу запись под замком"
+		if lastGone != "" {
+			why += " (держатель не опознан: " + lastGone + ")"
+		}
 		if hits > 0 {
 			why = " — после обрыва замок уже свободен"
 		}
@@ -1491,25 +1503,50 @@ var (
 	k5Deadline = 90 * time.Second
 )
 
-// lockHolder — держатель /run/lock: PID и строка lslocks.
-type lockHolder struct{ pid, line string }
+// lockHolder — держатель /run/lock: PID, строка lslocks и командная строка
+// процесса, снятая ТОЙ ЖЕ удалённой командой (cmd; "" — не прочиталась:
+// процесс уже вышел).
+type lockHolder struct{ pid, line, cmd string }
 
-// holdersPID — lockHolders с PID (второй столбец: lslocksCmd задаёт
-// порядок COMMAND,PID,TYPE,PATH). PID не число — ответ не разобран.
+// lslocksCmdlineCmd — lslocksCmd и, в той же оболочке сразу за ним,
+// командные строки всех PID из его вывода (строки «CMDLINE <pid> <argv>»
+// после маркера CMDLINES). Живой прогон 02.10: lslocks и чтение
+// /proc/PID/cmdline двумя SSH-командами расходились на сотни мс — flock
+// успевал выйти, и К5 на всех трёх контейнерах давал «командная строка
+// PID … не прочитана». Ошибку открытия /proc (процесс вышел) глушат
+// фигурные скобки: `2>/dev/null` после `<` не глушит сообщение оболочки, и
+// оно попадало бы в строку CMDLINE (проверено в dash).
+const lslocksCmdlineCmd = lslocksCmd + `; echo CMDLINES; printf '%s\n' "$out" | while read -r c p rest; do case "$p" in ''|*[!0-9]*) continue;; esac; printf 'CMDLINE %s ' "$p"; { tr '\0\n' '  ' < /proc/"$p"/cmdline; } 2>/dev/null; echo; done`
+
+// holdersPID — держатели /run/lock с PID (второй столбец: lslocksCmd задаёт
+// порядок COMMAND,PID,TYPE,PATH) и их командными строками — одной удалённой
+// командой. PID не число — ответ не разобран.
 func (e *Env) holdersPID() ([]lockHolder, bool, string) {
-	hs, ok, why := e.lockHolders()
+	out, err := e.Remote(lslocksCmdlineCmd)
+	if err != nil {
+		return nil, false, "lslocks не выполнился: " + err.Error()
+	}
+	locks, cmdPart, _ := strings.Cut(out, "\nCMDLINES\n")
+	hs, ok, why := lockHoldersFrom(locks)
 	if !ok {
 		return nil, false, why
 	}
-	var out []lockHolder
+	cmds := map[string]string{}
+	for _, l := range strings.Split(cmdPart, "\n") {
+		if rest, ok := strings.CutPrefix(l, "CMDLINE "); ok {
+			pid, argv, _ := strings.Cut(rest, " ")
+			cmds[pid] = strings.TrimSpace(argv)
+		}
+	}
+	var res []lockHolder
 	for _, l := range hs {
 		f := strings.Fields(l)
 		if len(f) < 2 || !isDigits(f[1]) {
 			return nil, false, "PID держателя не разобран: " + l
 		}
-		out = append(out, lockHolder{f[1], l})
+		res = append(res, lockHolder{f[1], l, cmds[f[1]]})
 	}
-	return out, true, ""
+	return res, true, ""
 }
 
 func isDigits(s string) bool {
@@ -1524,9 +1561,6 @@ func isDigits(s string) bool {
 	return true
 }
 
-// procCmdlineCmd — командная строка процесса на хосте (pid — только цифры).
-func procCmdlineCmd(pid string) string { return "tr '\\0' ' ' < /proc/" + pid + "/cmdline" }
-
 // isOurWrite — держатель pid — НАША запись (AU-LOGIC High-1). Почему так
 // надёжно: команда записи под замком несёт метку core.CASLabelApply и
 // sha256 файла конфигурации, который программа прочитала и сверяет под
@@ -1540,11 +1574,11 @@ func procCmdlineCmd(pid string) string { return "tr '\\0' ' ' < /proc/" + pid + 
 // Три исхода (AU-LOGIC Low-3): наш; «не опознан» — метка записи есть, но
 // сумма не та, или командную строку прочитать не удалось; «чужой» —
 // командная строка прочитана, метки записи amnezia-admin в ней нет.
-func (e *Env) classifyHolder(pid, sha string) (kind holderKind, why string) {
-	out, err := e.Remote(procCmdlineCmd(pid))
+func classifyHolder(h lockHolder, sha string) (kind holderKind, why string) {
+	pid, out := h.pid, h.cmd
 	switch {
-	case err != nil:
-		return holderUnknown, "командная строка PID " + pid + " не прочитана"
+	case out == "":
+		return holderGone, "командная строка PID " + pid + " не прочитана (процесс вышел)"
 	case !strings.Contains(out, core.CASLabelApply):
 		return holderForeign, ""
 	case !strings.Contains(out, sha):
@@ -1556,7 +1590,8 @@ func (e *Env) classifyHolder(pid, sha string) (kind holderKind, why string) {
 type holderKind int
 
 const (
-	holderUnknown holderKind = iota
+	holderUnknown holderKind = iota // метка есть, сумма не та
+	holderGone                      // командная строка пуста: процесс вышел
 	holderForeign
 	holderOurs
 )
@@ -1566,6 +1601,7 @@ type k5Attempt struct {
 	hit  bool     // убили, пока замок держала наша запись
 	pids []string // её держатели в момент обрыва
 	stop string   // попытка невозможна (замок чужой, lslocks молчит…) — К5 НЕ ПРОВЕРЕНО
+	gone string   // держатель вышел раньше, чем его опознали (попытка не удалась, повторяется)
 }
 
 // killUnderLock — запустить add -name name и убить его, как только замок
@@ -1576,6 +1612,14 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 		return k5Attempt{stop: "держателя замка на /run/lock узнать не удалось (" + why + ")"}
 	}
 	if len(hs) > 0 {
+		// До запуска нашей записи держатель — не наш. «Чужой» — только
+		// когда командная строка прочитана и метки записи в ней нет
+		// (AU-LOGIC Low-3); иначе — просто «занят».
+		for _, h := range hs {
+			if h.cmd == "" || strings.Contains(h.cmd, core.CASLabelApply) {
+				return k5Attempt{stop: "замок занят до попытки: " + oneLine(holderLines(hs))}
+			}
+		}
 		return k5Attempt{stop: "замок держит чужой: " + oneLine(holderLines(hs))}
 	}
 	conf, err := e.catFile(e.conf())
@@ -1602,10 +1646,11 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 	go func() { _ = cmd.Wait(); close(done) }()
 	defer func() { <-done }()
 	deadline := time.Now().Add(k5Deadline)
+	gone := ""
 	for {
 		select {
 		case <-done:
-			return k5Attempt{}
+			return k5Attempt{gone: gone}
 		default:
 		}
 		hs, ok, why := e.holdersPID()
@@ -1617,11 +1662,15 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 		var foreign []lockHolder
 		unknown := ""
 		for _, h := range hs {
-			switch k, why := e.classifyHolder(h.pid, sha); k {
+			switch k, why := classifyHolder(h, sha); k {
 			case holderOurs:
 				ours = append(ours, h.pid)
 			case holderForeign:
 				foreign = append(foreign, h)
+			case holderGone:
+				// вышел между lslocks и /proc в одной команде — опрос
+				// продолжается; не застали — попытка повторяется
+				gone = why
 			default:
 				if unknown == "" {
 					unknown = why
@@ -1642,7 +1691,7 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
-			return k5Attempt{}
+			return k5Attempt{gone: gone}
 		}
 		time.Sleep(k5Poll)
 	}
@@ -1743,7 +1792,7 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	if m, err := e.names(); err != nil {
 		return Result{Detail: "v0.2.0 add прошёл; список " + e.Ctr.Name + " не прочитан: " + err.Error()}
 	} else if _, ok := m["canary-k7"]; !ok {
-		return Result{Detail: "v0.2.0 add прошёл, но не в " + e.Ctr.Name + " — v0.2.0 выбрала другой контейнер; К7 для этого контейнера не проверен"}
+		return e.k7Elsewhere()
 	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "del", "-name", "canary-k7", "-yes"); r.code != 0 {
 		return Result{Status: Fail, Detail: "v0.2.0 del: код " + strconv.Itoa(r.code) + ": " + r.title}
@@ -1757,6 +1806,49 @@ func (e *Env) oldWorks(lockBefore string) Result {
 		return Result{Status: Fail, Detail: "права /run/lock изменились: было " + oneLine(lockBefore) + ", стало " + oneLine(now)}
 	}
 	return Result{Status: Pass, Detail: "v0.2.0 list/add/del прошли; /run/lock не изменился"}
+}
+
+// k7Elsewhere — v0.2.0 add прошёл, но не в этом контейнере. НЕ ПРИМЕНИМО
+// по существу — только если ДОКАЗАНО: на сервере не меньше двух
+// контейнеров семейства WG, и запись canary-k7 найдена в ДРУГОМ из них
+// (v0.2.0 выбирать контейнер не умеет и берёт первый управляемый). Тогда
+// запись убирается той же v0.2.0 (del выберет тот же контейнер). Иначе —
+// НЕ ПРОВЕРЕНО с причиной (живой прогон 02.10, amnezia-wireguard).
+func (e *Env) k7Elsewhere() Result {
+	base := "v0.2.0 add прошёл, но не в " + e.Ctr.Name
+	cs, err := e.Sess.FindContainers()
+	if err != nil {
+		return Result{Detail: base + "; контейнеры сервера не перечислены (" + oneLine(err.Error()) + ") — где запись, неизвестно; К7 не проверен"}
+	}
+	var wg []core.Container
+	for _, c := range cs {
+		if _, ferr := core.WGFamilyOf(&c); ferr == nil {
+			wg = append(wg, c)
+		}
+	}
+	found := ""
+	for i := range wg {
+		c := &wg[i]
+		if c.Name == e.Ctr.Name {
+			continue
+		}
+		cl, err := e.Sess.LoadClients(c)
+		if err != nil {
+			return Result{Detail: base + "; список " + c.Name + " не прочитан (" + oneLine(err.Error()) + ") — где запись, неизвестно; К7 не проверен"}
+		}
+		for _, x := range cl {
+			if x.Name() == "canary-k7" {
+				found = c.Name
+			}
+		}
+	}
+	if len(wg) < 2 || found == "" {
+		return Result{Detail: fmt.Sprintf("%s; контейнеров семейства WG %d, canary-k7 в других не найдена — куда записала v0.2.0, не доказано; К7 не проверен", base, len(wg))}
+	}
+	if r := e.cli(e.OldBin, e.KeyEnv, "del", "-name", "canary-k7", "-yes"); r.code != 0 {
+		return Result{Status: Fail, Detail: "v0.2.0 записала canary-k7 в " + found + ", а del не прошёл: код " + strconv.Itoa(r.code) + ": " + r.title}
+	}
+	return Result{Status: NotApplicable, Detail: fmt.Sprintf("v0.2.0 выбирать контейнер не умеет: на сервере %d контейнера семейства WG, её запись ушла в %s (там и удалена) — на %s К7 по существу не применим", len(wg), found, e.Ctr.Name)}
 }
 
 // cleanup — удаляет всех «canary-*», кроме добавленного в приложении

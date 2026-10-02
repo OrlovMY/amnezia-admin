@@ -153,30 +153,39 @@ func TestMaskerTable(t *testing.T) {
 	}
 }
 
-// lslocksHook — lslocks и /proc/PID/cmdline на «хосте» fakesrv: держатели —
-// записи, которые fakesrv держит под замком (LockHoldFor); foreign —
-// вдобавок всегда есть чужой держатель 9999 (sleep).
+// locksOut — ответ «хоста» на lslocksCmdlineCmd: держатели /run/lock
+// (pid, командная строка; "" — процесс вышел до чтения /proc) одной
+// командой, как у настоящего sh.
+func locksOut(hs ...[2]string) string {
+	out := "rc=0\nCOMMAND PID TYPE PATH\n"
+	for _, h := range hs {
+		out += "flock " + h[0] + " FLOCK /run/lock/\n"
+	}
+	out += "CMDLINES\n"
+	for _, h := range hs {
+		// как tr '\0\n' '  ': аргументы и переводы строк — пробелы
+		out += "CMDLINE " + h[0] + " " + strings.ReplaceAll(h[1], "\n", " ") + "\n"
+	}
+	return out
+}
+
+// lslocksHook — lslocks на «хосте» fakesrv: держатели — записи, которые
+// fakesrv держит под замком (LockHoldFor), их командные строки — в том же
+// ответе; foreign — вдобавок всегда есть чужой держатель 9999 (sleep).
+// Отдельное чтение /proc/PID/cmdline (второй командой) всегда неудачно:
+// живой прогон 02.10 — процесс успевал выйти между двумя командами.
 func lslocksHook(f *fakeServer, foreign bool) {
 	orig := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {
-		held := f.exec.Held()
-		if cmd == lslocksCmd {
-			out := "rc=0\nCOMMAND PID TYPE PATH\n"
+		if cmd == lslocksCmdlineCmd {
+			var hs [][2]string
 			if foreign {
-				out += "sleep 9999 FLOCK /run/lock/\n"
+				hs = append(hs, [2]string{"9999", "sleep 1000"})
 			}
-			for pid := range held {
-				out += "flock " + pid + " FLOCK /run/lock/\n"
+			for pid, c := range f.exec.Held() {
+				hs = append(hs, [2]string{pid, c})
 			}
-			return out, nil
-		}
-		for pid, c := range held {
-			if cmd == procCmdlineCmd(pid) {
-				return c, nil
-			}
-		}
-		if foreign && cmd == procCmdlineCmd("9999") {
-			return "sleep 1000 ", nil
+			return locksOut(hs...), nil
 		}
 		if strings.Contains(cmd, "/proc/") {
 			return "", errors.New("Process exited with status 1")
@@ -290,15 +299,12 @@ func TestK5ForeignAppearsLater(t *testing.T) {
 	calls := 0
 	inner := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {
-		if cmd == lslocksCmd {
+		if cmd == lslocksCmdlineCmd {
 			calls++
 			if calls == 1 {
-				return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+				return locksOut(), nil
 			}
-			return "rc=0\nCOMMAND PID TYPE PATH\nsleep 9999 FLOCK /run/lock/\n", nil
-		}
-		if cmd == procCmdlineCmd("9999") {
-			return "sleep 1000 ", nil
+			return locksOut([2]string{"9999", "sleep 1000"}), nil
 		}
 		return inner(cmd)
 	}
@@ -335,20 +341,41 @@ func TestK5LabelWrongSum(t *testing.T) {
 	calls := 0
 	inner := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {
-		if cmd == lslocksCmd {
+		if cmd == lslocksCmdlineCmd {
 			calls++
 			if calls == 1 {
-				return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+				return locksOut(), nil
 			}
-			return "rc=0\nCOMMAND PID TYPE PATH\nflock 7777 FLOCK /run/lock/\n", nil
-		}
-		if cmd == procCmdlineCmd("7777") {
-			return "flock -w 15 -E 4 /run/lock/ docker exec -i amnezia-awg timeout 50 sh -c x amnezia-admin-apply /opt/amnezia/awg " + strings.Repeat("ab", 32) + " absent wg0.conf ", nil
+			return locksOut([2]string{"7777", "flock -w 15 -E 4 /run/lock/ docker exec -i amnezia-awg timeout 50 sh -c x amnezia-admin-apply /opt/amnezia/awg " + strings.Repeat("ab", 32) + " absent wg0.conf"}), nil
 		}
 		return inner(cmd)
 	}
 	r := f.env.breakWrite()
 	if r.Status != NotChecked || !strings.Contains(r.Detail, "держатель замка не опознан") || strings.Contains(r.Detail, "чужой") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5HolderGoneRetries — держатель вышел раньше, чем прочиталась его
+// командная строка (в одной команде строка CMDLINE пуста): это «не
+// опознан», попытка повторяется, а не ПРОЙДЕН и не остановка К5.
+func TestK5HolderGoneRetries(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldFor = 300 * time.Millisecond })
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmdlineCmd {
+			var hs [][2]string
+			for pid := range f.exec.Held() {
+				hs = append(hs, [2]string{pid, ""}) // /proc уже пуст
+			}
+			return locksOut(hs...), nil
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "попыток 5 из 5") || !strings.Contains(r.Detail, "не прочитана (процесс вышел)") {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }
