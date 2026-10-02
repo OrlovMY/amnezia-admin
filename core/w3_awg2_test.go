@@ -53,6 +53,21 @@ func TestAWG2DiscoveryByFormat(t *testing.T) {
 	}
 }
 
+// TestAWG2DiscoveryMissingFile — awg0.conf нет — «не прочитан, версия
+// неизвестна», только просмотр; не «версия не определена» (файл есть, но
+// без признаков — управляется) и не управление.
+func TestAWG2DiscoveryMissingFile(t *testing.T) {
+	srv := awg2With(t, "Jc = 4\n")
+	srv.DeleteFile("/opt/amnezia/awg/awg0.conf")
+	cs, err := core.NewSessionWithRunner(srv, raceCreds()).FindContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || cs[0].Managed || cs[0].Proto != "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)" {
+		t.Errorf("%+v, ждали только просмотр с причиной «не прочитан»", cs)
+	}
+}
+
 // TestAWG2ClientConfigFromServer — доезд: выданный на AWG3 конфиг собран по
 // template.conf из серверного файла: параметры маскировки, I1/I2 из
 // комментариев, без серверных ключей; PersistentKeepalive = 25.
