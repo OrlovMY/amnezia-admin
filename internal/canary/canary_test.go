@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -78,19 +79,30 @@ func noopSudoKey() ([]string, func() error, error) {
 // [Interface], clientsTable нет), Env настроен как у владельца.
 func emptyFake(t *testing.T, withClients bool) *fakeServer {
 	t.Helper()
+	return emptyFakeOn(t, fakesrv.New(), &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}, withClients)
+}
+
+// emptyFakeOn — то же для любого контейнера семейства WG (PR-W3: К8 на
+// amnezia-awg2, fs — fakesrv.NewAWG2 или его вариант).
+func emptyFakeOn(t *testing.T, fs *fakesrv.Server, ctr *core.Container, withClients bool) *fakeServer {
+	t.Helper()
 	const user, pw = "root", "canary-test-pw"
 	hk, err := fakesrv.NewHostKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs := fakesrv.New()
+	fam, ferr := core.WGFamilyOf(ctr)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
 	if !withClients {
-		wg, _ := fs.File("/opt/amnezia/awg/wg0.conf")
+		p := fam.Dir + "/" + fam.File
+		wg, _ := fs.File(p)
 		iface := string(wg)[:strings.Index(string(wg), "[Peer]")]
-		fs.SetFile("/opt/amnezia/awg/wg0.conf", []byte(iface))
-		fs.DeleteFile("/opt/amnezia/awg/clientsTable")
+		fs.SetFile(p, []byte(iface))
+		fs.DeleteFile(fam.Dir + "/clientsTable")
 		// работающий сервер — тоже без peer'ов (П0 смотрит и его)
-		if _, err := fs.Run("docker exec amnezia-awg bash -c 'wg syncconf wg0 <(wg-quick strip /opt/amnezia/awg/wg0.conf)'", nil); err != nil {
+		if _, err := fs.Run(fmt.Sprintf("docker exec %s bash -c '%s syncconf %s <(%s-quick strip %s)'", ctr.Name, fam.Tool, fam.Iface, fam.Tool, p), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,8 +125,6 @@ func emptyFake(t *testing.T, withClients bool) *fakeServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(sess.Close)
-	ctr := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
-	fam, _ := core.WGFamilyOf(ctr)
 	// К4: канарейка играет старую версию прежней командой записи — fakesrv
 	// принимает её только по явному разрешению.
 	fs.AllowLegacyWrite = true

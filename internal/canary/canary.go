@@ -218,6 +218,14 @@ func Run(e *Env) ([]Result, error) {
 		r.ID, r.Name = w.id, w.name
 		add(r)
 	}
+	// PR-W3: К8 — amnezia-awg2 (AWG2/AWG3); на другом контейнере — одна
+	// строка «НЕ ПРИМЕНИМО».
+	for _, r := range e.k8Rows(gateOK) {
+		add(r)
+	}
+	if e.awgVariant != "" {
+		fmt.Fprintln(e.Out, "Вариант AWG: "+e.awgVariant)
+	}
 	// Раунд 4 (AU-LOGIC L2): неубранные canary-* — не строка в журнале, а
 	// шаг итога.
 	u := Result{ID: "У", Name: "уборка canary-*"}

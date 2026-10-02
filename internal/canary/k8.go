@@ -115,7 +115,7 @@ func dumpPeers(out string) (keys map[string]int) {
 }
 
 func (e *Env) dump() (map[string]int, string, error) {
-	out, err := e.dexec(e.fam.Tool + " show " + e.fam.Iface + " dump")
+	out, err := e.Remote(e.docker + " exec " + e.Ctr.Name + " " + e.fam.Tool + " show " + e.fam.Iface + " dump")
 	if err != nil {
 		return nil, out, err
 	}
@@ -132,7 +132,7 @@ func (e *Env) k8() []Result {
 
 	// К8.1 — формат. Незнакомый ключ или файл не прочитан — СТОП К8.
 	f := e.Sess.AWGFormatOf(e.Ctr)
-	text, terr := e.dexec("cat " + e.conf())
+	text, terr := e.catFile(e.conf())
 	keys := "ключи не прочитаны"
 	if terr == nil {
 		keys = strings.Join(ifaceKeys(text), ", ")
@@ -163,7 +163,7 @@ func (e *Env) k8() []Result {
 	}
 	id := m["canary-k8"].ClientID
 	peers, _, derr := e.dump()
-	after, aerr := e.dexec("cat " + e.conf())
+	after, aerr := e.catFile(e.conf())
 	switch {
 	case id == "":
 		set(1, Fail, "canary-k8 нет в списке после add")
@@ -174,11 +174,11 @@ func (e *Env) k8() []Result {
 	case peers[id] == 0:
 		set(1, Fail, "ключа canary-k8 нет в awg show "+e.fam.Iface+" dump")
 		return rs
-	case ifaceBlock(after) != before:
+	case strings.TrimRight(ifaceBlock(after), " \r\n") != strings.TrimRight(before, " \r\n"):
 		set(1, Fail, "[Interface] awg0.conf после add изменился — параметры маскировки не должны меняться")
 		return rs
 	}
-	set(1, Pass, "ключ в awg show dump; [Interface] awg0.conf байт в байт прежний")
+	set(1, Pass, "ключ в awg show dump; [Interface] awg0.conf байт в байт прежний (без учёта пустых строк перед [Peer])")
 
 	// К8.3 — телефон.
 	set(2, answerStatus(e.Ask("К8.3: импортируйте на телефон в приложение AmneziaWG/Amnezia файл "+a.conf+" и подключитесь. Есть ли связь (открывается сайт)?")), "ответ человека")
@@ -255,7 +255,7 @@ func (e *Env) k8() []Result {
 	}
 
 	// К8.7 — второе устройство.
-	set(6, answerStatus(e.Ask("К8.7: второе устройство, подключённое к этому серверу по AWG2 до начала К8.2, всё это время не теряло связь (сайт открывается без переподключения)?")), "ответ человека")
+	set(6, answerStatus(e.Ask("К8.7: второе устройство, подключённое по AmneziaWG 2 пользователем из вопроса К6 (до начала К8.2), всё это время не теряло связь (сайт открывается без переподключения)?")), "ответ человека")
 
 	// К8.8 — формат dump против parsePeerStats.
 	st8, d8 := e.k8Stats()
