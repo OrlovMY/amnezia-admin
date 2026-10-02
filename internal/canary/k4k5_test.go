@@ -364,31 +364,62 @@ func TestK5BusyBeforeAttempt(t *testing.T) {
 
 // TestK5FreedRightAfterCut — доезд: нашу запись застали под замком, обрыв
 // клиента на «хосте» прерывает её и отпускает замок (fakesrv
-// LockReleaseOnDisconnect — настоящий освобождённый замок, не сокрытие в
-// ответе lslocks) — ПРОЙДЕН «замок освободился сразу после обрыва;
-// ожидание не потребовалось».
+// LockReleaseOnDisconnect — настоящий освобождённый замок). Оба порядка —
+// первый опрос после обрыва застал оборванную до освобождения или уже не
+// застал — дают один и тот же ПРОЙДЕН без утверждения об ожидании. Порядок
+// задаётся тестом, а не скоростью машины (CI linux 02.10): «до» — ответ
+// lslocks после попадания отдаётся СНИМКОМ, взятым в момент попадания;
+// «после» — ответ ждёт, пока fakesrv отпустит замок.
 func TestK5FreedRightAfterCut(t *testing.T) {
-	f := emptyFake(t, false)
-	f.env.NewBin = newCLI(t)
-	f.exec.Configure(func(s *fakesrv.Server) {
-		s.CommandDelay = 100 * time.Millisecond
-		s.LockHoldFor = 1500 * time.Millisecond
-		s.LockReleaseOnDisconnect = true
-	})
-	inner := f.env.Remote
-	f.env.Remote = func(cmd string) (string, error) {
-		if cmd == lslocksCmdlineCmd {
-			var hs [][2]string
-			for pid, c := range f.exec.Held() {
-				hs = append(hs, [2]string{pid, c})
+	for _, order := range []string{"застал оборванную", "не застал"} {
+		t.Run(order, func(t *testing.T) {
+			f := emptyFake(t, false)
+			f.env.NewBin = newCLI(t)
+			f.exec.Configure(func(s *fakesrv.Server) {
+				s.CommandDelay = 100 * time.Millisecond
+				s.LockHoldFor = 1500 * time.Millisecond
+				s.LockReleaseOnDisconnect = true
+			})
+			var mu sync.Mutex
+			var snap [][2]string // держатели в момент попадания
+			replays := 0
+			inner := f.env.Remote
+			f.env.Remote = func(cmd string) (string, error) {
+				if cmd != lslocksCmdlineCmd {
+					return inner(cmd)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if snap == nil {
+					for pid, c := range f.exec.Held() {
+						snap = append(snap, [2]string{pid, c})
+					}
+					if snap == nil {
+						return locksOut(), nil // до попадания: свободно
+					}
+					return locksOut(snap...), nil // попадание
+				}
+				if order == "застал оборванную" && replays == 0 {
+					replays++
+					return locksOut(snap...), nil // первый опрос после обрыва: ещё держит
+				}
+				// дальше — только настоящий освобождённый замок
+				deadline := time.Now().Add(10 * time.Second)
+				for len(f.exec.Held()) > 0 && time.Now().Before(deadline) {
+					time.Sleep(10 * time.Millisecond)
+				}
+				return locksOut(), nil
 			}
-			return locksOut(hs...), nil
-		}
-		return inner(cmd)
-	}
-	r := f.env.breakWrite()
-	if r.Status != Pass || !strings.Contains(r.Detail, "замок после обрыва: держателей нет") {
-		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+			r := f.env.breakWrite()
+			want := "замок после обрыва: держателей нет"
+			if order == "застал оборванную" {
+				want = "затем освободила"
+			}
+			if r.Status != Pass || !strings.Contains(r.Detail, want) {
+				t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+			}
+			noWaitClaim(t, r.Detail)
+		})
 	}
 }
 
