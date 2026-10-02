@@ -7,6 +7,7 @@ package canary
 // не ПРОЙДЕН. Разбор ответов сервера — таблицами на подставных ответах.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/base64"
@@ -113,7 +114,24 @@ func emptyFake(t *testing.T, withClients bool) *fakeServer {
 	}
 	t.Cleanup(sess.Close)
 	ctr := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	fam, _ := core.WGFamilyOf(ctr)
+	// К4: канарейка играет старую версию прежней командой записи — fakesrv
+	// принимает её только по явному разрешению.
+	fs.AllowLegacyWrite = true
 	return &fakeServer{exec: fs, hk: hk, env: &Env{
+		fam: fam, docker: "docker",
+		RemoteIn: func(cmd string, stdin []byte) (string, error) {
+			s, err := sess.Client.NewSession()
+			if err != nil {
+				return "", err
+			}
+			defer s.Close()
+			if stdin != nil {
+				s.Stdin = bytes.NewReader(stdin)
+			}
+			out, err := s.CombinedOutput(cmd)
+			return string(out), err
+		},
 		Remote: func(cmd string) (string, error) {
 			s, err := sess.Client.NewSession()
 			if err != nil {
@@ -220,14 +238,16 @@ func TestK3OnFakesrv(t *testing.T) {
 	}
 }
 
-// TestRaceNeedsControl — К4: новая версия без потерь, но контроль на
-// v0.2.0 не выполнен → НЕ ПРОВЕРЕНО, а не ПРОЙДЕН.
+// TestRaceNeedsControl — К4: новая версия без потерь, но контроль (прежняя
+// запись без замка) не выполнен — команды со stdin нет → НЕ ПРОВЕРЕНО, а не
+// ПРОЙДЕН.
 func TestRaceNeedsControl(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 2
+	f.env.RemoteIn = nil
 	r := f.env.race()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "(потеряно из них 0)") || !strings.Contains(r.Detail, "v0.2.0 не выполнен") {
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "(потеряно из них 0)") || !strings.Contains(r.Detail, "контроль (прежняя запись без замка)") {
 		t.Fatalf("К4 без контроля: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -487,15 +507,16 @@ func TestRaceNewMustWriteAll(t *testing.T) {
 	}
 }
 
-// TestRaceControlWithoutLossNotChecked — QA п. 10: контроль «v0.2.0» (здесь
-// та же новая версия) потери не показал — К4 НЕ ПРОВЕРЕНО.
+// TestRaceControlWithoutLossNotChecked — QA п. 10: контроль (прежняя
+// запись без замка) потери не показал — К4 НЕ ПРОВЕРЕНО: «гонку не удалось
+// вызвать». Сам контроль — шов: детерминированно «без потерь».
 func TestRaceControlWithoutLossNotChecked(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = serialFake(t, newCLI(t))
-	f.env.OldBin = f.env.NewBin
 	f.env.RaceRounds = 2
+	f.env.oldRace = func() (int, int, error) { return 0, 4, nil }
 	r := f.env.race()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "потери НЕ показал") {
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "гонку не удалось вызвать") {
 		t.Fatalf("К4 с контролем без потери: %s — %s", r.Status, r.Detail)
 	}
 }

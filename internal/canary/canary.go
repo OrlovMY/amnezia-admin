@@ -42,6 +42,10 @@ const (
 	NotChecked Status = iota // по умолчанию: пока не доказано — не проверено
 	Pass
 	Fail
+	// NotApplicable — шаг для этого контейнера не имеет смысла (К7 на
+	// amnezia-awg2: v0.2.0 его не знает). Причина — в Detail. Не «пройдено»
+	// и не «не проверено»: итог по нему не меняется.
+	NotApplicable
 )
 
 func (s Status) String() string {
@@ -50,6 +54,8 @@ func (s Status) String() string {
 		return "ПРОЙДЕН"
 	case Fail:
 		return "НЕ ПРОЙДЕН"
+	case NotApplicable:
+		return "НЕ ПРИМЕНИМО"
 	}
 	return "НЕ ПРОВЕРЕНО"
 }
@@ -106,7 +112,19 @@ type Env struct {
 
 	docker    string // "docker" или "sudo -n docker"
 	dockerErr error  // docker ps не выполнился — К2.8 НЕ ПРОВЕРЕНО
+
+	// RemoteIn — команда на хосте со stdin (К4: прежняя запись без замка
+	// в роли старой версии). nil — К4 контроль НЕ ПРОВЕРЕНО.
+	RemoteIn func(cmd string, stdin []byte) (string, error)
+
+	fam core.WGFamily // файл, утилита, интерфейс контейнера Ctr (PR-W1)
+
+	// oldRace — шов теста для контроля К4 (nil — oldWriterRace).
+	oldRace func() (lost, total int, err error)
 }
+
+// conf — путь к файлу конфигурации сервера контейнера.
+func (e *Env) conf() string { return e.Ctr.Dir + "/" + e.fam.File }
 
 // RequiredConfirmation — дословный текст подтверждения, без которого
 // канарейка не работает (cmd/canary-a3b, флаг -not-production).
@@ -126,6 +144,12 @@ func Run(e *Env) ([]Result, error) {
 	if e.RaceRounds == 0 {
 		e.RaceRounds = 20
 	}
+	fam, ferr := core.WGFamilyOf(e.Ctr)
+	if ferr != nil {
+		add(Result{"П3", "контейнер семейства WG", NotChecked, ferr.Error()})
+		return rs, fmt.Errorf("%w: %v", ErrStop, ferr)
+	}
+	e.fam = fam
 	e.docker = "docker"
 	if out, err := e.Remote("docker ps -q 2>&1"); err != nil && strings.Contains(strings.ToLower(out+err.Error()), "permission denied") {
 		e.docker = "sudo -n docker"
@@ -178,7 +202,7 @@ func Run(e *Env) ([]Result, error) {
 		{"PR4.4", "права 0600 после записи", e.perms},
 		{"PR4.1", "откат через подмену wg-quick", e.rollback},
 		{"PR4.2", "sudo в обоих порядках", e.sudoOrders},
-		{"К4", "гонка: новая версия без потерь, v0.2.0 с потерей", e.race},
+		{"К4", "гонка: новая версия без потерь, прежняя запись без замка — с потерей", e.race},
 		{"К5", "обрыв: замок не зависает, файлы целиком", e.breakWrite},
 		{"К6", "приложение Amnezia: «изменён другим»", e.amneziaApp},
 		{"К7", "v0.2.0 после всего работает", func() Result { return e.oldWorks(lockBefore) }},
@@ -383,18 +407,23 @@ func orQ(s string) string {
 
 // Summary — итоговая строка: ПРОЙДЕН только без НЕ ПРОЙДЕН и НЕ ПРОВЕРЕНО.
 func Summary(rs []Result, runErr error) (Status, string) {
-	var pass, fail, nc int
+	var pass, fail, nc, na int
 	for _, r := range rs {
 		switch r.Status {
 		case Pass:
 			pass++
 		case Fail:
 			fail++
+		case NotApplicable:
+			na++
 		default:
 			nc++
 		}
 	}
 	counts := fmt.Sprintf("пройдено %d, не пройдено %d, не проверено %d", pass, fail, nc)
+	if na > 0 {
+		counts += fmt.Sprintf(", не применимо %d", na)
+	}
 	switch {
 	case runErr != nil:
 		return Fail, "ИТОГ: НЕ ПРОЙДЕН — " + runErr.Error() + " (" + counts + ")"
@@ -553,9 +582,9 @@ func (e *Env) serverEmpty() Result {
 		r.Detail = "clientsTable не прочитана: " + err.Error() + " — СТОП"
 		return r
 	}
-	wg, err := e.Remote(e.docker + " exec " + e.Ctr.Name + " cat " + e.Ctr.Dir + "/wg0.conf")
+	wg, err := e.Remote(e.docker + " exec " + e.Ctr.Name + " cat " + e.conf())
 	if err != nil {
-		r.Detail = "wg0.conf не прочитан: " + err.Error() + " — СТОП"
+		r.Detail = e.fam.File + " не прочитан: " + err.Error() + " — СТОП"
 		return r
 	}
 	peersInConf := strings.Count(wg, "[Peer]")
@@ -566,10 +595,10 @@ func (e *Env) serverEmpty() Result {
 	}
 	if len(clients) != 0 || peersInConf != 0 || len(rt) != 0 {
 		r.Status = Fail
-		r.Detail = fmt.Sprintf("клиентов в таблице %d, [Peer] в wg0.conf %d, peer'ов в работающем сервере %d — СТОП: канарейка запускается только на пустом тестовом сервере", len(clients), peersInConf, len(rt))
+		r.Detail = fmt.Sprintf("клиентов в таблице %d, [Peer] в %s %d, peer'ов в работающем сервере %d — СТОП: канарейка запускается только на пустом тестовом сервере", len(clients), e.fam.File, peersInConf, len(rt))
 		return r
 	}
-	r.Status, r.Detail = Pass, "таблица, wg0.conf и работающий сервер — без клиентов"
+	r.Status, r.Detail = Pass, "таблица, "+e.fam.File+" и работающий сервер — без клиентов"
 	return r
 }
 
@@ -583,7 +612,7 @@ func (e *Env) traces() Result {
 		r.Detail = "хост не проверен: " + fmt.Sprint(err)
 		return r
 	}
-	ctr, err := e.dexec(`for t in wg wg-quick; do p=$(command -v $t) && test -e "$p.canary-orig" && echo "ORIG $p"; done; echo DONE`)
+	ctr, err := e.dexec(`for t in ` + e.fam.Tool + ` ` + e.fam.Tool + `-quick; do p=$(command -v $t) && test -e "$p.canary-orig" && echo "ORIG $p"; done; echo DONE`)
 	if err != nil || !strings.Contains(ctr, "DONE") {
 		r.Detail = "контейнер не проверен: " + fmt.Sprint(err)
 		return r
@@ -722,6 +751,11 @@ type cliRun struct {
 func (e *Env) cli(bin string, env []string, args ...string) cliRun {
 	full := append([]string{}, args...)
 	full = append(full, "-hostkey", e.HostKey)
+	// PR-W1: новая версия получает контейнер явно; v0.2.0 флага -container
+	// не знает и выбирает первый управляемый сам (К7 это проверяет).
+	if bin == e.NewBin && e.Ctr != nil {
+		full = append(full, "-container", e.Ctr.Name)
+	}
 	cmd := exec.Command(bin, full...)
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = strings.NewReader("")
@@ -850,7 +884,7 @@ func (e *Env) perms() Result {
 	if r := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-perm"); r.code != 0 {
 		return Result{Status: Fail, Detail: "добавить: код " + strconv.Itoa(r.code) + ": " + r.title}
 	}
-	out, err := e.dexec(`ls -l ` + e.Ctr.Dir + `/wg0.conf ` + e.Ctr.Dir + `/clientsTable`)
+	out, err := e.dexec(`ls -l ` + e.conf() + ` ` + e.Ctr.Dir + `/clientsTable`)
 	if err != nil {
 		return Result{Detail: "ls не выполнился: " + err.Error()}
 	}
@@ -867,7 +901,7 @@ func (e *Env) perms() Result {
 }
 
 func (e *Env) fileSums() (string, error) {
-	out, err := e.dexec(`sha256sum ` + e.Ctr.Dir + `/wg0.conf ` + e.Ctr.Dir + `/clientsTable`)
+	out, err := e.dexec(`sha256sum ` + e.conf() + ` ` + e.Ctr.Dir + `/clientsTable`)
 	return strings.TrimSpace(out), err
 }
 
@@ -906,10 +940,10 @@ func (e *Env) rollback() (res Result) {
 	if len(peersBefore) != 1 {
 		return Result{Status: Fail, Detail: fmt.Sprintf("после «готово» для canary-rb0 peer'ов в работающем сервере %d, ожидался 1", len(peersBefore))}
 	}
-	p, err := e.dexec(`command -v wg`)
+	p, err := e.dexec(`command -v ` + e.fam.Tool)
 	p = strings.TrimSpace(p)
 	if err != nil || p == "" || strings.ContainsAny(p, " '\"$`\\") {
-		return Result{Detail: "wg в контейнере не найден: " + fmt.Sprint(err)}
+		return Result{Detail: e.fam.Tool + " в контейнере не найден: " + fmt.Sprint(err)}
 	}
 	before, err := e.fileSums()
 	if err != nil {
@@ -1025,20 +1059,22 @@ func (e *Env) race() Result {
 	if r, ok := judgeNew(st, 2*e.RaceRounds); !ok {
 		return r
 	}
-	if e.OldBin == "" {
-		return Result{Detail: "новая версия: " + st.summary() + "; контроль на v0.2.0 не выполнен — программа v0.2.0 не задана"}
+	// Контроль (PR-W1, Р3-4): роль старой версии играет сама канарейка —
+	// прежней командой записи без замка (`cat > tmp && mv`, как v0.2.0).
+	// v0.2.0 amnezia-awg2 не знает, а гонку надо воспроизвести на каждом
+	// контейнере.
+	oldRace := e.oldRace
+	if oldRace == nil {
+		oldRace = e.oldWriterRace
 	}
-	old, err := e.raceWith(e.OldBin, "canary-o")
-	if cerr := e.cleanup(); cerr != nil && err == nil {
-		err = fmt.Errorf("canary-* не убраны: %w", cerr)
-	}
+	lost, total, err := oldRace()
 	if err != nil {
-		return Result{Detail: "контроль v0.2.0: " + err.Error()}
+		return Result{Detail: "новая версия: " + st.summary() + "; контроль (прежняя запись без замка): " + err.Error()}
 	}
-	if old.lost == 0 {
-		return Result{Detail: fmt.Sprintf("новая версия без потерь, но контроль на v0.2.0 потери НЕ показал (%d «готово») — стенд не воспроизводит гонку, проверка недействительна", len(old.done))}
+	if lost == 0 {
+		return Result{Detail: fmt.Sprintf("новая версия: %s; контроль прежней записью без замка потери НЕ показал (%d записей) — гонку не удалось вызвать, проверка недействительна", st.summary(), total)}
 	}
-	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %s; v0.2.0: потеряно %d из %d — стенд гонку воспроизводит", st.summary(), old.lost, len(old.done))}
+	return Result{Status: Pass, Detail: fmt.Sprintf("новая версия: %s; прежняя запись без замка: потеряно %d из %d — стенд гонку воспроизводит", st.summary(), lost, total)}
 }
 
 // raceStats — исходы гонки: попытки, «готово», пропавшие из них, остальные
@@ -1218,9 +1254,9 @@ func (e *Env) consistent() (bool, string) {
 	if err != nil {
 		return false, "список не прочитан: " + err.Error()
 	}
-	wg, err := e.dexec(`cat ` + e.Ctr.Dir + `/wg0.conf`)
+	wg, err := e.dexec(`cat ` + e.conf())
 	if err != nil {
-		return false, "wg0.conf не прочитан: " + err.Error()
+		return false, e.fam.File + " не прочитан: " + err.Error()
 	}
 	peers := map[string]bool{}
 	for _, l := range strings.Split(wg, "\n") {
@@ -1235,11 +1271,11 @@ func (e *Env) consistent() (bool, string) {
 		}
 		active++
 		if !peers[c.ClientID] {
-			return false, "клиент " + c.Name() + " в таблице, но не в wg0.conf"
+			return false, "клиент " + c.Name() + " в таблице, но не в " + e.fam.File
 		}
 	}
 	if active != len(peers) {
-		return false, fmt.Sprintf("в wg0.conf peer'ов %d, активных в таблице %d", len(peers), active)
+		return false, fmt.Sprintf("в %s peer'ов %d, активных в таблице %d", e.fam.File, len(peers), active)
 	}
 	return true, "согласованы"
 }
@@ -1274,6 +1310,9 @@ func (e *Env) amneziaApp() Result {
 
 // oldWorks — К7: v0.2.0 работает после всего; каталог замка не изменился.
 func (e *Env) oldWorks(lockBefore string) Result {
+	if e.fam.File != "wg0.conf" {
+		return Result{Status: NotApplicable, Detail: "v0.2.0 не знает " + e.Ctr.Name + " (" + e.fam.File + ") — работать на нём и не должна"}
+	}
 	if e.OldBin == "" {
 		return Result{Detail: "программа v0.2.0 не задана"}
 	}
@@ -1282,6 +1321,13 @@ func (e *Env) oldWorks(lockBefore string) Result {
 	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "add", "-name", "canary-k7"); r.code != 0 {
 		return Result{Status: Fail, Detail: "v0.2.0 add: код " + strconv.Itoa(r.code) + ": " + r.title}
+	}
+	// v0.2.0 выбирает контейнер сам (первый управляемый): запись обязана
+	// оказаться в ЭТОМ контейнере, иначе К7 проверил другой протокол.
+	if m, err := e.names(); err != nil {
+		return Result{Detail: "v0.2.0 add прошёл; список " + e.Ctr.Name + " не прочитан: " + err.Error()}
+	} else if _, ok := m["canary-k7"]; !ok {
+		return Result{Detail: "v0.2.0 add прошёл, но не в " + e.Ctr.Name + " — v0.2.0 выбрала другой контейнер; К7 для этого контейнера не проверен"}
 	}
 	if r := e.cli(e.OldBin, e.KeyEnv, "del", "-name", "canary-k7", "-yes"); r.code != 0 {
 		return Result{Status: Fail, Detail: "v0.2.0 del: код " + strconv.Itoa(r.code) + ": " + r.title}

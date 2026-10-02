@@ -93,6 +93,9 @@ type Server struct {
 	// (сумма по всем командам записи); читать после работы Session.
 	TempLeft int
 
+	// AllowLegacyWrite — принимать прежнюю запись v0.2.0 (см. reLegacyWrite).
+	AllowLegacyWrite bool
+
 	// LockBusy — замок на хосте занят: команда записи возвращает код 4
 	// (flock -E 4), ничего не записав.
 	LockBusy bool
@@ -278,7 +281,12 @@ var (
 	// awg0, awg0.conf) — смешение (awg + wg0.conf и т.п.) — неизвестная
 	// команда.
 	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c '(wg|awg) syncconf (wg0|awg0) <\((wg|awg)-quick strip (\S+)/(wg0\.conf|awg0\.conf)\)'$`)
-	reWgShow   = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
+	// reLegacyWrite — прежняя запись v0.2.0 (`cat > P.tmp && mv P.tmp P`),
+	// без замка и без сверки. Продукт её больше не шлёт (T7); принимается
+	// ТОЛЬКО при AllowLegacyWrite — для канарейки, которая играет роль
+	// старой версии в К4 (PR-W1).
+	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
+	reWgShow      = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -342,6 +350,17 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: cat: %s: No such file or directory", cmd, path)
 		}
 		return string(data), nil
+
+	case s.AllowLegacyWrite && reLegacyWrite.MatchString(cmd):
+		m := reLegacyWrite.FindStringSubmatch(cmd)
+		if m[2] != m[3] || m[2] != m[4] {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		if s.files == nil {
+			s.files = map[string][]byte{}
+		}
+		s.files[m[2]] = append([]byte(nil), stdin...)
+		return "", nil
 
 	case reCASWrite.MatchString(cmd):
 		return s.casWrite(cmd, reCASWrite.FindStringSubmatch(cmd), stdin)

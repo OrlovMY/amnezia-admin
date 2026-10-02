@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 
 	"amnezia-admin/core"
@@ -38,6 +39,7 @@ func run() int {
 	oldBin := flag.String("old", "", "путь к v0.2.0 (консольная) — для контроля гонки и К7")
 	hostkey := flag.String("hostkey", "", "отпечаток ключа сервера SHA256:… (иначе программа спросит)")
 	rounds := flag.Int("rounds", 20, "добавлений на писателя в К4")
+	only := flag.String("container", "", "проверить только этот контейнер семейства WG (amnezia-awg, amnezia-awg2, amnezia-wireguard); по умолчанию — все найденные")
 	printFP := flag.Bool("print-fingerprint", false, "напечатать ревизию сборки и три суммы команды записи и выйти (сервер не нужен)")
 	flag.Parse()
 
@@ -108,82 +110,111 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ: контейнеры:", err)
 		return 2
 	}
-	var ctr *core.Container
-	for i := range cs {
-		if cs[i].Name == "amnezia-awg" {
-			ctr = &cs[i]
+	sel, why := canary.SelectWG(cs, *only)
+	if len(sel) == 0 {
+		fmt.Println(why)
+		fmt.Println("ИТОГ: НЕ ПРОВЕРЕНО — выпуск по этой канарейке НЕЛЬЗЯ")
+		return 1
+	}
+	remote := func(cmd string) (string, error) {
+		s, err := sess.Client.NewSession()
+		if err != nil {
+			return "", err
 		}
+		defer s.Close()
+		out, err := s.CombinedOutput(cmd)
+		return string(out), err
 	}
-	if ctr == nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: контейнера amnezia-awg нет — установите протокол AmneziaWG в приложении Amnezia")
-		fmt.Fprintln(os.Stderr, canary.ContainersFound(cs))
-		return 2
-	}
-	env := &canary.Env{
-		Remote: func(cmd string) (string, error) {
-			s, err := sess.Client.NewSession()
-			if err != nil {
-				return "", err
-			}
-			defer s.Close()
-			out, err := s.CombinedOutput(cmd)
-			return string(out), err
-		},
-		Sess: sess, Ctr: ctr,
-		NewBin: *newBin, OldBin: *oldBin,
-		KeyEnv:     []string{"AMNEZIA_KEY=" + key},
-		HostKey:    sess.HostKeyFingerprint,
-		Ask:        ask,
-		Out:        os.Stdout,
-		RaceRounds: *rounds,
-	}
-	if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
-		env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
-	} else if creds.User == "root" {
-		// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере; пароль
-		// случайный, уходит только через stdin chpasswd (SEC S2).
-		remoteIn := func(cmd string, stdin []byte) (string, error) {
-			s, err := sess.Client.NewSession()
-			if err != nil {
-				return "", err
-			}
-			defer s.Close()
-			if stdin != nil {
-				s.Stdin = bytes.NewReader(stdin)
-			}
-			out, err := s.CombinedOutput(cmd)
-			return string(out), err
+	remoteIn := func(cmd string, stdin []byte) (string, error) {
+		s, err := sess.Client.NewSession()
+		if err != nil {
+			return "", err
 		}
-		env.MakeSudoKey = canary.NewSudoKeyMaker(remoteIn, creds.Host, creds.Port, func() (string, error) {
-			buf := make([]byte, 16)
-			if _, err := rand.Read(buf); err != nil {
-				return "", err
-			}
-			return hex.EncodeToString(buf), nil
-		})
+		defer s.Close()
+		if stdin != nil {
+			s.Stdin = bytes.NewReader(stdin)
+		}
+		out, err := s.CombinedOutput(cmd)
+		return string(out), err
+	}
+	newEnv := func(ctr *core.Container) *canary.Env {
+		env := &canary.Env{
+			Remote:   remote,
+			RemoteIn: remoteIn,
+			Sess:     sess, Ctr: ctr,
+			NewBin: *newBin, OldBin: *oldBin,
+			KeyEnv:     []string{"AMNEZIA_KEY=" + key},
+			HostKey:    sess.HostKeyFingerprint,
+			Ask:        ask,
+			Out:        os.Stdout,
+			RaceRounds: *rounds,
+		}
+		if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
+			env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
+		} else if creds.User == "root" {
+			// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере;
+			// пароль случайный, уходит только через stdin chpasswd (SEC S2).
+			env.MakeSudoKey = canary.NewSudoKeyMaker(remoteIn, creds.Host, creds.Port, func() (string, error) {
+				buf := make([]byte, 16)
+				if _, err := rand.Read(buf); err != nil {
+					return "", err
+				}
+				return hex.EncodeToString(buf), nil
+			})
+		}
+		return env
 	}
 
-	// Уборка по Ctrl+C / kill (SEC S3, S4): вернуть wg-quick, удалить
-	// временного пользователя. Ошибка уборки — громко, с командой вручную.
+	// Уборка по Ctrl+C / kill (SEC S3, S4): вернуть подменённые утилиты,
+	// удалить временного пользователя — у текущего контейнера.
+	var curMu sync.Mutex
+	var cur *canary.Env
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
 		fmt.Println("\nПРЕРВАНО — убираю за собой на тестовом сервере…")
-		for _, err := range env.RunCleanups() {
-			fmt.Println(err)
+		curMu.Lock()
+		e := cur
+		curMu.Unlock()
+		if e != nil {
+			for _, err := range e.RunCleanups() {
+				fmt.Println(err)
+			}
 		}
 		fmt.Println("ИТОГ: НЕ ПРОЙДЕН — проверка прервана. Удалите тестовый сервер у провайдера.")
 		os.Exit(130)
 	}()
 
-	rs, runErr := canary.Run(env)
-	cleanErrs := env.RunCleanups()
-	for _, err := range cleanErrs {
-		fmt.Println(err)
+	// PR-W1: канарейка проходит по ВСЕМ контейнерам семейства WG (или по
+	// одному — флаг -container); итог — таблица «шаг × контейнер».
+	var all []canary.Result
+	var order []string
+	per := map[string][]canary.Result{}
+	var runErr error
+	cleanFailed := false
+	for i := range sel {
+		ctr := &sel[i]
+		fmt.Printf("\n===== контейнер %s (%s) =====\n", ctr.Name, ctr.Proto)
+		env := newEnv(ctr)
+		curMu.Lock()
+		cur = env
+		curMu.Unlock()
+		rs, err := canary.Run(env)
+		for _, cerr := range env.RunCleanups() {
+			fmt.Println(cerr)
+			cleanFailed = true
+		}
+		if err != nil && runErr == nil {
+			runErr = fmt.Errorf("%s: %w", ctr.Name, err)
+		}
+		order = append(order, ctr.Name)
+		per[ctr.Name] = rs
+		all = append(all, rs...)
 	}
-	st, line := canary.Summary(rs, runErr)
-	if len(cleanErrs) > 0 {
+	fmt.Println("\n" + canary.Table(order, per))
+	st, line := canary.Summary(all, runErr)
+	if cleanFailed {
 		st, line = canary.Fail, "ИТОГ: НЕ ПРОЙДЕН — уборка на тестовом сервере не удалась (см. выше)"
 	}
 	fmt.Println(line)
