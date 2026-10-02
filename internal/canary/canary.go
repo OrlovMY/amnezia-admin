@@ -1536,10 +1536,30 @@ func procCmdlineCmd(pid string) string { return "tr '\\0' ' ' < /proc/" + pid + 
 // содержимого после нашего запуска — на тестовом сервере, где пишет одна
 // канарейка, это наша. Командная строка не прочитана (процесс уже вышел) —
 // не наша: попаданием не считается.
-func (e *Env) isOurWrite(pid, sha string) bool {
+//
+// Три исхода (AU-LOGIC Low-3): наш; «не опознан» — метка записи есть, но
+// сумма не та, или командную строку прочитать не удалось; «чужой» —
+// командная строка прочитана, метки записи amnezia-admin в ней нет.
+func (e *Env) classifyHolder(pid, sha string) (kind holderKind, why string) {
 	out, err := e.Remote(procCmdlineCmd(pid))
-	return err == nil && strings.Contains(out, core.CASLabelApply) && strings.Contains(out, sha)
+	switch {
+	case err != nil:
+		return holderUnknown, "командная строка PID " + pid + " не прочитана"
+	case !strings.Contains(out, core.CASLabelApply):
+		return holderForeign, ""
+	case !strings.Contains(out, sha):
+		return holderUnknown, "у PID " + pid + " метка записи есть, а сумма файла не та, что прочитана перед запуском"
+	}
+	return holderOurs, ""
 }
+
+type holderKind int
+
+const (
+	holderUnknown holderKind = iota
+	holderForeign
+	holderOurs
+)
 
 // k5Attempt — итог одной попытки обрыва.
 type k5Attempt struct {
@@ -1595,16 +1615,26 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 		}
 		var ours []string
 		var foreign []lockHolder
+		unknown := ""
 		for _, h := range hs {
-			if e.isOurWrite(h.pid, sha) {
+			switch k, why := e.classifyHolder(h.pid, sha); k {
+			case holderOurs:
 				ours = append(ours, h.pid)
-			} else {
+			case holderForeign:
 				foreign = append(foreign, h)
+			default:
+				if unknown == "" {
+					unknown = why
+				}
 			}
 		}
 		if len(ours) > 0 {
 			_ = cmd.Process.Kill()
 			return k5Attempt{hit: true, pids: ours}
+		}
+		if unknown != "" && len(ours) == 0 {
+			_ = cmd.Process.Kill()
+			return k5Attempt{stop: "держатель замка не опознан: " + unknown}
 		}
 		if len(foreign) > 0 {
 			_ = cmd.Process.Kill()

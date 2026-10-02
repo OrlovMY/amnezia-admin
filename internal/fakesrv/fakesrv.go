@@ -117,7 +117,10 @@ type Server struct {
 	// оборванным клиентом. Без флага она завершается — модель записи,
 	// пережившей клиента.
 	LockHoldAbort bool
-	lockAborted   atomic.Bool
+	// LockShared — замок LockHoldFor НЕ взаимоисключающий (модель стенда,
+	// где ожидание второй записи измерить нельзя: держатели перекрываются).
+	LockShared  bool
+	lockAborted atomic.Bool
 	// lockMu — сам замок /run/lock: записи под замком при LockHoldFor > 0
 	// взаимоисключающие, как у flock (вторая ЖДЁТ первую).
 	lockMu  sync.Mutex
@@ -326,8 +329,10 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 		time.Sleep(d)
 	}
 	if s.LockHoldFor > 0 && reCASWrite.MatchString(cmd) {
-		s.lockMu.Lock()
-		defer s.lockMu.Unlock()
+		if !s.LockShared {
+			s.lockMu.Lock()
+			defer s.lockMu.Unlock()
+		}
 		pid := s.addHeld(cmd)
 		defer s.delHeld(pid)
 		time.Sleep(s.LockHoldFor)

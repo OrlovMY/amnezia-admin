@@ -306,3 +306,48 @@ func TestK5ForeignAppearsLater(t *testing.T) {
 		t.Fatalf("К5 с чужим держателем после запуска: %s — %s", r.Status, r.Detail)
 	}
 }
+
+// TestK5WaitNotMeasured — доезд «код 0, ожидание не измерено» (AU-LOGIC
+// Medium-2): замок стенда не взаимоисключающий, держатели перекрываются —
+// вторая запись проходит, но «ждала» не утверждается.
+func TestK5WaitNotMeasured(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.CommandDelay = 150 * time.Millisecond
+	f.exec.LockHoldFor = 1500 * time.Millisecond
+	f.exec.LockHoldAbort = true
+	f.exec.LockShared = true
+	lslocksHook(f, false)
+	r := f.env.breakWrite()
+	if r.Status != Pass || !strings.Contains(r.Detail, "ждала ли она замка, не измерено") || strings.Contains(r.Detail, "исход: ждёт") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5LabelWrongSum — тест аудитора (Low-2): после запуска у замка
+// держатель с меткой записи, но с чужой суммой — не попадание: НЕ
+// ПРОВЕРЕНО «держатель замка не опознан» (Low-3), а не «чужой».
+func TestK5LabelWrongSum(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.CommandDelay = 100 * time.Millisecond
+	calls := 0
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmd {
+			calls++
+			if calls == 1 {
+				return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+			}
+			return "rc=0\nCOMMAND PID TYPE PATH\nflock 7777 FLOCK /run/lock/\n", nil
+		}
+		if cmd == procCmdlineCmd("7777") {
+			return "flock -w 15 -E 4 /run/lock/ docker exec -i amnezia-awg timeout 50 sh -c x amnezia-admin-apply /opt/amnezia/awg " + strings.Repeat("ab", 32) + " absent wg0.conf ", nil
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "держатель замка не опознан") || strings.Contains(r.Detail, "чужой") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
