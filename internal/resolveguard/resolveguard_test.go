@@ -62,10 +62,12 @@ const wrapperFile = "colors.go"
 var rawFuncs = map[string]bool{"ResolveClient": true, "ResolveNonNumeric": true}
 
 // wrapperCalls — сколько раз каждую обёртку обязаны звать в cmd/. Четыре
-// пункта интерактивного меню; восемь флаговых мест (четыре в runDryRun,
-// четыре в боевых ветках del/rename/toggle/rekey). Счёт, а не «больше
-// нуля»: исчезновение одного места — ровно тот дефект, от которого сторож.
-var wrapperCalls = map[string]int{"resolveInteractive": 4, "resolveByFlag": 8}
+// пункта интерактивного меню; девять флаговых мест (четыре в runDryRun,
+// четыре в боевых ветках del/rename/toggle/rekey, одно в show-config —
+// задача 01.10.2026; печатает Note() тем же resolveByFlag, только читает).
+// Счёт, а не «больше нуля»: исчезновение одного места — ровно тот дефект,
+// от которого сторож.
+var wrapperCalls = map[string]int{"resolveInteractive": 4, "resolveByFlag": 9}
 
 type finding struct {
 	pos  string
