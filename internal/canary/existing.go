@@ -161,6 +161,11 @@ func AgeCheck(remote func(string) (string, error), names []string, now time.Time
 // Снимок каждого контейнера остаётся в его Env (П0-итог); П0 в Run
 // пропускает только при пройденной предпроверке.
 func Preflight(remote func(string) (string, error), envs []*Env, names []string, now time.Time) []Result {
+	// Прежняя отметка не переживает новую предпроверку (признак 4): не
+	// прошла — снимков и отметки нет, даже если раньше проходила.
+	for _, e := range envs {
+		e.existing, e.preflightOK = nil, false
+	}
 	age := AgeCheck(remote, names, now)
 	cnt := Result{ID: "П0-сервер", Name: fmt.Sprintf("клиентов на сервере до проверки не больше %d", MaxExisting)}
 	total := 0

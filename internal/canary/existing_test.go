@@ -386,3 +386,22 @@ func TestPinServerConnectsByIP(t *testing.T) {
 		t.Errorf("SSH-адрес %q, ждали %s", sess.Creds.Host, host)
 	}
 }
+
+// TestPreflightResetsMark — повторная предпроверка, которая не прошла,
+// снимает прежнюю отметку и снимок (признак 4: не «показываем старое»).
+func TestPreflightResetsMark(t *testing.T) {
+	f, _ := withAdmin(t, false)
+	now := time.Now()
+	fresh := func(string) (string, error) {
+		return "/amnezia-awg " + now.Add(-time.Hour).UTC().Format(time.RFC3339Nano) + "\n", nil
+	}
+	Preflight(fresh, []*Env{f.env}, []string{"amnezia-awg"}, now)
+	if !f.env.preflightOK || f.env.existing == nil {
+		t.Fatal("свежий пустой сервер не прошёл предпроверку")
+	}
+	broken := func(string) (string, error) { return "", errors.New("exit status 1") }
+	Preflight(broken, []*Env{f.env}, []string{"amnezia-awg"}, now)
+	if f.env.preflightOK || f.env.existing != nil {
+		t.Errorf("после неудачной предпроверки осталась прежняя отметка: ok=%v, снимок=%v", f.env.preflightOK, f.env.existing != nil)
+	}
+}
