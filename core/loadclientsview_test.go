@@ -77,7 +77,7 @@ var containersWasNow = []struct {
 	managed            bool // на 8c20da1 + FIX-VIEW — текущее состояние
 	wasManagedOriginal bool // на d6b3a5a
 }{
-	{"amnezia-awg", "AmneziaWG", true, true},
+	{"amnezia-awg", "AmneziaWG (старый)", true, true},
 	{"amnezia-wireguard", "WireGuard", true, true},
 	{"amnezia-xray", "XRay", false, false},
 	{"amnezia-openvpn", "OpenVPN", false, false},
@@ -89,7 +89,7 @@ var containersWasNow = []struct {
 	{"amnezia-dns", "DNS", false, false},
 	// PR-W3: подпись amnezia-awg2 — версия по awg0.conf; здесь awg0.conf нет
 	// → «не прочитан», управление выключено.
-	{"amnezia-awg2", "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)", false, true},
+	{"amnezia-awg2", "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан", false, true},
 	{"amnezia-foo", "foo", false, false},
 }
 
@@ -253,6 +253,12 @@ func TestContainersWasNowTable(t *testing.T) {
 					want = "Ошибка: " + loadErr.Error() + " · показаны данные прошлого чтения."
 				case spec.managed:
 					want = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
+				case strings.Contains(spec.proto, "— только просмотр") && loadErr != nil:
+					want = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", spec.proto, loadErr.Error())
+				case strings.Contains(spec.proto, "— только просмотр") && !existed:
+					want = spec.proto + ". Списка пользователей на сервере нет."
+				case strings.Contains(spec.proto, "— только просмотр"):
+					want = fmt.Sprintf("%s. Пользователей: %d.", spec.proto, len(clients))
 				case loadErr != nil:
 					want = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", spec.proto, loadErr.Error())
 				case !existed:

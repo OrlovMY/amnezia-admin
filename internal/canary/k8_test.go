@@ -52,7 +52,7 @@ func TestK8OnFakesrv(t *testing.T) {
 					t.Errorf("%s %s: %s (%s), ждали %s", r.ID, r.Name, r.Status, r.Detail, want)
 				}
 			}
-			if !strings.Contains(rs[0].Detail, "AmneziaWG 3") || !strings.Contains(rs[0].Detail, "проверено на AWG3; AWG2 — только на тестовом стенде") {
+			if !strings.Contains(rs[0].Detail, "AmneziaWG (версия 3.1)") || !strings.Contains(rs[0].Detail, "проверено на AWG3; AWG2 — только на тестовом стенде") {
 				t.Errorf("К8.1 не называет вариант: %s", rs[0].Detail)
 			}
 			if strings.Contains(rs[0].Detail, "hpk") || strings.Contains(rs[0].Detail, "PrivateKey =") {

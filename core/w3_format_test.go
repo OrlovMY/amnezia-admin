@@ -50,15 +50,71 @@ func TestParseAWGFormat(t *testing.T) {
 	}
 }
 
+// TestParseAWGFormatNotKnown — QA W3 (признак 2), SEC W3-R1, W3-R2: файл,
+// по которому нельзя сказать «формат известен», — только просмотр с
+// причиной. Ни подпись, ни причина не несут значения из файла.
+func TestParseAWGFormatNotKnown(t *testing.T) {
+	const secret = "SECRETKEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	long := strings.Repeat("A", 40)
+	for _, c := range []struct {
+		name, text string
+		state      FormatState
+		reason     string
+	}{
+		{"файл пуст", "", FormatIncomplete, "файл настроек сервера пуст"},
+		{"только перевод строки", "\n", FormatIncomplete, "файл настроек сервера пуст"},
+		{"без [Interface]", "[Peer]\nPublicKey = p\n", FormatIncomplete, "нет секции [Interface]"},
+		{"без PrivateKey", "[Interface]\nAddress = 10.8.1.1/24\nListenPort = 1\n", FormatIncomplete, "нет параметра «PrivateKey»"},
+		{"без Address", "[Interface]\nPrivateKey = k\nListenPort = 1\n", FormatIncomplete, "нет параметра «Address»"},
+		{"без ListenPort", "[Interface]\nPrivateKey = k\nAddress = a\n", FormatIncomplete, "нет параметра «ListenPort»"},
+		{"\\r в значении", awgText("Jc = 4\r\n"), FormatUnknownKey, "строка 5 содержит управляющий символ"},
+		{"нулевой байт", awgText("Jc = 4\x00\n"), FormatUnknownKey, "управляющий символ"},
+		{"строка без =", "[Interface]\nPrivateKey " + secret + "\n", FormatUnknownKey, "строка 2 без «=»"},
+		{"длинное имя", awgText(long + " = x\n"), FormatUnknownKey, "строка 5 — незнакомый параметр"},
+		{"имя с ключом внутри", awgText("PrivateKey" + secret + " = x\n"), FormatUnknownKey, "незнакомый параметр"},
+		{"вторая [Interface]", awgText("") + "[Interface]\nPrivateKey = k\n", FormatUnknownKey, "вторая секция [Interface]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := ParseAWGFormat(c.text)
+			if f.State != c.state || !strings.Contains(f.Reason, c.reason) {
+				t.Errorf("%+v, ждали состояние %d, причина ⊃ %q", f, c.state, c.reason)
+			}
+			l := AWGVersionLabel(f)
+			if !strings.Contains(l, "— только просмотр: ") || strings.Contains(l, "SECRET") || strings.Contains(l, long) {
+				t.Errorf("подпись %q: нет «только просмотр» или есть значение из файла", l)
+			}
+			if err := checkAWG2Writable(&Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg"}, c.text); err == nil || strings.Contains(err.Error(), "SECRET") {
+				t.Errorf("запись: %v", err)
+			}
+		})
+	}
+}
+
+// TestAWG2Keepalive — scriptsRegistry.cpp:260-261: для 3.1 — «25-35»,
+// иначе «25».
+func TestAWG2Keepalive(t *testing.T) {
+	for iface, want := range map[string]string{
+		"HeaderProtectionKey = x\n": "PersistentKeepalive = 25-35\n",
+		"S3 = 15\n":                 "PersistentKeepalive = 25\n",
+		"Jc = 4\n":                  "PersistentKeepalive = 25\n",
+	} {
+		got := buildClientConfigAWG2(awgText(iface), "spub", "h", "1", "cpriv", "psk", "10.8.1.9")
+		if !strings.HasSuffix(got, want) {
+			t.Errorf("%q: конфиг кончается не на %q:\n%s", iface, want, got)
+		}
+	}
+}
+
 // TestAWGVersionLabel — подписи; «не определено» не выдаётся за «AWG2».
 func TestAWGVersionLabel(t *testing.T) {
 	for f, want := range map[AWGFormat]string{
-		{State: FormatKnown, Version: "3.1"}: "AmneziaWG 3",
-		{State: FormatKnown, Version: "2"}:   "AmneziaWG 2",
-		{State: FormatKnown, Version: "1.5"}: "AmneziaWG 1.5",
-		{State: FormatKnown}:                 "AmneziaWG 2 (версия параметров не определена)",
-		{State: FormatUnknownKey, Key: "X"}:  "AmneziaWG 2 (незнакомый параметр «X»)",
-		{State: FormatUnreadable}:            "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)",
+		{State: FormatKnown, Version: "3.1"}: "AmneziaWG (версия 3.1)",
+		{State: FormatKnown, Version: "2"}:   "AmneziaWG (версия 2)",
+		{State: FormatKnown, Version: "1.5"}: "AmneziaWG (версия 1.5)",
+		{State: FormatKnown}:                 "AmneziaWG (версия параметров не определена)",
+		{State: FormatUnknownKey, Key: "X", Reason: "на сервере незнакомый параметр «X»"}: "AmneziaWG — только просмотр: на сервере незнакомый параметр «X»",
+		{State: FormatIncomplete, Reason: "файл настроек сервера пуст"}:                   "AmneziaWG — только просмотр: файл настроек сервера пуст",
+		{State: FormatUnreadable}: "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан",
 	} {
 		if got := AWGVersionLabel(f); got != want {
 			t.Errorf("%+v: %q, ждали %q", f, got, want)

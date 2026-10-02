@@ -13,6 +13,7 @@ package guiview
 
 import (
 	"fmt"
+	"strings"
 
 	"amnezia-admin/core"
 )
@@ -57,7 +58,10 @@ type View struct {
 // неуправляемых. ЕДИНСТВЕННОЕ место этой подписи (Д2) — второго суффикса
 // быть не должно (ни в core.Container.Proto, ни второй раз в GUI).
 func ProtoLabel(c core.Container) string {
-	if c.Managed {
+	// W3 раунд 2: подпись amnezia-awg2 «… — только просмотр: <причина>»
+	// уже несёт и признак, и причину (одна форма в CLI и GUI) — второй
+	// суффикс не дописывается.
+	if c.Managed || strings.Contains(c.Proto, "— только просмотр") {
 		return c.Proto
 	}
 	return fmt.Sprintf("%s (только просмотр)", c.Proto)
@@ -83,6 +87,18 @@ func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err e
 		v.StaleShown = true
 	case c.Managed:
 		v.Status = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
+	case strings.Contains(c.Proto, "— только просмотр"):
+		// W3 раунд 2: причина «только просмотр» уже в подписи — не
+		// повторять её и не говорить «не поддерживается» про управляемый
+		// по сути протокол.
+		switch {
+		case err != nil:
+			v.Status = fmt.Sprintf("%s. Список пользователей не прочитан: %s.", c.Proto, err.Error())
+		case !existed:
+			v.Status = fmt.Sprintf("%s. Списка пользователей на сервере нет.", c.Proto)
+		default:
+			v.Status = fmt.Sprintf("%s. Пользователей: %d.", c.Proto, len(clients))
+		}
 	case err != nil:
 		v.Status = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", c.Proto, err.Error())
 	case !existed:

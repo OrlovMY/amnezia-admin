@@ -54,7 +54,7 @@ func TestAWG2DiscoveryDir(t *testing.T) {
 	}
 	// PR-W3: формат awg0.conf известен (S3/S4, диапазоны H) — управление
 	// включено, подпись — версия.
-	if !c.Managed || c.Proto != "AmneziaWG 2" {
+	if !c.Managed || c.Proto != "AmneziaWG (версия 2)" {
 		t.Errorf("amnezia-awg2 с известным форматом: Managed=%v, Proto=%q (ждали true, «AmneziaWG 2»)", c.Managed, c.Proto)
 	}
 }

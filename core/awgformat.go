@@ -20,24 +20,31 @@ import (
 	"strings"
 )
 
-// FormatState — что известно о формате awg0.conf. Три состояния: известен
-// (управление), незнакомый параметр (только просмотр), не прочитан.
+// FormatState — что известно о формате awg0.conf. Известен — управление;
+// всё прочее — только просмотр с причиной (AWGFormat.Reason).
 type FormatState int
 
 const (
 	FormatUnreadable FormatState = iota // файла нет или не прочитан — не знаем
 	FormatKnown
-	FormatUnknownKey // есть ключ вне закрытого списка
+	FormatUnknownKey // есть ключ вне закрытого списка, управляющий символ или непонятная строка
+	FormatIncomplete // файл пуст, нет [Interface] или обязательного параметра
 )
 
 // AWGFormat — формат awg0.conf.
 type AWGFormat struct {
 	State FormatState
 	// Version — как у awgVersionOf: "3.1", "2", "1.5" или "" (не определено;
-	// сам клиент Amnezia в этом случае тоже не угадывает).
+	// сам клиент Amnezia в этом случае тоже не угадывает). Для
+	// FormatUnreadable — пусто и не значит «не определено».
 	Version string
-	Key     string // незнакомый ключ (FormatUnknownKey)
-	Err     error  // причина (FormatUnreadable)
+	// Key — имя незнакомого параметра, только если оно похоже на имя (буквы,
+	// цифры, «_», не длиннее awgKeyMax); иначе пусто, а причина — номер
+	// строки. Значения параметров никогда не попадают ни сюда, ни в Reason
+	// (SEC W3-R2: испорченная строка может нести PrivateKey).
+	Key    string
+	Reason string // причина «только просмотр» по-человечески; "" у FormatKnown
+	Err    error  // причина (FormatUnreadable)
 }
 
 // awg2ServerKeys — ЗАКРЫТЫЙ список ключей [Interface] awg0.conf
@@ -59,43 +66,93 @@ var awg2PeerKeys = map[string]bool{"PublicKey": true, "PresharedKey": true, "All
 // reAWGComment — комментарий `# Ik = значение` (configure_container.sh:37-41).
 var reAWGComment = regexp.MustCompile(`^#\s*I([1-5])\s*=\s*(.*)$`)
 
+// awgKeyMax — предел длины имени параметра в подписи и ошибке.
+const awgKeyMax = 32
+
+var reAWGKeyName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
+
+// awg2Required — без них сервер amnezia-awg2 не работает; нет любого —
+// формат не известен (QA W3, признак 2).
+var awg2Required = []string{"PrivateKey", "Address", "ListenPort"}
+
+// hasControl — управляющий символ (кроме табуляции) в строке.
+func hasControl(s string) bool {
+	for _, r := range s {
+		if (r < 0x20 && r != '\t') || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseAWGFormat — формат текста awg0.conf. Комментарии, кроме `# Ik = …`,
-// не влияют ни на что и пропускаются; секция вне [Interface]/[Peer] —
-// незнакомый ключ.
+// пропускаются. Известен файл только тогда, когда в нём есть [Interface] с
+// PrivateKey, Address и ListenPort и всё остальное — из закрытых списков.
 func ParseAWGFormat(text string) AWGFormat {
+	unknown := func(n int, key, what string) AWGFormat {
+		f := AWGFormat{State: FormatUnknownKey}
+		if key != "" && len(key) <= awgKeyMax && reAWGKeyName.MatchString(key) {
+			f.Key = key
+			f.Reason = "на сервере незнакомый параметр «" + key + "»"
+		} else {
+			f.Reason = fmt.Sprintf("в файле настроек сервера строка %d %s", n, what)
+		}
+		return f
+	}
 	section := ""
-	for _, line := range strings.Split(text, "\n") {
-		l := strings.TrimSpace(strings.TrimRight(line, "\r"))
+	seenIface := false
+	ifaceKeys := map[string]bool{}
+	for i, line := range strings.Split(text, "\n") {
+		n := i + 1
+		if hasControl(line) {
+			return unknown(n, "", "содержит управляющий символ")
+		}
+		l := strings.TrimSpace(line)
 		switch {
 		case l == "" || strings.HasPrefix(l, "#"):
 			continue
 		case strings.HasPrefix(l, "["):
 			switch {
 			case strings.EqualFold(l, "[Interface]"):
-				section = "i"
+				if seenIface {
+					return unknown(n, "", "— вторая секция [Interface]")
+				}
+				section, seenIface = "i", true
 			case strings.EqualFold(l, "[Peer]"):
 				section = "p"
 			default:
-				return AWGFormat{State: FormatUnknownKey, Key: l}
+				return unknown(n, "", "— незнакомая секция")
 			}
 			continue
 		}
 		kv := strings.SplitN(l, "=", 2)
 		if len(kv) != 2 {
-			return AWGFormat{State: FormatUnknownKey, Key: l}
+			return unknown(n, "", "без «=»")
 		}
 		k := strings.TrimSpace(kv[0])
 		switch section {
 		case "i":
 			if !awg2ServerKeys[k] {
-				return AWGFormat{State: FormatUnknownKey, Key: k}
+				return unknown(n, k, "— незнакомый параметр")
 			}
+			ifaceKeys[k] = true
 		case "p":
 			if !awg2PeerKeys[k] {
-				return AWGFormat{State: FormatUnknownKey, Key: k}
+				return unknown(n, k, "— незнакомый параметр")
 			}
 		default:
-			return AWGFormat{State: FormatUnknownKey, Key: k}
+			return unknown(n, "", "— параметр вне секции")
+		}
+	}
+	switch {
+	case strings.TrimSpace(text) == "":
+		return AWGFormat{State: FormatIncomplete, Reason: "файл настроек сервера пуст"}
+	case !seenIface:
+		return AWGFormat{State: FormatIncomplete, Reason: "в файле настроек сервера нет секции [Interface]"}
+	}
+	for _, k := range awg2Required {
+		if !ifaceKeys[k] {
+			return AWGFormat{State: FormatIncomplete, Reason: "в файле настроек сервера нет параметра «" + k + "»"}
 		}
 	}
 	return AWGFormat{State: FormatKnown, Version: awgVersionOf(parseWgConf(text).iface, awgSpecialJunk(text))}
@@ -158,23 +215,27 @@ func awgSpecialJunk(text string) map[string]string {
 	return out
 }
 
-// AWGVersionLabel — подпись протокола amnezia-awg2 по формату.
+// AWGVersionLabel — подпись протокола amnezia-awg2 (решение ядра, W3 раунд
+// 2, по awgProtocolConfig.cpp:433-439): имя «AmneziaWG», версия параметров —
+// в скобках; только просмотр — «… — только просмотр: <причина>».
+// Старый контейнер amnezia-awg подписан «AmneziaWG (старый)» (knownContainers).
 func AWGVersionLabel(f AWGFormat) string {
-	switch f.State {
-	case FormatUnreadable:
-		return "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)"
-	case FormatUnknownKey:
-		return "AmneziaWG 2 (незнакомый параметр «" + f.Key + "»)"
-	}
+	base := "AmneziaWG (версия параметров не определена)"
 	switch f.Version {
-	case "3.1":
-		return "AmneziaWG 3"
-	case "2":
-		return "AmneziaWG 2"
-	case "1.5":
-		return "AmneziaWG 1.5"
+	case "3.1", "2", "1.5":
+		base = "AmneziaWG (версия " + f.Version + ")"
 	}
-	return "AmneziaWG 2 (версия параметров не определена)"
+	switch f.State {
+	case FormatKnown:
+		return base
+	case FormatUnreadable:
+		return "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан"
+	}
+	reason := f.Reason
+	if reason == "" {
+		reason = "формат файла настроек сервера не распознан"
+	}
+	return "AmneziaWG — только просмотр: " + reason
 }
 
 // AWGFormatOf — формат awg0.conf контейнера (только для amnezia-awg2).
@@ -202,7 +263,7 @@ func checkAWG2Writable(c *Container, raw string) error {
 	}
 	f := ParseAWGFormat(raw)
 	if f.State != FormatKnown {
-		return fmt.Errorf("%s: незнакомый параметр «%s» в awg0.conf — только просмотр", c.Name, f.Key)
+		return fmt.Errorf("%s: только просмотр — %s", c.Name, f.Reason)
 	}
 	return nil
 }
@@ -222,12 +283,16 @@ const AWG2ConfigNote = "Параметры маскировки взяты из 
 
 // buildClientConfigAWG2 — клиентский .conf amnezia-awg2 по template.conf:
 // параметры маскировки — из серверного [Interface] (I1-I5 — из комментариев
-// `# Ik = …`), только ключи шаблона, в его порядке; PersistentKeepalive = 25
-// (нижняя граница «25-35» protocolConstants.h:215; выбор значения из
-// диапазона в клиенте Amnezia не прочитан — берём фиксированное и называем).
+// `# Ik = …`), только ключи шаблона, в его порядке. PersistentKeepalive —
+// как в клиенте (scriptsRegistry.cpp:260-261): для версии 3.1 литерально
+// «25-35», иначе «25».
 func buildClientConfigAWG2(raw string, serverPub, host, listenPort, clientPriv, psk, clientIP string) string {
 	iface := parseWgConf(raw).iface
 	junk := awgSpecialJunk(raw)
+	keepalive := "25"
+	if awgVersionOf(iface, junk) == "3.1" {
+		keepalive = "25-35"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Interface]\nAddress = %s/32\nDNS = 1.1.1.1, 1.0.0.1\nPrivateKey = %s\n", clientIP, clientPriv)
 	for _, k := range awg2ClientKeys {
@@ -239,7 +304,7 @@ func buildClientConfigAWG2(raw string, serverPub, host, listenPort, clientPriv, 
 			fmt.Fprintf(&b, "%s = %s\n", k, v)
 		}
 	}
-	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n",
-		serverPub, psk, host, listenPort)
+	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = %s\n",
+		serverPub, psk, host, listenPort, keepalive)
 	return b.String()
 }

@@ -416,7 +416,7 @@ func saveFailed(w io.Writer, u *core.NewUser, err error) error {
 func printContainers(containers []core.Container, withNotes bool) {
 	for i, c := range containers {
 		note := ""
-		if withNotes && !c.Managed {
+		if withNotes && !c.Managed && !strings.Contains(c.Proto, "— только просмотр") {
 			note = cDim(" (только просмотр, управление не поддерживается)")
 		}
 		fmt.Printf("  %s %s %s%s\n", cNum(strconv.Itoa(i+1)+"."), c.Proto, cDim("["+c.Name+"]"), note)

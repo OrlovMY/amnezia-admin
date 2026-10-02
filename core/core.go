@@ -161,7 +161,7 @@ type Container struct {
 }
 
 var knownContainers = []Container{
-	{"amnezia-awg", "/opt/amnezia/awg", "AmneziaWG", true},
+	{"amnezia-awg", "/opt/amnezia/awg", "AmneziaWG (старый)", true},
 	{"amnezia-wireguard", "/opt/amnezia/wireguard", "WireGuard", true},
 	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg, а НЕ
 	// /opt/amnezia/awg2, как прежде угадывалось по суффиксу имени (PR-W1).

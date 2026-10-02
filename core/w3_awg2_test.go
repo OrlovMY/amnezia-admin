@@ -35,10 +35,10 @@ func TestAWG2DiscoveryByFormat(t *testing.T) {
 		name, extra, proto string
 		managed            bool
 	}{
-		{"AWG3", awg3Extra, "AmneziaWG 3", true},
-		{"AWG2", "S3 = 15\nS4 = 25\nH1 = 100-200\n", "AmneziaWG 2", true},
-		{"без признаков", "Jc = 4\nJmin = 10\nJmax = 50\n", "AmneziaWG 2 (версия параметров не определена)", true},
-		{"незнакомый ключ", "S3 = 15\nPostUp = rm -rf /\n", "AmneziaWG 2 (незнакомый параметр «PostUp»)", false},
+		{"AWG3", awg3Extra, "AmneziaWG (версия 3.1)", true},
+		{"AWG2", "S3 = 15\nS4 = 25\nH1 = 100-200\n", "AmneziaWG (версия 2)", true},
+		{"без признаков", "Jc = 4\nJmin = 10\nJmax = 50\n", "AmneziaWG (версия параметров не определена)", true},
+		{"незнакомый ключ", "S3 = 15\nPostUp = rm -rf /\n", "AmneziaWG — только просмотр: на сервере незнакомый параметр «PostUp»", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			srv := awg2With(t, c.extra)
@@ -63,7 +63,7 @@ func TestAWG2DiscoveryMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cs) != 1 || cs[0].Managed || cs[0].Proto != "AmneziaWG 2 (awg0.conf не прочитан — версия неизвестна)" {
+	if len(cs) != 1 || cs[0].Managed || cs[0].Proto != "AmneziaWG (версия неизвестна) — только просмотр: файл настроек сервера не прочитан" {
 		t.Errorf("%+v, ждали только просмотр с причиной «не прочитан»", cs)
 	}
 }
@@ -90,11 +90,11 @@ func TestAWG2AlongsideAWG(t *testing.T) {
 		switch cs[i].Name {
 		case "amnezia-awg2":
 			awg2 = &cs[i]
-			if cs[i].Proto != "AmneziaWG 3" || !cs[i].Managed {
+			if cs[i].Proto != "AmneziaWG (версия 3.1)" || !cs[i].Managed {
 				t.Errorf("amnezia-awg2: %+v", cs[i])
 			}
 		case "amnezia-awg":
-			if strings.Contains(cs[i].Proto, "AmneziaWG 2") || strings.Contains(cs[i].Proto, "AmneziaWG 3") || !cs[i].Managed {
+			if cs[i].Proto != "AmneziaWG (старый)" || !cs[i].Managed {
 				t.Errorf("amnezia-awg получил подпись awg2 или не управляется: %+v", cs[i])
 			}
 		}
@@ -126,7 +126,7 @@ func TestAWG2ClientConfigFromServer(t *testing.T) {
 	}
 	for _, want := range []string{"S3 = 15", "S4 = 25", "H1 = 100-200", "I1 = <r 2><b 0x8580>", "I2 = <b 0xdead>",
 		"HeaderProtectionKey = hpk-value", "ContentPaddingAddition = 10-100", "RandomTrailers = on", "DisableCookies = on",
-		"MaxHandshakeAttempts = 15-20", "PersistentKeepalive = 25", "Endpoint = 1.2.3.4:51820"} {
+		"MaxHandshakeAttempts = 15-20", "PersistentKeepalive = 25-35", "Endpoint = 1.2.3.4:51820"} {
 		if !strings.Contains(u.Config, want+"\n") {
 			t.Errorf("в клиентском конфиге нет %q:\n%s", want, u.Config)
 		}
