@@ -240,7 +240,7 @@ func writeChosenConfig(w fyne.URIWriteCloser, config string) (string, error) {
 func (u *ui) saveConfigAs(name, config string) {
 	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
 		if err != nil {
-			dialog.ShowError(err, u.win)
+			u.showError(err)
 			return
 		}
 		if w == nil {
@@ -248,7 +248,7 @@ func (u *ui) saveConfigAs(name, config string) {
 		}
 		where, err := writeChosenConfig(w, config)
 		if err != nil {
-			dialog.ShowError(err, u.win)
+			u.showError(err)
 			if errors.Is(err, errPermsNotLimited) && u.status != nil {
 				u.status.SetText("Конфиг сохранён, но права НЕ ограничены: " + where)
 			}
