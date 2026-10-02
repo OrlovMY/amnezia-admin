@@ -202,8 +202,8 @@ var plants = []plant{
 		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"}},
 		wantTest: gtm, also: []string{keys}, wantMsg: "у шага задан shell: «bash {0} || true»"},
 	{name: "r2-gotest-subshell", edits: []edit{
-		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
-		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
+		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
 		wantTest: gtm, also: []string{progs}, wantMsg: "строка «if false; then» выше вызова"},
 	// --- раунд 4 QA-01: значение -shellcheck и окружение инструментов ---
 	{name: "r4-sc-nonexistent", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck /nonexistent \`),
@@ -583,13 +583,21 @@ var plants = []plant{
 		wantTest: "TestReleaseMatrixArchMatchesRunnerTable", wantMsg: "метка раннера macos-27 не описана в таблице runnerArch"},
 	// --- go test ---
 	{name: "gotest-multiline-both", edits: []edit{
-		{ciYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
-			"        run: |\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"},
-		{releaseYML, "        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
-			"        run: |\n          go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
+		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
+			"        run: |\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
+			"        run: |\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
 		wantTest: gtm, wantMsg: "после вызова стоит строка «echo ok»"},
 	{name: "packages", edits: rel("./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/\n"),
 		wantTest: gtm, wantMsg: "списки go test разошлись"},
+	// -timeout (решение ядра 02.10, cmd/gui на macOS > 10 мин): значение
+	// обязано совпадать в обоих файлах.
+	{name: "timeout-differs", edits: rel("go test -timeout=20m -race", "go test -timeout=30m -race"),
+		wantTest: gtm, wantMsg: "аргумент «-timeout=30m» вне закрытого списка"},
+	{name: "timeout-dropped-both", edits: []edit{
+		{ciYML, "go test -timeout=20m -race", "go test -race"},
+		{releaseYML, "go test -timeout=20m -race", "go test -race"}},
+		wantTest: gtm, wantMsg: "нет обязательного флага -timeout=20m"},
 	{name: "packages-order", edits: rel("-count=1 ./core/ ./internal/...", "-count=1 ./internal/... ./core/"),
 		wantTest: gtm, wantMsg: "списки go test разошлись — на теге проверяется не то, что на PR"},
 	{name: "packages-dir", extraDir: "cmd/planted",
