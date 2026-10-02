@@ -405,3 +405,47 @@ func TestPreflightResetsMark(t *testing.T) {
 		t.Errorf("после неудачной предпроверки осталась прежняя отметка: ok=%v, снимок=%v", f.env.preflightOK, f.env.existing != nil)
 	}
 }
+
+// TestSudoKey — SEC П-3: второй ключ ведёт на тот же сервер. Без флага —
+// тот же хост и порт, иначе отказ; с флагом — PinServer: имя → {A, B},
+// флаг A — дочерним программам ключ ровно на A.
+func TestSudoKey(t *testing.T) {
+	enc := func(m map[string]any) string { k, _ := ChildKey(m); return k }
+	const a, b = "198.51.100.1", "203.0.113.2"
+	lookup := func(h string) ([]net.IP, error) {
+		if h == "test.example" {
+			return []net.IP{net.ParseIP(a), net.ParseIP(b)}, nil
+		}
+		return nil, errors.New("нет такого имени")
+	}
+	main := map[string]any{"hostName": a, "userName": "root", "password": "pw", "port": "2222"}
+	same := enc(map[string]any{"hostName": a, "userName": "admin", "password": "pw2", "port": "2222"})
+	if k, err := SudoKey(main, same, "", lookup); err != nil || k != same {
+		t.Errorf("тот же хост без флага: %v", err)
+	}
+	for name, k := range map[string]string{
+		"другой хост":   enc(map[string]any{"hostName": b, "userName": "admin", "port": "2222"}),
+		"другой порт":   enc(map[string]any{"hostName": a, "userName": "admin", "port": "22"}),
+		"имя вместо IP": enc(map[string]any{"hostName": "test.example", "userName": "admin", "port": "2222"}),
+		"не ключ":       "vpn://мусор",
+	} {
+		_, err := SudoKey(main, k, "", lookup)
+		if err == nil {
+			t.Errorf("%s без флага: ждали отказ", name)
+		} else if strings.Contains(err.Error(), "pw") {
+			t.Errorf("%s: секрет в тексте ошибки: %v", name, err)
+		}
+	}
+	named := enc(map[string]any{"hostName": "test.example", "userName": "admin", "password": "pw2", "port": "22"})
+	k, err := SudoKey(main, named, a, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, _ := core.DecodeVpnKey(k)
+	if creds, err := core.CredsFromConfig(dec); err != nil || creds.Host != a {
+		t.Errorf("второй ключ с флагом: адрес %v (%v), ждали ровно %s", dec["hostName"], err, a)
+	}
+	if _, err := SudoKey(main, enc(map[string]any{"hostName": b, "userName": "admin"}), a, lookup); err == nil {
+		t.Errorf("второй ключ на другой IP с флагом: ждали отказ")
+	}
+}

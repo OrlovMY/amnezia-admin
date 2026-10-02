@@ -85,6 +85,16 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ: ключ не разобран:", err)
 		return 2
 	}
+	// SEC П-3: второй ключ — на тот же тестовый сервер, ДО подключения.
+	sudoKey := ""
+	if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
+		sk, err := canary.SudoKey(cfg, k, *serverIP, net.LookupIP)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+			return 2
+		}
+		sudoKey = sk
+	}
 	// Правка П0: второй фактор против боевого сервера — IP, названный
 	// человеком, против адреса из ключа; ДО подключения. SEC П-1: дальше
 	// и канарейка, и дочерние программы подключаются ПРЯМО по этому IP —
@@ -194,8 +204,8 @@ func run() int {
 			RaceRounds: *rounds,
 			ServerIP:   *serverIP,
 		}
-		if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
-			env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + k}
+		if sudoKey != "" {
+			env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + sudoKey}
 		} else if creds.User == "root" {
 			// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере;
 			// пароль случайный, уходит только через stdin chpasswd (SEC S2).

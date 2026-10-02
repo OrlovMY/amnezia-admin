@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"amnezia-admin/core"
 )
 
 // Правка П0 (живой стенд 89.22.229.78, решение ядра): приложение Amnezia
@@ -90,10 +92,43 @@ func ChildKey(cfg map[string]any) (string, error) {
 	return "vpn://" + base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// SudoKey — SEC П-3: второй ключ (AMNEZIA_KEY_SUDO, по нему пишет PR4.2)
+// обязан вести на тот же тестовый сервер, что и основной. С -server-ip —
+// через PinServer с тем же флагом (подключение по IP, ключ дочерним
+// программам — ChildKey). Без флага — hostName и порт обязаны совпасть с
+// основным ключом (mainCfg), иначе отказ до подключения. Текст ошибки
+// ключа не содержит.
+func SudoKey(mainCfg map[string]any, sudoKey, flagIP string, lookup func(string) ([]net.IP, error)) (string, error) {
+	cfg, err := core.DecodeVpnKey(sudoKey)
+	if err != nil {
+		return "", fmt.Errorf("AMNEZIA_KEY_SUDO не разобран: %v", err)
+	}
+	if flagIP != "" {
+		p, err := PinServer(cfg, flagIP, lookup)
+		if err != nil {
+			return "", fmt.Errorf("AMNEZIA_KEY_SUDO: %v", err)
+		}
+		return ChildKey(p)
+	}
+	port := func(m map[string]any) string {
+		if p := core.Str(m, "port"); p != "" && p != "0" {
+			return p
+		}
+		return "22"
+	}
+	mh, sh := core.Str(mainCfg, "hostName"), core.Str(cfg, "hostName")
+	if sh == "" || sh != mh || port(cfg) != port(mainCfg) {
+		return "", fmt.Errorf("AMNEZIA_KEY_SUDO ведёт на %s:%s, основной ключ — на %s:%s: второй ключ обязан быть от того же тестового сервера", sh, port(cfg), mh, port(mainCfg))
+	}
+	return sudoKey, nil
+}
+
 // MaxFreshAge — SEC П-2: объективный признак «сервер только что поставлен».
 // Тестовый сервер арендуется на сутки и ставится под проверку; боевой
 // работает неделями. Контейнер Amnezia старше 72 ч — СТОП, флагом не
-// обходится.
+// обходится. ГРАНИЦА (SEC, раунд 2): .Created — возраст КОНТЕЙНЕРА, а не
+// сервера; если на боевом сервере протокол переустановлен за последние
+// 72 ч, свежесть пройдёт — тогда защищают порог MaxExisting и -server-ip.
 const MaxFreshAge = 72 * time.Hour
 
 // AgeCheck — П0-свежесть: возраст КАЖДОГО контейнера Amnezia на сервере
