@@ -210,7 +210,7 @@ func TestK5HitsWriteUnderLock(t *testing.T) {
 	if r.Status != Pass {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
-	for _, w := range []string{"попыток 1 из 5, застали нашу запись под замком: 1", "ждала:", "исход: ждёт"} {
+	for _, w := range []string{"попыток 1 из 5, застали нашу запись под замком: 1", "затем освободила", "ожидание второй записи не проверяется"} {
 		if !strings.Contains(r.Detail, w) {
 			t.Errorf("нет %q: %s", w, r.Detail)
 		}
@@ -242,36 +242,6 @@ func TestK5MissesReportAttempts(t *testing.T) {
 	}
 	if !strings.Contains(r.Detail, "попыток 5 из 5, застали нашу запись под замком: 0") || !strings.Contains(r.Detail, "ни одна попытка") {
 		t.Errorf("отчёт: %s", r.Detail)
-	}
-}
-
-// TestJudgeK5Second — решение ядра 02.10: исходы второй записи и
-// «изменили» без изменения оборванной записи (и без сведений о нём);
-// «ждёт» — только при измеренном ожидании.
-func TestJudgeK5Second(t *testing.T) {
-	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
-	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
-	changed := cliRun{code: 1, title: chg.Title}
-	for _, c := range []struct {
-		name   string
-		r      cliRun
-		landed landedState
-		waited bool
-		want   Status
-		text   string
-	}{
-		{"ждёт, измерено", cliRun{}, landedNo, true, Pass, "исход: ждёт"},
-		{"код 0, не измерено", cliRun{}, landedNo, false, Pass, "не измерено"},
-		{"занято", cliRun{code: 1, title: bsy.Title}, landedNo, false, Pass, "занято"},
-		{"оборванная завершилась → CAS", changed, landedYes, false, Pass, "сверено по содержимому"},
-		{"CAS без изменения оборванной", changed, landedNo, false, Fail, "необъясним"},
-		{"CAS, завершение не узнать", changed, landedUnknown, false, NotChecked, "узнать не удалось"},
-		{"иной отказ", cliRun{code: 1, title: "что-то ещё"}, landedYes, true, Fail, "не прошла"},
-	} {
-		got, why := judgeK5Second(c.r, c.landed, c.waited)
-		if got != c.want || !strings.Contains(why, c.text) {
-			t.Errorf("%s: %s (%s), ждали %s с %q", c.name, got, why, c.want, c.text)
-		}
 	}
 }
 
@@ -312,23 +282,6 @@ func TestK5ForeignAppearsLater(t *testing.T) {
 	r := f.env.breakWrite()
 	if r.Status != NotChecked || !strings.Contains(r.Detail, "замок держит чужой") {
 		t.Fatalf("К5 с чужим держателем после запуска: %s — %s", r.Status, r.Detail)
-	}
-}
-
-// TestK5WaitNotMeasured — доезд «код 0, ожидание не измерено» (AU-LOGIC
-// Medium-2): замок стенда не взаимоисключающий, держатели перекрываются —
-// вторая запись проходит, но «ждала» не утверждается.
-func TestK5WaitNotMeasured(t *testing.T) {
-	f := emptyFake(t, false)
-	f.env.NewBin = newCLI(t)
-	f.exec.Configure(func(s *fakesrv.Server) { s.CommandDelay = 150 * time.Millisecond })
-	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldFor = 1500 * time.Millisecond })
-	f.exec.Configure(func(s *fakesrv.Server) { s.LockHoldAbort = true })
-	f.exec.Configure(func(s *fakesrv.Server) { s.LockShared = true })
-	lslocksHook(f, false)
-	r := f.env.breakWrite()
-	if r.Status != Pass || !strings.Contains(r.Detail, "ждала ли она замка, не измерено") || strings.Contains(r.Detail, "исход: ждёт") {
-		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }
 
@@ -409,32 +362,6 @@ func TestK5BusyBeforeAttempt(t *testing.T) {
 	}
 }
 
-// TestJudgeK5Freed — решение ядра 02.10: застали нашу запись, после обрыва
-// замок свободен. Код 0 и исход оборванной известен — ПРОЙДЕН; не известен
-// — НЕ ПРОВЕРЕНО; иной код — как judgeK5Second.
-func TestJudgeK5Freed(t *testing.T) {
-	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
-	for _, c := range []struct {
-		name   string
-		r      cliRun
-		landed landedState
-		want   Status
-	}{
-		{"код 0, оборванная не выполнена", cliRun{}, landedNo, Pass},
-		{"код 0, оборванная завершилась", cliRun{}, landedYes, Pass},
-		{"код 0, исход оборванной не узнать", cliRun{}, landedUnknown, NotChecked},
-		{"изменили, оборванной нет", cliRun{code: 1, title: chg.Title}, landedNo, Fail},
-		{"иной отказ", cliRun{code: 1, title: "что-то"}, landedNo, Fail},
-	} {
-		if got, _ := judgeK5Freed(c.r, c.landed, false); c.r.code == 0 && got == Pass {
-			t.Errorf("%s: свобода замка во время второй не подтверждена, а ПРОЙДЕН", c.name)
-		}
-		if got, why := judgeK5Freed(c.r, c.landed, true); got != c.want {
-			t.Errorf("%s: %s (%s), ждали %s", c.name, got, why, c.want)
-		}
-	}
-}
-
 // TestK5FreedRightAfterCut — доезд: нашу запись застали под замком, обрыв
 // клиента на «хосте» прерывает её и отпускает замок (fakesrv
 // LockReleaseOnDisconnect — настоящий освобождённый замок, не сокрытие в
@@ -460,7 +387,7 @@ func TestK5FreedRightAfterCut(t *testing.T) {
 		return inner(cmd)
 	}
 	r := f.env.breakWrite()
-	if r.Status != Pass || !strings.Contains(r.Detail, "замок освободился сразу после обрыва; ожидание не потребовалось") {
+	if r.Status != Pass || !strings.Contains(r.Detail, "замок после обрыва: держателей нет") {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -500,10 +427,157 @@ func TestK5ForeignAfterCut(t *testing.T) {
 		return inner(cmd)
 	}
 	r := f.env.breakWrite()
-	if r.Status == Pass || strings.Contains(r.Detail, "ожидание не потребовалось") ||
+	if r.Status == Pass ||
 		!(strings.Contains(r.Detail, "после обрыва у замка был не наш держатель") || strings.Contains(r.Detail, "замок держит чужой")) {
 		// не наш держатель после обрыва — новая попытка (а её предусловие
 		// видит чужого), а не путь «замок свободен»
 		t.Fatalf("К5 с чужим держателем после обрыва: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// noWaitClaim — в итоге К5 нет утверждения об ожидании второй записи
+// (решение ядра 02.10, AU-LOGIC раунд 5 High-4).
+func noWaitClaim(t *testing.T, d string) {
+	t.Helper()
+	for _, w := range []string{"ждала", "ждёт", "не потребовалось", "дождалась"} {
+		if strings.Contains(d, w) {
+			t.Errorf("утверждение об ожидании («%s»): %s", w, d)
+		}
+	}
+	if !strings.Contains(d, "ожидание второй записи не проверяется") {
+		t.Errorf("нет оговорки «ожидание второй записи не проверяется»: %s", d)
+	}
+}
+
+// TestJudgeK5 — пункты 3 и 4 закрытого списка ПРОЙДЕН.
+func TestJudgeK5(t *testing.T) {
+	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
+	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
+	changed := cliRun{code: 1, title: chg.Title}
+	for _, c := range []struct {
+		name       string
+		r          cliRun
+		consistent bool
+		landed     landedState
+		third      int
+		want       Status
+		text       string
+	}{
+		{"код 0, исход известен", cliRun{}, true, landedNo, 0, Pass, "код 0"},
+		{"занято", cliRun{code: 1, title: bsy.Title}, true, landedNo, 0, Pass, "занято"},
+		{"CAS, оборванная завершилась", changed, true, landedYes, 0, Pass, "сверено по содержимому"},
+		{"CAS без изменения оборванной", changed, true, landedNo, 0, Fail, "необъясним"},
+		{"CAS, исход не узнать", changed, true, landedUnknown, 0, NotChecked, "пункт 3"},
+		{"пункт 4: код 0, исход оборванной не узнать", cliRun{}, true, landedUnknown, 0, NotChecked, "пункт 4"},
+		{"файлы не согласованы", cliRun{}, false, landedNo, 0, Fail, "не согласованы"},
+		{"третья не прошла", cliRun{}, true, landedNo, 1, Fail, "завис"},
+		{"иной отказ", cliRun{code: 1, title: "что-то"}, true, landedYes, 0, Fail, "не прошла"},
+	} {
+		got, why := judgeK5(c.r, c.consistent, c.landed, c.third)
+		if got != c.want || !strings.Contains(why, c.text) {
+			t.Errorf("%s: %s (%s), ждали %s с %q", c.name, got, why, c.want, c.text)
+		}
+	}
+}
+
+// TestK5NoWaitClaim — ни один исход К5 на стенде не утверждает ожидания.
+func TestK5NoWaitClaim(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	lslocksHook(f, false)
+	r := f.env.breakWrite()
+	if r.Status != Pass {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+	noWaitClaim(t, r.Detail)
+}
+
+// TestK5BlindLslocksAfterHit — случай аудитора (раунд 5): нашу запись
+// застали, после этого lslocks отвечает пусто («слепой»). Пустой ответ —
+// успешное измерение «держателей нет», ПРОЙДЕН допустим, но без
+// утверждения об ожидании.
+func TestK5BlindLslocksAfterHit(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	var mu sync.Mutex
+	hit := false
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmdlineCmd {
+			mu.Lock()
+			defer mu.Unlock()
+			if held := f.exec.Held(); !hit && len(held) > 0 {
+				hit = true
+				var hs [][2]string
+				for pid, c := range held {
+					hs = append(hs, [2]string{pid, c})
+				}
+				return locksOut(hs...), nil
+			}
+			return locksOut(), nil
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	noWaitClaim(t, r.Detail)
+	if r.Status == Pass && !strings.Contains(r.Detail, "держателей нет") {
+		t.Errorf("ПРОЙДЕН без подтверждённого пункта 2: %s", r.Detail)
+	}
+}
+
+// TestK5ReleaseUnmeasured — пункт 2: держит наша оборванная, а следующий
+// ответ lslocks — ошибка до самого срока: НЕ ПРОВЕРЕНО «пункт 2».
+func TestK5ReleaseUnmeasured(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	old := k5Deadline
+	k5Deadline = 3 * time.Second
+	t.Cleanup(func() { k5Deadline = old })
+	var mu sync.Mutex
+	seen := 0
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmdlineCmd {
+			mu.Lock()
+			defer mu.Unlock()
+			held := f.exec.Held()
+			if len(held) > 0 {
+				seen++
+			}
+			switch {
+			case seen == 0:
+				return locksOut(), nil
+			case seen <= 2: // попадание и ответ сразу после обрыва
+				var hs [][2]string
+				for pid, c := range held {
+					hs = append(hs, [2]string{pid, c})
+				}
+				if len(hs) == 0 {
+					return "", errors.New("lslocks: отказ")
+				}
+				return locksOut(hs...), nil
+			}
+			return "", errors.New("lslocks: отказ")
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "пункт 2") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }
