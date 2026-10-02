@@ -987,7 +987,7 @@ func (s *Session) PlanSetEnabled(c *Container, clientID string, enabled bool) (*
 
 func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 	if !c.Managed() {
-		return nil, fmt.Errorf("создание пользователей для %s не поддерживается этой утилитой", c.Title())
+		return nil, fmt.Errorf("создание пользователей для %s не поддерживается этой программой", c.Title())
 	}
 	if err := ValidateName(name); err != nil {
 		return nil, err
@@ -1077,7 +1077,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 
 func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error) {
 	if !c.Managed() {
-		return nil, fmt.Errorf("удаление пользователей для %s не поддерживается этой утилитой", c.Title())
+		return nil, fmt.Errorf("удаление пользователей для %s не поддерживается этой программой", c.Title())
 	}
 	if err := requireClientID(clientID); err != nil {
 		return nil, err
@@ -1127,7 +1127,7 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 
 func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) {
 	if !c.Managed() {
-		return nil, fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", c.Title())
+		return nil, fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой программой", c.Title())
 	}
 	if err := requireClientID(clientID); err != nil {
 		return nil, err
@@ -1243,7 +1243,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 
 func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Plan, error) {
 	if !c.Managed() {
-		return nil, fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", c.Title())
+		return nil, fmt.Errorf("переименование пользователей для %s не поддерживается этой программой", c.Title())
 	}
 	if err := requireClientID(clientID); err != nil {
 		return nil, err
@@ -1291,7 +1291,7 @@ func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Pla
 
 func (s *Session) planSetEnabledLocked(c *Container, clientID string, enabled bool) (*Plan, error) {
 	if !c.Managed() {
-		return nil, fmt.Errorf("управление пользователями для %s не поддерживается этой утилитой", c.Title())
+		return nil, fmt.Errorf("управление пользователями для %s не поддерживается этой программой", c.Title())
 	}
 	if enabled {
 		return s.planEnableLocked(c, clientID)

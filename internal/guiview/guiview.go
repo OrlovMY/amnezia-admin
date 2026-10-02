@@ -62,11 +62,16 @@ type View struct {
 // но не поддерживается (имя + «не поддерживается этой программой»),
 // незнакомый (голое имя контейнера с пометкой — не похоже на протокол).
 func ProtoLabel(c core.Container) string {
-	switch c.Support {
-	case core.SupportYes:
+	// Раунд 2 (UX-01 Р1): ЧЕТЫРЕ подписи для человека — что с протоколом
+	// можно: управлять / только смотреть список / ничего не показать /
+	// незнакомый.
+	switch {
+	case c.Support == core.SupportYes:
 		return c.Proto
-	case core.SupportKnownNo:
-		return c.Proto + " — не поддерживается этой программой"
+	case c.Support == core.SupportKnownNo && c.Dir != "":
+		return c.Proto + " — только просмотр"
+	case c.Support == core.SupportKnownNo:
+		return c.Proto + " — не поддерживается, пользователей не показать"
 	}
 	return "незнакомый контейнер " + c.Name
 }
@@ -86,9 +91,11 @@ func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err e
 	// заходили, сказать «не ведёт список» или «ошибка чтения» было бы неверно.
 	case c.Support == core.SupportUnknown:
 		v.LoadStats, v.CanManage = false, false
-		v.Status = fmt.Sprintf("Незнакомый контейнер %s: программа не знает, что это за протокол, и не заходит в него.", c.Name)
+		v.Status = fmt.Sprintf("Незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет. Пользователи этого контейнера здесь не показаны. Если это протокол Amnezia — управляйте им в приложении Amnezia.", c.Name)
 	case !c.Managed() && errors.Is(err, core.ErrContainerDirUnknown):
-		v.Status = fmt.Sprintf("%s — не поддерживается этой программой: управление пользователями недоступно.", c.Proto)
+		// UX-01 Р2: сказать, что список НЕ показан и почему — иначе пустая
+		// таблица выглядит как «пользователей нет» (признак 2)
+		v.Status = fmt.Sprintf("%s установлен на сервере, но эта программа не знает, где он хранит пользователей, поэтому список не показан. Управлять его пользователями можно в приложении Amnezia.", c.Proto)
 	case c.Managed() && err != nil:
 		// Место № 4 задания A1: таблица сохраняет прежние данные (решение
 		// FIX-VIEW не отменяется), но молчать об этом нельзя — иначе
@@ -101,7 +108,7 @@ func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err e
 	case err != nil:
 		v.Status = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", c.Proto, err.Error())
 	case !existed:
-		v.Status = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой утилите — только просмотр.", c.Proto)
+		v.Status = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой программе — только просмотр.", c.Proto)
 	default:
 		v.Status = fmt.Sprintf("Пользователей: %d — только просмотр: управление для протокола %s не поддерживается.", len(clients), c.Proto)
 	}

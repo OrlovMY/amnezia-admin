@@ -1445,9 +1445,14 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	addBtn.Importance = widget.HighImportance
 	u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn = refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn
 
-	top := container.NewBorder(nil, nil,
-		container.NewHBox(server, widget.NewLabel("Протокол:"), u.protoSelect),
-		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn),
+	// W2 раунд 2 (UX-01 Р4): список протоколов — отдельной строкой на всю
+	// ширину окна. В одной строке с кнопками поле было 127.9 т., а подписи
+	// W2 доходят до 505 т. — Select усекал их многоточием, и «— только
+	// просмотр» / «— не поддерживается» не было видно. Сторож — TestProtoLabelFits.
+	top := container.NewVBox(
+		container.NewBorder(nil, nil, server,
+			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
+		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
 }

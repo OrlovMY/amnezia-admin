@@ -41,7 +41,11 @@ func defaultContainer(cs []core.Container) core.Container {
 	return cs[0]
 }
 
-const notSup = " — не поддерживается этой программой"
+const (
+	viewOnly = " — только просмотр"
+	noList   = " — не поддерживается, пользователей не показать"
+	notSup   = " — не поддерживается" // общий корень двух подписей неподдерживаемых
+)
 
 func TestW2DiscoveryTable(t *testing.T) {
 	all16 := []string{"amnezia-awg", "amnezia-wireguard", "amnezia-awg2", "amnezia-xray", "amnezia-openvpn",
@@ -55,27 +59,27 @@ func TestW2DiscoveryTable(t *testing.T) {
 		errHas string
 	}{
 		{"только amnezia-awg", []string{"amnezia-awg"},
-			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG"}}, "amnezia-awg", ""},
+			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}}, "amnezia-awg", ""},
 		{"awg + wireguard (docker отдал wireguard первым)", []string{"amnezia-wireguard", "amnezia-awg"},
-			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG"}, {"amnezia-wireguard", core.SupportYes, "WireGuard"}}, "amnezia-awg", ""},
+			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}, {"amnezia-wireguard", core.SupportYes, "WireGuard"}}, "amnezia-awg", ""},
 		{"только amnezia-xray", []string{"amnezia-xray"},
-			[]w2want{{"amnezia-xray", core.SupportKnownNo, "XRay" + notSup}}, "amnezia-xray", ""},
+			[]w2want{{"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly}}, "amnezia-xray", ""},
 		{"только amnezia-openvpn", []string{"amnezia-openvpn"},
-			[]w2want{{"amnezia-openvpn", core.SupportKnownNo, "OpenVPN" + notSup}}, "amnezia-openvpn", ""},
+			[]w2want{{"amnezia-openvpn", core.SupportKnownNo, "OpenVPN" + viewOnly}}, "amnezia-openvpn", ""},
 		{"amnezia-ipsec, amnezia-torwebsite", []string{"amnezia-torwebsite", "amnezia-ipsec"},
-			[]w2want{{"amnezia-ipsec", core.SupportKnownNo, "IKEv2" + notSup}, {"amnezia-torwebsite", core.SupportKnownNo, "Tor site" + notSup}}, "amnezia-ipsec", ""},
+			[]w2want{{"amnezia-ipsec", core.SupportKnownNo, "IPsec" + viewOnly}, {"amnezia-torwebsite", core.SupportKnownNo, "Website in Tor network" + noList}}, "amnezia-ipsec", ""},
 		{"старые имена amnezia-ikev2, amnezia-tor", []string{"amnezia-tor", "amnezia-ikev2"},
-			[]w2want{{"amnezia-ikev2", core.SupportKnownNo, "IKEv2" + notSup}, {"amnezia-tor", core.SupportKnownNo, "Tor site" + notSup}}, "amnezia-ikev2", ""},
+			[]w2want{{"amnezia-ikev2", core.SupportKnownNo, "IPsec" + viewOnly}, {"amnezia-tor", core.SupportKnownNo, "Website in Tor network" + viewOnly}}, "amnezia-ikev2", ""},
 		{"amnezia-foo", []string{"amnezia-foo"},
 			[]w2want{{"amnezia-foo", core.SupportUnknown, "незнакомый контейнер amnezia-foo"}}, "amnezia-foo", ""},
 		{"amnezia-awg2 (до PR-W3)", []string{"amnezia-awg2"},
-			[]w2want{{"amnezia-awg2", core.SupportKnownNo, "AmneziaWG 2" + notSup}}, "amnezia-awg2", ""},
+			[]w2want{{"amnezia-awg2", core.SupportKnownNo, "AmneziaWG" + viewOnly}}, "amnezia-awg2", ""},
 		{"пусто", nil, nil, "", "контейнеры Amnezia на сервере не найдены"},
 		// «только остановленные» — вне W2: docker ps -a вынесен после релиза
 		// (Р3-5). Вместо этой строки — все 16 типов разом: каждый опознан.
 		{"все 16 типов", all16, nil, "amnezia-awg", ""},
 		{"чужие контейнеры вместе с amnezia", []string{"nginx", "amnezia-xray", "portainer", "amnezia-awg"},
-			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG"}, {"amnezia-xray", core.SupportKnownNo, "XRay" + notSup}}, "amnezia-awg", ""},
+			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}, {"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly}}, "amnezia-awg", ""},
 	} {
 		t.Run(c.set, func(t *testing.T) {
 			srv, sess, cs, err := w2find(t, c.names)
@@ -155,7 +159,58 @@ func TestW2ThreeStatesDistinct(t *testing.T) {
 	if labels[core.SupportYes] == labels[core.SupportKnownNo] || labels[core.SupportKnownNo] == labels[core.SupportUnknown] {
 		t.Errorf("подписи совпали: %v", labels)
 	}
-	if !strings.Contains(labels[core.SupportUnknown], "amnezia-foo") || strings.Contains(labels[core.SupportUnknown], notSup) {
+	if !strings.Contains(labels[core.SupportUnknown], "amnezia-foo") || strings.Contains(labels[core.SupportUnknown], notSup) || strings.Contains(labels[core.SupportUnknown], viewOnly) {
 		t.Errorf("незнакомый подписан как известный: %q", labels[core.SupportUnknown])
+	}
+}
+
+// TestW2FourLabels — UX-01 Р1: ЧЕТЫРЕ подписи — поддерживается / только
+// просмотр (каталог известен, список читается) / не поддерживается,
+// пользователей не показать (каталога нет) / незнакомый. Доезд — через
+// FindContainers; «только просмотр» только там, где список действительно
+// читается (LoadClientsView без ErrContainerDirUnknown).
+func TestW2FourLabels(t *testing.T) {
+	_, sess, cs, err := w2find(t, []string{"amnezia-awg", "amnezia-xray", "amnezia-mtproxy", "amnezia-foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"amnezia-awg":     "AmneziaWG (старый)",
+		"amnezia-xray":    "XRay — только просмотр",
+		"amnezia-mtproxy": "MTProxy (Telegram) — не поддерживается, пользователей не показать",
+		"amnezia-foo":     "незнакомый контейнер amnezia-foo",
+	}
+	seen := map[string]bool{}
+	for _, c := range cs {
+		l := ProtoLabel(c)
+		if l != want[c.Name] {
+			t.Errorf("%s: %q, ожидалось %q", c.Name, l, want[c.Name])
+		}
+		if seen[l] {
+			t.Errorf("подпись %q повторяется", l)
+		}
+		seen[l] = true
+		_, _, lerr := sess.LoadClientsView(&c)
+		if strings.HasSuffix(l, "— только просмотр") && errors.Is(lerr, core.ErrContainerDirUnknown) {
+			t.Errorf("%s: «только просмотр», а список не читается", c.Name)
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("подписей %d из 4", len(seen))
+	}
+}
+
+// TestW2NoDirStatus — UX-01 Р2: протокол без известного каталога — статус
+// говорит, что список НЕ показан и почему, а не «пользователей нет».
+func TestW2NoDirStatus(t *testing.T) {
+	_, sess, cs, err := w2find(t, []string{"amnezia-mtproxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients, existed, lerr := sess.LoadClientsView(&cs[0])
+	v := ViewState(cs[0], clients, existed, lerr)
+	want := "MTProxy (Telegram) установлен на сервере, но эта программа не знает, где он хранит пользователей, поэтому список не показан. Управлять его пользователями можно в приложении Amnezia."
+	if v.Status != want || len(clients) != 0 || v.CanManage {
+		t.Errorf("статус: %q", v.Status)
 	}
 }

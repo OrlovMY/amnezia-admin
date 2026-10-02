@@ -181,8 +181,12 @@ func pad(s string, n int) string {
 // run() — свой stdout io.Writer, чтобы TestNonTTYUnknownHostNeedsHostkey мог
 // перехватить вывод подкоманды list без чтения реального os.Stdout.
 func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEntry, error) {
+	if c.Support == core.SupportUnknown {
+		// QA раунд 1: незнакомый — не «протокол»
+		return nil, fmt.Errorf("незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет", c.Name)
+	}
 	if !c.Managed() {
-		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG и WireGuard)", c.Title())
+		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG (старый) и WireGuard)", c.Title())
 	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
@@ -664,7 +668,7 @@ func interactive() (code int) {
 			}
 		case "3":
 			if !cur.Managed() {
-				printErr(fmt.Errorf("удаление пользователей для %s не поддерживается этой утилитой", cur.Title()))
+				printErr(fmt.Errorf("удаление пользователей для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			// listUsers возвращает список в том же (отсортированном) порядке,
@@ -696,7 +700,7 @@ func interactive() (code int) {
 			}
 		case "6":
 			if !cur.Managed() {
-				printErr(fmt.Errorf("переименование пользователей для %s не поддерживается этой утилитой", cur.Title()))
+				printErr(fmt.Errorf("переименование пользователей для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)
@@ -724,7 +728,7 @@ func interactive() (code int) {
 			}
 		case "7":
 			if !cur.Managed() {
-				printErr(fmt.Errorf("управление пользователями для %s не поддерживается этой утилитой", cur.Title()))
+				printErr(fmt.Errorf("управление пользователями для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)
@@ -772,7 +776,7 @@ func interactive() (code int) {
 			}
 		case "8":
 			if !cur.Managed() {
-				printErr(fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой утилитой", cur.Title()))
+				printErr(fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой программой", cur.Title()))
 				break
 			}
 			clients, err := listUsers(os.Stdout, sess, cur)

@@ -208,9 +208,14 @@ const amneziaClientRevision = "amnezia-client dev 94b51df"
 // Dir — каталог, если известен (прежний список программы; у awg2 — по
 // исходникам, PR-W1); "" — не известен, внутрь не заходим.
 //
-// Proto — подпись для человека. Для типов из прежнего списка — прежняя
-// подпись программы; для новых — наша формулировка, НЕ сверенная с
-// containerHumanNames [ПРИНЯТО, отметка для UX-01].
+// Proto — человеческое имя ДОСЛОВНО из amnezia-client 94b51df
+// (решение ядра, раунд 2 W2): containerHumanNames в
+// client/core/utils/containers/containerUtils.cpp:63–84 — их владелец видит
+// в приложении Amnezia. Исключение — Awg (уточнение ядра к п.5, QA-01 по
+// awgProtocolConfig.cpp:433–439): клиент зовёт awg2 «AmneziaWG» и дописывает
+// версию суффиксом (это сделает W3: «AmneziaWG (версия 3.1)»), поэтому
+// amnezia-awg — «AmneziaWG (старый)»; так они различимы на одном сервере.
+// W3 обязан дать те же имена. Сверка — TestContainerHumanNames.
 type containerType struct {
 	Enum    string
 	Names   []string
@@ -226,28 +231,32 @@ type containerType struct {
 // FindContainers упорядочивает найденное, и протокол по умолчанию (первый
 // поддерживаемый) не зависит от порядка вывода docker ps (Р2-2).
 var containerTypes = []containerType{
-	{"Awg", []string{"amnezia-awg"}, "/opt/amnezia/awg", "AmneziaWG", SupportYes, ""},
+	{"Awg", []string{"amnezia-awg"}, "/opt/amnezia/awg", "AmneziaWG (старый)", SupportYes, ""},
 	{"WireGuard", []string{"amnezia-wireguard"}, "/opt/amnezia/wireguard", "WireGuard", SupportYes, ""},
-	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg, а не угаданный
-	// по суффиксу /opt/amnezia/awg2 (PR-W1). Управление — в PR-W3.
-	{"Awg2", []string{"amnezia-awg2"}, "/opt/amnezia/awg", "AmneziaWG 2", SupportKnownNo, ""},
+	// amnezia-awg2 (AWG2 и AWG3): каталог /opt/amnezia/awg (PR-W1, по
+	// исходникам). Управление — в PR-W3.
+	{"Awg2", []string{"amnezia-awg2"}, "/opt/amnezia/awg", "AmneziaWG", SupportKnownNo, ""},
 	{"Xray", []string{"amnezia-xray"}, "/opt/amnezia/xray", "XRay", SupportKnownNo, ""},
 	{"OpenVpn", []string{"amnezia-openvpn"}, "/opt/amnezia/openvpn", "OpenVPN", SupportKnownNo, ""},
-	{"ShadowSocks", []string{"amnezia-shadowsocks"}, "/opt/amnezia/shadowsocks", "OpenVPN+ShadowSocks", SupportKnownNo, ""},
-	{"Cloak", []string{"amnezia-openvpn-cloak"}, "/opt/amnezia/openvpn-cloak", "OpenVPN+Cloak", SupportKnownNo, ""},
-	// Ipsec: по правилу — amnezia-ipsec; amnezia-ikev2 — имя из прежнего
-	// списка программы, держим синонимом. Каталог прежнего списка был
-	// /opt/amnezia/ikev2 — для имени amnezia-ipsec он не подтверждён, поэтому
-	// у типа каталога нет [ПРИНЯТО].
-	{"Ipsec", []string{"amnezia-ipsec", "amnezia-ikev2"}, "", "IKEv2", SupportKnownNo, "/opt/amnezia/ikev2"},
-	{"SSXray", []string{"amnezia-ssxray"}, "", "Shadowsocks (XRay)", SupportKnownNo, ""},
-	{"TorWebSite", []string{"amnezia-torwebsite", "amnezia-tor"}, "", "Tor site", SupportKnownNo, "/opt/amnezia/tor"},
-	{"Dns", []string{"amnezia-dns"}, "/opt/amnezia/dns", "DNS", SupportKnownNo, ""},
-	{"Sftp", []string{"amnezia-sftp"}, "/opt/amnezia/sftp", "SFTP", SupportKnownNo, ""},
-	{"Socks5Proxy", []string{"amnezia-socks5proxy"}, "", "SOCKS5 proxy", SupportKnownNo, ""},
-	{"MtProxy", []string{"amnezia-mtproxy"}, "", "MTProxy", SupportKnownNo, ""},
-	{"Telemt", []string{"amnezia-telemt"}, "", "Telemt", SupportKnownNo, ""},
-	{"TProxy", []string{"amnezia-tproxy"}, "", "TProxy", SupportKnownNo, ""},
+	{"ShadowSocks", []string{"amnezia-shadowsocks"}, "/opt/amnezia/shadowsocks", "OpenVPN over SS", SupportKnownNo, ""},
+	// Cloak: каталог /opt/amnezia/cloak по исходникам (usersController.cpp:326
+	// "/opt/amnezia/%1/clientsTable" с containerTypeToString; protocolConstants.h:127),
+	// а не прежний /opt/amnezia/openvpn-cloak (QA раунд 1).
+	{"Cloak", []string{"amnezia-openvpn-cloak"}, "/opt/amnezia/cloak", "OpenVPN over Cloak", SupportKnownNo, ""},
+	// Ipsec: каталог /opt/amnezia/ikev2 подтверждён исходниками (там же,
+	// containerTypeToString(Ipsec) = "ikev2"); amnezia-ikev2 — синоним.
+	{"Ipsec", []string{"amnezia-ipsec", "amnezia-ikev2"}, "/opt/amnezia/ikev2", "IPsec", SupportKnownNo, ""},
+	{"SSXray", []string{"amnezia-ssxray"}, "", "Shadowsocks", SupportKnownNo, ""},
+	// TorWebSite: каталог по правилу клиента — /opt/amnezia/torwebsite, на
+	// живом сервере не сверен — «не известен»; синоним amnezia-tor держит
+	// прежний каталог программы.
+	{"TorWebSite", []string{"amnezia-torwebsite", "amnezia-tor"}, "", "Website in Tor network", SupportKnownNo, "/opt/amnezia/tor"},
+	{"Dns", []string{"amnezia-dns"}, "/opt/amnezia/dns", "AmneziaDNS", SupportKnownNo, ""},
+	{"Sftp", []string{"amnezia-sftp"}, "/opt/amnezia/sftp", "SFTP file sharing service", SupportKnownNo, ""},
+	{"Socks5Proxy", []string{"amnezia-socks5proxy"}, "", "SOCKS5 proxy server", SupportKnownNo, ""},
+	{"MtProxy", []string{"amnezia-mtproxy"}, "", "MTProxy (Telegram)", SupportKnownNo, ""},
+	{"Telemt", []string{"amnezia-telemt"}, "", "Telemt (Telegram)", SupportKnownNo, ""},
+	{"TProxy", []string{"amnezia-tproxy"}, "", "TProxy (Telegram WEB)", SupportKnownNo, ""},
 }
 
 // lookupContainer — тип по имени контейнера (с синонимами); rank — место
@@ -473,7 +482,7 @@ func (s *Session) LoadClientsView(c *Container) (clients []ClientEntry, existed 
 // ErrContainerDirUnknown — каталог данных контейнера программе не известен
 // (незнакомый контейнер или тип без подтверждённого каталога): внутрь не
 // заходим и ничего не угадываем.
-var ErrContainerDirUnknown = errors.New("каталог данных этого контейнера программе не известен — внутрь не заходим")
+var ErrContainerDirUnknown = errors.New("каталог данных этого контейнера программе не известен — ничего не прочитано")
 
 // PeerStat — статистика по одному peer'у из `wg show wg0 dump`
 type PeerStat struct {

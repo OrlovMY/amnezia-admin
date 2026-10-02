@@ -20,9 +20,15 @@ func openMainW2(pick int) func(t *testing.T, u *ui, sized func()) osmotrScene {
 			{Name: "amnezia-xray", Dir: "/opt/amnezia/xray", Proto: "XRay", Support: core.SupportKnownNo},
 			{Name: "amnezia-foo", Support: core.SupportUnknown},
 		}
-		u.cur = &u.containers[pick]
+		// Флак TestOsmotrForms (QA раунд 1, воспроизведён 2 из 3 под полной
+		// нагрузкой): при u.cur ДО показа mainScreen зовёт SetSelectedIndex →
+		// refresh() → osmotrNoServer, и асинхронное «Не удалось прочитать…»
+		// затирало статус сцены. Как в osmotrMain — выбор после показа, без
+		// обработчика.
+		u.cur = nil
 		u.canManage = false
 		u.showMainScreen()
+		u.cur = &u.containers[pick]
 		u.protoSelect.Selected = u.protoSelect.Options[pick]
 		u.protoSelect.Refresh()
 		var lerr error
@@ -49,7 +55,7 @@ func init() {
 		}
 	}
 	osmotrForms = append(osmotrForms,
-		osmotrForm{name: "(п) протоколы: незнакомый контейнер", open: openMainW2(2), inventory: inv("Незнакомый контейнер amnezia-foo: программа не знает, что это за протокол, и не заходит в него.")},
-		osmotrForm{name: "(п) протоколы: XRay не поддерживается", open: openMainW2(1), inventory: inv("Протокол XRay не ведёт список пользователей в этой утилите — только просмотр.")},
+		osmotrForm{name: "(п) протоколы: незнакомый контейнер", open: openMainW2(2), inventory: inv("Незнакомый контейнер amnezia-foo: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет. Пользователи этого контейнера здесь не показаны. Если это протокол Amnezia — управляйте им в приложении Amnezia.")},
+		osmotrForm{name: "(п) протоколы: XRay не поддерживается", open: openMainW2(1), inventory: inv("Протокол XRay не ведёт список пользователей в этой программе — только просмотр.")},
 	)
 }

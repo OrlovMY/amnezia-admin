@@ -94,7 +94,7 @@ func TestViewState(t *testing.T) {
 			if spec.managed {
 				want = "Пользователей: 0 · трафик и активность — с момента перезапуска сервера"
 			} else {
-				want = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой утилите — только просмотр.", spec.proto)
+				want = fmt.Sprintf("Протокол %s не ведёт список пользователей в этой программе — только просмотр.", spec.proto)
 			}
 			if v.Status != want {
 				t.Errorf("Status = %q, want %q", v.Status, want)
@@ -140,8 +140,7 @@ func TestProtoLabel(t *testing.T) {
 		t.Errorf("ProtoLabel(managed) = %q, want %q", got, "AmneziaWG")
 	}
 	// PR-W2: было «XRay (только просмотр)»
-	unmanaged := core.Container{Name: "amnezia-xray", Proto: "XRay", Support: core.SupportKnownNo}
-	if got := ProtoLabel(unmanaged); got != "XRay — не поддерживается этой программой" {
+	if got := ProtoLabel(core.Container{Name: "amnezia-xray", Proto: "XRay", Dir: "/opt/amnezia/xray", Support: core.SupportKnownNo}); got != "XRay — только просмотр" {
 		t.Errorf("ProtoLabel(unmanaged) = %q", got)
 	}
 	// PR-W2: незнакомый — голое имя контейнера с пометкой, а не суффикс,

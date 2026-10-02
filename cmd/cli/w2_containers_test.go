@@ -23,8 +23,8 @@ func TestW2PrintContainersThreeStates(t *testing.T) {
 	out := captureStdout(t, func() { printContainers(cs, true) })
 	lines := strings.Split(strings.TrimSpace(stripANSI(out)), "\n")
 	want := []string{
-		"1. AmneziaWG [amnezia-awg]",
-		"2. XRay — не поддерживается этой программой [amnezia-xray]",
+		"1. AmneziaWG (старый) [amnezia-awg]",
+		"2. XRay — только просмотр [amnezia-xray]",
 		"3. незнакомый контейнер amnezia-foo [amnezia-foo]",
 	}
 	if len(lines) != len(want) {
