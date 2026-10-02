@@ -620,31 +620,50 @@ func TestK5ReleaseUnmeasured(t *testing.T) {
 // файла конфигурации на «сервере» отказывает — К5 НЕ ПРОВЕРЕНО «не
 // прочитано», не НЕ ПРОЙДЕН «файлы не согласованы».
 func TestK5ConsistencyUnread(t *testing.T) {
-	f := emptyFake(t, false)
-	f.env.NewBin = newCLI(t)
-	f.exec.Configure(func(s *fakesrv.Server) {
-		s.CommandDelay = 100 * time.Millisecond
-		s.LockHoldFor = 1000 * time.Millisecond
-		s.LockHoldAbort = true
-	})
-	lslocksHook(f, false)
-	inner := f.env.Remote
-	var mu sync.Mutex
-	broken := false
-	f.env.Remote = func(cmd string) (string, error) {
-		mu.Lock()
-		b := broken
-		mu.Unlock()
-		if b && strings.Contains(cmd, " cat /opt/amnezia/awg/wg0.conf") {
-			return "", errors.New("Process exited with status 1")
-		}
-		return inner(cmd)
-	}
-	// отказ включается, когда вторая запись уже прошла: перед consistent
-	f.env.afterSecond = func() { mu.Lock(); broken = true; mu.Unlock() }
-	r := f.env.breakWrite()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "не прочитан") || strings.Contains(r.Detail, "не согласованы") {
-		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	for _, c := range []struct {
+		name string
+		// break — включить отказ чтения, когда вторая запись уже прошла
+		brk func(f *fakeServer, broken *atomic.Bool)
+	}{
+		{"не прочитан файл конфигурации", func(f *fakeServer, broken *atomic.Bool) {
+			inner := f.env.Remote
+			f.env.Remote = func(cmd string) (string, error) {
+				if broken.Load() && strings.Contains(cmd, " cat /opt/amnezia/awg/wg0.conf") {
+					return "", errors.New("Process exited with status 1")
+				}
+				return inner(cmd)
+			}
+			f.env.afterSecond = func() { broken.Store(true) }
+		}},
+		// QA-01 Н10: не прочитан список клиентов (clientsTable), файл
+		// конфигурации читается.
+		{"не прочитан список клиентов", func(f *fakeServer, _ *atomic.Bool) {
+			f.env.afterSecond = func() {
+				f.exec.Configure(func(s *fakesrv.Server) {
+					if s.FailReadTimes == nil {
+						s.FailReadTimes = map[string]int{}
+					}
+					s.FailReadTimes["/opt/amnezia/awg/clientsTable"] = 1000
+				})
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := emptyFake(t, false)
+			f.env.NewBin = newCLI(t)
+			f.exec.Configure(func(s *fakesrv.Server) {
+				s.CommandDelay = 100 * time.Millisecond
+				s.LockHoldFor = 1000 * time.Millisecond
+				s.LockHoldAbort = true
+			})
+			lslocksHook(f, false)
+			var broken atomic.Bool
+			c.brk(f, &broken)
+			r := f.env.breakWrite()
+			if r.Status != NotChecked || !strings.Contains(r.Detail, "пункт 4") || !strings.Contains(r.Detail, "не прочитан") || strings.Contains(r.Detail, "не согласованы") {
+				t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+			}
+		})
 	}
 }
 
