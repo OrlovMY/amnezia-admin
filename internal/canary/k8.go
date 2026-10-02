@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -25,6 +26,18 @@ var k8IDs = []struct{ id, name string }{
 	{"К8.6", "удаление: ключа нет в awg show"},
 	{"К8.7", "второе устройство на AWG2 не теряет связь"},
 	{"К8.8", "формат awg show dump сходится с разбором parsePeerStats"},
+}
+
+var reANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// savedPath — путь к .conf из строки вывода CLI «Конфиг сохранён: <путь>»
+// (без цветовых кодов и подписи); "" — строки не было.
+func savedPath(line string) string {
+	l := strings.TrimSpace(reANSI.ReplaceAllString(line, ""))
+	if i := strings.LastIndex(l, ": "); i >= 0 {
+		l = l[i+2:]
+	}
+	return strings.TrimSpace(l)
 }
 
 // isAWG2Ctr — контейнер amnezia-awg2 (файл awg0.conf).
@@ -61,14 +74,28 @@ func AWGVariantLine(version string, known bool) string {
 	return "проверено на файле без признаков AWG2/AWG3 (версия не определена); AWG2 и AWG3 — только на тестовом стенде"
 }
 
-func answerStatus(a Answer) Status {
-	switch a {
-	case AnswerYes:
+// expectStatus — ответ человека на вопрос «Открывается ли сайт?» против
+// ожидания (UX W3 В2: вопросы без отрицаний, ожидаемое — в скобках, сверяет
+// программа): совпал — ПРОЙДЕН, не совпал — НЕ ПРОЙДЕН, пропуск — НЕ ПРОВЕРЕНО.
+func expectStatus(a Answer, opens bool) Status {
+	switch {
+	case a == AnswerSkip:
+		return NotChecked
+	case (a == AnswerYes) == opens:
 		return Pass
-	case AnswerNo:
-		return Fail
 	}
-	return NotChecked
+	return Fail
+}
+
+// worse — худший из двух исходов шага с двумя вопросами.
+func worse(a, b Status) Status {
+	switch {
+	case a == Fail || b == Fail:
+		return Fail
+	case a == NotChecked || b == NotChecked:
+		return NotChecked
+	}
+	return Pass
 }
 
 // ifaceBlock — секция [Interface] текста (до первой [Peer]).
@@ -178,31 +205,28 @@ func (e *Env) k8() []Result {
 		set(1, Fail, "[Interface] awg0.conf после add изменился — параметры маскировки не должны меняться")
 		return rs
 	}
+	aConf := savedPath(a.conf)
 	set(1, Pass, "ключ в awg show dump; [Interface] awg0.conf байт в байт прежний (без учёта пустых строк перед [Peer])")
 
 	// К8.3 — телефон.
-	set(2, answerStatus(e.Ask("К8.3: импортируйте на телефон в приложение AmneziaWG/Amnezia файл "+a.conf+" и подключитесь. Есть ли связь (открывается сайт)?")), "ответ человека")
+	set(2, expectStatus(e.Ask("К8.3: импортируйте на телефон в приложение AmneziaWG или Amnezia файл "+aConf+" и подключитесь им. Откройте новый сайт. Открывается? (ожидается: да)"), true), "ответ человека")
 
 	// К8.4 — выключить/включить.
 	if r := e.cli(e.NewBin, e.KeyEnv, "toggle", "-name", "canary-k8", "-yes"); r.code != 0 {
 		set(3, Fail, fmt.Sprintf("выключить: код %d: %s", r.code, r.title))
 		return rs
 	}
-	off := e.Ask("К8.4: canary-k8 выключен. Связи на телефоне НЕТ (сайт не открывается)?")
+	off := e.Ask("К8.4: программа ВЫКЛЮЧИЛА пользователя canary-k8. На телефоне откройте новый сайт (не обновляйте старую вкладку). Открывается? (ожидается: нет)")
 	if r := e.cli(e.NewBin, e.KeyEnv, "toggle", "-name", "canary-k8", "-yes"); r.code != 0 {
 		set(3, Fail, fmt.Sprintf("включить: код %d: %s", r.code, r.title))
 		return rs
 	}
-	on := e.Ask("К8.4: canary-k8 включён. Связь на телефоне ЕСТЬ?")
-	st := answerStatus(off)
-	if s2 := answerStatus(on); s2 == Fail || (st == Pass && s2 != Pass) {
-		st = s2
-	}
-	set(3, st, fmt.Sprintf("ответы человека: выключен — нет связи: %s; включён — есть: %s", off, on))
+	on := e.Ask("К8.4: программа ВКЛЮЧИЛА canary-k8 обратно. На телефоне откройте новый сайт. Открывается? (ожидается: да)")
+	set(3, worse(expectStatus(off, false), expectStatus(on, true)), fmt.Sprintf("ответы человека «открывается»: выключен — %s (ждали нет); включён — %s (ждали да)", off, on))
 
 	// К8.5 — перевыпуск. Прежний файл программа перезапишет — копия.
 	oldCopy := ""
-	if b, err := os.ReadFile(a.conf); err == nil {
+	if b, err := os.ReadFile(aConf); err == nil {
 		if dir, err := os.MkdirTemp("", "canary-k8-old"); err == nil {
 			oldCopy = filepath.Join(dir, "canary-k8-old.conf")
 			if os.WriteFile(oldCopy, b, 0o600) != nil {
@@ -215,21 +239,18 @@ func (e *Env) k8() []Result {
 		set(4, Fail, fmt.Sprintf("rekey: код %d: %s", r.code, r.title))
 		return rs
 	}
-	newConf := r.conf
+	newConf := savedPath(r.conf)
 	if newConf == "" {
-		newConf = a.conf
+		newConf = aConf
 	}
-	oldQ := "К8.5: прежний конфиг canary-k8 сохранить не удалось — пропустите вопрос."
+	// Копии прежнего конфига нет — вопрос не задаётся, половина шага
+	// НЕ ПРОВЕРЕНО (а не «пропустите вопрос»).
+	oldA := AnswerSkip
 	if oldCopy != "" {
-		oldQ = "К8.5: импортируйте ПРЕЖНИЙ конфиг " + oldCopy + " и подключитесь. Связи НЕТ?"
+		oldA = e.Ask("К8.5: в приложении на телефоне отключите текущее подключение, импортируйте ПРЕЖНИЙ конфиг " + oldCopy + " и подключитесь им. Откройте новый сайт. Открывается? (ожидается: нет — после перевыпуска старый конфиг работать не должен)")
 	}
-	oldA := e.Ask(oldQ)
-	newA := e.Ask("К8.5: импортируйте НОВЫЙ конфиг " + newConf + " и подключитесь. Связь ЕСТЬ?")
-	st = answerStatus(oldA)
-	if s2 := answerStatus(newA); s2 == Fail || (st == Pass && s2 != Pass) {
-		st = s2
-	}
-	set(4, st, fmt.Sprintf("ответы человека: прежний не подключается: %s; новый подключается: %s", oldA, newA))
+	newA := e.Ask("К8.5: отключите прежний, импортируйте НОВЫЙ конфиг " + newConf + " и подключитесь им. Откройте новый сайт. Открывается? (ожидается: да)")
+	set(4, worse(expectStatus(oldA, false), expectStatus(newA, true)), fmt.Sprintf("ответы человека «открывается»: прежний — %s (ждали нет%s); новый — %s (ждали да)", oldA, map[bool]string{true: "", false: "; копия прежнего конфига не сделана, вопрос не задан"}[oldCopy != ""], newA))
 
 	// К8.6 — удаление.
 	m, err = e.names()
@@ -255,7 +276,7 @@ func (e *Env) k8() []Result {
 	}
 
 	// К8.7 — второе устройство.
-	set(6, answerStatus(e.Ask("К8.7: второе устройство, подключённое по AmneziaWG 2 пользователем из вопроса К6 (до начала К8.2), всё это время не теряло связь (сайт открывается без переподключения)?")), "ответ человека")
+	set(6, expectStatus(e.Ask("К8.7: второе устройство — то, что вы подключили через приложение Amnezia, когда программа просила добавить пользователя. Сейчас, не переподключая его, откройте на нём новый сайт. Открывается? (ожидается: да)"), true), "ответ человека")
 
 	// К8.8 — формат dump против parsePeerStats.
 	st8, d8 := e.k8Stats()

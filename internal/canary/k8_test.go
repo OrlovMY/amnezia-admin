@@ -3,6 +3,7 @@ package canary
 // PR-W3: К8 на amnezia-awg2 против fakesrv — через собранную программу и SSH.
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -31,25 +32,72 @@ const k8AWG3 = "Jc = 4\nS3 = 15\nH1 = 100-200\nHeaderProtectionKey = hpk\nRandom
 // шаги на устройствах — по ответу человека: да → ПРОЙДЕН, нет → НЕ ПРОЙДЕН,
 // пропуск → НЕ ПРОВЕРЕНО. Вариант AWG назван.
 func TestK8OnFakesrv(t *testing.T) {
+	// expected — ответ «как ожидается» по подсказке в скобках вопроса.
+	expected := func(q string) Answer {
+		if strings.Contains(q, "(ожидается: нет") {
+			return AnswerNo
+		}
+		return AnswerYes
+	}
+	flip := func(a Answer) Answer {
+		if a == AnswerYes {
+			return AnswerNo
+		}
+		return AnswerYes
+	}
+	type want struct{ k3, k4, k5, k7 Status }
 	for _, c := range []struct {
-		ans  Answer
-		want Status
-	}{{AnswerYes, Pass}, {AnswerNo, Fail}, {AnswerSkip, NotChecked}} {
-		t.Run(c.ans.String(), func(t *testing.T) {
+		name string
+		ask  func(string) Answer
+		w    want
+	}{
+		{"как ожидается", expected, want{Pass, Pass, Pass, Pass}},
+		{"наоборот", func(q string) Answer { return flip(expected(q)) }, want{Fail, Fail, Fail, Fail}},
+		// UX W3 В2: «да» на «Открывается?» у выключенного и у прежнего —
+		// провал; знак держит этот случай.
+		{"всегда да", func(string) Answer { return AnswerYes }, want{Pass, Fail, Fail, Pass}},
+		{"всегда нет", func(string) Answer { return AnswerNo }, want{Fail, Fail, Fail, Fail}},
+		{"пропуск", func(string) Answer { return AnswerSkip }, want{NotChecked, NotChecked, NotChecked, NotChecked}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			f := emptyFakeOn(t, awg2Server(k8AWG3), awg2Ctr(), false)
 			f.env.NewBin = newCLI(t)
-			f.env.Ask = func(string) Answer { return c.ans }
+			var qs []string
+			f.env.Ask = func(q string) Answer { qs = append(qs, q); return c.ask(q) }
 			rs := f.env.k8()
-			if len(rs) != 8 {
-				t.Fatalf("шагов К8 %d, ждали ровно 8", len(rs))
+			// QA W3 M2: набор ID шагов, а не их число.
+			var got []string
+			for _, r := range rs {
+				got = append(got, r.ID)
 			}
-			for i, r := range rs {
-				want := c.want
-				if i == 0 || i == 1 || i == 5 || i == 7 {
-					want = Pass
+			if strings.Join(got, " ") != "К8.1 К8.2 К8.3 К8.4 К8.5 К8.6 К8.7 К8.8" {
+				t.Fatalf("шаги К8: %v", got)
+			}
+			ws := map[string]Status{"К8.1": Pass, "К8.2": Pass, "К8.3": c.w.k3, "К8.4": c.w.k4, "К8.5": c.w.k5, "К8.6": Pass, "К8.7": c.w.k7, "К8.8": Pass}
+			for _, r := range rs {
+				if r.Status != ws[r.ID] {
+					t.Errorf("%s %s: %s (%s), ждали %s", r.ID, r.Name, r.Status, r.Detail, ws[r.ID])
 				}
-				if r.Status != want {
-					t.Errorf("%s %s: %s (%s), ждали %s", r.ID, r.Name, r.Status, r.Detail, want)
+			}
+			// названные человеку файлы существуют (раунд 2: раньше вместо
+			// пути называлась строка-подсказка CLI)
+			for _, q := range qs {
+				for _, pre := range []string{"файл ", "ПРЕЖНИЙ конфиг ", "НОВЫЙ конфиг "} {
+					if i := strings.Index(q, pre); i >= 0 && c.name == "как ожидается" {
+						p := q[i+len(pre):]
+						p = p[:strings.Index(p, " и подключитесь")]
+						if _, err := os.Stat(p); err != nil {
+							t.Errorf("в вопросе назван несуществующий файл %q: %s", p, q)
+						}
+					}
+				}
+			}
+			for _, q := range qs {
+				if strings.Contains(q, "НЕТ?") || strings.Contains(q, "ЕСТЬ?") || strings.Contains(q, "К6") || strings.Contains(q, "К8.2") {
+					t.Errorf("вопрос с отрицанием или ссылкой на номер шага: %s", q)
+				}
+				if !strings.Contains(q, "(ожидается: ") {
+					t.Errorf("вопрос без ожидаемого ответа: %s", q)
 				}
 			}
 			if !strings.Contains(rs[0].Detail, "AmneziaWG (версия 3.1)") || !strings.Contains(rs[0].Detail, "проверено на AWG3; AWG2 — только на тестовом стенде") {
@@ -59,6 +107,23 @@ func TestK8OnFakesrv(t *testing.T) {
 				t.Errorf("К8.1 напечатал значения параметров: %s", rs[0].Detail)
 			}
 		})
+	}
+}
+
+// TestExpectStatus — таблица знака: ответ против ожидания.
+func TestExpectStatus(t *testing.T) {
+	for _, c := range []struct {
+		a     Answer
+		opens bool
+		want  Status
+	}{
+		{AnswerYes, true, Pass}, {AnswerNo, true, Fail},
+		{AnswerYes, false, Fail}, {AnswerNo, false, Pass},
+		{AnswerSkip, true, NotChecked}, {AnswerSkip, false, NotChecked},
+	} {
+		if got := expectStatus(c.a, c.opens); got != c.want {
+			t.Errorf("ответ %s, ждали «открывается»=%v: %s, ждали %s", c.a, c.opens, got, c.want)
+		}
 	}
 }
 

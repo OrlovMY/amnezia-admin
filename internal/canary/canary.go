@@ -784,8 +784,15 @@ func (e *Env) cli(bin string, env []string, args ...string) cliRun {
 		r.errText = err.Error()
 	}
 	r.title = oneLine(firstLine(se.String()))
+	// W3 раунд 2: строка «Конфиг сохранён: <путь>» главнее прочих строк с
+	// «.conf» (подсказка «Импорт → выбрать .conf» стоит ниже и раньше
+	// перекрывала путь — К8.5 не мог скопировать прежний конфиг).
+	saved := false
 	for _, l := range strings.Split(so.String(), "\n") {
-		if strings.Contains(l, ".conf") {
+		switch {
+		case strings.Contains(l, "Конфиг сохранён: "):
+			r.conf, saved = strings.TrimSpace(l), true
+		case !saved && strings.Contains(l, ".conf"):
 			r.conf = strings.TrimSpace(l)
 		}
 	}
@@ -853,7 +860,7 @@ func (e *Env) k3() Result {
 	}
 	// удаление — после вопросов, чтобы человек успел проверить подключение
 	ans1 := e.Ask("К3: откройте приложение Amnezia и обновите список пользователей этого сервера. Есть ли там «canary-k3r» и совпадает ли список с программой?")
-	ans2 := e.Ask("К3: импортируйте в клиент AmneziaWG файл " + conf + " и подключитесь. Работает ли подключение (открывается сайт)?")
+	ans2 := e.Ask("К3: импортируйте в клиент AmneziaWG файл " + savedPath(conf) + " и подключитесь. Работает ли подключение (открывается сайт)?")
 	d := e.cli(e.NewBin, e.KeyEnv, "del", "-name", "canary-k3r", "-yes")
 	if d.code != 0 {
 		return Result{Status: Fail, Detail: "удалить: код " + strconv.Itoa(d.code) + ": " + d.title}
