@@ -36,6 +36,8 @@ var testSeen = time.Date(2026, 9, 22, 12, 30, 0, 0, time.Local)
 const (
 	wantMenuCopyValue   = "Копировать значение"
 	wantMenuCopyRow     = "Копировать строку"
+	wantMenuShowQR      = "Показать QR"
+	wantMenuSaveConfig  = "Сохранить конфигурацию…"
 	wantStatusCopiedOne = "Значение скопировано в буфер обмена"
 )
 
@@ -69,9 +71,13 @@ func TestCellMenuCopiesValueAndRow(t *testing.T) {
 	if m == nil {
 		t.Fatal("контекстное меню ячейки не построено")
 	}
-	if len(m.Items) != 2 {
-		t.Fatalf("в меню %d пунктов, ожидалось 2 (%q и %q)", len(m.Items),
-			wantMenuCopyValue, wantMenuCopyRow)
+	if len(m.Items) != 4 {
+		t.Fatalf("в меню %d пунктов, ожидалось 4 (%q, %q, %q, %q)", len(m.Items),
+			wantMenuCopyValue, wantMenuCopyRow, wantMenuShowQR, wantMenuSaveConfig)
+	}
+	if m.Items[2].Label != wantMenuShowQR || m.Items[3].Label != wantMenuSaveConfig {
+		t.Fatalf("подписи пунктов конфига: %q, %q; ожидались %q и %q",
+			m.Items[2].Label, m.Items[3].Label, wantMenuShowQR, wantMenuSaveConfig)
 	}
 	// Ожидания ЛИТЕРАЛЬНЫЕ (ревью QA-01). Сверка с guiview.MenuCopyValue
 	// брала бы ожидание из того же места, откуда строится продукт: опечатка
@@ -166,7 +172,7 @@ func TestSecondaryTapShowsMenu(t *testing.T) {
 		}
 	})
 	all := strings.Join(shown, "|")
-	for _, want := range []string{wantMenuCopyValue, wantMenuCopyRow} {
+	for _, want := range []string{wantMenuCopyValue, wantMenuCopyRow, wantMenuShowQR, wantMenuSaveConfig} {
 		if !strings.Contains(all, want) {
 			t.Errorf("во всплывающем меню нет пункта %q; показаны: %q", want, all)
 		}

@@ -115,7 +115,7 @@ func shownAndCopied(t *testing.T, u *ui, name string) (shown, copied string) {
 		cell := newTableCell()
 		u.table.UpdateCell(widget.TableCellID{Row: row, Col: trafficCol}, cell)
 		m := u.cellMenu(widget.TableCellID{Row: row, Col: trafficCol})
-		if m == nil || len(m.Items) != 2 {
+		if m == nil || len(m.Items) != 4 {
 			t.Fatalf("строка %q: меню ячейки не построено", name)
 		}
 		m.Items[1].Action()
