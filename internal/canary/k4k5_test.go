@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"amnezia-admin/internal/writeoutcome"
 )
 
 // TestK4TmpCollisionIsRace — доезд: fakesrv делит прежнюю запись на
@@ -149,5 +151,44 @@ func TestK5MissesReportAttempts(t *testing.T) {
 	}
 	if !strings.Contains(r.Detail, "попыток 5 из 5, застали запись под замком: 0") || !strings.Contains(r.Detail, "ни одна попытка") {
 		t.Errorf("отчёт: %s", r.Detail)
+	}
+}
+
+// TestJudgeK5Second — решение ядра 02.10: три исхода второй записи и
+// «изменили» без изменения оборванной записи (и без сведений о нём).
+func TestJudgeK5Second(t *testing.T) {
+	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
+	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
+	changed := cliRun{code: 1, title: chg.Title}
+	for _, c := range []struct {
+		name   string
+		r      cliRun
+		landed landedState
+		want   Status
+	}{
+		{"ждёт", cliRun{}, landedNo, Pass},
+		{"занято", cliRun{code: 1, title: bsy.Title}, landedNo, Pass},
+		{"оборванная завершилась → CAS", changed, landedYes, Pass},
+		{"CAS без изменения оборванной", changed, landedNo, Fail},
+		{"CAS, завершение не узнать", changed, landedUnknown, NotChecked},
+		{"иной отказ", cliRun{code: 1, title: "что-то ещё"}, landedYes, Fail},
+	} {
+		if got, why := judgeK5Second(c.r, c.landed); got != c.want {
+			t.Errorf("%s: %s (%s), ждали %s", c.name, got, why, c.want)
+		}
+	}
+}
+
+// TestK5CutWriteLanded — доезд исхода «оборванная завершилась → CAS»:
+// fakesrv доводит удержанную запись до конца (без LockHoldAbort).
+func TestK5CutWriteLanded(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.CommandDelay = 150 * time.Millisecond
+	f.exec.LockHoldFor = 1500 * time.Millisecond
+	lslocksHook(f)
+	r := f.env.breakWrite()
+	if r.Status != Pass || !strings.Contains(r.Detail, "оборванная запись завершилась") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }

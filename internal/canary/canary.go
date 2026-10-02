@@ -1317,11 +1317,13 @@ func (e *Env) breakWrite() Result {
 	// Попытка удачна, если держатель был в момент обрыва И остался сразу
 	// после него (иначе вторая запись ждать нечего — повторяем).
 	attempts, hits := 0, 0
+	cutName := "" // оборванная запись последнего попадания
 	var holders []string
 	known, why := true, ""
 	for attempts < k5Attempts {
 		attempts++
-		h, k, w, err := e.killUnderLock(fmt.Sprintf("canary-k5a-%d", attempts))
+		name := fmt.Sprintf("canary-k5a-%d", attempts)
+		h, k, w, err := e.killUnderLock(name)
 		if err != nil {
 			return Result{Detail: fmt.Sprintf("первая запись (попытка %d): %v", attempts, err)}
 		}
@@ -1332,6 +1334,7 @@ func (e *Env) breakWrite() Result {
 			continue
 		}
 		hits++
+		cutName = name
 		holders, known, why = e.lockHolders()
 		if !known || len(holders) > 0 {
 			break
@@ -1350,6 +1353,18 @@ func (e *Env) breakWrite() Result {
 	}
 	second := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b")
 	consistent, why := e.consistent()
+	// Решение ядра 02.10: завершилась ли оборванная запись — по
+	// СОДЕРЖИМОМУ (клиент в таблице; consistent сверил таблицу с файлом
+	// конфигурации), не по коду возврата. Таблица не прочитана — неизвестно.
+	landed := landedUnknown
+	if cutName != "" {
+		if m, err := e.names(); err == nil {
+			landed = landedNo
+			if _, ok := m[cutName]; ok {
+				landed = landedYes
+			}
+		}
+	}
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
 	detail := fmt.Sprintf("%s; держатель замка сразу после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s",
 		tries, oneLine(holder), second.code, second.dur.Seconds(), second.title, third.code, why)
@@ -1364,10 +1379,50 @@ func (e *Env) breakWrite() Result {
 		return Result{Detail: detail + " — ни одна попытка не застала запись под замком: ожидание второй записи не проверено"}
 	case len(holders) == 0:
 		return Result{Detail: detail + " — после обрыва замок уже свободен: ожидание второй записи не проверено"}
-	case second.code != 0 && !isBusy(second):
-		return Result{Status: Fail, Detail: detail + " — вторая запись не прошла и не «занято»"}
 	}
-	return Result{Status: Pass, Detail: detail}
+	st, outcome := judgeK5Second(second, landed)
+	return Result{Status: st, Detail: detail + " — " + outcome}
+}
+
+// landedState — завершилась ли оборванная запись на сервере (по
+// содержимому): да / нет / не узнать.
+type landedState int
+
+const (
+	landedUnknown landedState = iota
+	landedNo
+	landedYes
+)
+
+// judgeK5Second — исход второй записи К5 (решение ядра 02.10):
+//   - код 0 — ждала замок и записала: ПРОЙДЕН «ждёт»;
+//   - «занято» — ПРОЙДЕН «занято»;
+//   - «изменили в другом месте» — ПРОЙДЕН, только если оборванная запись
+//     доказанно завершилась на сервере (landedYes); её нет — CAS
+//     необъясним, НЕ ПРОЙДЕН; не узнать — НЕ ПРОВЕРЕНО;
+//   - иное — НЕ ПРОЙДЕН.
+func judgeK5Second(second cliRun, landed landedState) (Status, string) {
+	switch {
+	case second.code == 0:
+		return Pass, "исход: ждёт (вторая запись дождалась замка и записала)"
+	case isBusy(second):
+		return Pass, "исход: занято"
+	case isChanged(second):
+		switch landed {
+		case landedYes:
+			return Pass, "исход: оборванная запись завершилась на сервере → «изменили в другом месте» (сверено по содержимому)"
+		case landedNo:
+			return Fail, "«изменили в другом месте», но изменения оборванной записи на сервере нет — отказ необъясним"
+		}
+		return NotChecked, "«изменили в другом месте», а завершилась ли оборванная запись, узнать не удалось (таблица не прочитана)"
+	}
+	return Fail, "вторая запись не прошла, и это не «ждёт», не «занято» и не «изменили в другом месте»"
+}
+
+// isChanged — «изменили в другом месте» так же, как в К4: код 1 и заголовок.
+func isChanged(r cliRun) bool {
+	c, _ := writeoutcome.TextFor(writeoutcome.Changed)
+	return r.code == 1 && c.Title != "" && r.title == c.Title
 }
 
 // k5Attempts — сколько раз К5 пытается оборвать запись именно под замком.
