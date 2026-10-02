@@ -432,7 +432,9 @@ func TestSudoKey(t *testing.T) {
 		_, err := SudoKey(main, k, "", lookup)
 		if err == nil {
 			t.Errorf("%s без флага: ждали отказ", name)
-		} else if strings.Contains(err.Error(), "pw") {
+			continue
+		}
+		if strings.Contains(err.Error(), "pw") {
 			t.Errorf("%s: секрет в тексте ошибки: %v", name, err)
 		}
 	}
