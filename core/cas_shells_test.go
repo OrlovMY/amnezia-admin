@@ -155,7 +155,7 @@ func writeExec(t *testing.T, p, body string) {
 // суммы). Оболочка «хоста» (dash) разбирает кавычки, как login-shell по SSH.
 func commandTail(t *testing.T, script, label, dir, ww, wt string) string {
 	t.Helper()
-	cmd, err := CASWriteCommand(label, "c", dir, ww, wt)
+	cmd, err := CASWriteCommand(label, "c", dir, curConf, ww, wt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ type scenario struct {
 func casDir(t *testing.T, wg, tbl []byte) string {
 	t.Helper()
 	d := asciiTemp(t)
-	if err := os.WriteFile(filepath.Join(d, "wg0.conf"), wg, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(d, curConf), wg, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if tbl != nil {
@@ -244,8 +244,8 @@ func expect(d string, r shellRun, code int, stderrHas string, wgWant, tblWant []
 	if stderrHas != "" && !strings.Contains(r.stderr, stderrHas) {
 		bad = append(bad, fmt.Sprintf("stderr %q не содержит %q", r.stderr, stderrHas))
 	}
-	if wg, _ := readOpt(d, "wg0.conf"); !bytes.Equal(wg, wgWant) {
-		bad = append(bad, "wg0.conf не тот")
+	if wg, _ := readOpt(d, curConf); !bytes.Equal(wg, wgWant) {
+		bad = append(bad, curConf+" не тот")
 	}
 	tbl, ok := readOpt(d, "clientsTable")
 	if ok != tblPresent || (ok && !bytes.Equal(tbl, tblWant)) {
@@ -276,7 +276,7 @@ func shellScenarios() []scenario {
 		{"запись при верных суммах", func(t *testing.T, rs realShell, script string) []string {
 			d, r := simpleRun(t, rs, script, rs.shimDir(t, "", "", ""), wgOld, tblOld, hOld, hTbl, wgNew, tblNew)
 			bad := expect(d, r, 0, "", wgNew, tblNew, true)
-			for _, n := range []string{"wg0.conf", "clientsTable"} {
+			for _, n := range []string{curConf, "clientsTable"} {
 				if fi, err := os.Stat(filepath.Join(d, n)); err == nil && fi.Mode().Perm()&0o077 != 0 {
 					bad = append(bad, fmt.Sprintf("%s: права %v, ждали без доступа группе и прочим (umask 077)", n, fi.Mode().Perm()))
 				}
@@ -285,7 +285,7 @@ func shellScenarios() []scenario {
 		}},
 		{"устаревшая сумма wg0.conf", func(t *testing.T, rs realShell, script string) []string {
 			d, r := simpleRun(t, rs, script, rs.shimDir(t, "", "", ""), wgOld, tblOld, sum64(wgNew, true), hTbl, wgNew, tblNew)
-			return expect(d, r, 3, "changed: wg0.conf", wgOld, tblOld, true)
+			return expect(d, r, 3, "changed: "+curConf, wgOld, tblOld, true)
 		}},
 		{"устаревшая сумма только clientsTable", func(t *testing.T, rs realShell, script string) []string {
 			d, r := simpleRun(t, rs, script, rs.shimDir(t, "", "", ""), wgOld, tblOld, hOld, sum64(tblNew, true), wgNew, tblNew)
@@ -384,8 +384,8 @@ func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 	if res.code != 0 {
 		bad = append(bad, fmt.Sprintf("запись с маркером: код %d (%s)", res.code, res.stderr))
 	}
-	if got, _ := readOpt(d, "wg0.conf"); !bytes.Equal(got, payload) {
-		bad = append(bad, fmt.Sprintf("wg0.conf после записи с маркером — %d байт вместо %d: данные не дошли", len(got), len(payload)))
+	if got, _ := readOpt(d, curConf); !bytes.Equal(got, payload) {
+		bad = append(bad, fmt.Sprintf(curConf+" после записи с маркером — %d байт вместо %d: данные не дошли", len(got), len(payload)))
 	}
 	if b, _ := os.ReadFile(report); len(bytes.TrimSpace(b)) != 0 {
 		bad = append(bad, fmt.Sprintf("данные видны в /proc/*/cmdline: %q", b))
@@ -415,12 +415,12 @@ func parallelWriters(t *testing.T, rs realShell, script string) []string {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < 50; i++ {
-				cur, _ := readOpt(d, "wg0.conf")
+				cur, _ := readOpt(d, curConf)
 				curT, _ := readOpt(d, "clientsTable")
 				line := []byte(fmt.Sprintf("w%d-%d\n", w, i))
 				next := append(append([]byte{}, cur...), line...)
 				nextT := append(append([]byte{}, curT...), line...)
-				cmd, err := CASWriteCommand(CASLabelApply, "c", d, sum64(cur, true), sum64(curT, true))
+				cmd, err := CASWriteCommand(CASLabelApply, "c", d, curConf, sum64(cur, true), sum64(curT, true))
 				if err != nil {
 					mu.Lock()
 					bad = append(bad, err.Error())
@@ -459,7 +459,7 @@ func parallelWriters(t *testing.T, rs realShell, script string) []string {
 	if len(other) != 0 {
 		bad = append(bad, fmt.Sprintf("коды вне {0, 3} (код: сколько раз): %v", other))
 	}
-	final, _ := readOpt(d, "wg0.conf")
+	final, _ := readOpt(d, curConf)
 	finalT, _ := readOpt(d, "clientsTable")
 	lines := bytes.Count(final, []byte("\n"))
 	if lines != success {
@@ -555,22 +555,41 @@ func TestCASScriptRealShells(t *testing.T) {
 			}
 		}
 	}()
-	for _, rs := range shells {
-		ran := 0
-		defer func(name string, ran *int) { tally = append(tally, fmt.Sprintf("%d в %s", *ran, name)) }(rs.name, &ran)
-		for _, sc := range scen {
-			t.Run(rs.name+"/"+sc.name, func(t *testing.T) {
-				ran++
-				for _, msg := range sc.check(t, rs, script) {
-					t.Errorf("%s %s: %s", shellsMarker, rs.name, msg)
-				}
-			})
-		}
-		for _, msg := range shellsVerdict(rs.name, ran) {
-			t.Errorf("%s %s", shellsMarker, msg)
+	// PR-W1: имя файла конфигурации — аргумент $4 из закрытого списка;
+	// каждый сценарий — для обоих имён (wg0.conf — amnezia-awg и
+	// amnezia-wireguard, awg0.conf — amnezia-awg2).
+	defer func() { curConf = "wg0.conf" }()
+	files := []string{"wg0.conf", "awg0.conf"}
+	if os.Getenv(shellsPlantEnv) != "" {
+		// Дочерний прогон канарейки: посадка проверяет, что вердикт способен
+		// покраснеть, — одного имени файла для этого достаточно, а время
+		// job linux не резиновое (каждый проход — около двух минут).
+		files = files[:1]
+	}
+	for _, cf := range files {
+		curConf = cf
+		for _, rs := range shells {
+			ran := 0
+			name := rs.name + "/" + cf
+			defer func(name string, ran *int) { tally = append(tally, fmt.Sprintf("%d в %s", *ran, name)) }(name, &ran)
+			for _, sc := range scen {
+				t.Run(name+"/"+sc.name, func(t *testing.T) {
+					ran++
+					for _, msg := range sc.check(t, rs, script) {
+						t.Errorf("%s %s: %s", shellsMarker, name, msg)
+					}
+				})
+			}
+			for _, msg := range shellsVerdict(name, ran) {
+				t.Errorf("%s %s", shellsMarker, msg)
+			}
 		}
 	}
 }
+
+// curConf — имя файла конфигурации текущего прохода TestCASScriptRealShells
+// (подтесты идут по очереди, без t.Parallel).
+var curConf = "wg0.conf"
 
 // shellsVerdict — число исполненных сценариев на оболочку ТОЧНО равно
 // shellsWantScenarios: выпавший сценарий — нарушение.

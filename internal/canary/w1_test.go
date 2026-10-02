@@ -4,6 +4,7 @@ package canary
 // amnezia-awg2 — «НЕ ПРИМЕНИМО», файл конфигурации из таблицы.
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -78,5 +79,24 @@ func TestCanaryUsesFamilyFile(t *testing.T) {
 	e := &Env{Ctr: ctr, fam: fam}
 	if got := e.conf(); got != "/opt/amnezia/awg/awg0.conf" {
 		t.Errorf("файл конфигурации на amnezia-awg2: %q", got)
+	}
+}
+
+// TestCanaryPassesContainerToNew — новой версии канарейка передаёт
+// -container проверяемого контейнера; v0.2.0 (флага не знает) — нет.
+func TestCanaryPassesContainerToNew(t *testing.T) {
+	newBin := fakeCLI(t, "fakecli-args")
+	oldBin := fakeCLI(t, "fakecli-args-old")
+	ctr := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg"}
+	e := &Env{Ctr: ctr, NewBin: newBin, OldBin: oldBin, HostKey: "SHA256:x"}
+	e.cli(newBin, nil, "list")
+	e.cli(oldBin, nil, "list")
+	na, _ := os.ReadFile(newBin + ".args")
+	oa, _ := os.ReadFile(oldBin + ".args")
+	if !strings.Contains(string(na), "-container amnezia-awg2") {
+		t.Errorf("новой версии не передан -container: %q", na)
+	}
+	if strings.Contains(string(oa), "-container") {
+		t.Errorf("v0.2.0 передан -container, которого она не знает: %q", oa)
 	}
 }

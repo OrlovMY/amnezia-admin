@@ -342,6 +342,11 @@ func TestMain(m *testing.M) {
 		// заголовок «изменили», но код выхода не тот — не «изменили»
 		os.Stderr.WriteString("Не записано: сервер изменили в другом месте\n")
 		os.Exit(2)
+	case strings.HasPrefix(base, "fakecli-args"):
+		// записывает свои аргументы в файл рядом и «успешно» выходит
+		self, _ := os.Executable()
+		_ = os.WriteFile(self+".args", []byte(strings.Join(os.Args[1:], " ")), 0o600)
+		os.Exit(0)
 	case strings.HasPrefix(base, "fakecli-serial"):
 		os.Exit(serialCLI())
 	}
