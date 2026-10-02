@@ -365,6 +365,7 @@ type k6Window struct {
 	opened              bool
 	before, after       *existingSnap
 	beforeWhy, afterWhy string
+	lockWhy             string // замок не свободен перед К6 — окно не открыто
 }
 
 // plainFields — поля userData, значения которых печатаются (не секреты).
@@ -431,6 +432,77 @@ func tableDiff(ids map[string]string, a, b *existingSnap) (gone, changed []strin
 	return gone, changed
 }
 
+// windowDiff — изменения таблицы в окне К6 (снимки a «до», b «после»).
+// Закрытый список (AU-LOGIC р8 High-5): допустимо только (1) новая запись
+// и (2) у существующей записи ПОЯВИЛОСЬ allowed_ips, равное AllowedIPs её
+// [Peer] в снимке «после», при прочих полях байт в байт прежних — это
+// сведения (info). Пропажа записи — порча, НЕ ПРОЙДЕН (gone). Любое другое
+// изменение — чья правка, не различить (unknown → П0-итог НЕ ПРОВЕРЕНО).
+func windowDiff(ids map[string]string, a, b *existingSnap) (info, unknown, gone []string) {
+	for id := range b.table {
+		if _, ok := a.table[id]; !ok {
+			info = append(info, "в окне К6 появилась запись "+short(id))
+		}
+	}
+	for id := range ids {
+		was, ok := a.table[id]
+		if !ok {
+			continue
+		}
+		got, ok := b.table[id]
+		switch {
+		case !ok:
+			// пропажа клиента — порча, а не «не различить» (QA-01 р9 Н11)
+			gone = append(gone, "запись clientsTable "+short(id)+" пропала (в окне К6)")
+			continue
+		case got == was:
+			continue
+		}
+		if v, ok := addedAllowedIPs(was, got, b.peers[id]); ok {
+			info = append(info, "у записи "+short(id)+" появилось allowed_ips = "+v)
+			continue
+		}
+		unknown = append(unknown, "изменение в окне К6 — чья правка, не различить: запись "+short(id)+", поля: "+fieldDiff(was, got))
+	}
+	sort.Strings(info)
+	return info, unknown, gone
+}
+
+// addedAllowedIPs — got отличается от was ровно появившимся полем
+// allowed_ips (строка), равным AllowedIPs блока [Peer] peer.
+func addedAllowedIPs(was, got, peer string) (string, bool) {
+	var a, b core.ClientEntry
+	if json.Unmarshal([]byte(was), &a) != nil || json.Unmarshal([]byte(got), &b) != nil || a.ClientID != b.ClientID {
+		return "", false
+	}
+	if _, had := a.UserData["allowed_ips"]; had {
+		return "", false
+	}
+	v, ok := b.UserData["allowed_ips"].(string)
+	if !ok || len(b.UserData) != len(a.UserData)+1 {
+		return "", false
+	}
+	for k, x := range a.UserData {
+		y, ok := b.UserData[k]
+		jx, _ := json.Marshal(x)
+		jy, _ := json.Marshal(y)
+		if !ok || string(jx) != string(jy) {
+			return "", false
+		}
+	}
+	want := ""
+	for _, l := range strings.Split(peer, "\n") {
+		if kv := strings.SplitN(l, "=", 2); len(kv) == 2 && strings.TrimSpace(kv[0]) == "AllowedIPs" {
+			want = strings.TrimSpace(kv[1])
+		}
+	}
+	norm := func(s string) string { return strings.ReplaceAll(s, " ", "") }
+	if want == "" || norm(v) != norm(want) {
+		return "", false
+	}
+	return v, true
+}
+
 // existingIntact — П0-итог: каждый клиент из снимка на месте и не изменён.
 // Окно К6 (человек добавлял пользователя в приложении Amnezia, оно
 // переписывает clientsTable): изменение записи внутри окна — сведение;
@@ -452,8 +524,12 @@ func (e *Env) existingIntact() Result {
 		r.Detail = why
 		return r
 	}
-	var bad, info []string
+	var bad, info, unknown []string
 	ids := e.existing.table
+	if e.k6.lockWhy != "" {
+		r.Detail = "замок не свободен перед К6 (" + e.k6.lockWhy + ") — окно К6 не открыто, сверка не выполнялась"
+		return r
+	}
 	if e.k6.opened {
 		switch {
 		case e.k6.before == nil:
@@ -466,11 +542,10 @@ func (e *Env) existingIntact() Result {
 		g, c := tableDiff(ids, e.existing, e.k6.before)
 		bad = append(bad, g...)
 		bad = append(bad, c...)
-		g, c = tableDiff(ids, e.k6.before, e.k6.after)
-		bad = append(bad, g...)
-		for _, x := range c {
-			info = append(info, "приложение Amnezia (окно К6) "+strings.TrimPrefix(x, "запись clientsTable "))
-		}
+		wi, wu, wg := windowDiff(ids, e.k6.before, e.k6.after)
+		bad = append(bad, wg...)
+		info = append(info, wi...)
+		unknown = append(unknown, wu...)
 		g, c = tableDiff(ids, e.k6.after, now)
 		bad = append(bad, g...)
 		bad = append(bad, c...)
@@ -501,8 +576,13 @@ func (e *Env) existingIntact() Result {
 		r.Status, r.Detail = Fail, strings.Join(bad, "; ")+note
 		return r
 	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		r.Detail = strings.Join(unknown, "; ") + note
+		return r
+	}
 	if len(info) > 0 {
-		r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — %s и работающий сервер байт в байт прежние; таблица изменена только приложением Amnezia в окне К6%s", e.existing.count(), e.fam.File, note)
+		r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — %s и работающий сервер байт в байт прежние; в окне К6 только допустимые изменения таблицы%s", e.existing.count(), e.fam.File, note)
 		return r
 	}
 	r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — таблица, %s и работающий сервер байт в байт прежние", e.existing.count(), e.fam.File)

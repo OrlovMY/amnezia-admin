@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"amnezia-admin/core"
 )
 
 // П0-К6 (живой прогон 03.10): приложение Amnezia в окне К6 переписывает
@@ -19,8 +22,61 @@ func appRewrite(t *testing.T, f *fakeServer, id string) {
 	allowedIPs(t, f, id)
 }
 
-// allowedIPs — только дописать записи id поле allowed_ips.
+// adminAllowedIPs — AllowedIPs блока [Peer] администратора (ключ id) в
+// файле конфигурации.
+func adminAllowedIPs(t *testing.T, f *fakeServer, id string) string {
+	t.Helper()
+	raw, _ := f.exec.File(f.env.Ctr.Dir + "/" + f.env.fam.File)
+	for _, l := range strings.Split(peerBlocks(string(raw))[id], "\n") {
+		if kv := strings.SplitN(l, "=", 2); len(kv) == 2 && strings.TrimSpace(kv[0]) == "AllowedIPs" {
+			return strings.TrimSpace(kv[1])
+		}
+	}
+	t.Fatal("AllowedIPs администратора нет")
+	return ""
+}
+
+// allowedIPs — дописать записи id поле allowed_ips, равное AllowedIPs её
+// [Peer] (как приложение Amnezia на живом стенде 03.10).
 func allowedIPs(t *testing.T, f *fakeServer, id string) {
+	v := adminAllowedIPs(t, f, id)
+	editAdmin(t, f, id, func(ud map[string]any) { ud["allowed_ips"] = v })
+}
+
+// foreignAllowedIPs — allowed_ips с чужим значением (не AllowedIPs peer'а).
+func foreignAllowedIPs(t *testing.T, f *fakeServer, id string) {
+	editAdmin(t, f, id, func(ud map[string]any) { ud["allowed_ips"] = "10.99.0.1/32" })
+}
+
+// spoilAdmin — случай аудитора р8: clientName «ИСПОРЧЕНО» и disabled.
+func spoilAdmin(t *testing.T, f *fakeServer, id string) {
+	editAdmin(t, f, id, func(ud map[string]any) { ud["clientName"] = "ИСПОРЧЕНО"; ud["disabled"] = true })
+}
+
+// dropRecord — убрать из clientsTable запись id; [Peer] остаётся (чтобы
+// НЕ ПРОЙДЕН шёл именно от пропажи записи).
+func dropRecord(t *testing.T, f *fakeServer, id string) {
+	t.Helper()
+	p := f.env.Ctr.Dir + "/clientsTable"
+	raw, _ := f.exec.File(p)
+	var tbl, out []map[string]any
+	if err := json.Unmarshal(raw, &tbl); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range tbl {
+		if r["clientId"] != id {
+			out = append(out, r)
+		}
+	}
+	if len(out) != len(tbl)-1 {
+		t.Fatal("записи администратора нет")
+	}
+	b, _ := json.Marshal(out)
+	f.exec.SetFile(p, b)
+}
+
+// editAdmin — правка userData записи id прямо в clientsTable стенда.
+func editAdmin(t *testing.T, f *fakeServer, id string, edit func(map[string]any)) {
 	t.Helper()
 	p := f.env.Ctr.Dir + "/clientsTable"
 	raw, ok := f.exec.File(p)
@@ -34,7 +90,7 @@ func allowedIPs(t *testing.T, f *fakeServer, id string) {
 	hit := false
 	for _, r := range tbl {
 		if r["clientId"] == id {
-			r["userData"].(map[string]any)["allowed_ips"] = "10.8.1.1/32"
+			edit(r["userData"].(map[string]any))
 			hit = true
 		}
 	}
@@ -77,11 +133,31 @@ func TestP0K6Window(t *testing.T) {
 		// «после К6» (таблица им уже снята): отрезок «после К6 → конец».
 		afterK6   func(t *testing.T, f *fakeServer, id string)
 		failAfter bool
-		status       Status
-		want         []string
+		status    Status
+		want      []string
 	}{
 		{name: "в окне К6 — сведение", inK6: appRewrite, status: Pass,
-			want: []string{"сведение", "приложение Amnezia (окно К6)", `allowed_ips: было нет, стало "10.8.1.1/32"`}},
+			want: []string{"сведение", "появилось allowed_ips = ", "появилась запись"}},
+		{name: "в окне К6 чужое allowed_ips — НЕ ПРОВЕРЕНО",
+			inK6:   func(t *testing.T, f *fakeServer, id string) { addAppUser(t, f); foreignAllowedIPs(t, f, id) },
+			status: NotChecked, want: []string{"чья правка, не различить", `allowed_ips: было нет, стало "10.99.0.1/32"`}},
+		{name: "в окне К6 clientName и disabled (аудитор р8) — НЕ ПРОВЕРЕНО",
+			inK6:   func(t *testing.T, f *fakeServer, id string) { addAppUser(t, f); spoilAdmin(t, f, id) },
+			status: NotChecked, want: []string{"чья правка, не различить", `clientName: было "` + adminName + `", стало "ИСПОРЧЕНО"`, "disabled: было нет, стало true"}},
+		{name: "в окне К6 пропала запись (QA-01 р9 Н11) — НЕ ПРОЙДЕН",
+			inK6: func(t *testing.T, f *fakeServer, id string) {
+				// два пользователя приложения минус пропавшая запись: К6
+				// видит «+1» и проходит, итог решает П0-итог
+				addAppUser(t, f)
+				if _, err := f.env.Sess.AddUser(f.env.Ctr, "app-user-2"); err != nil {
+					t.Fatal(err)
+				}
+				dropRecord(t, f, id)
+			},
+			status: Fail, want: []string{"пропала (в окне К6)"}},
+		{name: "в окне К6 allowed_ips и clientName — НЕ ПРОВЕРЕНО",
+			inK6:   func(t *testing.T, f *fakeServer, id string) { appRewrite(t, f, id); spoilAdmin(t, f, id) },
+			status: NotChecked, want: []string{"чья правка, не различить"}},
 		{name: "вне окна — НЕ ПРОЙДЕН",
 			inK6:   func(t *testing.T, f *fakeServer, _ string) { addAppUser(t, f) },
 			atLock: allowedIPs, status: Fail,
@@ -152,6 +228,89 @@ func TestP0K6Window(t *testing.T) {
 				if !strings.Contains(r.Detail, w) {
 					t.Errorf("П0-итог без %q: %s", w, r.Detail)
 				}
+			}
+		})
+	}
+}
+
+// TestP0K6LockBeforeWindow — AU-LOGIC р8 High-5 п. 2: перед окном К6
+// замок /run/lock держит отложенная запись (держатель после К5). Ответ
+// lslocks с держателем идёт через настоящий разбор (lockHoldersFrom).
+// Держатель исчез за время ожидания core.CASOuterTimeout — окно
+// открывается; не исчез или lslocks не ответил — вопрос К6 не задан, К6 и
+// П0-итог НЕ ПРОВЕРЕНО.
+func TestP0K6LockBeforeWindow(t *testing.T) {
+	const held = "rc=0\nCOMMAND PID TYPE PATH\nflock 4242 FLOCK /run/lock/\n"
+	for _, c := range []struct {
+		name   string
+		answer func(call int) (string, error) // ответ на lslocks перед К6, call с 1
+		calls  int
+		slept  bool
+		opened bool
+		status Status
+		want   string
+	}{
+		{"держатель исчез за ожидание", func(n int) (string, error) {
+			if n == 1 {
+				return held, nil
+			}
+			return "rc=0\nCOMMAND PID TYPE PATH\n", nil
+		}, 2, true, true, Pass, "появилось allowed_ips"},
+		{"держатель остался", func(int) (string, error) { return held, nil }, 2, true, false, NotChecked, "замок не свободен перед К6"},
+		{"lslocks не ответил", func(int) (string, error) { return "", errors.New("обрыв связи") }, 2, true, false, NotChecked, "замок не свободен перед К6"},
+		{"свободен сразу", func(int) (string, error) { return "rc=0\nCOMMAND PID TYPE PATH\n", nil }, 1, false, true, Pass, "появилось allowed_ips"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, id := withAdmin(t, true)
+			preflight(t, f)
+			real := f.env.Remote
+			var mu sync.Mutex
+			calls := 0
+			f.env.Remote = func(cmd string) (string, error) {
+				if strings.HasPrefix(cmd, ": k6-lock; ") {
+					mu.Lock()
+					calls++
+					n := calls
+					mu.Unlock()
+					return c.answer(n)
+				}
+				return real(cmd)
+			}
+			var slept []time.Duration
+			f.env.Sleep = func(d time.Duration) { slept = append(slept, d) }
+			asked := false
+			f.env.Ask = func(q string) Answer {
+				if strings.HasPrefix(q, "К6:") {
+					asked = true
+					appRewrite(t, f, id)
+				}
+				return AnswerYes
+			}
+			rs, err := Run(f.env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := byID(rs)
+			if calls != c.calls {
+				t.Errorf("проверок замка перед К6 %d, ждали %d", calls, c.calls)
+			}
+			wantSleep := time.Duration(core.CASOuterTimeout) * time.Second
+			if c.slept != (len(slept) == 1 && slept[0] == wantSleep) || (!c.slept && len(slept) > 0) {
+				t.Errorf("ожидание: %v, ждали %v (%v)", slept, c.slept, wantSleep)
+			}
+			if asked != c.opened {
+				t.Fatalf("вопрос К6 задан: %v, ждали %v", asked, c.opened)
+			}
+			k6, p0 := m["К6"], m["П0-итог"]
+			if c.opened {
+				if k6.Status != Pass {
+					t.Fatalf("К6: %+v", k6)
+				}
+			} else if k6.Status != NotChecked || !strings.Contains(k6.Detail, c.want) {
+				t.Fatalf("К6: %+v", k6)
+			}
+			if p0.Status != c.status || !strings.Contains(p0.Detail, c.want) {
+				t.Fatalf("П0-итог: %v: %s", p0.Status, p0.Detail)
 			}
 		})
 	}

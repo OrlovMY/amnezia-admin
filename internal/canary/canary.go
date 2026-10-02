@@ -112,9 +112,12 @@ type Env struct {
 	// ServerIP — значение -server-ip, уже сверенное с адресом из ключа
 	// (CheckServerIP). Задан — П0 допускает до MaxExisting существующих
 	// клиентов и сверяет их в П0-итог; "" — сервер обязан быть пуст.
-	ServerIP    string
-	existing    *existingSnap
-	k6          k6Window // снимки существующих клиентов вокруг окна К6
+	ServerIP string
+	existing *existingSnap
+	k6       k6Window // снимки существующих клиентов вокруг окна К6
+	// Sleep — ожидание перед повторной проверкой замка в К6 (nil —
+	// time.Sleep).
+	Sleep       func(time.Duration)
 	preflightOK bool // Preflight пройдена для этого Env (SEC П-2)
 	Out         io.Writer
 
@@ -1851,6 +1854,44 @@ func (e *Env) consistent() (consState, string) {
 	return consYes, "согласованы"
 }
 
+// k6LockCmd — lslocksCmd перед окном К6 (метка — только для журнала и
+// тестов; оболочке это пустая команда).
+const k6LockCmd = ": k6-lock; " + lslocksCmd
+
+// k6LockFree — замок /run/lock свободен перед К6: успешный ответ lslocks
+// без держателей. Есть держатель или ответа нет — ждём
+// core.CASOuterTimeout (дольше запись замок не держит) и спрашиваем ещё
+// раз. Не доказано свободно — false и почему.
+func (e *Env) k6LockFree() (string, bool) {
+	check := func() (string, bool) {
+		out, err := e.Remote(k6LockCmd)
+		if err != nil {
+			return "lslocks не выполнился: " + err.Error(), false
+		}
+		h, known, why := lockHoldersFrom(out)
+		switch {
+		case !known:
+			return why, false
+		case len(h) > 0:
+			return "замок держит: " + strings.Join(h, "; "), false
+		}
+		return "", true
+	}
+	if _, ok := check(); ok {
+		return "", true
+	}
+	sleep := e.Sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	sleep(time.Duration(core.CASOuterTimeout) * time.Second)
+	why, ok := check()
+	if !ok {
+		why += fmt.Sprintf(" (и после ожидания %d с)", core.CASOuterTimeout)
+	}
+	return why, ok
+}
+
 // amneziaApp — К6: план добавления построен, в приложении Amnezia добавлен
 // пользователь, план применён — ожидается «изменён другим», пользователь из
 // приложения на месте.
@@ -1868,6 +1909,13 @@ func (e *Env) amneziaApp() Result {
 	// сразу после «да» отделяет его правки от наших (П0-итог).
 	e.k6 = k6Window{}
 	if e.existing != nil {
+		// AU-LOGIC р8 High-5: отложенная запись (держатель замка после К5)
+		// могла бы попасть в окно К6 и сойти за правку приложения. Окно
+		// открывается только при доказанно свободном замке.
+		if why, free := e.k6LockFree(); !free {
+			e.k6.lockWhy = why
+			return Result{Detail: "замок не свободен перед К6 (" + why + ") — окно К6 не открыто, вопрос не задан"}
+		}
 		e.k6.before, e.k6.beforeWhy = e.takeSnap()
 	}
 	if e.Ask("К6: добавьте сейчас одного пользователя в приложении Amnezia на этом сервере. Добавили?") != AnswerYes {

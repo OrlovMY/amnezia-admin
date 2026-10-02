@@ -63,6 +63,10 @@ const (
 	casOuterTimeout = casLockWait + casInnerTimeout + casOuterMargin
 )
 
+// CASOuterTimeout — внешний таймаут записи под замком, в секундах: дольше
+// него запись замок не держит (канарейка ждёт столько перед К6).
+const CASOuterTimeout = casOuterTimeout
+
 // CASWriteScript — POSIX sh, исполняется в контейнере: sh -c СКРИПТ МЕТКА
 // КАТАЛОГ СУММА_WG0 СУММА_ТАБЛИЦЫ; stdin — две строки base64 (wg0.conf,
 // clientsTable). Одинарных кавычек в тексте нет (он сам в одинарных).
