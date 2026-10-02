@@ -116,6 +116,7 @@ func run() int {
 	}
 	if ctr == nil {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ: контейнера amnezia-awg нет — установите протокол AmneziaWG в приложении Amnezia")
+		fmt.Fprintln(os.Stderr, canary.ContainersFound(cs))
 		return 2
 	}
 	env := &canary.Env{

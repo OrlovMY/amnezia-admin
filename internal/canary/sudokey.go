@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"amnezia-admin/core"
 )
 
 // NewSudoKeyMaker — PR4.2: на ТЕСТОВОМ сервере (ключ root) создаётся
@@ -45,4 +47,22 @@ func NewSudoKeyMaker(remoteIn func(cmd string, stdin []byte) (string, error), ho
 		raw, _ := json.Marshal(map[string]any{"hostName": host, "port": port, "userName": TempUser, "password": pw})
 		return []string{"AMNEZIA_KEY=vpn://" + base64.RawURLEncoding.EncodeToString(raw)}, undo, nil
 	}
+}
+
+// ContainersFound — строка для отказа «контейнера amnezia-awg нет»: какие
+// контейнеры Amnezia на сервере всё-таки найдены (имя и протокол), чтобы
+// владелец видел, что поставлено не то, а не гадал.
+func ContainersFound(cs []core.Container) string {
+	if len(cs) == 0 {
+		return "Найдено контейнеров Amnezia: ни одного."
+	}
+	parts := make([]string, 0, len(cs))
+	for _, c := range cs {
+		p := c.Proto
+		if p == "" {
+			p = "протокол не определён"
+		}
+		parts = append(parts, c.Name+" ("+p+")")
+	}
+	return fmt.Sprintf("Найдено контейнеров Amnezia: %d — %s.", len(cs), strings.Join(parts, ", "))
 }

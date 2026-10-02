@@ -1093,3 +1093,15 @@ func TestSudoTimingTable(t *testing.T) {
 		t.Errorf("пользователь не создан: %s — %s", r.Status, r.Detail)
 	}
 }
+
+// TestContainersFound — отказ «контейнера amnezia-awg нет» называет, что
+// найдено; пустой список — «ни одного», а не пустая строка.
+func TestContainersFound(t *testing.T) {
+	if got := ContainersFound(nil); got != "Найдено контейнеров Amnezia: ни одного." {
+		t.Errorf("пусто: %q", got)
+	}
+	got := ContainersFound([]core.Container{{Name: "amnezia-xray", Proto: "Xray"}, {Name: "amnezia-awg2", Proto: ""}})
+	if got != "Найдено контейнеров Amnezia: 2 — amnezia-xray (Xray), amnezia-awg2 (протокол не определён)." {
+		t.Errorf("список: %q", got)
+	}
+}
