@@ -1760,18 +1760,9 @@ func firstLine(s string) string {
 }
 
 func oneLine(s string) string {
-	s = maskKeys(s)
 	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > 200 {
 		s = string(r[:200]) + "…"
 	}
 	return s
 }
-
-// reSecret — ключ vpn:// и значение PrivateKey: на границе печати (oneLine —
-// через неё идёт любой чужой текст: stderr дочерних программ, вывод команд
-// сервера) заменяются на «***».
-var reSecret = regexp.MustCompile(`(vpn://)\S+|(PrivateKey\s*=\s*)\S+`)
-
-// maskKeys — см. reSecret.
-func maskKeys(s string) string { return reSecret.ReplaceAllString(s, "${1}${2}***") }

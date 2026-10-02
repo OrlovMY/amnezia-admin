@@ -12,6 +12,7 @@ package canary
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -73,9 +74,6 @@ func TestK4OtherFailureNotRace(t *testing.T) {
 					t.Errorf("нет %q: %s", w, r.Detail)
 				}
 			}
-			if strings.Contains(r.Detail, "СЕКРЕТНЫЙ") {
-				t.Errorf("ключ в тексте: %s", r.Detail)
-			}
 		})
 	}
 }
@@ -86,16 +84,70 @@ func TestK4OtherFailureNotRace(t *testing.T) {
 func TestIsTmpCollision(t *testing.T) {
 	const conf, tbl = "/opt/amnezia/awg/wg0.conf", "/opt/amnezia/awg/clientsTable"
 	for s, want := range map[string]bool{
-		"Process exited with status 1: mv: can't rename '/opt/amnezia/awg/wg0.conf.tmp': No such file or directory":    true,
-		"Process exited with status 1: mv: cannot stat '/opt/amnezia/awg/clientsTable.tmp': No such file or directory": true,
-		"Process exited with status 1: sh: can't create /opt/amnezia/awg/wg0.conf.tmp: No such file or directory":      false,
-		"Process exited with status 1: cat: '/opt/amnezia/awg/wg0.conf.tmp': No such file or directory":                false,
-		"Process exited with status 1: mv: can't rename '/opt/amnezia/awg/wg0.conf.tmp': Permission denied":            false,
-		"Process exited with status 1: mv: can't rename '/opt/other/x.tmp': No such file or directory":                 false,
-		"Process exited with status 1 (вывода нет)":                                                                    false,
+		"Process exited with status 1: mv: can't rename '/opt/amnezia/awg/wg0.conf.tmp': No such file or directory":            true,
+		"Process exited with status 1: mv: cannot stat '/opt/amnezia/awg/clientsTable.tmp': No such file or directory":         true,
+		"Process exited with status 1: sh: can't create /opt/amnezia/awg/wg0.conf.tmp: No such file or directory":              false,
+		"Process exited with status 1: cat: '/opt/amnezia/awg/wg0.conf.tmp': No such file or directory":                        false,
+		"Process exited with status 1: mv: can't rename '/opt/amnezia/awg/wg0.conf.tmp': Permission denied":                    false,
+		"Process exited with status 1: mv: can't rename '/opt/other/x.tmp': No such file or directory":                         false,
+		"Process exited with status 1: команда x: mv: can't rename '/opt/amnezia/awg/wg0.conf.tmp': No such file or directory": false,
+		"Process exited with status 1: sh: cat: /opt/amnezia/awg/wg0.conf.tmp: No such file or directory":                      false,
+		"Process exited with status 1": false,
 	} {
-		if got := isTmpCollision(errors.New(s), conf, tbl); got != want {
+		exit, out, _ := strings.Cut(s, ": ")
+		if got := isTmpCollision(&legacyErr{exit: exit, out: out}, conf, tbl); got != want {
 			t.Errorf("%q: %v, ждали %v", s, got, want)
+		}
+	}
+}
+
+// TestMaskBoundary — QA-01 Н1: Detail, собранный боевым путём из
+// err.Error() (stderr прежней записи с ключом vpn://, PEM приватного ключа
+// и паролем), до вывода не доходит: граница печати — Masker.Writer, как в
+// cmd/canary-a3b. В самом Detail маскировки нет (она одна, на границе).
+func TestMaskBoundary(t *testing.T) {
+	const pw = "s3cr3t-пароль"
+	pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"
+	f := emptyFake(t, false)
+	f.env.NewBin = serialFake(t, newCLI(t))
+	f.env.RaceRounds = 2
+	orig := f.env.RemoteIn
+	f.env.RemoteIn = func(cmd string, stdin []byte) (string, error) {
+		if strings.Contains(cmd, "cat > ") {
+			return "sh: Permission denied vpn://AAAA-ключ " + pem + " password " + pw, errors.New("Process exited with status 1")
+		}
+		return orig(cmd, stdin)
+	}
+	r := f.env.race()
+	if !strings.Contains(r.Detail, "Permission denied") {
+		t.Fatalf("stderr не дошёл до Detail: %s", r.Detail)
+	}
+	var buf strings.Builder
+	out := NewMasker(pw).Writer(&buf)
+	fmt.Fprintf(out, "[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+	got := buf.String()
+	for _, s := range []string{"AAAA", "b3BlbnNzaC1rZXktdjEAAAAA", "BEGIN OPENSSH", pw} {
+		if strings.Contains(got, s) {
+			t.Errorf("в выводе секрет %q: %s", s, got)
+		}
+	}
+	if !strings.Contains(got, "Permission denied") {
+		t.Errorf("вывод замаскирован целиком: %s", got)
+	}
+}
+
+// TestMaskerTable — шаблоны маскировщика.
+func TestMaskerTable(t *testing.T) {
+	m := NewMasker("пароль-1234")
+	for in, bad := range map[string]string{
+		"ключ vpn://QQQQ конец":                                                "QQQQ",
+		"-----BEGIN RSA PRIVATE KEY-----\nZZZZ\n-----END RSA PRIVATE KEY-----": "ZZZZ",
+		"оборванный -----BEGIN EC PRIVATE KEY----- YYYY":                       "YYYY",
+		"PrivateKey = XXXX=": "XXXX",
+		"pw пароль-1234 тут": "пароль-1234",
+	} {
+		if got := m.Mask(in); strings.Contains(got, bad) {
+			t.Errorf("%q → %q", in, got)
 		}
 	}
 }

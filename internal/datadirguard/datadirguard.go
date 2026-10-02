@@ -52,7 +52,13 @@ func Run(m *testing.M, dir *string) int {
 		*dir = d
 	}
 	code := m.Run()
-	if leaked := Files(d); len(leaked) > 0 {
+	leaked, werr := Files(d)
+	if werr != nil {
+		// QA-01 Н4: каталог не обойти — «утечек нет» не утверждается.
+		fmt.Fprintf(os.Stderr, "СТОРОЖ datadirguard: унаследованный каталог данных не обойти (%v) — есть ли в нём записи, неизвестно\n", werr)
+		return 1
+	}
+	if len(leaked) > 0 {
 		fmt.Fprintf(os.Stderr, "СТОРОЖ datadirguard: прогон записал %d файл(ов) в унаследованный каталог данных (на машине владельца это настоящий каталог данных): %s\n",
 			len(leaked), strings.Join(leaked, "; "))
 		return 1
@@ -61,14 +67,18 @@ func Run(m *testing.M, dir *string) int {
 }
 
 // Files — файлы под dir, имена относительно dir (содержимое не читается).
-func Files(dir string) []string {
+// Ошибка обхода (каталог исчез, не читается) — ошибка, а не «файлов нет».
+func Files(dir string) ([]string, error) {
 	var out []string
-	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
 			rel, _ := filepath.Rel(dir, p)
 			out = append(out, rel)
 		}
 		return nil
 	})
-	return out
+	return out, err
 }

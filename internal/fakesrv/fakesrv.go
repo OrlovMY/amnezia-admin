@@ -420,7 +420,8 @@ func (s *Server) legacySplit(cmd, path string, stdin []byte) (string, error) {
 	defer s.mu.Unlock()
 	data, ok := s.files[tmp]
 	if !ok {
-		return "", &ExitError{Cmd: cmd, Status: 1, Stderr: "mv: can't rename '" + tmp + "': No such file or directory"}
+		// stderr — ровно сообщение mv, как у настоящего сервера (код 1).
+		return "", errors.New("mv: can't rename '" + tmp + "': No such file or directory")
 	}
 	s.files[path] = data
 	delete(s.files, tmp)

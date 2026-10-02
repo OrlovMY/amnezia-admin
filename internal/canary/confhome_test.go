@@ -28,7 +28,13 @@ var inheritedHome string
 func runIsolated(m *testing.M) int { return datadirguard.Run(m, &inheritedHome) }
 
 // filesUnder — см. datadirguard.Files.
-func filesUnder(dir string) []string { return datadirguard.Files(dir) }
+func filesUnder(dir string) []string {
+	fs, err := datadirguard.Files(dir)
+	if err != nil {
+		return []string{"ОБХОД НЕ УДАЛСЯ: " + err.Error()}
+	}
+	return fs
+}
 
 // TestChildConfigsInConfHome — дочерний amnezia-admin (настоящий, против
 // fakesrv) сохраняет конфиг canary-* в Env.ConfHome, путь в выводе (его

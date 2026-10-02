@@ -42,6 +42,10 @@ func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func run() int {
+	// QA-01 Н1: единственная граница маскировки — всё, что канарейка
+	// печатает, идёт через эти писатели (см. internal/canary/mask.go).
+	masker := canary.NewMasker(os.Getenv("AMNEZIA_KEY"), os.Getenv("AMNEZIA_KEY_SUDO"))
+	out, errOut := masker.Writer(os.Stdout), masker.Writer(os.Stderr)
 	confirm := flag.String("not-production", "", "подтверждение, что сервер НЕ боевой: ровно "+canary.RequiredConfirmation)
 	newBin := flag.String("new", "", "путь к собранной новой версии (консольная, amnezia-admin)")
 	oldBin := flag.String("old", "", "путь к v0.2.0 (консольная) — для контроля гонки и К7")
@@ -66,23 +70,26 @@ func run() int {
 				}
 			}
 		}
-		fmt.Printf("vcs.revision=%s vcs.modified=%s\n%s\n", rev, mod, canary.FingerprintLine())
+		fmt.Fprintf(out, "vcs.revision=%s vcs.modified=%s\n%s\n", rev, mod, canary.FingerprintLine())
 		return 0
 	}
 
 	if *confirm != canary.RequiredConfirmation {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: канарейка запускается только на отдельном тестовом сервере.")
-		fmt.Fprintln(os.Stderr, "Подтвердите это флагом: -not-production "+canary.RequiredConfirmation)
+		fmt.Fprintln(errOut, "ОТКАЗ: канарейка запускается только на отдельном тестовом сервере.")
+		fmt.Fprintln(errOut, "Подтвердите это флагом: -not-production "+canary.RequiredConfirmation)
 		return 2
 	}
 	key := os.Getenv("AMNEZIA_KEY")
 	if key == "" || *newBin == "" {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: нужны переменная AMNEZIA_KEY (ключ ТЕСТОВОГО сервера) и флаг -new")
+		fmt.Fprintln(errOut, "ОТКАЗ: нужны переменная AMNEZIA_KEY (ключ ТЕСТОВОГО сервера) и флаг -new")
 		return 2
 	}
 	cfg, err := core.DecodeVpnKey(key)
+	if err == nil {
+		masker.Add(core.Str(cfg, "password"))
+	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: ключ не разобран:", err)
+		fmt.Fprintln(errOut, "ОТКАЗ: ключ не разобран:", err)
 		return 2
 	}
 	// SEC П-3: второй ключ — на тот же тестовый сервер, ДО подключения.
@@ -90,7 +97,7 @@ func run() int {
 	if k := os.Getenv("AMNEZIA_KEY_SUDO"); k != "" {
 		sk, err := canary.SudoKey(cfg, k, *serverIP, net.LookupIP)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+			fmt.Fprintln(errOut, "ОТКАЗ:", err)
 			return 2
 		}
 		sudoKey = sk
@@ -102,32 +109,32 @@ func run() int {
 	if *serverIP != "" {
 		pinned, err := canary.PinServer(cfg, *serverIP, net.LookupIP)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+			fmt.Fprintln(errOut, "ОТКАЗ:", err)
 			return 2
 		}
 		ck, err := canary.ChildKey(pinned)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "ОТКАЗ: ключ для дочерних программ не собран")
+			fmt.Fprintln(errOut, "ОТКАЗ: ключ для дочерних программ не собран")
 			return 2
 		}
 		cfg, key = pinned, ck
 	}
 	creds, err := core.CredsFromConfig(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+		fmt.Fprintln(errOut, "ОТКАЗ:", err)
 		return 2
 	}
 	// Долг 02.10: конфиги canary-* дочерние программы сохраняют во
 	// временный каталог, а не в настоящий каталог данных пользователя.
 	confHome, err := os.MkdirTemp("", "amnezia-canary-data-")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: временный каталог для конфигов canary-* не создан:", err)
+		fmt.Fprintln(errOut, "ОТКАЗ: временный каталог для конфигов canary-* не создан:", err)
 		return 2
 	}
-	fmt.Printf("Конфиги canary-* сохраняются во временный каталог: %s (настоящий каталог данных не трогается)\n", confHome)
+	fmt.Fprintf(out, "Конфиги canary-* сохраняются во временный каталог: %s (настоящий каталог данных не трогается)\n", confHome)
 	in := bufio.NewReader(os.Stdin)
 	ask := func(q string) canary.Answer {
-		fmt.Printf("%s (да/нет/пропустить): ", q)
+		fmt.Fprintf(out, "%s (да/нет/пропустить): ", q)
 		line, _ := in.ReadString('\n')
 		switch strings.ToLower(strings.TrimSpace(line)) {
 		case "да", "y", "yes":
@@ -137,7 +144,7 @@ func run() int {
 		}
 		return canary.AnswerSkip
 	}
-	fmt.Printf("Сервер: %s (канарейка — только для ТЕСТОВОГО сервера)\n", creds.Host)
+	fmt.Fprintf(out, "Сервер: %s (канарейка — только для ТЕСТОВОГО сервера)\n", creds.Host)
 	kh := filepath.Join(os.TempDir(), "amnezia-canary-a3b-known_hosts")
 	sess, err := core.ConnectWithHostKey(creds, core.HostKeyPolicy{
 		KnownHostsPath:      kh,
@@ -147,19 +154,19 @@ func run() int {
 		},
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: подключение:", err)
+		fmt.Fprintln(errOut, "ОТКАЗ: подключение:", err)
 		return 2
 	}
 	defer sess.Close()
 	cs, err := sess.FindContainers()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ: контейнеры:", err)
+		fmt.Fprintln(errOut, "ОТКАЗ: контейнеры:", err)
 		return 2
 	}
 	sel, why := canary.SelectWG(cs, *only)
 	if len(sel) == 0 {
-		fmt.Println(why)
-		fmt.Println("ИТОГ: НЕ ПРОВЕРЕНО — выпуск по этой канарейке НЕЛЬЗЯ")
+		fmt.Fprintln(out, why)
+		fmt.Fprintln(out, "ИТОГ: НЕ ПРОВЕРЕНО — выпуск по этой канарейке НЕЛЬЗЯ")
 		return 1
 	}
 	// W1 раунд 2 (QA, находка 4): обязательные семейства. Ненайденное — шаг
@@ -170,7 +177,7 @@ func run() int {
 	}
 	famRows, skipped, famNotes, ferr := canary.FamilyPlan(selNames, skipFam)
 	if ferr != nil {
-		fmt.Fprintln(os.Stderr, "ОТКАЗ:", ferr)
+		fmt.Fprintln(errOut, "ОТКАЗ:", ferr)
 		return 2
 	}
 	remote := func(cmd string) (string, error) {
@@ -204,11 +211,11 @@ func run() int {
 			HostKey: sess.HostKeyFingerprint,
 			Ask:     ask,
 			AskIP: func(q string) string {
-				fmt.Printf("%s\nАдрес: ", q)
+				fmt.Fprintf(out, "%s\nАдрес: ", q)
 				line, _ := in.ReadString('\n')
 				return strings.TrimSpace(line)
 			},
-			Out:        os.Stdout,
+			Out:        out,
 			RaceRounds: *rounds,
 			ServerIP:   *serverIP,
 			ConfHome:   confHome,
@@ -237,16 +244,16 @@ func run() int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
-		fmt.Println("\nПРЕРВАНО — убираю за собой на тестовом сервере…")
+		fmt.Fprintln(out, "\nПРЕРВАНО — убираю за собой на тестовом сервере…")
 		curMu.Lock()
 		e := cur
 		curMu.Unlock()
 		if e != nil {
 			for _, err := range e.RunCleanups() {
-				fmt.Println(err)
+				fmt.Fprintln(out, err)
 			}
 		}
-		fmt.Println("ИТОГ: НЕ ПРОЙДЕН — проверка прервана. Удалите тестовый сервер у провайдера.")
+		fmt.Fprintln(out, "ИТОГ: НЕ ПРОЙДЕН — проверка прервана. Удалите тестовый сервер у провайдера.")
 		os.Exit(130)
 	}()
 
@@ -260,10 +267,10 @@ func run() int {
 		foundNames = append(foundNames, c.Name)
 	}
 	mr := canary.MountsCheck(remote, foundNames)
-	fmt.Printf("[%s] %s %s — %s\n", mr.Status, mr.ID, mr.Name, mr.Detail)
+	fmt.Fprintf(out, "[%s] %s %s — %s\n", mr.Status, mr.ID, mr.Name, mr.Detail)
 	if mr.Status != canary.Pass && mr.Status != canary.NotApplicable {
 		_, line := canary.Summary([]canary.Result{mr}, nil)
-		fmt.Println(line)
+		fmt.Fprintln(out, line)
 		return 1
 	}
 	all = append(all, mr)
@@ -281,12 +288,12 @@ func run() int {
 		}
 		pre := canary.Preflight(remote, list, foundNames, time.Now())
 		for _, r := range pre {
-			fmt.Printf("[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+			fmt.Fprintf(out, "[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
 		}
 		for _, r := range pre {
 			if r.Status != canary.Pass {
 				_, line := canary.Summary(pre, nil)
-				fmt.Println(line)
+				fmt.Fprintln(out, line)
 				return 1
 			}
 		}
@@ -298,7 +305,7 @@ func run() int {
 	cleanFailed := false
 	for i := range sel {
 		ctr := &sel[i]
-		fmt.Printf("\n===== контейнер %s (%s) =====\n", ctr.Name, ctr.Proto)
+		fmt.Fprintf(out, "\n===== контейнер %s (%s) =====\n", ctr.Name, ctr.Proto)
 		env := envs[ctr.Name]
 		if env == nil {
 			env = newEnv(ctr)
@@ -308,7 +315,7 @@ func run() int {
 		curMu.Unlock()
 		rs, err := canary.Run(env)
 		for _, cerr := range env.RunCleanups() {
-			fmt.Println(cerr)
+			fmt.Fprintln(out, cerr)
 			cleanFailed = true
 		}
 		if err != nil && runErr == nil {
@@ -318,19 +325,19 @@ func run() int {
 		per[ctr.Name] = rs
 		all = append(all, rs...)
 	}
-	fmt.Println("\n" + canary.Table(order, per))
+	fmt.Fprintln(out, "\n"+canary.Table(order, per))
 	for _, r := range famRows {
-		fmt.Printf("[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+		fmt.Fprintf(out, "[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
 	}
 	for _, n := range famNotes {
-		fmt.Println(n)
+		fmt.Fprintln(out, n)
 	}
 	all = append(all, famRows...)
 	st, line := canary.FinalSummary(all, runErr, skipped)
 	if cleanFailed {
 		st, line = canary.Fail, "ИТОГ: НЕ ПРОЙДЕН — уборка на тестовом сервере не удалась (см. выше)"
 	}
-	fmt.Println(line)
+	fmt.Fprintln(out, line)
 	// 0 — ПРОЙДЕН, 3 — ПРОЙДЕН ЧАСТИЧНО (-skip-family), 1 — прочее.
 	return canary.ExitCode(st)
 }

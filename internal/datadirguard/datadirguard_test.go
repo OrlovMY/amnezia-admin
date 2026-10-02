@@ -13,12 +13,19 @@ func TestMain(m *testing.M) { os.Exit(Run(m, nil)) }
 
 // TestLeakChild — пишет в каталог данных ТОЛЬКО по просьбе родителя.
 func TestLeakChild(t *testing.T) {
-	if os.Getenv("DATADIRGUARD_LEAK") != "1" {
-		t.Skip("запускается из TestGuardCatchesLeak")
-	}
 	base := os.Getenv("LOCALAPPDATA")
 	if runtime.GOOS != "windows" {
 		base = os.Getenv("XDG_CONFIG_HOME")
+	}
+	if os.Getenv("DATADIRGUARD_RMDIR") == "1" {
+		// каталог исчез — обойти его нельзя
+		if err := os.RemoveAll(base); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if os.Getenv("DATADIRGUARD_LEAK") != "1" {
+		t.Skip("запускается из TestGuardCatchesLeak")
 	}
 	p := filepath.Join(base, "amnezia-admin", "Конфигурации", "canary-leak.conf")
 	os.MkdirAll(filepath.Dir(p), 0o700)
@@ -44,5 +51,23 @@ func TestGuardCatchesLeak(t *testing.T) {
 		case !leak && err != nil:
 			t.Errorf("прогон без записи упал: %v\n%s", err, out)
 		}
+	}
+}
+
+// TestGuardFailsOnUnreadableDir — QA-01 Н4: каталог не обойти (исчез во
+// время прогона) — прогон падает «не обойти», а не «утечек нет».
+func TestGuardFailsOnUnreadableDir(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestLeakChild$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "DATADIRGUARD_RMDIR=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "не обойти") {
+		t.Errorf("каталог не обойти, а прогон не упал: %v\n%s", err, out)
+	}
+}
+
+// TestFilesError — Files на несуществующем каталоге — ошибка.
+func TestFilesError(t *testing.T) {
+	if _, err := Files(filepath.Join(t.TempDir(), "нет")); err == nil {
+		t.Errorf("обход несуществующего каталога без ошибки")
 	}
 }

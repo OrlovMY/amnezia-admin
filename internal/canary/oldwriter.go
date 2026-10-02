@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,18 +28,27 @@ func (e *Env) catFile(path string) (string, error) {
 
 // legacyWrite — прежняя запись v0.2.0: без замка, без сверки, общий .tmp.
 // Ошибка несёт вывод команды (прогон 02.10: «Process exited with status 1»
-// без причины не давал понять, что упало); oneLine маскирует ключи.
+// без причины не давал понять, что упало). Секреты маскирует граница
+// печати (mask.go), а не это место.
 func (e *Env) legacyWrite(path string, data []byte) error {
 	// LC_ALL=C — сообщения mv/sh на английском при любой локали сервера
 	// (AU-LOGIC Low-1: от них зависит признак столкновения).
 	out, err := e.RemoteIn(e.docker+" exec -i "+e.Ctr.Name+" env LC_ALL=C sh -c 'cat > "+path+".tmp && mv "+path+".tmp "+path+"'", data)
 	if err != nil {
-		if o := tailLine(out); o != "" {
-			return fmt.Errorf("%s: %s", oneLine(err.Error()), o)
-		}
-		return fmt.Errorf("%s (вывода нет)", oneLine(err.Error()))
+		return &legacyErr{exit: oneLine(err.Error()), out: out}
 	}
 	return nil
+}
+
+// legacyErr — отказ прежней записи: код выхода и вывод команды как есть
+// (по строкам вывода опознаётся столкновение на .tmp).
+type legacyErr struct{ exit, out string }
+
+func (e *legacyErr) Error() string {
+	if o := tailLine(e.out); o != "" {
+		return e.exit + ": " + o
+	}
+	return e.exit + " (вывода нет)"
 }
 
 // OldRaceStats — итог контроля К4 (прежняя запись без замка).
@@ -56,23 +66,32 @@ type OldRaceStats struct {
 //
 // Сопоставление — по сообщению mv («mv: …») с ПОЛНЫМ путём 'P.tmp' одного
 // из файлов записи (AU-LOGIC Low-1: подстрока «mv» встречалась и в путях).
+//
+// QA-01 Н3: строка вывода обязана НАЧИНАТЬСЯ с «mv: » (сообщение самой mv,
+// LC_ALL=C), а не содержать её где-то; сообщения cat:/sh: — не гонка.
 func isTmpCollision(err error, paths ...string) bool {
-	s := err.Error()
-	if !strings.Contains(s, "mv: ") || !strings.Contains(s, "No such file") {
+	var le *legacyErr
+	if !errors.As(err, &le) {
 		return false
 	}
-	for _, p := range paths {
-		if strings.Contains(s, "'"+p+".tmp'") {
-			return true
+	for _, l := range strings.Split(le.out, "\n") {
+		l = strings.TrimSpace(l)
+		if !strings.HasPrefix(l, "mv: ") || !strings.Contains(l, "No such file") {
+			continue
+		}
+		for _, p := range paths {
+			if strings.Contains(l, "'"+p+".tmp'") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 // tailLine — вывод команды одной строкой, КОНЕЦ (там сообщение mv/sh), не
-// длиннее 200 знаков; ключи замаскированы (oneLine).
+// длиннее 200 знаков. Секреты маскирует граница печати (mask.go).
 func tailLine(s string) string {
-	s = strings.Join(strings.Fields(maskKeys(s)), " ")
+	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > 200 {
 		s = "…" + string(r[len(r)-200:])
 	}
