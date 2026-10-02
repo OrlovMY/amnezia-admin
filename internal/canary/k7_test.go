@@ -117,3 +117,30 @@ func TestK7OtherListUnreadable(t *testing.T) {
 		t.Fatalf("К7: %s — %s", r.Status, r.Detail)
 	}
 }
+
+// TestP1TraceInOtherContainer — живой прогон 02.10: canary-k7 от прошлого
+// прогона лежала в amnezia-awg, проверялся amnezia-wireguard. П1 обязан
+// остановить ДО любой записи — след ищется во всех WG-контейнерах.
+func TestP1TraceInOtherContainer(t *testing.T) {
+	f := twoWG(t, true)
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "id "+TempUser) && strings.Contains(cmd, "echo DONE"):
+			return "DONE", nil
+		case strings.Contains(cmd, "canary-orig"):
+			return "DONE", nil
+		}
+		return inner(cmd)
+	}
+	before := len(f.exec.Commands())
+	r := f.env.traces()
+	if r.Status != Fail || !strings.Contains(r.Detail, "в amnezia-awg есть canary-k7") {
+		t.Fatalf("П1: %s — %s", r.Status, r.Detail)
+	}
+	for _, c := range f.exec.Commands()[before:] {
+		if strings.Contains(c, "flock") || strings.Contains(c, "cat > ") {
+			t.Errorf("запись при П1: %.80s", c)
+		}
+	}
+}

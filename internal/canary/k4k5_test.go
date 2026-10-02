@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -405,5 +406,63 @@ func TestK5BusyBeforeAttempt(t *testing.T) {
 				t.Errorf("%q", a.stop)
 			}
 		})
+	}
+}
+
+// TestJudgeK5Freed — решение ядра 02.10: застали нашу запись, после обрыва
+// замок свободен. Код 0 и исход оборванной известен — ПРОЙДЕН; не известен
+// — НЕ ПРОВЕРЕНО; иной код — как judgeK5Second.
+func TestJudgeK5Freed(t *testing.T) {
+	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
+	for _, c := range []struct {
+		name   string
+		r      cliRun
+		landed landedState
+		want   Status
+	}{
+		{"код 0, оборванная не выполнена", cliRun{}, landedNo, Pass},
+		{"код 0, оборванная завершилась", cliRun{}, landedYes, Pass},
+		{"код 0, исход оборванной не узнать", cliRun{}, landedUnknown, NotChecked},
+		{"изменили, оборванной нет", cliRun{code: 1, title: chg.Title}, landedNo, Fail},
+		{"иной отказ", cliRun{code: 1, title: "что-то"}, landedNo, Fail},
+	} {
+		if got, why := judgeK5Freed(c.r, c.landed); got != c.want {
+			t.Errorf("%s: %s (%s), ждали %s", c.name, got, why, c.want)
+		}
+	}
+}
+
+// TestK5FreedRightAfterCut — доезд: нашу запись застали под замком, а
+// после обрыва держателей уже нет (как на хосте 02.10) — ПРОЙДЕН «замок
+// освободился сразу после обрыва; ожидание не потребовалось».
+func TestK5FreedRightAfterCut(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 800 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmdlineCmd {
+			mu.Lock()
+			defer mu.Unlock()
+			var hs [][2]string
+			for pid, c := range f.exec.Held() {
+				if !seen[pid] { // держатель виден один раз: после обрыва — свободно
+					seen[pid] = true
+					hs = append(hs, [2]string{pid, c})
+				}
+			}
+			return locksOut(hs...), nil
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	if r.Status != Pass || !strings.Contains(r.Detail, "замок освободился сразу после обрыва") || !strings.Contains(r.Detail, "застали нашу запись под замком: 1") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }

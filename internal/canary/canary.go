@@ -1367,21 +1367,19 @@ func (e *Env) breakWrite() Result {
 				cutPIDs = append(cutPIDs, h.pid)
 			}
 		}
-		if len(cutPIDs) > 0 {
-			break
-		}
+		// Решение ядра 02.10 (живой прогон 0c6d639): попадание — и замок
+		// после обрыва свободен — тоже исход К5, а не повод повторять.
+		break
 	}
 	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали нашу запись под замком: %d", attempts, k5Attempts, hits)
-	if len(cutPIDs) == 0 {
+	if hits == 0 {
 		why := " — ни одна попытка не застала нашу запись под замком"
 		if lastGone != "" {
 			why += " (держатель не опознан: " + lastGone + ")"
 		}
-		if hits > 0 {
-			why = " — после обрыва замок уже свободен"
-		}
 		return Result{Detail: tries + why + ": ожидание второй записи не проверено"}
 	}
+	freed := len(cutPIDs) == 0 // замок свободен при первом же опросе после обрыва
 	// Вторая запись — пока держится замок оборванной. Ожидание измеряется:
 	// держатели опрашиваются, пока вторая идёт; «ждала» — только если
 	// замок оборванной освободился ПОСЛЕ начала второй, вторая закончилась
@@ -1393,8 +1391,11 @@ func (e *Env) breakWrite() Result {
 	var second cliRun
 	var freedAt time.Time
 	overlap, pollFail := false, ""
+	if freed {
+		second = <-ch // ждать нечего: держателей уже нет
+	}
 poll:
-	for {
+	for !freed {
 		select {
 		case second = <-ch:
 			break poll
@@ -1426,6 +1427,8 @@ poll:
 	waited := !freedAt.IsZero() && end.After(freedAt) && freedAt.After(start) && !overlap && pollFail == ""
 	wait := "ожидание не измерено"
 	switch {
+	case freed:
+		wait = "замок освободился сразу после обрыва; ожидание не потребовалось"
 	case waited:
 		wait = fmt.Sprintf("ждала: замок оборванной записи освободился через %.1f с после начала второй", freedAt.Sub(start).Seconds())
 	case overlap:
@@ -1456,7 +1459,29 @@ poll:
 		return Result{Status: Fail, Detail: detail + " — замок завис"}
 	}
 	st, outcome := judgeK5Second(second, landed, waited)
+	if freed {
+		st, outcome = judgeK5Freed(second, landed)
+	}
 	return Result{Status: st, Detail: detail + " — " + outcome}
+}
+
+// judgeK5Freed — исход К5, когда нашу запись застали под замком, а сразу
+// после обрыва замок свободен (решение ядра 02.10): К5 проверяет «замок не
+// зависает и файлы целиком». Вторая запись прошла (код 0) и исход
+// оборванной определён по содержимому — ПРОЙДЕН; исход оборванной не
+// определён — НЕ ПРОВЕРЕНО; прочие исходы второй — как в judgeK5Second.
+// Согласованность файлов и третья запись проверены до вызова.
+func judgeK5Freed(second cliRun, landed landedState) (Status, string) {
+	if second.code != 0 {
+		return judgeK5Second(second, landed, false)
+	}
+	switch landed {
+	case landedYes:
+		return Pass, "исход: замок освободился сразу после обрыва, ожидание не потребовалось; оборванная запись завершилась на сервере"
+	case landedNo:
+		return Pass, "исход: замок освободился сразу после обрыва, ожидание не потребовалось; оборванная запись не выполнена"
+	}
+	return NotChecked, "замок освободился сразу после обрыва, вторая прошла, но завершилась ли оборванная запись, узнать не удалось (таблица не прочитана)"
 }
 
 func contains(xs []string, x string) bool {
