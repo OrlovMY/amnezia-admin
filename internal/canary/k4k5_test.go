@@ -486,25 +486,27 @@ func TestJudgeK5(t *testing.T) {
 	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
 	changed := cliRun{code: 1, title: chg.Title}
 	for _, c := range []struct {
-		name       string
-		r          cliRun
-		consistent bool
-		landed     landedState
-		third      int
-		want       Status
-		text       string
+		name   string
+		r      cliRun
+		cons   consState
+		landed landedState
+		third  int
+		want   Status
+		text   string
 	}{
-		{"код 0, исход известен", cliRun{}, true, landedNo, 0, Pass, "код 0"},
-		{"занято", cliRun{code: 1, title: bsy.Title}, true, landedNo, 0, Pass, "занято"},
-		{"CAS, оборванная завершилась", changed, true, landedYes, 0, Pass, "сверено по содержимому"},
-		{"CAS без изменения оборванной", changed, true, landedNo, 0, Fail, "необъясним"},
-		{"CAS, исход не узнать", changed, true, landedUnknown, 0, NotChecked, "пункт 3"},
-		{"пункт 4: код 0, исход оборванной не узнать", cliRun{}, true, landedUnknown, 0, NotChecked, "пункт 4"},
-		{"файлы не согласованы", cliRun{}, false, landedNo, 0, Fail, "не согласованы"},
-		{"третья не прошла", cliRun{}, true, landedNo, 1, Fail, "завис"},
-		{"иной отказ", cliRun{code: 1, title: "что-то"}, true, landedYes, 0, Fail, "не прошла"},
+		{"код 0, исход известен", cliRun{}, consYes, landedNo, 0, Pass, "код 0"},
+		{"занято", cliRun{code: 1, title: bsy.Title}, consYes, landedNo, 0, Pass, "занято"},
+		{"CAS, оборванная завершилась", changed, consYes, landedYes, 0, Pass, "сверено по содержимому"},
+		{"CAS без изменения оборванной", changed, consYes, landedNo, 0, Fail, "необъясним"},
+		{"CAS, исход не узнать", changed, consYes, landedUnknown, 0, NotChecked, "пункт 3"},
+		{"пункт 4: код 0, исход оборванной не узнать", cliRun{}, consYes, landedUnknown, 0, NotChecked, "пункт 4"},
+		{"файлы не согласованы", cliRun{}, consNo, landedNo, 0, Fail, "не согласованы"},
+		{"третья: код 1 — без вывода о зависании", cliRun{}, consYes, landedNo, 1, Fail, "третья запись: код 1"},
+		{"третья: код 4 — замок завис", cliRun{}, consYes, landedNo, 4, Fail, "замок завис"},
+		{"не прочитано — не «не согласованы»", cliRun{}, consUnknown, landedNo, 0, NotChecked, "не проверена"},
+		{"иной отказ", cliRun{code: 1, title: "что-то"}, consYes, landedYes, 0, Fail, "не прошла"},
 	} {
-		got, why := judgeK5(c.r, c.consistent, c.landed, c.third)
+		got, why := judgeK5(c.r, c.cons, c.landed, c.third)
 		if got != c.want || !strings.Contains(why, c.text) {
 			t.Errorf("%s: %s (%s), ждали %s с %q", c.name, got, why, c.want, c.text)
 		}
@@ -609,6 +611,122 @@ func TestK5ReleaseUnmeasured(t *testing.T) {
 	}
 	r := f.env.breakWrite()
 	if r.Status != NotChecked || !strings.Contains(r.Detail, "пункт 2") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5ConsistencyUnread — доезд различения «не прочитано ≠ не
+// согласовано» (AU-LOGIC раунд 6 Medium-3): после второй записи чтение
+// файла конфигурации на «сервере» отказывает — К5 НЕ ПРОВЕРЕНО «не
+// прочитано», не НЕ ПРОЙДЕН «файлы не согласованы».
+func TestK5ConsistencyUnread(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	lslocksHook(f, false)
+	inner := f.env.Remote
+	var mu sync.Mutex
+	broken := false
+	f.env.Remote = func(cmd string) (string, error) {
+		mu.Lock()
+		b := broken
+		mu.Unlock()
+		if b && strings.Contains(cmd, " cat /opt/amnezia/awg/wg0.conf") {
+			return "", errors.New("Process exited with status 1")
+		}
+		return inner(cmd)
+	}
+	// отказ включается, когда вторая запись уже прошла: перед consistent
+	f.env.afterSecond = func() { mu.Lock(); broken = true; mu.Unlock() }
+	r := f.env.breakWrite()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "не прочитан") || strings.Contains(r.Detail, "не согласованы") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5CutNeverReleased — Low-6: оборванная запись держит замок дольше
+// k5Deadline — НЕ ПРОЙДЕН «замок завис».
+func TestK5CutNeverReleased(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	old := k5Deadline
+	t.Cleanup(func() { k5Deadline = old })
+	var mu sync.Mutex
+	var snap [][2]string
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd != lslocksCmdlineCmd {
+			return inner(cmd)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if snap == nil {
+			for pid, c := range f.exec.Held() {
+				snap = append(snap, [2]string{pid, c})
+			}
+			if snap != nil {
+				k5Deadline = 2 * time.Second // попадание есть — дальше срок короткий
+			}
+		}
+		return locksOut(snap...), nil // оборванная «держит» вечно
+	}
+	r := f.env.breakWrite()
+	if r.Status != Fail || !strings.Contains(r.Detail, "замок завис") {
+		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5OtherHolderWhileCutHolds — QA-01 Н8: пока держит оборванная, у
+// замка появляется второй держатель с другим PID — пункт 2 не подтверждён,
+// НЕ ПРОВЕРЕНО «другой держатель», а не ПРОЙДЕН и не «завис».
+func TestK5OtherHolderWhileCutHolds(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1000 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	old := k5Deadline
+	t.Cleanup(func() { k5Deadline = old })
+	var mu sync.Mutex
+	var snap [][2]string
+	calls := 0
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd != lslocksCmdlineCmd {
+			return inner(cmd)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if snap == nil {
+			for pid, c := range f.exec.Held() {
+				snap = append(snap, [2]string{pid, c})
+			}
+			if snap == nil {
+				return locksOut(), nil
+			}
+			k5Deadline = 2 * time.Second
+			return locksOut(snap...), nil // попадание
+		}
+		calls++
+		if calls == 1 { // сразу после обрыва — держит только оборванная
+			return locksOut(snap...), nil
+		}
+		// затем рядом с оборванной — второй держатель с другим PID
+		return locksOut(append(append([][2]string{}, snap...), [2]string{"7777", "flock /run/lock/ sleep 1"})...), nil
+	}
+	r := f.env.breakWrite()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "пункт 2") || !strings.Contains(r.Detail, "другой держатель") {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
 	}
 }

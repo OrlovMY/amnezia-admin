@@ -158,6 +158,8 @@ type Env struct {
 	createdMu   sync.Mutex
 	created     map[string]bool
 	leftForeign []string // заполняет cleanup
+
+	afterSecond func() // шов теста К5: сразу после второй записи (nil — нет)
 }
 
 // noteCreated — имя name канарейка отдаёт программе на добавление.
@@ -1481,7 +1483,10 @@ func (e *Env) breakWrite() Result {
 		release = "держала оборванная (PID " + strings.Join(cutPIDs, ",") + "), затем освободила"
 	}
 	second := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5b")
-	consistent, why := e.consistent()
+	if e.afterSecond != nil {
+		e.afterSecond()
+	}
+	cons, why := e.consistent()
 	// Исход оборванной — по СОДЕРЖИМОМУ (клиент в таблице; consistent
 	// сверил таблицу с файлом конфигурации). Таблица не прочитана —
 	// неизвестно.
@@ -1495,18 +1500,22 @@ func (e *Env) breakWrite() Result {
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
 	detail := fmt.Sprintf("%s; замок после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s; %s",
 		tries, release, second.code, second.dur.Seconds(), second.title, third.code, why, noWait)
-	st, outcome := judgeK5(second, consistent, landed, third.code)
+	st, outcome := judgeK5(second, cons, landed, third.code)
 	return Result{Status: st, Detail: detail + " — " + outcome}
 }
 
 // judgeK5 — пункты 3 и 4 (пункты 1 и 2 подтверждены до вызова). Третья
 // запись не прошла — замок завис.
-func judgeK5(second cliRun, consistent bool, landed landedState, thirdCode int) (Status, string) {
+func judgeK5(second cliRun, cons consState, landed landedState, thirdCode int) (Status, string) {
 	switch {
-	case !consistent:
+	case cons == consUnknown:
+		return NotChecked, "пункт 4 не подтверждён: согласованность файлов не проверена (не прочитано)"
+	case cons == consNo:
 		return Fail, "файлы не согласованы"
+	case thirdCode == 4:
+		return Fail, "третья запись: код 4 (замок занят) — замок завис"
 	case thirdCode != 0:
-		return Fail, "третья запись не прошла — замок завис"
+		return Fail, fmt.Sprintf("третья запись: код %d", thirdCode)
 	}
 	st, outcome := judgeK5Second(second, landed)
 	if st != Pass {
@@ -1799,14 +1808,25 @@ func isBusy(r cliRun) bool {
 
 // consistent — файлы согласованы: каждый включённый клиент таблицы есть в
 // wg0.conf и наоборот (ни «смеси», ни половины записи).
-func (e *Env) consistent() (bool, string) {
+// consState — согласованы ли таблица и файл конфигурации: да / нет /
+// не прочитано (AU-LOGIC раунд 6 Medium-3, CLAUDE.md признак 1: «не
+// прочитано» прежде уходило в «не согласованы» и давало НЕ ПРОЙДЕН).
+type consState int
+
+const (
+	consUnknown consState = iota
+	consNo
+	consYes
+)
+
+func (e *Env) consistent() (consState, string) {
 	cl, err := e.Sess.LoadClients(e.Ctr)
 	if err != nil {
-		return false, "список не прочитан: " + err.Error()
+		return consUnknown, "список не прочитан: " + oneLine(err.Error())
 	}
 	wg, err := e.catFile(e.conf())
 	if err != nil {
-		return false, e.fam.File + " не прочитан: " + err.Error()
+		return consUnknown, e.fam.File + " не прочитан: " + oneLine(err.Error())
 	}
 	peers := map[string]bool{}
 	for _, l := range strings.Split(wg, "\n") {
@@ -1821,13 +1841,13 @@ func (e *Env) consistent() (bool, string) {
 		}
 		active++
 		if !peers[c.ClientID] {
-			return false, "клиент " + c.Name() + " в таблице, но не в " + e.fam.File
+			return consNo, "клиент " + c.Name() + " в таблице, но не в " + e.fam.File
 		}
 	}
 	if active != len(peers) {
-		return false, fmt.Sprintf("в %s peer'ов %d, активных в таблице %d", e.fam.File, len(peers), active)
+		return consNo, fmt.Sprintf("в %s peer'ов %d, активных в таблице %d", e.fam.File, len(peers), active)
 	}
-	return true, "согласованы"
+	return consYes, "согласованы"
 }
 
 // amneziaApp — К6: план добавления построен, в приложении Amnezia добавлен
