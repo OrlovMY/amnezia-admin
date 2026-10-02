@@ -6,6 +6,7 @@ package canary
 // после add она появилась в другом, после del её нет по повторному чтению.
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -142,5 +143,61 @@ func TestP1TraceInOtherContainer(t *testing.T) {
 		if strings.Contains(c, "flock") || strings.Contains(c, "cat > ") {
 			t.Errorf("запись при П1: %.80s", c)
 		}
+	}
+}
+
+// TestCleanupLeavesForeignCanary — решение ядра 02.10: уборка удаляет
+// только canary-…, которые канарейка сама добавляла в этом прогоне; чужой
+// canary-… (человек во время прогона) остаётся и называется в «У».
+func TestCleanupLeavesForeignCanary(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	if r := f.env.cli(f.env.NewBin, f.env.KeyEnv, "add", "-name", "canary-ours"); r.code != 0 {
+		t.Fatalf("add: %d %s", r.code, r.title)
+	}
+	tbl, _ := f.exec.File("/opt/amnezia/awg/clientsTable")
+	s := strings.TrimRight(strings.TrimSpace(string(tbl)), "]")
+	s += `, {"clientId": "` + strings.Repeat("H", 43) + `=", "userData": {"clientName": "canary-human"}}]`
+	f.exec.SetFile("/opt/amnezia/awg/clientsTable", []byte(s))
+	if err := f.env.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	names, err := f.env.names()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := names["canary-ours"]; ok {
+		t.Errorf("свой canary-ours не убран")
+	}
+	if _, ok := names["canary-human"]; !ok {
+		t.Errorf("чужой canary-human удалён")
+	}
+	if len(f.env.leftForeign) != 1 || !strings.Contains(f.env.leftForeign[0], "canary-human") {
+		t.Errorf("«не наш, оставлен»: %v", f.env.leftForeign)
+	}
+}
+
+// TestEnumFailP1AndCleanup — QA-01 Н7: контейнеры семейства WG не
+// перечислены — П1 НЕ ПРОВЕРЕНО «контейнеры … не перечислены» (не
+// ПРОЙДЕН), уборка — ошибка «убран только <контейнер>».
+func TestEnumFailP1AndCleanup(t *testing.T) {
+	f := twoWG(t, false)
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "id "+TempUser) && strings.Contains(cmd, "echo DONE"):
+			return "DONE", nil
+		case strings.Contains(cmd, "canary-orig"):
+			return "DONE", nil
+		}
+		return inner(cmd)
+	}
+	f.exec.Configure(func(s *fakesrv.Server) { s.FailDockerPS = errors.New("docker ps: отказ") })
+	if r := f.env.traces(); r.Status != NotChecked || !strings.Contains(r.Detail, "не перечислены") {
+		t.Errorf("П1: %s — %s", r.Status, r.Detail)
+	}
+	err := f.env.cleanup()
+	if err == nil || !strings.Contains(err.Error(), "убран только amnezia-wireguard") {
+		t.Errorf("уборка: %v", err)
 	}
 }

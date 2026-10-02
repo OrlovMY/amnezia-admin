@@ -72,15 +72,37 @@ func TestFilesError(t *testing.T) {
 	}
 }
 
-// TestLeaksIgnoresOnlyGoTelemetry — исключение ровно одно: телеметрия Go.
+// TestLeaksIgnoresOnlyGoTelemetry — исключение ровно одно на ОС:
+// телеметрия Go там, где её кладёт os.UserConfigDir подменённого каталога.
 func TestLeaksIgnoresOnlyGoTelemetry(t *testing.T) {
-	got := Leaks([]string{
-		filepath.FromSlash("go/telemetry/local/go@go1.26.3.count"),
-		filepath.FromSlash("go/env"),
-		filepath.FromSlash("amnezia-admin/Конфигурации/canary-x.conf"),
-		filepath.FromSlash("gotelemetry/x"),
-	})
-	if len(got) != 3 {
-		t.Errorf("утечки %v, ждали всё, кроме go/telemetry/…", got)
+	files := []string{
+		"go/telemetry/local/go@go1.26.3.count",
+		"Library/Application Support/go/telemetry/local/go@go1.26.3.count",
+		"go/env",
+		"amnezia-admin/Конфигурации/canary-x.conf",
+		"Library/Application Support/amnezia-admin/Конфигурации/canary-x.conf",
+		"gotelemetry/x",
+	}
+	for _, c := range []struct {
+		goos   string
+		ignore string // единственный пропущенный файл ("" — никакой)
+	}{
+		{"linux", files[0]},
+		{"darwin", files[1]},
+		{"windows", ""},
+	} {
+		got := leaksFor(c.goos, files)
+		want := len(files)
+		if c.ignore != "" {
+			want--
+		}
+		if len(got) != want {
+			t.Errorf("%s: утечки %v, ждали всё, кроме %q", c.goos, got, c.ignore)
+		}
+		for _, g := range got {
+			if g == c.ignore {
+				t.Errorf("%s: %q не пропущен", c.goos, g)
+			}
+		}
 	}
 }

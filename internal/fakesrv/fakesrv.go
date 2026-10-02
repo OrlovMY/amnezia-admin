@@ -94,6 +94,10 @@ type Server struct {
 	// (сумма по всем командам записи); читать после работы Session.
 	TempLeft int
 
+	// FailDockerPS — `docker ps` возвращает эту ошибку (контейнеры не
+	// перечислить).
+	FailDockerPS error
+
 	// AllowLegacyWrite — принимать прежнюю запись v0.2.0 (см. reLegacyWrite).
 	AllowLegacyWrite bool
 
@@ -119,8 +123,11 @@ type Server struct {
 	LockHoldAbort bool
 	// LockShared — замок LockHoldFor НЕ взаимоисключающий (модель стенда,
 	// где ожидание второй записи измерить нельзя: держатели перекрываются).
-	LockShared  bool
-	lockAborted atomic.Bool
+	LockShared bool
+	// LockReleaseOnDisconnect — удерживаемая запись прерывается и отпускает
+	// замок, как только её SSH-клиент отключился (см. RunCancel).
+	LockReleaseOnDisconnect bool
+	lockAborted             atomic.Bool
 	// lockMu — сам замок /run/lock: записи под замком при LockHoldFor > 0
 	// взаимоисключающие, как у flock (вторая ЖДЁТ первую).
 	lockMu  sync.Mutex
@@ -325,11 +332,20 @@ var (
 // Commands() ДО обработки (в том числе отклонённая хуками) — тесты проверяют
 // "ни одной записи не произошло" именно по этому журналу.
 func (s *Server) Run(cmd string, stdin []byte) (string, error) {
+	return s.RunCancel(cmd, stdin, nil)
+}
+
+// RunCancel — Run с сигналом «клиент отключился» (gone; nil — нет): при
+// LockReleaseOnDisconnect удерживаемая запись под замком, чей клиент
+// отключился, не выполняется и сразу отпускает замок — модель обрыва, при
+// котором запись на хосте умирает вместе с клиентом.
+func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (string, error) {
 	// Настройки, действующие ВНЕ общего мьютекса, читаются под ним одним
 	// снимком (CI -race 02.10: тесты меняют их через Configure, пока
 	// сессии SSH уже обслуживаются).
 	s.mu.Lock()
 	delay, hold, shared, abort := s.CommandDelay, s.LockHoldFor, s.LockShared, s.LockHoldAbort
+	release := s.LockReleaseOnDisconnect
 	split, gap := s.AllowLegacyWrite && s.LegacyTmpSplit, s.LegacyTmpGap
 	s.mu.Unlock()
 	if delay > 0 {
@@ -342,7 +358,15 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 		}
 		pid := s.addHeld(cmd)
 		defer s.delHeld(pid)
-		time.Sleep(hold)
+		if release && gone != nil {
+			select {
+			case <-time.After(hold):
+			case <-gone:
+				return "", &ExitError{Cmd: cmd, Status: 255, Stderr: "клиент отключился: запись прервана, замок отпущен"}
+			}
+		} else {
+			time.Sleep(hold)
+		}
 		if abort && s.lockAborted.CompareAndSwap(false, true) {
 			return "", &ExitError{Cmd: cmd, Status: 124, Stderr: "timeout: прервано (модель обрыва)"}
 		}
@@ -450,6 +474,9 @@ func (s *Server) legacySplit(cmd, path string, stdin []byte, gap time.Duration) 
 func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	switch {
 	case cmd == reDockerPS:
+		if s.FailDockerPS != nil {
+			return "", s.FailDockerPS
+		}
 		return strings.Join(s.Names, "\n"), nil
 
 	case reCat.MatchString(cmd):

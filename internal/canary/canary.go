@@ -150,6 +150,42 @@ type Env struct {
 	// завёлся — дочерняя программа НЕ запускается.
 	ConfHome string
 	confMu   sync.Mutex
+
+	// created — имена клиентов, которые канарейка САМА запускала в
+	// добавление в этом прогоне (решение ядра 02.10 по риску QA): уборка
+	// удаляет только их; чужой canary-…, созданный человеком во время
+	// прогона, не трогается и называется в «У» как «не наш, оставлен».
+	createdMu   sync.Mutex
+	created     map[string]bool
+	leftForeign []string // заполняет cleanup
+}
+
+// noteCreated — имя name канарейка отдаёт программе на добавление.
+func (e *Env) noteCreated(name string) {
+	e.createdMu.Lock()
+	defer e.createdMu.Unlock()
+	if e.created == nil {
+		e.created = map[string]bool{}
+	}
+	e.created[name] = true
+}
+
+func (e *Env) isCreated(name string) bool {
+	e.createdMu.Lock()
+	defer e.createdMu.Unlock()
+	return e.created[name]
+}
+
+// noteAddArgs — из аргументов программы: add … -name X → X создаётся нами.
+func (e *Env) noteAddArgs(args []string) {
+	if len(args) == 0 || args[0] != "add" {
+		return
+	}
+	for i := 1; i+1 < len(args); i++ {
+		if args[i] == "-name" {
+			e.noteCreated(args[i+1])
+		}
+	}
 }
 
 // ChildDataEnv — переменные, уводящие каталог данных пользователя дочерней
@@ -299,6 +335,9 @@ func Run(e *Env) ([]Result, error) {
 		u.Status, u.Detail = Fail, err.Error()
 	} else {
 		u.Status, u.Detail = Pass, "canary-* удалены, пользователь из приложения Amnezia оставлен"
+		if len(e.leftForeign) > 0 {
+			u.Detail += "; не наш, оставлен: " + strings.Join(e.leftForeign, ", ")
+		}
 	}
 	add(u)
 	if e.sudoUndo != nil {
@@ -863,6 +902,7 @@ func (e *Env) cli(bin string, env []string, args ...string) cliRun {
 	if cerr != nil {
 		return cliRun{code: -1, errText: cerr.Error(), title: oneLine(cerr.Error())}
 	}
+	e.noteAddArgs(full)
 	cmd := exec.Command(bin, full...)
 	cmd.Env = cenv
 	cmd.Stdin = strings.NewReader("")
@@ -1342,6 +1382,8 @@ func (e *Env) breakWrite() Result {
 	lastGone := ""       // последний держатель, вышедший до опознания
 	cutName := ""        // оборванная запись последнего попадания
 	var cutPIDs []string // её держатели замка, оставшиеся после обрыва
+	freed := false       // после обрыва держателей нет ВОВСЕ (одна команда lslocks)
+	lastOther := ""      // после обрыва у замка был не наш держатель
 	for attempts < k5Attempts {
 		attempts++
 		name := fmt.Sprintf("canary-k5a-%d", attempts)
@@ -1367,9 +1409,18 @@ func (e *Env) breakWrite() Result {
 				cutPIDs = append(cutPIDs, h.pid)
 			}
 		}
-		// Решение ядра 02.10 (живой прогон 0c6d639): попадание — и замок
-		// после обрыва свободен — тоже исход К5, а не повод повторять.
-		break
+		// Решение ядра 02.10 (живой прогон 0c6d639): замок после обрыва
+		// свободен — тоже исход К5. Но «свободен» — это держателей НЕТ
+		// ВОВСЕ, а не «нашего PID нет» (AU-LOGIC раунд 4 High-3): не наш
+		// держатель после обрыва — попытка повторяется.
+		if len(after) == 0 {
+			freed = true
+			break
+		}
+		if len(cutPIDs) > 0 {
+			break
+		}
+		lastOther = holderLines(after)
 	}
 	tries := fmt.Sprintf("обрыв под замком: попыток %d из %d, застали нашу запись под замком: %d", attempts, k5Attempts, hits)
 	if hits == 0 {
@@ -1379,7 +1430,9 @@ func (e *Env) breakWrite() Result {
 		}
 		return Result{Detail: tries + why + ": ожидание второй записи не проверено"}
 	}
-	freed := len(cutPIDs) == 0 // замок свободен при первом же опросе после обрыва
+	if !freed && len(cutPIDs) == 0 {
+		return Result{Detail: tries + " — после обрыва у замка был не наш держатель (" + oneLine(lastOther) + "): ожидание второй записи не проверено"}
+	}
 	// Вторая запись — пока держится замок оборванной. Ожидание измеряется:
 	// держатели опрашиваются, пока вторая идёт; «ждала» — только если
 	// замок оборванной освободился ПОСЛЕ начала второй, вторая закончилась
@@ -1391,8 +1444,36 @@ func (e *Env) breakWrite() Result {
 	var second cliRun
 	var freedAt time.Time
 	overlap, pollFail := false, ""
+	// Замок свободен: «ожидание не потребовалось» — только если и во время
+	// второй записи у замка не было никого, кроме самой второй записи
+	// (метка и сумма файла, прочитанного перед ней).
+	freeClean, freeWhy := true, ""
 	if freed {
-		second = <-ch // ждать нечего: держателей уже нет
+		shaNow := ""
+		if c, err := e.catFile(e.conf()); err == nil {
+			sum := sha256.Sum256([]byte(c))
+			shaNow = hex.EncodeToString(sum[:])
+		} else {
+			freeClean, freeWhy = false, e.fam.File+" перед второй записью не прочитан"
+		}
+	freePoll:
+		for {
+			select {
+			case second = <-ch:
+				break freePoll
+			default:
+			}
+			hs, ok, why := e.holdersPID()
+			if !ok {
+				freeClean, freeWhy = false, why
+			}
+			for _, h := range hs {
+				if k, _ := classifyHolder(h, shaNow); k != holderOurs || shaNow == "" {
+					freeClean, freeWhy = false, "во время второй записи у замка был держатель "+oneLine(h.line)
+				}
+			}
+			time.Sleep(k5Poll)
+		}
 	}
 poll:
 	for !freed {
@@ -1427,8 +1508,10 @@ poll:
 	waited := !freedAt.IsZero() && end.After(freedAt) && freedAt.After(start) && !overlap && pollFail == ""
 	wait := "ожидание не измерено"
 	switch {
-	case freed:
+	case freed && freeClean:
 		wait = "замок освободился сразу после обрыва; ожидание не потребовалось"
+	case freed:
+		wait = "ожидание не измерено: " + freeWhy
 	case waited:
 		wait = fmt.Sprintf("ждала: замок оборванной записи освободился через %.1f с после начала второй", freedAt.Sub(start).Seconds())
 	case overlap:
@@ -1460,7 +1543,7 @@ poll:
 	}
 	st, outcome := judgeK5Second(second, landed, waited)
 	if freed {
-		st, outcome = judgeK5Freed(second, landed)
+		st, outcome = judgeK5Freed(second, landed, freeClean)
 	}
 	return Result{Status: st, Detail: detail + " — " + outcome}
 }
@@ -1471,9 +1554,12 @@ poll:
 // оборванной определён по содержимому — ПРОЙДЕН; исход оборванной не
 // определён — НЕ ПРОВЕРЕНО; прочие исходы второй — как в judgeK5Second.
 // Согласованность файлов и третья запись проверены до вызова.
-func judgeK5Freed(second cliRun, landed landedState) (Status, string) {
+func judgeK5Freed(second cliRun, landed landedState, clean bool) (Status, string) {
 	if second.code != 0 {
 		return judgeK5Second(second, landed, false)
+	}
+	if !clean {
+		return NotChecked, "замок после обрыва был свободен, но во время второй записи свобода замка не подтверждена — ожидание не измерено"
 	}
 	switch landed {
 	case landedYes:
@@ -1685,6 +1771,7 @@ func (e *Env) killUnderLock(name string) k5Attempt {
 	if e.Ctr != nil {
 		args = append(args, "-container", e.Ctr.Name)
 	}
+	e.noteAddArgs(args)
 	cmd := exec.Command(e.NewBin, args...)
 	cmd.Env = cenv
 	cmd.Stdin = strings.NewReader("")
@@ -1957,6 +2044,7 @@ func (e *Env) cleanup() error {
 		ctrs = wg
 	}
 	var left []string
+	e.leftForeign = nil
 	for i := range ctrs {
 		c := &ctrs[i]
 		if c.Name == e.Ctr.Name {
@@ -1967,10 +2055,15 @@ func (e *Env) cleanup() error {
 			return fmt.Errorf("уборка: список %s не прочитан: %w", c.Name, err)
 		}
 		for _, x := range cl {
-			if strings.HasPrefix(x.Name(), "canary-") {
-				if err := e.Sess.DeleteByID(c, x.ClientID); err != nil {
-					left = append(left, c.Name+": "+x.Name())
-				}
+			if !strings.HasPrefix(x.Name(), "canary-") {
+				continue
+			}
+			if !e.isCreated(x.Name()) {
+				e.leftForeign = append(e.leftForeign, c.Name+": "+x.Name())
+				continue
+			}
+			if err := e.Sess.DeleteByID(c, x.ClientID); err != nil {
+				left = append(left, c.Name+": "+x.Name())
 			}
 		}
 	}

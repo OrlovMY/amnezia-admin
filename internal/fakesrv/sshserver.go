@@ -46,6 +46,7 @@ func NewHostKey() (ssh.Signer, error) {
 // SSHServer — работающий SSH-сервер поверх net.Listener; каждая сессия exec
 // исполняется через переданный exec (*Server).
 type SSHServer struct {
+	exec *Server // для run == nil (ListenSSH): RunCancel с сигналом отключения
 	ln   net.Listener
 	fp   string
 	wg   sync.WaitGroup
@@ -90,7 +91,7 @@ func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*
 	if exec == nil {
 		return nil, fmt.Errorf("fakesrv: ListenSSH: exec (*Server) обязателен")
 	}
-	return listenSSH(addr, user, password, hostKey, exec, exec.Run)
+	return listenSSH(addr, user, password, hostKey, exec, nil)
 }
 
 // ListenSSHSudoOnly — как ListenSSH, но пользователь user устроен как в
@@ -173,12 +174,14 @@ func listenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server, ru
 	}
 
 	s := &SSHServer{
+		exec:  exec,
 		ln:    ln,
 		fp:    ssh.FingerprintSHA256(hostKey.PublicKey()),
 		conns: make(map[net.Conn]struct{}),
 	}
 	s.wg.Add(1)
 	go s.acceptLoop(cfg, run)
+
 	return s, nil
 }
 
@@ -254,6 +257,13 @@ func (s *SSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig, run func(st
 		return
 	}
 	defer sconn.Close()
+	// run == nil — обычный ListenSSH: команды идут в exec.RunCancel с
+	// сигналом «клиент отключился» (LockReleaseOnDisconnect).
+	if run == nil {
+		gone := make(chan struct{})
+		go func() { _ = sconn.Wait(); close(gone) }()
+		run = func(cmd string, stdin []byte) (string, error) { return s.exec.RunCancel(cmd, stdin, gone) }
+	}
 	go ssh.DiscardRequests(reqs)
 
 	var wg sync.WaitGroup

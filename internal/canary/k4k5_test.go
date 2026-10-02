@@ -426,43 +426,84 @@ func TestJudgeK5Freed(t *testing.T) {
 		{"изменили, оборванной нет", cliRun{code: 1, title: chg.Title}, landedNo, Fail},
 		{"иной отказ", cliRun{code: 1, title: "что-то"}, landedNo, Fail},
 	} {
-		if got, why := judgeK5Freed(c.r, c.landed); got != c.want {
+		if got, _ := judgeK5Freed(c.r, c.landed, false); c.r.code == 0 && got == Pass {
+			t.Errorf("%s: свобода замка во время второй не подтверждена, а ПРОЙДЕН", c.name)
+		}
+		if got, why := judgeK5Freed(c.r, c.landed, true); got != c.want {
 			t.Errorf("%s: %s (%s), ждали %s", c.name, got, why, c.want)
 		}
 	}
 }
 
-// TestK5FreedRightAfterCut — доезд: нашу запись застали под замком, а
-// после обрыва держателей уже нет (как на хосте 02.10) — ПРОЙДЕН «замок
-// освободился сразу после обрыва; ожидание не потребовалось».
+// TestK5FreedRightAfterCut — доезд: нашу запись застали под замком, обрыв
+// клиента на «хосте» прерывает её и отпускает замок (fakesrv
+// LockReleaseOnDisconnect — настоящий освобождённый замок, не сокрытие в
+// ответе lslocks) — ПРОЙДЕН «замок освободился сразу после обрыва;
+// ожидание не потребовалось».
 func TestK5FreedRightAfterCut(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin = newCLI(t)
 	f.exec.Configure(func(s *fakesrv.Server) {
 		s.CommandDelay = 100 * time.Millisecond
-		s.LockHoldFor = 800 * time.Millisecond
-		s.LockHoldAbort = true
+		s.LockHoldFor = 1500 * time.Millisecond
+		s.LockReleaseOnDisconnect = true
 	})
-	var mu sync.Mutex
-	seen := map[string]bool{}
 	inner := f.env.Remote
 	f.env.Remote = func(cmd string) (string, error) {
 		if cmd == lslocksCmdlineCmd {
-			mu.Lock()
-			defer mu.Unlock()
 			var hs [][2]string
 			for pid, c := range f.exec.Held() {
-				if !seen[pid] { // держатель виден один раз: после обрыва — свободно
-					seen[pid] = true
-					hs = append(hs, [2]string{pid, c})
-				}
+				hs = append(hs, [2]string{pid, c})
 			}
 			return locksOut(hs...), nil
 		}
 		return inner(cmd)
 	}
 	r := f.env.breakWrite()
-	if r.Status != Pass || !strings.Contains(r.Detail, "замок освободился сразу после обрыва") || !strings.Contains(r.Detail, "застали нашу запись под замком: 1") {
+	if r.Status != Pass || !strings.Contains(r.Detail, "замок освободился сразу после обрыва; ожидание не потребовалось") {
 		t.Fatalf("К5: %s — %s", r.Status, r.Detail)
+	}
+}
+
+// TestK5ForeignAfterCut — тест аудитора (раунд 4 High-3): нашу запись
+// застали, а после обрыва у замка только чужой 9999 (sleep) — не ПРОЙДЕН
+// «ожидание не потребовалось».
+func TestK5ForeignAfterCut(t *testing.T) {
+	f := emptyFake(t, false)
+	f.env.NewBin = newCLI(t)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.CommandDelay = 100 * time.Millisecond
+		s.LockHoldFor = 1500 * time.Millisecond
+		s.LockHoldAbort = true
+	})
+	var mu sync.Mutex
+	hit := false
+	inner := f.env.Remote
+	f.env.Remote = func(cmd string) (string, error) {
+		if cmd == lslocksCmdlineCmd {
+			mu.Lock()
+			defer mu.Unlock()
+			held := f.exec.Held()
+			if !hit && len(held) > 0 {
+				hit = true
+				var hs [][2]string
+				for pid, c := range held {
+					hs = append(hs, [2]string{pid, c})
+				}
+				return locksOut(hs...), nil
+			}
+			if hit {
+				return locksOut([2]string{"9999", "sleep 1000"}), nil
+			}
+			return locksOut(), nil
+		}
+		return inner(cmd)
+	}
+	r := f.env.breakWrite()
+	if r.Status == Pass || strings.Contains(r.Detail, "ожидание не потребовалось") ||
+		!(strings.Contains(r.Detail, "после обрыва у замка был не наш держатель") || strings.Contains(r.Detail, "замок держит чужой")) {
+		// не наш держатель после обрыва — новая попытка (а её предусловие
+		// видит чужого), а не путь «замок свободен»
+		t.Fatalf("К5 с чужим держателем после обрыва: %s — %s", r.Status, r.Detail)
 	}
 }

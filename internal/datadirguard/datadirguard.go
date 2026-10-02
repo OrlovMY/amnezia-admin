@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -67,20 +68,35 @@ func Run(m *testing.M, dir *string) int {
 	return code
 }
 
-// toolchainPrefix — единственное, что в унаследованном каталоге данных
+// telemetryPrefix — единственное, что в унаследованном каталоге данных
 // пишет НЕ программа: счётчики телеметрии самого Go (go build/go env в
-// тестах; os.UserConfigDir/go/telemetry — на Linux и macOS он от
-// XDG_CONFIG_HOME/HOME). CI 02.10: без этого исключения сторож краснел на
-// linux и macos по файлам go/telemetry/local/*.count. Закрытый список из
-// одного префикса: всё остальное — утечка.
-const toolchainPrefix = "go/telemetry/"
+// тестах) в os.UserConfigDir()/go/telemetry/. Run подменяет каталог данных
+// на d, поэтому путь — относительно d и зависит от ОС так же, как
+// os.UserConfigDir: linux — $XDG_CONFIG_HOME (= d); darwin —
+// $HOME/Library/Application Support (HOME = d); windows — %AppData%, его
+// Run не подменяет — в d телеметрии нет, исключения нет. CI 02.10: без
+// исключения сторож краснел на linux (go/telemetry/…) и macos (Library/
+// Application Support/go/telemetry/…). Закрытый список из одного префикса
+// на ОС: всё остальное — утечка.
+func telemetryPrefix(goos string) string {
+	switch goos {
+	case "windows":
+		return ""
+	case "darwin", "ios":
+		return "Library/Application Support/go/telemetry/"
+	}
+	return "go/telemetry/"
+}
 
 // Leaks — файлы из Files, которые считаются записью в каталог данных
-// (всё, кроме телеметрии Go).
-func Leaks(files []string) []string {
+// (всё, кроме телеметрии Go этой ОС).
+func Leaks(files []string) []string { return leaksFor(runtime.GOOS, files) }
+
+func leaksFor(goos string, files []string) []string {
+	pre := telemetryPrefix(goos)
 	var out []string
 	for _, f := range files {
-		if !strings.HasPrefix(filepath.ToSlash(f), toolchainPrefix) {
+		if pre == "" || !strings.HasPrefix(filepath.ToSlash(f), pre) {
 			out = append(out, f)
 		}
 	}
