@@ -12,6 +12,7 @@
 //	amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //	amnezia-admin toggle -key vpn://... -name Vasya
 //	amnezia-admin rekey  -key vpn://... -name Vasya
+//	amnezia-admin show-config -key vpn://... -name Vasya [-print]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -54,6 +55,7 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/envcheck"
+	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/version"
 )
 
@@ -365,13 +367,18 @@ func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 // тест подставлял свой и не писал в настоящий каталог данных владельца — тот
 // же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
 func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
-	abs, createdDir, err := core.WriteClientConfig(dir, u.Name, u.Config)
+	res, err := core.SaveClientConfig(dir, u.Name, u.Config, u.Replaces)
+	abs, createdDir := res.Path, res.DirWasMissing
 	if err != nil {
 		return saveFailed(w, u, err)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
+	if res.Occupied != "" {
+		// К-1: имя занято конфигом другого клиента — его файл не тронут
+		fmt.Fprintln(w, cWarn(guiview.OccupiedText(res.Occupied, filepath.Base(abs))))
+	}
 	if createdDir {
 		// Одноразовая подсказка: каталога не было, значит в новое место
 		// сохраняется впервые (ревью UX-01).
@@ -872,6 +879,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
 	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
+	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента) — только если ключ сервера сверен и совпал")
+	printUnverified := fs.Bool("print-unverified", false, "show-config: напечатать содержимое, даже если ключ сервера не совпал или не сверен")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1055,8 +1064,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			e = saveUserConfig(stdout, u, cur.Proto)
 		}
 		err = e
+	case "show-config":
+		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))
