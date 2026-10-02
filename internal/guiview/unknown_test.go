@@ -38,7 +38,7 @@ func (f *failWgShow) Run(cmd string, stdin []byte) (string, error) {
 }
 
 func wgContainer() *core.Container {
-	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 }
 
 // TestDeleteCardActivityThreeStates — ТЕСТ РАЗЛИЧЕНИЯ места № 1: три

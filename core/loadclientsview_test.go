@@ -87,8 +87,11 @@ var containersWasNow = []struct {
 	{"amnezia-sftp", "SFTP", false, false},
 	{"amnezia-tor", "Tor site", false, false},
 	{"amnezia-dns", "DNS", false, false},
-	{"amnezia-awg2", "awg2", false, true},
-	{"amnezia-foo", "foo", false, false},
+	// PR-W2: awg2 — известный тип с человеческим именем (было "awg2" —
+	// голый суффикс); amnezia-foo — незнакомый: Proto пуст, каталог не
+	// подставлен, внутрь не заходим.
+	{"amnezia-awg2", "AmneziaWG 2", false, true},
+	{"amnezia-foo", "", false, false},
 }
 
 func containerNames() []string {
@@ -166,6 +169,9 @@ func TestContainersWasNowTable(t *testing.T) {
 					// amnezia-client), а не угаданный по суффиксу /opt/amnezia/awg2.
 					dir = "/opt/amnezia/awg"
 				}
+				if spec.name == "amnezia-foo" {
+					dir = "" // PR-W2: каталог незнакомого не подставляется
+				}
 				path := dir + "/clientsTable"
 				setVariant(srv, path, variant)
 				sess := core.NewSessionWithRunner(srv, viewCreds())
@@ -189,14 +195,33 @@ func TestContainersWasNowTable(t *testing.T) {
 					t.Errorf("Proto = %q, want %q (Э1: без хвоста «не поддерживается»)", c.Proto, spec.proto)
 				}
 				// (а), реш. Б: Managed сейчас (может отличаться от d6b3a5a — awg2)
-				if c.Managed != spec.managed {
-					t.Errorf("Managed = %v, want %v (was %v on d6b3a5a)", c.Managed, spec.managed, spec.wasManagedOriginal)
+				if c.Managed() != spec.managed {
+					t.Errorf("Managed = %v, want %v (was %v on d6b3a5a)", c.Managed(), spec.managed, spec.wasManagedOriginal)
 				}
 				if c.Dir != dir {
 					t.Fatalf("Dir = %q, want %q (тест держит их согласованными)", c.Dir, dir)
 				}
 
 				clients, existed, loadErr := sess.LoadClientsView(c)
+
+				if spec.name == "amnezia-foo" {
+					// PR-W2: незнакомый — ни одной команды внутрь, ошибка
+					// «каталог не известен», статус «незнакомый контейнер»
+					if !errors.Is(loadErr, core.ErrContainerDirUnknown) {
+						t.Fatalf("LoadClientsView незнакомого: %v", loadErr)
+					}
+					for _, cmd := range srv.Commands() {
+						if strings.Contains(cmd, "exec amnezia-foo") {
+							t.Errorf("команда внутрь незнакомого контейнера: %s", cmd)
+						}
+					}
+					view := guiview.ViewState(*c, clients, existed, loadErr)
+					want := "Незнакомый контейнер amnezia-foo: программа не знает, что это за протокол, и не заходит в него."
+					if view.Status != want || view.CanManage || view.LoadStats {
+						t.Errorf("незнакомый: %+v", view)
+					}
+					return
+				}
 
 				switch variant {
 				case "ok":
@@ -282,7 +307,7 @@ func TestLoadClientsViewNoExtraCommands(t *testing.T) {
 			dir := "/opt/amnezia/" + suffix
 			setVariant(srv, dir+"/clientsTable", "ok")
 			sess := core.NewSessionWithRunner(srv, viewCreds())
-			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Managed: false}
+			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Support: core.SupportKnownNo}
 
 			if _, _, err := sess.LoadClientsView(c); err != nil {
 				t.Fatalf("LoadClientsView: %v", err)
@@ -303,7 +328,7 @@ func TestLoadClientsViewNoExtraCommands(t *testing.T) {
 			dir := "/opt/amnezia/" + suffix
 			setVariant(srv, dir+"/clientsTable", "missing")
 			sess := core.NewSessionWithRunner(srv, viewCreds())
-			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Managed: false}
+			c := &core.Container{Name: name, Dir: dir, Proto: suffix, Support: core.SupportKnownNo}
 
 			if _, _, err := sess.LoadClientsView(c); err != nil {
 				t.Fatalf("LoadClientsView: %v", err)

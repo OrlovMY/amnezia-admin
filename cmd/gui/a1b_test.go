@@ -293,7 +293,7 @@ func cellText(u *ui, row, col int) string {
 func TestA1bActivityAndTrafficFromOneReading(t *testing.T) {
 	r := &countingRunner{inner: fakesrv.New(), okWgShow: 1}
 	sess := core.NewSessionWithRunner(r, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	u := refreshedUI(t, sess, c)
 	if r.wgShow != 1 {
 		t.Errorf("refresh() спросил `wg show` %d раз(а), ожидался один запрос на обе колонки", r.wgShow)
@@ -319,7 +319,7 @@ func TestA1bActivityAndTrafficFromOneReading(t *testing.T) {
 // Этот тест держит НОВЫЙ тип: подмена в guiview.ActivityText «!ok → "—"»
 // роняет его (и TestActivityTextThreeStates) — проверено, см. отчёт.
 func TestA1bActivityUnknownWhenStatsFail(t *testing.T) {
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
 	failed := refreshedUI(t, core.NewSessionWithRunner(&countingRunner{inner: fakesrv.New(), okWgShow: 0}, creds), c)
 	ok := refreshedUI(t, core.NewSessionWithRunner(fakesrv.New(), creds), c)

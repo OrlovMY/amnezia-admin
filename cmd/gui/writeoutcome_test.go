@@ -94,7 +94,7 @@ func pr3DiffWindow(t *testing.T, prep func(*fakesrv.Server)) (*ui, *widget.Butto
 }
 
 func pr3Container() *core.Container {
-	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 }
 
 // TestPR3GUIApplyOutcomes — ДОЕЗД и РАЗЛИЧЕНИЕ по всем семи исходам.

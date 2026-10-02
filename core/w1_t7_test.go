@@ -35,7 +35,7 @@ var awg2Want = []int{8, 2, 3, 3, 2, 2, 1}
 func TestServerCommandsAWG2(t *testing.T) {
 	srv := fakesrv.NewAWG2()
 	sess := NewSessionWithRunner(srv, testCreds())
-	c := &Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Managed: true}
+	c := &Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Support: SupportYes}
 	if _, err := sess.GetPeerStats(c); err != nil {
 		t.Fatalf("GetPeerStats: %v", err)
 	}

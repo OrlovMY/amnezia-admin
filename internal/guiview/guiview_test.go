@@ -39,7 +39,11 @@ func mkContainer(spec struct {
 	proto   string
 	managed bool
 }) core.Container {
-	return core.Container{Name: spec.name, Dir: "/opt/amnezia/" + spec.name, Proto: spec.proto, Managed: spec.managed}
+	sup := core.SupportKnownNo
+	if spec.managed {
+		sup = core.SupportYes
+	}
+	return core.Container{Name: spec.name, Dir: "/opt/amnezia/" + spec.name, Proto: spec.proto, Support: sup}
 }
 
 // twoClients — вариант "две записи" (N=2) для LoadClientsView.
@@ -131,12 +135,19 @@ func TestViewState(t *testing.T) {
 // TestProtoLabel — единственное место подписи "(только просмотр)" (Д2): без
 // второго суффикса, дословно.
 func TestProtoLabel(t *testing.T) {
-	managed := core.Container{Proto: "AmneziaWG", Managed: true}
+	managed := core.Container{Proto: "AmneziaWG", Support: core.SupportYes}
 	if got := ProtoLabel(managed); got != "AmneziaWG" {
 		t.Errorf("ProtoLabel(managed) = %q, want %q", got, "AmneziaWG")
 	}
-	unmanaged := core.Container{Proto: "XRay", Managed: false}
-	if got := ProtoLabel(unmanaged); got != "XRay (только просмотр)" {
-		t.Errorf("ProtoLabel(unmanaged) = %q, want %q", got, "XRay (только просмотр)")
+	// PR-W2: было «XRay (только просмотр)»
+	unmanaged := core.Container{Name: "amnezia-xray", Proto: "XRay", Support: core.SupportKnownNo}
+	if got := ProtoLabel(unmanaged); got != "XRay — не поддерживается этой программой" {
+		t.Errorf("ProtoLabel(unmanaged) = %q", got)
+	}
+	// PR-W2: незнакомый — голое имя контейнера с пометкой, а не суффикс,
+	// похожий на протокол (было «foo (только просмотр)»)
+	unknown := core.Container{Name: "amnezia-foo", Support: core.SupportUnknown}
+	if got := ProtoLabel(unknown); got != "незнакомый контейнер amnezia-foo" {
+		t.Errorf("ProtoLabel(unknown) = %q", got)
 	}
 }

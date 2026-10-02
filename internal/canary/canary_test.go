@@ -113,7 +113,7 @@ func emptyFake(t *testing.T, withClients bool) *fakeServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(sess.Close)
-	ctr := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	ctr := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	fam, _ := core.WGFamilyOf(ctr)
 	// К4: канарейка играет старую версию прежней командой записи — fakesrv
 	// принимает её только по явному разрешению.

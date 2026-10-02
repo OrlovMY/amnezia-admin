@@ -52,7 +52,7 @@ func TestAWG2DiscoveryDir(t *testing.T) {
 	if c.Dir != "/opt/amnezia/awg" {
 		t.Errorf("каталог amnezia-awg2 = %q, ждали /opt/amnezia/awg", c.Dir)
 	}
-	if c.Managed {
+	if c.Managed() {
 		t.Errorf("управление amnezia-awg2 включает PR-W3 (определение формата), а не PR-W1")
 	}
 }
@@ -66,7 +66,7 @@ func TestAWG2WriteFamily(t *testing.T) {
 	sess := core.NewSessionWithRunner(srv, raceCreds())
 	// Managed=true — как включит PR-W3 после определения формата; здесь
 	// проверяется путь ЗАПИСИ (файл, утилита, интерфейс из таблицы).
-	c := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Managed: true}
+	c := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Support: core.SupportYes}
 	u, err := sess.AddUser(c, "Carol")
 	if err != nil {
 		t.Fatalf("AddUser на amnezia-awg2: %v", err)

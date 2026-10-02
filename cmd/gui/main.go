@@ -1034,7 +1034,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			u.containers = containers
 			u.cur = &u.containers[0]
 			for i := range u.containers {
-				if u.containers[i].Managed {
+				if u.containers[i].Managed() {
 					u.cur = &u.containers[i]
 					break
 				}
@@ -2273,12 +2273,12 @@ func (u *ui) setBusy(busy bool) {
 // !Managed обрывался ранним guard'ом — "LoadClients для !Managed падает",
 // предпосылка не проверялась и была неверна; см. секцию А задания).
 //
-// refresh() НЕ содержит собственных условий по Container.Managed (Э3а,
+// refresh() НЕ содержит собственных условий по Container.Managed() (Э3а,
 // решение ядра 15.09): что грузить (LoadClientsView — всегда), нужна ли
 // серверная статистика (wg show), доступно ли управление и что написать в
 // статусе — решает ТОЛЬКО guiview.ViewState по результату LoadClientsView.
 // Так табличный тест на подмену ViewState (Э3б) реально ловит регресс: если
-// бы refresh() держал свой параллельный guard "if !cur.Managed", подмена в
+// бы refresh() держал свой параллельный guard "if !cur.Managed()", подмена в
 // guiview его бы не увидела.
 //
 // Снимок cur делается дважды: один раз здесь (для запроса к нужному
@@ -2641,9 +2641,9 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 // ---------- создание ----------
 
 func (u *ui) addDialog() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	entry := widget.NewEntry()
@@ -2902,9 +2902,9 @@ func scrollToEnd(outer *fyne.Container, s *container.Scroll) {
 // ---------- переименование ----------
 
 func (u *ui) renameSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -2991,9 +2991,9 @@ func (u *ui) renameSelected() {
 // ---------- отключение/включение ----------
 
 func (u *ui) toggleSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3085,9 +3085,9 @@ func (u *ui) toggleSelected() {
 // ---------- перевыпуск конфига (re-key) ----------
 
 func (u *ui) regenerateSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3173,9 +3173,9 @@ func (u *ui) regenerateSelected() {
 var errProtoSwitched = errors.New("протокол переключён, пока шёл запрос активности")
 
 func (u *ui) deleteSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow

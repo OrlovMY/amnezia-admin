@@ -147,7 +147,7 @@ func TestSaveKeyDialogFocusesLabelEntry(t *testing.T) {
 // TestAddDialogFocusesNameEntry — «Новый пользователь»: имя вводится сразу.
 func TestAddDialogFocusesNameEntry(t *testing.T) {
 	u := focusTestUI(t)
-	u.cur = &core.Container{Proto: "awg", Managed: true}
+	u.cur = &core.Container{Proto: "awg", Support: core.SupportYes}
 	u.status = widget.NewLabel("")
 	u.addDialog()
 	over := u.win.Canvas().Overlays().List()
@@ -165,7 +165,7 @@ func TestAddDialogFocusesNameEntry(t *testing.T) {
 // сразу, поле уже содержит прежнее.
 func TestRenameDialogFocusesNameEntry(t *testing.T) {
 	u := focusTestUI(t)
-	u.cur = &core.Container{Proto: "awg", Managed: true}
+	u.cur = &core.Container{Proto: "awg", Support: core.SupportYes}
 	u.status = widget.NewLabel("")
 	u.canManage = true
 	u.clients = []core.ClientEntry{{ClientID: "id-1", UserData: map[string]any{"clientName": "Ноутбук"}}}

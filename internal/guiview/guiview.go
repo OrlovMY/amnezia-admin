@@ -8,10 +8,11 @@
 // ViewState — единственное место, откуда refresh() в cmd/gui/main.go берёт
 // решения "грузить список / запрашивать статистику / доступно управление /
 // текст статуса" (Э3а, решение ядра 15.09): сама refresh() не содержит
-// собственных условий по Container.Managed.
+// собственных условий по Container.Managed().
 package guiview
 
 import (
+	"errors"
 	"fmt"
 
 	"amnezia-admin/core"
@@ -56,32 +57,46 @@ type View struct {
 // имя протокола как есть для управляемых, "<Proto> (только просмотр)" для
 // неуправляемых. ЕДИНСТВЕННОЕ место этой подписи (Д2) — второго суффикса
 // быть не должно (ни в core.Container.Proto, ни второй раз в GUI).
+//
+// PR-W2: три состояния — поддерживается (имя протокола как есть), известен,
+// но не поддерживается (имя + «не поддерживается этой программой»),
+// незнакомый (голое имя контейнера с пометкой — не похоже на протокол).
 func ProtoLabel(c core.Container) string {
-	if c.Managed {
+	switch c.Support {
+	case core.SupportYes:
 		return c.Proto
+	case core.SupportKnownNo:
+		return c.Proto + " — не поддерживается этой программой"
 	}
-	return fmt.Sprintf("%s (только просмотр)", c.Proto)
+	return "незнакомый контейнер " + c.Name
 }
 
 // ViewState решает состояние GUI для контейнера c по результату
 // c.LoadClientsView (clients, existed, err), см. таблицу дословных строк в
-// задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed — единственная
+// задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed() — единственная
 // переменная, влияющая на них; err/existed влияют только на текст Status.
 func ViewState(c core.Container, clients []core.ClientEntry, existed bool, err error) View {
 	v := View{
 		LoadList:  true, // Д2: список пробуем читать для ЛЮБОГО amnezia-*
-		LoadStats: c.Managed,
-		CanManage: c.Managed,
+		LoadStats: c.Managed(),
+		CanManage: c.Managed(),
 	}
 	switch {
-	case c.Managed && err != nil:
+	// PR-W2: незнакомый и «каталог не известен» — ДО общих веток: внутрь не
+	// заходили, сказать «не ведёт список» или «ошибка чтения» было бы неверно.
+	case c.Support == core.SupportUnknown:
+		v.LoadStats, v.CanManage = false, false
+		v.Status = fmt.Sprintf("Незнакомый контейнер %s: программа не знает, что это за протокол, и не заходит в него.", c.Name)
+	case !c.Managed() && errors.Is(err, core.ErrContainerDirUnknown):
+		v.Status = fmt.Sprintf("%s — не поддерживается этой программой: управление пользователями недоступно.", c.Proto)
+	case c.Managed() && err != nil:
 		// Место № 4 задания A1: таблица сохраняет прежние данные (решение
 		// FIX-VIEW не отменяется), но молчать об этом нельзя — иначе
 		// решения принимаются по данным, про которые человек думает, что
 		// они свежие.
 		v.Status = "Ошибка: " + err.Error() + " · показаны данные прошлого чтения."
 		v.StaleShown = true
-	case c.Managed:
+	case c.Managed():
 		v.Status = fmt.Sprintf("Пользователей: %d · трафик и активность — с момента перезапуска сервера", len(clients))
 	case err != nil:
 		v.Status = fmt.Sprintf("Не удалось прочитать список пользователей %s: %s.", c.Proto, err.Error())

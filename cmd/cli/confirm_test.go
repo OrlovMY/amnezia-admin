@@ -178,7 +178,7 @@ func TestToggleEnableSilent(t *testing.T) {
 func TestConfirmSubcommandTable(t *testing.T) {
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 
 	active := core.ClientEntry{ClientID: "k1", UserData: map[string]any{"clientName": "Alice"}}
 	disabled := core.ClientEntry{ClientID: "k2", UserData: map[string]any{"clientName": "Bob", "disabled": true}}
@@ -281,7 +281,7 @@ func TestDryRunBeatsYes(t *testing.T) {
 
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	var buf bytes.Buffer
 	if err := runDryRun(&buf, sess, c, "del", "Alice", ""); err != nil {
 		t.Fatalf("runDryRun(del): %v", err)

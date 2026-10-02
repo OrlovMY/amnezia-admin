@@ -36,7 +36,7 @@ func TestCASSudoRetryOverRealSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sess.Close()
-	ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	if _, err := sess.AddUser(ct, "Carol"); err != nil {
 		t.Fatalf("запись пользователем «docker только через sudo» не прошла: %v", err)
 	}

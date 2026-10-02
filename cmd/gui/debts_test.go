@@ -78,7 +78,7 @@ func addTableEntry(t *testing.T, srv *fakesrv.Server, entry map[string]any) {
 // Штатный случай — без этих строк. На c65420e строка состояния во всех
 // случаях была «Пользователей: N · …».
 func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
 	const (
 		failNote    = "Статистику с сервера получить не удалось"
@@ -136,7 +136,7 @@ func TestDebtsStatusNamesCauseOfUnknown(t *testing.T) {
 // «отключён», "yes" — «вкл/откл: ?». На c65420e "yes" давал «—», как у
 // активного.
 func TestDebtsRowShowsEnabledUnknown(t *testing.T) {
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
 	for _, cs := range []struct {
 		v    any
@@ -222,7 +222,7 @@ func TestDebtsPinThrottleUnreadableClosesInput(t *testing.T) {
 // Боевой путь: refresh() против fakesrv, настоящие toggleSelected и
 // regenerateSelected. На f5951bc «Вкл/Выкл» давал отказ.
 func TestDebtsToggleUnknownOffersDisable(t *testing.T) {
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	creds := &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"}
 	srv := fakesrv.New()
 	const path = "/opt/amnezia/awg/clientsTable"

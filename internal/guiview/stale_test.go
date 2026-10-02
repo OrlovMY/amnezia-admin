@@ -25,8 +25,8 @@ import (
 // управляемого протокола и только у неё.
 func TestStaleShownIsStateNotText(t *testing.T) {
 	readErr := errors.New("чтение clientsTable: i/o timeout")
-	managed := core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
-	viewOnly := core.Container{Name: "amnezia-xray", Dir: "/opt/amnezia/xray", Proto: "XRay", Managed: false}
+	managed := core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
+	viewOnly := core.Container{Name: "amnezia-xray", Dir: "/opt/amnezia/xray", Proto: "XRay", Support: core.SupportKnownNo}
 
 	for _, tc := range []struct {
 		name string
@@ -56,7 +56,7 @@ func TestStaleShownIsStateNotText(t *testing.T) {
 // по строке интерфейса.
 func TestStaleStatusSaysSo(t *testing.T) {
 	readErr := errors.New("чтение clientsTable: i/o timeout")
-	managed := core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	managed := core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 
 	v := ViewState(managed, nil, false, readErr)
 	want := "Ошибка: " + readErr.Error() + " · показаны данные прошлого чтения."
