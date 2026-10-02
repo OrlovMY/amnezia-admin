@@ -43,6 +43,12 @@ func WGFamilyOf(c *Container) (WGFamily, error) {
 	}
 	for _, f := range wgFamilies {
 		if f.Container == c.Name {
+			// W1, ревью SEC W-R1: каталог берётся из knownContainers (c.Dir), а
+			// файл — отсюда. Две таблицы обязаны совпадать: расхождение — отказ,
+			// а не запись «в чужой каталог».
+			if c.Dir != f.Dir {
+				return WGFamily{}, fmt.Errorf("контейнер %s: каталог %q расходится с таблицей семейства WG (%s) — команды не выполняются", c.Name, c.Dir, f.Dir)
+			}
 			return f, nil
 		}
 	}

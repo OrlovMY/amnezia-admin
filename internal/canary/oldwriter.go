@@ -42,21 +42,40 @@ func (e *Env) oldWriterRace() (lost, total int, err error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s не прочитан: %w", e.fam.File, err)
 	}
-	tblBefore, tblErr := e.catFile(tblPath)
-	tblExisted := tblErr == nil
-	defer func() {
-		// Возврат файлов — всегда; ошибка — наружу (Fail в race).
-		if rerr := e.legacyWrite(e.conf(), []byte(confBefore)); rerr != nil && err == nil {
-			err = fmt.Errorf("ВНИМАНИЕ: %s не возвращён после контроля: %w", e.fam.File, rerr)
-		}
+	// SEC W-R3 (признак 2): «таблицы нет» — только по явному ответу
+	// test -f; иная ошибка чтения — контроль НЕ выполняется (иначе при
+	// возврате настоящая таблица заменилась бы пустой).
+	tblBefore, existed, terr := e.tableBefore(tblPath)
+	if terr != nil {
+		return 0, 0, terr
+	}
+	if !existed {
 		// Таблицы до контроля не было — возвращается пустая: для программы
 		// и для Amnezia пустая и отсутствующая таблица равнозначны (так же
 		// поступает откат ядра).
-		if !tblExisted {
-			tblBefore = "[]"
-		}
-		if rerr := e.legacyWrite(tblPath, []byte(tblBefore)); rerr != nil && err == nil {
-			err = fmt.Errorf("ВНИМАНИЕ: clientsTable не возвращена после контроля: %w", rerr)
+		tblBefore = "[]"
+	}
+	// SEC W-R4: возврат регистрируется СРАЗУ и в Cleanup — прерывание
+	// посреди контроля (Ctrl+C) не оставляет мусорных записей; выполняется
+	// один раз.
+	var restoreOnce sync.Once
+	var restoreErr error
+	restore := func() error {
+		restoreOnce.Do(func() {
+			if rerr := e.legacyWrite(e.conf(), []byte(confBefore)); rerr != nil {
+				restoreErr = fmt.Errorf("ВНИМАНИЕ: %s не возвращён после контроля: %w", e.fam.File, rerr)
+			}
+			if rerr := e.legacyWrite(tblPath, []byte(tblBefore)); rerr != nil && restoreErr == nil {
+				restoreErr = fmt.Errorf("ВНИМАНИЕ: clientsTable не возвращена после контроля: %w", rerr)
+			}
+		})
+		return restoreErr
+	}
+	e.Cleanup(restore)
+	defer func() {
+		// Возврат файлов — всегда; ошибка — наружу (Fail в race).
+		if rerr := restore(); rerr != nil && err == nil {
+			err = rerr
 		}
 	}()
 
@@ -104,6 +123,26 @@ func (e *Env) oldWriterRace() (lost, total int, err error) {
 		}
 	}
 	return lost, len(done), nil
+}
+
+// tableBefore — clientsTable до контроля: (текст, true) — есть; ("", false) —
+// test -f ответил «no»; ошибка — всё прочее (ответ не yes/no, cat не
+// выполнился): что с таблицей, неизвестно.
+func (e *Env) tableBefore(tblPath string) (string, bool, error) {
+	out, err := e.Remote(e.docker + " exec " + e.Ctr.Name + " sh -c 'test -f " + tblPath + " && echo yes || echo no'")
+	switch {
+	case err != nil:
+		return "", false, fmt.Errorf("наличие clientsTable не выяснено (%v) — контроль не выполнялся", err)
+	case strings.TrimSpace(out) == "no":
+		return "", false, nil
+	case strings.TrimSpace(out) != "yes":
+		return "", false, fmt.Errorf("наличие clientsTable не выяснено (ответ %q) — контроль не выполнялся", oneLine(out))
+	}
+	tbl, err := e.catFile(tblPath)
+	if err != nil {
+		return "", false, fmt.Errorf("clientsTable есть, но не прочитана (%v) — контроль не выполнялся", err)
+	}
+	return tbl, true, nil
 }
 
 // oldAdd — одна запись «старой версии»: прочитать, дописать, записать
