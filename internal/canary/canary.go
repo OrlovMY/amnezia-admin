@@ -121,6 +121,8 @@ type Env struct {
 
 	// oldRace — шов теста для контроля К4 (nil — oldWriterRace).
 	oldRace func() (lost, total int, err error)
+
+	awgVariant string // К8: какой вариант AWG проверен вживую ("" — не дошли)
 }
 
 // conf — путь к файлу конфигурации сервера контейнера.
