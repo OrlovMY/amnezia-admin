@@ -1,11 +1,13 @@
 package canary
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Правка П0 (живой стенд 89.22.229.78, решение ядра): приложение Amnezia
@@ -16,36 +18,183 @@ import (
 // они не изменились.
 
 // MaxExisting — сколько уже существующих клиентов допускает П0 с
-// -server-ip. Обоснование: на свежей установке приложение Amnezia создаёт
+// -server-ip, НА СЕРВЕР в сумме по всем контейнерам семейства WG (SEC П-2:
+// счёт на контейнер пропускал боевой сервер с клиентами в разных
+// протоколах). Обоснование: на свежей установке приложение Amnezia создаёт
 // одного клиента администратора на КАЖДЫЙ протокол (на стенде — по одному
-// у amnezia-wireguard и amnezia-awg2); запас — на повторную установку
-// протокола или второе устройство владельца. Больше трёх на одном
-// контейнере — признак сервера, которым пользуются люди: СТОП.
+// у amnezia-wireguard и amnezia-awg2, итого 2); запас — один. Сам по себе
+// порог боевой сервер не отличает (на семью хватает 1–3 клиентов), поэтому
+// главный признак — свежесть контейнеров (MaxFreshAge).
 const MaxExisting = 3
 
 // CheckServerIP — -server-ip против адреса из ключа (hostName) ДО
-// подключения. Совпало — nil. Host — имя: сверяются его адреса.
+// подключения; имя разрешается системным резолвером. См. checkServerIPWith.
 func CheckServerIP(flagIP, host string) error {
+	_, err := checkServerIPWith(flagIP, host, net.LookupIP)
+	return err
+}
+
+// checkServerIPWith — сверка (SEC П-1): в ключе IP — обязан совпасть с
+// флагом; в ключе имя — флаг обязан быть среди разрешённых адресов.
+// Возвращает адрес, по которому ТОЛЬКО и можно подключаться: сам флаг.
+func checkServerIPWith(flagIP, host string, lookup func(string) ([]net.IP, error)) (net.IP, error) {
 	want := net.ParseIP(strings.TrimSpace(flagIP))
 	if want == nil {
-		return fmt.Errorf("-server-ip %q — не IP-адрес", flagIP)
+		return nil, fmt.Errorf("-server-ip %q — не IP-адрес", flagIP)
 	}
 	if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil {
 		if ip.Equal(want) {
-			return nil
+			return want, nil
 		}
-		return fmt.Errorf("-server-ip %s не совпал с адресом из ключа %s — это не тот сервер", want, ip)
+		return nil, fmt.Errorf("-server-ip %s не совпал с адресом из ключа %s — это не тот сервер", want, ip)
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := lookup(host)
 	if err != nil {
-		return fmt.Errorf("адрес из ключа %q не разрешён (%v) — сверить с -server-ip нельзя", host, err)
+		return nil, fmt.Errorf("адрес из ключа %q не разрешён (%v) — сверить с -server-ip нельзя", host, err)
 	}
 	for _, ip := range ips {
 		if ip.Equal(want) {
-			return nil
+			return want, nil
 		}
 	}
-	return fmt.Errorf("-server-ip %s не совпал ни с одним адресом %q из ключа — это не тот сервер", want, host)
+	return nil, fmt.Errorf("-server-ip %s нет среди адресов %q из ключа — это не тот сервер", want, host)
+}
+
+// PinServer — SEC П-1: после сверки подключаться ПРЯМО по IP из флага,
+// без второго разрешения имени (иначе SSH или дочерняя программа -new могли
+// бы уйти на другой адрес того же имени). Возвращает копию ключа с
+// hostName = IP из флага; остальные поля — как были. Ключ хоста
+// проверяется как обычно (known_hosts/-hostkey).
+func PinServer(cfg map[string]any, flagIP string, lookup func(string) ([]net.IP, error)) (map[string]any, error) {
+	host, _ := cfg["hostName"].(string)
+	ip, err := checkServerIPWith(flagIP, host, lookup)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	out["hostName"] = ip.String()
+	return out, nil
+}
+
+// ChildKey — ключ vpn:// для дочерних программ (-new, -old) из
+// закреплённого PinServer: JSON без сжатия (core.DecodeVpnKey, вариант 3).
+// Секрет: не печатается, уходит только в окружение дочерней программы.
+func ChildKey(cfg map[string]any) (string, error) {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	return "vpn://" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// MaxFreshAge — SEC П-2: объективный признак «сервер только что поставлен».
+// Тестовый сервер арендуется на сутки и ставится под проверку; боевой
+// работает неделями. Контейнер Amnezia старше 72 ч — СТОП, флагом не
+// обходится.
+const MaxFreshAge = 72 * time.Hour
+
+// AgeCheck — П0-свежесть: возраст КАЖДОГО контейнера Amnezia на сервере
+// (docker inspect .Created). Старше MaxFreshAge — НЕ ПРОЙДЕН (СТОП); сбой
+// inspect, неразобранный ответ, не все контейнеры в ответе — НЕ ПРОВЕРЕНО
+// (СТОП).
+func AgeCheck(remote func(string) (string, error), names []string, now time.Time) Result {
+	r := Result{ID: "П0-свежесть", Name: fmt.Sprintf("контейнеры Amnezia поставлены не раньше %d ч назад", int(MaxFreshAge.Hours()))}
+	if len(names) == 0 {
+		r.Detail = "контейнеров нет — СТОП"
+		return r
+	}
+	args := " inspect --format '{{.Name}} {{.Created}}' " + strings.Join(names, " ")
+	out, err := remote("docker" + args)
+	if err != nil && strings.Contains(strings.ToLower(out+err.Error()), "permission denied") {
+		out, err = remote("sudo -n docker" + args)
+	}
+	if err != nil {
+		r.Detail = "docker inspect не выполнился: " + oneLine(out) + " " + err.Error() + " — СТОП"
+		return r
+	}
+	seen := map[string]bool{}
+	var old []string
+	oldest := time.Duration(0)
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		l = strings.TrimSpace(strings.TrimRight(l, "\r"))
+		f := strings.Fields(l)
+		if len(f) != 2 {
+			r.Detail = "ответ docker inspect не разобран: " + oneLine(l) + " — СТОП"
+			return r
+		}
+		created, perr := time.Parse(time.RFC3339Nano, f[1])
+		if perr != nil {
+			r.Detail = "время создания не разобрано: " + oneLine(l) + " — СТОП"
+			return r
+		}
+		name := strings.TrimPrefix(f[0], "/")
+		seen[name] = true
+		age := now.Sub(created)
+		if age > oldest {
+			oldest = age
+		}
+		if age > MaxFreshAge {
+			old = append(old, fmt.Sprintf("%s — %.0f ч", name, age.Hours()))
+		}
+	}
+	for _, n := range names {
+		if !seen[n] {
+			r.Detail = "в ответе docker inspect нет " + n + " — СТОП"
+			return r
+		}
+	}
+	if len(old) > 0 {
+		r.Status = Fail
+		r.Detail = "контейнер старше " + fmt.Sprint(int(MaxFreshAge.Hours())) + " ч: " + strings.Join(old, ", ") + " — похоже на сервер, которым пользуются, СТОП (флагом не обходится)"
+		return r
+	}
+	r.Status, r.Detail = Pass, fmt.Sprintf("контейнеров %d, старшему %.1f ч", len(names), oldest.Hours())
+	return r
+}
+
+// Preflight — SEC П-2: ОДИН раз по серверу до первой записи. Свежесть
+// всех контейнеров Amnezia (names) и сумма существующих клиентов по ВСЕМ
+// контейнерам семейства WG (envs) — не больше MaxExisting на сервер.
+// Снимок каждого контейнера остаётся в его Env (П0-итог); П0 в Run
+// пропускает только при пройденной предпроверке.
+func Preflight(remote func(string) (string, error), envs []*Env, names []string, now time.Time) []Result {
+	age := AgeCheck(remote, names, now)
+	cnt := Result{ID: "П0-сервер", Name: fmt.Sprintf("клиентов на сервере до проверки не больше %d", MaxExisting)}
+	total := 0
+	var parts []string
+	snaps := make([]*existingSnap, len(envs))
+	for i, e := range envs {
+		if err := e.init(); err != nil {
+			cnt.Detail = e.Ctr.Name + ": " + err.Error() + " — СТОП"
+			return []Result{age, cnt}
+		}
+		s, why := e.takeSnap()
+		if s == nil {
+			cnt.Detail = e.Ctr.Name + ": " + why + " — СТОП"
+			return []Result{age, cnt}
+		}
+		snaps[i] = s
+		total += s.count()
+		parts = append(parts, fmt.Sprintf("%s %d", e.Ctr.Name, s.count()))
+	}
+	switch {
+	case len(envs) == 0:
+		cnt.Detail = "контейнеров семейства WG нет — СТОП"
+	case total > MaxExisting:
+		cnt.Status, cnt.Detail = Fail, fmt.Sprintf("клиентов на сервере %d (%s) — больше %d: похоже на сервер, которым пользуются люди, СТОП", total, strings.Join(parts, ", "), MaxExisting)
+	default:
+		cnt.Status, cnt.Detail = Pass, fmt.Sprintf("клиентов на сервере %d (%s) — снимки сняты, в конце сверяются (П0-итог)", total, strings.Join(parts, ", "))
+	}
+	if age.Status == Pass && cnt.Status == Pass {
+		for i, e := range envs {
+			e.existing = snaps[i]
+			e.preflightOK = true
+		}
+	}
+	return []Result{age, cnt}
 }
 
 // existingSnap — снимок клиентов, бывших на сервере до канарейки: по ключу
@@ -135,30 +284,30 @@ func (e *Env) takeSnap() (*existingSnap, string) {
 	return s, ""
 }
 
-// existingAllowed — П0 с -server-ip: существующих клиентов не больше
-// MaxExisting и среди них нет canary-* (следы прошлого прогона). Снимок —
-// в e.existing.
+// existingAllowed — П0 с -server-ip: предпроверка сервера (Preflight:
+// свежесть и сумма клиентов по серверу) пройдена, среди существующих нет
+// canary-* (следы прошлого прогона). Снимок — из Preflight, снят до первой
+// записи на сервер.
 func (e *Env) existingAllowed() Result {
-	r := Result{ID: "П0", Name: "существующие клиенты сняты, их не больше " + fmt.Sprint(MaxExisting)}
-	s, why := e.takeSnap()
-	if s == nil {
-		r.Detail = why + " — СТОП"
+	r := Result{ID: "П0", Name: "существующие клиенты сняты до первой записи"}
+	if !e.preflightOK || e.existing == nil {
+		r.Detail = "предпроверка сервера (П0-свежесть, П0-сервер) не пройдена или не выполнялась — СТОП"
 		return r
 	}
-	clients, _ := e.Sess.LoadClients(e.Ctr)
+	clients, err := e.Sess.LoadClients(e.Ctr)
+	if err != nil {
+		r.Detail = "clientsTable не прочитана: " + err.Error() + " — СТОП"
+		return r
+	}
 	for _, c := range clients {
 		if strings.HasPrefix(c.Name(), "canary-") {
 			r.Status, r.Detail = Fail, "на сервере уже есть "+c.Name()+" — следы прошлого прогона, СТОП"
 			return r
 		}
 	}
-	if n := s.count(); n > MaxExisting {
-		r.Status, r.Detail = Fail, fmt.Sprintf("клиентов %d — больше %d: похоже на сервер, которым пользуются люди, СТОП", n, MaxExisting)
-		return r
-	}
-	e.existing = s
+	s := e.existing
 	r.Status = Pass
-	r.Detail = fmt.Sprintf("клиентов до проверки %d (таблица %d, [Peer] в %s %d, в работающем сервере %d) — снимок снят, в конце сверяется (П0-итог)",
+	r.Detail = fmt.Sprintf("клиентов в контейнере до проверки %d (таблица %d, [Peer] в %s %d, в работающем сервере %d) — снимок снят до первой записи, в конце сверяется (П0-итог)",
 		s.count(), len(s.table), e.fam.File, len(s.peers), len(s.runtime))
 	return r
 }

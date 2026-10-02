@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/canary"
@@ -83,18 +85,27 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ: ключ не разобран:", err)
 		return 2
 	}
+	// Правка П0: второй фактор против боевого сервера — IP, названный
+	// человеком, против адреса из ключа; ДО подключения. SEC П-1: дальше
+	// и канарейка, и дочерние программы подключаются ПРЯМО по этому IP —
+	// второго разрешения имени нет.
+	if *serverIP != "" {
+		pinned, err := canary.PinServer(cfg, *serverIP, net.LookupIP)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
+			return 2
+		}
+		ck, err := canary.ChildKey(pinned)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ОТКАЗ: ключ для дочерних программ не собран")
+			return 2
+		}
+		cfg, key = pinned, ck
+	}
 	creds, err := core.CredsFromConfig(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
 		return 2
-	}
-	// Правка П0: второй фактор против боевого сервера — IP, названный
-	// человеком, против адреса из ключа; ДО подключения.
-	if *serverIP != "" {
-		if err := canary.CheckServerIP(*serverIP, creds.Host); err != nil {
-			fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
-			return 2
-		}
 	}
 	in := bufio.NewReader(os.Stdin)
 	ask := func(q string) canary.Answer {
@@ -237,6 +248,31 @@ func run() int {
 		return 1
 	}
 	all = append(all, mr)
+	// SEC П-2: с -server-ip — предпроверка сервера ОДИН раз до первой
+	// записи: свежесть всех контейнеров Amnezia и сумма существующих
+	// клиентов по всем контейнерам семейства WG. Не пройдена — СТОП.
+	envs := map[string]*canary.Env{}
+	if *serverIP != "" {
+		allWG, _ := canary.SelectWG(cs, "")
+		var list []*canary.Env
+		for i := range allWG {
+			e := newEnv(&allWG[i])
+			envs[allWG[i].Name] = e
+			list = append(list, e)
+		}
+		pre := canary.Preflight(remote, list, foundNames, time.Now())
+		for _, r := range pre {
+			fmt.Printf("[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+		}
+		for _, r := range pre {
+			if r.Status != canary.Pass {
+				_, line := canary.Summary(pre, nil)
+				fmt.Println(line)
+				return 1
+			}
+		}
+		all = append(all, pre...)
+	}
 	var order []string
 	per := map[string][]canary.Result{}
 	var runErr error
@@ -244,7 +280,10 @@ func run() int {
 	for i := range sel {
 		ctr := &sel[i]
 		fmt.Printf("\n===== контейнер %s (%s) =====\n", ctr.Name, ctr.Proto)
-		env := newEnv(ctr)
+		env := envs[ctr.Name]
+		if env == nil {
+			env = newEnv(ctr)
+		}
 		curMu.Lock()
 		cur = env
 		curMu.Unlock()

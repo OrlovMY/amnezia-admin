@@ -110,9 +110,10 @@ type Env struct {
 	// ServerIP — значение -server-ip, уже сверенное с адресом из ключа
 	// (CheckServerIP). Задан — П0 допускает до MaxExisting существующих
 	// клиентов и сверяет их в П0-итог; "" — сервер обязан быть пуст.
-	ServerIP string
-	existing *existingSnap
-	Out      io.Writer
+	ServerIP    string
+	existing    *existingSnap
+	preflightOK bool // Preflight пройдена для этого Env (SEC П-2)
+	Out         io.Writer
 
 	// RaceRounds — сколько добавлений делает каждый из двух писателей в К4.
 	RaceRounds int
@@ -143,6 +144,24 @@ type Env struct {
 // conf — путь к файлу конфигурации сервера контейнера.
 func (e *Env) conf() string { return e.Ctr.Dir + "/" + e.fam.File }
 
+// init — семейство WG контейнера и форма вызова docker (напрямую или через
+// sudo). Вызывается из Run и из Preflight (до первой записи).
+func (e *Env) init() error {
+	fam, ferr := core.WGFamilyOf(e.Ctr)
+	if ferr != nil {
+		return ferr
+	}
+	e.fam = fam
+	e.docker = "docker"
+	if out, err := e.Remote("docker ps -q 2>&1"); err != nil && strings.Contains(strings.ToLower(out+err.Error()), "permission denied") {
+		e.docker = "sudo -n docker"
+		_, e.dockerErr = e.Remote("sudo -n docker ps -q")
+	} else {
+		e.dockerErr = err
+	}
+	return nil
+}
+
 // RequiredConfirmation — дословный текст подтверждения, без которого
 // канарейка не работает (cmd/canary-a3b, флаг -not-production).
 const RequiredConfirmation = "ЭТО-НЕ-БОЕВОЙ-СЕРВЕР"
@@ -161,18 +180,9 @@ func Run(e *Env) ([]Result, error) {
 	if e.RaceRounds == 0 {
 		e.RaceRounds = 20
 	}
-	fam, ferr := core.WGFamilyOf(e.Ctr)
-	if ferr != nil {
+	if ferr := e.init(); ferr != nil {
 		add(Result{"П3", "контейнер семейства WG", NotChecked, ferr.Error()})
 		return rs, fmt.Errorf("%w: %v", ErrStop, ferr)
-	}
-	e.fam = fam
-	e.docker = "docker"
-	if out, err := e.Remote("docker ps -q 2>&1"); err != nil && strings.Contains(strings.ToLower(out+err.Error()), "permission denied") {
-		e.docker = "sudo -n docker"
-		_, e.dockerErr = e.Remote("sudo -n docker ps -q")
-	} else {
-		e.dockerErr = err
 	}
 
 	// П0. Сервер пуст — иначе это может оказаться боевой сервер. Раунд 2
