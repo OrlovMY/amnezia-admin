@@ -103,18 +103,24 @@ func SudoKey(mainCfg map[string]any, sudoKey, flagIP string, lookup func(string)
 	if err != nil {
 		return "", fmt.Errorf("AMNEZIA_KEY_SUDO не разобран: %v", err)
 	}
-	if flagIP != "" {
-		p, err := PinServer(cfg, flagIP, lookup)
-		if err != nil {
-			return "", fmt.Errorf("AMNEZIA_KEY_SUDO: %v", err)
-		}
-		return ChildKey(p)
-	}
 	port := func(m map[string]any) string {
 		if p := core.Str(m, "port"); p != "" && p != "0" {
 			return p
 		}
 		return "22"
+	}
+	if flagIP != "" {
+		// SEC-01 (02.10): с -server-ip адрес второго ключа подменяется
+		// сверенным, но порт берётся из самого ключа — сверяем его с портом
+		// основного, иначе второй ключ мог вести на другой sshd того же IP.
+		if port(cfg) != port(mainCfg) {
+			return "", fmt.Errorf("AMNEZIA_KEY_SUDO ведёт на порт %s, основной ключ — на порт %s: второй ключ обязан быть от того же тестового сервера", port(cfg), port(mainCfg))
+		}
+		p, err := PinServer(cfg, flagIP, lookup)
+		if err != nil {
+			return "", fmt.Errorf("AMNEZIA_KEY_SUDO: %v", err)
+		}
+		return ChildKey(p)
 	}
 	mh, sh := core.Str(mainCfg, "hostName"), core.Str(cfg, "hostName")
 	if sh == "" || sh != mh || port(cfg) != port(mainCfg) {

@@ -438,7 +438,7 @@ func TestSudoKey(t *testing.T) {
 			t.Errorf("%s: секрет в тексте ошибки: %v", name, err)
 		}
 	}
-	named := enc(map[string]any{"hostName": "test.example", "userName": "admin", "password": "pw2", "port": "22"})
+	named := enc(map[string]any{"hostName": "test.example", "userName": "admin", "password": "pw2", "port": "2222"})
 	k, err := SudoKey(main, named, a, lookup)
 	if err != nil {
 		t.Fatal(err)
@@ -449,5 +449,33 @@ func TestSudoKey(t *testing.T) {
 	}
 	if _, err := SudoKey(main, enc(map[string]any{"hostName": b, "userName": "admin"}), a, lookup); err == nil {
 		t.Errorf("второй ключ на другой IP с флагом: ждали отказ")
+	}
+	// SEC-01 (02.10): с флагом порт второго ключа сверяется с основным;
+	// пусто и "0" — это 22.
+	for _, c := range []struct {
+		name, mainPort, sudoPort string
+		ok                       bool
+	}{
+		{"другой порт с флагом", "2222", "22", false},
+		{"порт пуст против 2222", "2222", "", false},
+		{"0 против 2222", "2222", "0", false},
+		{"тот же порт", "2222", "2222", true},
+		{"пусто = 22", "", "22", true},
+		{"0 = пусто", "0", "", true},
+		{"22 = 0", "22", "0", true},
+	} {
+		m := map[string]any{"hostName": a, "userName": "root", "password": "pw", "port": c.mainPort}
+		sk := enc(map[string]any{"hostName": "test.example", "userName": "admin", "password": "pw2", "port": c.sudoPort})
+		_, err := SudoKey(m, sk, a, lookup)
+		if c.ok && err != nil {
+			t.Errorf("%s: ждали успех, получили %v", c.name, err)
+		}
+		if !c.ok {
+			if err == nil {
+				t.Errorf("%s: порт не сверен с основным — ждали отказ", c.name)
+			} else if strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "vpn://") {
+				t.Errorf("%s: секрет в тексте ошибки: %v", c.name, err)
+			}
+		}
 	}
 }
