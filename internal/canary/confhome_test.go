@@ -13,63 +13,22 @@ package canary
 // Подмена «childEnv не добавляет ChildDataEnv» роняет оба поведением.
 
 import (
-	"fmt"
-	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"amnezia-admin/internal/datadirguard"
 )
 
 // inheritedHome — каталог данных, который наследует любой дочерний процесс
 // из окружения теста. Ничего писать в него нельзя.
 var inheritedHome string
 
-func runIsolated(m *testing.M) int {
-	dir, err := os.MkdirTemp("", "amnezia-canary-inherited-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		return 1
-	}
-	defer os.RemoveAll(dir)
-	// Кэши Go выводятся из HOME — запомнить их до подмены (как cmd/cli).
-	for _, k := range []string{"GOMODCACHE", "GOPATH", "GOCACHE"} {
-		if os.Getenv(k) != "" {
-			continue
-		}
-		if out, err := exec.Command("go", "env", k).Output(); err == nil {
-			if v := strings.TrimSpace(string(out)); v != "" {
-				os.Setenv(k, v)
-			}
-		}
-	}
-	inheritedHome = dir
-	for _, kv := range ChildDataEnv(dir) {
-		k, v, _ := strings.Cut(kv, "=")
-		os.Setenv(k, v)
-	}
-	code := m.Run()
-	if leaked := filesUnder(dir); len(leaked) > 0 {
-		fmt.Fprintf(os.Stderr, "СТОРОЖ: прогон записал %d файл(ов) в унаследованный каталог данных (на машине владельца это настоящий каталог данных amnezia-admin): %s\n",
-			len(leaked), strings.Join(leaked, "; "))
-		return 1
-	}
-	return code
-}
+func runIsolated(m *testing.M) int { return datadirguard.Run(m, &inheritedHome) }
 
-// filesUnder — файлы под dir (имена относительно dir; содержимое не читается).
-func filesUnder(dir string) []string {
-	var out []string
-	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			rel, _ := filepath.Rel(dir, p)
-			out = append(out, rel)
-		}
-		return nil
-	})
-	return out
-}
+// filesUnder — см. datadirguard.Files.
+func filesUnder(dir string) []string { return datadirguard.Files(dir) }
 
 // TestChildConfigsInConfHome — дочерний amnezia-admin (настоящий, против
 // fakesrv) сохраняет конфиг canary-* в Env.ConfHome, путь в выводе (его
