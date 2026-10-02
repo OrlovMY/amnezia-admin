@@ -1047,9 +1047,26 @@ type raceStats struct {
 	attempts int
 	done     []string
 	lost     int
-	changed  int            // код 1, «Не записано: сервер изменили в другом месте»
-	busy     int            // код 1, «Не записано: сервер занят»
-	other    map[string]int // всё иное: «код N «заголовок»»
+	changed  int // код 1, «Не записано: сервер изменили в другом месте»
+	busy     int // код 1, «Не записано: сервер занят»
+	// unconfirmed — код 1, «Записано, но работа изменений не подтверждена —
+	// откат не выполнен» (решение ядра 02.10.2026): в гонке это честно —
+	// вторая копия записала поверх до проверки первой. Допустимо, только
+	// если запись есть на сервере (считается в lost вместе с done).
+	unconfirmed []string
+	other       map[string]int // всё иное: «код N «заголовок»»
+}
+
+// countLost — сколько записей, о которых сказано «готово» или «записано,
+// не подтверждено», на сервере после гонки НЕТ.
+func countLost(st raceStats, onServer map[string]core.ClientEntry) int {
+	n := 0
+	for _, name := range append(append([]string(nil), st.done...), st.unconfirmed...) {
+		if _, in := onServer[name]; !in {
+			n++
+		}
+	}
+	return n
 }
 
 func (st raceStats) otherCount() int {
@@ -1061,7 +1078,7 @@ func (st raceStats) otherCount() int {
 }
 
 func (st raceStats) summary() string {
-	s := fmt.Sprintf("попыток %d: «готово» %d (потеряно %d), «изменили в другом месте» %d, «занято» %d", st.attempts, len(st.done), st.lost, st.changed, st.busy)
+	s := fmt.Sprintf("попыток %d: «готово» %d, «записано, не подтверждено» %d (потеряно из них %d), «изменили в другом месте» %d, «занято» %d", st.attempts, len(st.done), len(st.unconfirmed), st.lost, st.changed, st.busy)
 	if len(st.other) > 0 {
 		var parts []string
 		for k, v := range st.other {
@@ -1079,10 +1096,10 @@ func judgeNew(st raceStats, want int) (Result, bool) {
 		return Result{Status: Fail, Detail: "новая версия: " + why + " — " + st.summary()}, false
 	}
 	switch {
-	case st.attempts != want || len(st.done)+st.changed+st.busy+st.otherCount() != want:
+	case st.attempts != want || len(st.done)+len(st.unconfirmed)+st.changed+st.busy+st.otherCount() != want:
 		return fail(fmt.Sprintf("исходы учтены не для всех %d попыток", want))
 	case st.lost > 0:
-		return fail(fmt.Sprintf("из «готово» пропало %d", st.lost))
+		return fail(fmt.Sprintf("из «готово» и «записано, не подтверждено» пропало %d", st.lost))
 	case st.otherCount() > 0:
 		return fail("есть исходы, кроме «изменили в другом месте» и «занято»")
 	case len(st.done) == 0:
@@ -1092,12 +1109,15 @@ func judgeNew(st raceStats, want int) (Result, bool) {
 }
 
 // raceOutcome — вид исхода одной попытки по коду выхода и заголовку исхода.
-func classifyRace(st *raceStats, code int, title string) {
+func classifyRace(st *raceStats, name string, code int, title string) {
 	chg, _ := writeoutcome.TextFor(writeoutcome.Changed)
 	bsy, _ := writeoutcome.TextFor(writeoutcome.Busy)
+	unc, _ := writeoutcome.TextFor(writeoutcome.RollbackForeign)
 	switch {
 	case code == 1 && chg.Title != "" && title == chg.Title:
 		st.changed++
+	case code == 1 && unc.Title != "" && title == unc.Title:
+		st.unconfirmed = append(st.unconfirmed, name)
 	case code == 1 && bsy.Title != "" && title == bsy.Title:
 		st.busy++
 	default:
@@ -1130,7 +1150,7 @@ func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 				if r.code == 0 {
 					st.done = append(st.done, name)
 				} else {
-					classifyRace(&st, r.code, r.title)
+					classifyRace(&st, name, r.code, r.title)
 				}
 				mu.Unlock()
 			}
@@ -1141,11 +1161,7 @@ func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 	if lerr != nil {
 		return st, fmt.Errorf("список после гонки не прочитан: %w", lerr)
 	}
-	for _, n := range st.done {
-		if _, in := m[n]; !in {
-			st.lost++
-		}
-	}
+	st.lost = countLost(st, m)
 	return st, nil
 }
 

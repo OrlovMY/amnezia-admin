@@ -227,7 +227,7 @@ func TestRaceNeedsControl(t *testing.T) {
 	f.env.NewBin = serialFake(t, newCLI(t))
 	f.env.RaceRounds = 2
 	r := f.env.race()
-	if r.Status != NotChecked || !strings.Contains(r.Detail, "(потеряно 0)") || !strings.Contains(r.Detail, "v0.2.0 не выполнен") {
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "(потеряно из них 0)") || !strings.Contains(r.Detail, "v0.2.0 не выполнен") {
 		t.Fatalf("К4 без контроля: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -589,7 +589,7 @@ func TestRaceNewLostDone(t *testing.T) {
 	f := emptyFake(t, false)
 	f.env.NewBin, f.env.OldBin, f.env.RaceRounds = fakeCLI(t, "fakecli-ok"), fakeCLI(t, "fakecli-ok"), 2
 	r := f.env.race()
-	if r.Status != Fail || !strings.Contains(r.Detail, "из «готово» пропало 4") {
+	if r.Status != Fail || !strings.Contains(r.Detail, "из «готово» и «записано, не подтверждено» пропало 4") {
 		t.Fatalf("К4: %s — %s", r.Status, r.Detail)
 	}
 }
@@ -624,6 +624,10 @@ func TestJudgeNewTable(t *testing.T) {
 		{"иной исход", raceStats{attempts: 4, done: d(3), other: map[string]int{"код 1 «Записано частично»": 1}}, false, "есть исходы, кроме"},
 		{"сумма не сходится", raceStats{attempts: 4, done: d(2), changed: 1}, false, "учтены не для всех"},
 		{"попыток меньше", raceStats{attempts: 3, done: d(3)}, false, "учтены не для всех"},
+		// решение ядра 02.10.2026: «записано, не подтверждено» в гонке — допустимо без потерь
+		{"не подтверждено, потерь нет", raceStats{attempts: 4, done: d(2), unconfirmed: d(1), changed: 1}, true, ""},
+		{"не подтверждено, запись пропала", raceStats{attempts: 4, done: d(2), unconfirmed: d(1), changed: 1, lost: 1}, false, "пропало 1"},
+		{"не подтверждено не учтено в сумме", raceStats{attempts: 4, done: d(2), changed: 1}, false, "учтены не для всех"},
 	} {
 		r, ok := judgeNew(c.st, 4)
 		if ok != c.ok || (!ok && (r.Status != Fail || !strings.Contains(r.Detail, c.why))) {
@@ -635,12 +639,12 @@ func TestJudgeNewTable(t *testing.T) {
 // TestClassifyRace — вид исхода по коду выхода и заголовку дословно.
 func TestClassifyRace(t *testing.T) {
 	var st raceStats
-	classifyRace(&st, 1, "Не записано: сервер изменили в другом месте")
-	classifyRace(&st, 1, "Не записано: сервер занят")
-	classifyRace(&st, 2, "Не записано: сервер занят")
-	classifyRace(&st, 2, "Не записано: сервер изменили в другом месте")
-	classifyRace(&st, 1, "Не записано: сервер занят, кажется")
-	classifyRace(&st, 1, "")
+	classifyRace(&st, "a", 1, "Не записано: сервер изменили в другом месте")
+	classifyRace(&st, "x", 1, "Не записано: сервер занят")
+	classifyRace(&st, "x", 2, "Не записано: сервер занят")
+	classifyRace(&st, "x", 2, "Не записано: сервер изменили в другом месте")
+	classifyRace(&st, "x", 1, "Не записано: сервер занят, кажется")
+	classifyRace(&st, "x", 1, "")
 	if st.changed != 1 || st.busy != 1 || st.otherCount() != 4 {
 		t.Errorf("изменили=%d занято=%d иные=%d, ожидалось 1/1/4", st.changed, st.busy, st.otherCount())
 	}
@@ -1103,5 +1107,27 @@ func TestContainersFound(t *testing.T) {
 	got := ContainersFound([]core.Container{{Name: "amnezia-xray", Proto: "Xray"}, {Name: "amnezia-awg2", Proto: ""}})
 	if got != "Найдено контейнеров Amnezia: 2 — amnezia-xray (Xray), amnezia-awg2 (протокол не определён)." {
 		t.Errorf("список: %q", got)
+	}
+}
+
+// TestRaceUnconfirmedOutcome — решение ядра 02.10.2026: исход «Записано, но
+// работа изменений не подтверждена — откат не выполнен» (код 1, заголовок
+// дословно) учитывается отдельно; потерей считается его запись, которой
+// нет на сервере после гонки, как и у «готово».
+func TestRaceUnconfirmedOutcome(t *testing.T) {
+	var st raceStats
+	classifyRace(&st, "canary-n-0-01", 1, "Записано, но работа изменений не подтверждена — откат не выполнен")
+	classifyRace(&st, "canary-n-1-01", 2, "Записано, но работа изменений не подтверждена — откат не выполнен")
+	st.done = []string{"canary-n-0-00"}
+	if len(st.unconfirmed) != 1 || st.otherCount() != 1 {
+		t.Fatalf("исход: не подтверждено %v, иные %v", st.unconfirmed, st.other)
+	}
+	present := map[string]core.ClientEntry{"canary-n-0-00": {}, "canary-n-0-01": {}}
+	if n := countLost(st, present); n != 0 {
+		t.Errorf("запись есть на сервере, а потерь %d", n)
+	}
+	delete(present, "canary-n-0-01")
+	if n := countLost(st, present); n != 1 {
+		t.Errorf("запись «не подтверждено» пропала, а потерь %d", n)
 	}
 }
