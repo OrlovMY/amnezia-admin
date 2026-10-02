@@ -527,8 +527,9 @@ func (e *Env) existingIntact() Result {
 	var bad, info, unknown []string
 	ids := e.existing.table
 	if e.k6.lockWhy != "" {
-		r.Detail = "замок не свободен перед К6 (" + e.k6.lockWhy + ") — окно К6 не открыто, сверка не выполнялась"
-		return r
+		// QA-01 р10 Н12: окно не открылось, приложение не писало — сверка
+		// «начало → конец» как без К6 (ниже, opened=false); причина — сведением.
+		info = append(info, "замок не свободен перед К6 ("+e.k6.lockWhy+") — окно К6 не открыто, сверка «начало → конец»")
 	}
 	if e.k6.opened {
 		switch {
@@ -582,7 +583,7 @@ func (e *Env) existingIntact() Result {
 		return r
 	}
 	if len(info) > 0 {
-		r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — %s и работающий сервер байт в байт прежние; в окне К6 только допустимые изменения таблицы%s", e.existing.count(), e.fam.File, note)
+		r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — %s и работающий сервер байт в байт прежние; таблица прежняя или изменена только допустимо в окне К6%s", e.existing.count(), e.fam.File, note)
 		return r
 	}
 	r.Status, r.Detail = Pass, fmt.Sprintf("клиентов %d — таблица, %s и работающий сервер байт в байт прежние", e.existing.count(), e.fam.File)

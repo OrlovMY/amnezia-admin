@@ -158,6 +158,14 @@ func TestP0K6Window(t *testing.T) {
 		{name: "в окне К6 allowed_ips и clientName — НЕ ПРОВЕРЕНО",
 			inK6:   func(t *testing.T, f *fakeServer, id string) { appRewrite(t, f, id); spoilAdmin(t, f, id) },
 			status: NotChecked, want: []string{"чья правка, не различить"}},
+		// AU-LOGIC р9 Low-9: allowed_ips верный, число полей «+1», но сменено
+		// clientName — прочие поля обязаны сверяться по значению.
+		{name: "в окне К6 allowed_ips верный, сменено clientName — НЕ ПРОВЕРЕНО",
+			inK6: func(t *testing.T, f *fakeServer, id string) {
+				appRewrite(t, f, id)
+				editAdmin(t, f, id, func(ud map[string]any) { ud["clientName"] = "ИСПОРЧЕНО" })
+			},
+			status: NotChecked, want: []string{"чья правка, не различить", `clientName: было "` + adminName + `", стало "ИСПОРЧЕНО"`}},
 		{name: "вне окна — НЕ ПРОЙДЕН",
 			inK6:   func(t *testing.T, f *fakeServer, _ string) { addAppUser(t, f) },
 			atLock: allowedIPs, status: Fail,
@@ -237,28 +245,34 @@ func TestP0K6Window(t *testing.T) {
 // замок /run/lock держит отложенная запись (держатель после К5). Ответ
 // lslocks с держателем идёт через настоящий разбор (lockHoldersFrom).
 // Держатель исчез за время ожидания core.CASOuterTimeout — окно
-// открывается; не исчез или lslocks не ответил — вопрос К6 не задан, К6 и
-// П0-итог НЕ ПРОВЕРЕНО.
+// открывается; не исчез или lslocks не ответил — вопрос К6 не задан, К6
+// НЕ ПРОВЕРЕНО, П0-итог сверяет «начало → конец» (QA-01 р10 Н12).
 func TestP0K6LockBeforeWindow(t *testing.T) {
 	const held = "rc=0\nCOMMAND PID TYPE PATH\nflock 4242 FLOCK /run/lock/\n"
 	for _, c := range []struct {
 		name   string
-		answer func(call int) (string, error) // ответ на lslocks перед К6, call с 1
+		answer func(call int, f *fakeServer, id string) (string, error) // ответ на lslocks перед К6, call с 1
 		calls  int
 		slept  bool
 		opened bool
 		status Status
 		want   string
 	}{
-		{"держатель исчез за ожидание", func(n int) (string, error) {
+		{"держатель исчез за ожидание", func(n int, _ *fakeServer, _ string) (string, error) {
 			if n == 1 {
 				return held, nil
 			}
 			return "rc=0\nCOMMAND PID TYPE PATH\n", nil
 		}, 2, true, true, Pass, "появилось allowed_ips"},
-		{"держатель остался", func(int) (string, error) { return held, nil }, 2, true, false, NotChecked, "замок не свободен перед К6"},
-		{"lslocks не ответил", func(int) (string, error) { return "", errors.New("обрыв связи") }, 2, true, false, NotChecked, "замок не свободен перед К6"},
-		{"свободен сразу", func(int) (string, error) { return "rc=0\nCOMMAND PID TYPE PATH\n", nil }, 1, false, true, Pass, "появилось allowed_ips"},
+		{"держатель остался", func(int, *fakeServer, string) (string, error) { return held, nil }, 2, true, false, Pass, "замок не свободен перед К6"},
+		{"lslocks не ответил", func(int, *fakeServer, string) (string, error) { return "", errors.New("обрыв связи") }, 2, true, false, Pass, "замок не свободен перед К6"},
+		{"держатель остался, до К6 пропал клиент", func(n int, f *fakeServer, id string) (string, error) {
+			if n == 1 {
+				dropRecord(t, f, id)
+			}
+			return held, nil
+		}, 2, true, false, Fail, "пропала"},
+		{"свободен сразу", func(int, *fakeServer, string) (string, error) { return "rc=0\nCOMMAND PID TYPE PATH\n", nil }, 1, false, true, Pass, "появилось allowed_ips"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f, id := withAdmin(t, true)
@@ -272,7 +286,7 @@ func TestP0K6LockBeforeWindow(t *testing.T) {
 					calls++
 					n := calls
 					mu.Unlock()
-					return c.answer(n)
+					return c.answer(n, f, id)
 				}
 				return real(cmd)
 			}
@@ -306,7 +320,7 @@ func TestP0K6LockBeforeWindow(t *testing.T) {
 				if k6.Status != Pass {
 					t.Fatalf("К6: %+v", k6)
 				}
-			} else if k6.Status != NotChecked || !strings.Contains(k6.Detail, c.want) {
+			} else if k6.Status != NotChecked || !strings.Contains(k6.Detail, "замок не свободен перед К6") {
 				t.Fatalf("К6: %+v", k6)
 			}
 			if p0.Status != c.status || !strings.Contains(p0.Detail, c.want) {
