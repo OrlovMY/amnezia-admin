@@ -564,6 +564,10 @@ func TestRaceRealCASPass(t *testing.T) {
 	sawCAS := false
 	for try := 0; try < 5 && !sawCAS; try++ {
 		f := emptyFake(t, false)
+		// задержка как у настоящего сервера: иначе пауза опроса замка
+		// known_hosts (PR #31, 20 мс) разводит две копии во времени, и
+		// fakesrv, отвечающий за доли мс, гонку не воспроизводит
+		f.exec.CommandDelay = 30 * time.Millisecond
 		f.env.NewBin, f.env.OldBin, f.env.RaceRounds = cli, old, 3
 		r := f.env.race()
 		if r.Status != Pass {

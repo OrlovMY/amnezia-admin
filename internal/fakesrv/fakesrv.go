@@ -130,6 +130,13 @@ type Server struct {
 	// вернул код 0, но peer фактически не поднялся.
 	DropPeerOnSync string
 
+	// CommandDelay — задержка каждой команды ДО её исполнения, вне общего
+	// мьютекса: модель сетевой задержки настоящего сервера (десятки мс на
+	// команду). Без неё fakesrv отвечает за доли мс, и гонку двух копий
+	// программы гасит любая межпроцессная пауза на клиенте (опрос замка
+	// known_hosts, PR #31) — стенд перестаёт её воспроизводить.
+	CommandDelay time.Duration
+
 	mu            sync.Mutex
 	files         map[string][]byte
 	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
@@ -274,6 +281,9 @@ var (
 // Commands() ДО обработки (в том числе отклонённая хуками) — тесты проверяют
 // "ни одной записи не произошло" именно по этому журналу.
 func (s *Server) Run(cmd string, stdin []byte) (string, error) {
+	if d := s.CommandDelay; d > 0 {
+		time.Sleep(d)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, cmd)
