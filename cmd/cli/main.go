@@ -385,6 +385,10 @@ func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) er
 		fmt.Fprintln(w, cDim(core.FirstSaveHint))
 	}
 	fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
+	if u.Note != "" {
+		// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче.
+		fmt.Fprintln(w, cWarn(u.Note))
+	}
 	return nil
 }
 

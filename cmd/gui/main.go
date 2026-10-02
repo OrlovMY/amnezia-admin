@@ -2854,6 +2854,13 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 
 	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
 	hint.Wrapping = fyne.TextWrapWord
+	// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче;
+	// пустая Note — метки нет.
+	noteLabel := widget.NewLabel(nu.Note)
+	noteLabel.Wrapping = fyne.TextWrapWord
+	if nu.Note == "" {
+		noteLabel.Hide()
+	}
 
 	// Д6 (осмотр 29.09.2026, решение владельца — прокрутка содержимого):
 	// после сохранения (путь, подсказка о новом месте) и после отказа (совет)
@@ -2874,6 +2881,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
 		hint,
+		noteLabel,
 	))
 	content = container.NewBorder(container.NewCenter(qrObj), container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
