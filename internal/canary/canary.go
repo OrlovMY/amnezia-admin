@@ -139,6 +139,39 @@ type Env struct {
 	oldRace func() (lost, total int, err error)
 
 	awgVariant string // К8: какой вариант AWG проверен вживую ("" — не дошли)
+
+	// ConfHome — временный каталог, который дочерние amnezia-admin получают
+	// как каталог данных пользователя (LOCALAPPDATA, XDG_CONFIG_HOME, HOME):
+	// конфиги canary-* сохраняются в нём, а не в настоящем каталоге данных
+	// владельца (долг 02.10: там накопились тысячи canary-*.conf). "" —
+	// заводится при первом запуске дочерней программы (MkdirTemp); не
+	// завёлся — дочерняя программа НЕ запускается.
+	ConfHome string
+	confMu   sync.Mutex
+}
+
+// ChildDataEnv — переменные, уводящие каталог данных пользователя дочерней
+// программы в home на всех трёх ОС (Windows — LOCALAPPDATA, Linux —
+// XDG_CONFIG_HOME, macOS — HOME; см. core.UserConfigsDir). Ставятся ПОСЛЕ
+// остального окружения: при повторе ключа exec берёт последнее значение.
+func ChildDataEnv(home string) []string {
+	return []string{"LOCALAPPDATA=" + home, "XDG_CONFIG_HOME=" + home, "HOME=" + home}
+}
+
+// childEnv — окружение дочерней программы: наше, затем extra, затем
+// каталог данных во временном ConfHome.
+func (e *Env) childEnv(extra []string) ([]string, error) {
+	e.confMu.Lock()
+	defer e.confMu.Unlock()
+	if e.ConfHome == "" {
+		d, err := os.MkdirTemp("", "amnezia-canary-data-")
+		if err != nil {
+			return nil, fmt.Errorf("временный каталог данных для дочерней программы не создан (%v) — она не запущена, чтобы не писать в настоящий каталог данных", err)
+		}
+		e.ConfHome = d
+	}
+	env := append(append([]string{}, os.Environ()...), extra...)
+	return append(env, ChildDataEnv(e.ConfHome)...), nil
 }
 
 // conf — путь к файлу конфигурации сервера контейнера.
@@ -800,8 +833,12 @@ func (e *Env) cli(bin string, env []string, args ...string) cliRun {
 	if bin == e.NewBin && e.Ctr != nil {
 		full = append(full, "-container", e.Ctr.Name)
 	}
+	cenv, cerr := e.childEnv(env)
+	if cerr != nil {
+		return cliRun{code: -1, errText: cerr.Error(), title: oneLine(cerr.Error())}
+	}
 	cmd := exec.Command(bin, full...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = cenv
 	cmd.Stdin = strings.NewReader("")
 	var so, se strings.Builder
 	cmd.Stdout, cmd.Stderr = &so, &se
@@ -1261,8 +1298,12 @@ func (e *Env) raceWith(bin, prefix string) (st raceStats, err error) {
 // рвётся); замок в это время держится, следующая запись ждёт или получает
 // «занято», файлы — целиком старые или целиком новые, а затем запись идёт.
 func (e *Env) breakWrite() Result {
+	cenv, cerr := e.childEnv(e.KeyEnv)
+	if cerr != nil {
+		return Result{Detail: "первая запись не запущена: " + cerr.Error()}
+	}
 	cmd := exec.Command(e.NewBin, "add", "-name", "canary-k5a", "-hostkey", e.HostKey)
-	cmd.Env = append(os.Environ(), e.KeyEnv...)
+	cmd.Env = cenv
 	if err := cmd.Start(); err != nil {
 		return Result{Detail: "первая запись не запущена: " + err.Error()}
 	}

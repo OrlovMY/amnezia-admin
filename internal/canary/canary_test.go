@@ -128,6 +128,14 @@ func emptyFakeOn(t *testing.T, fs *fakesrv.Server, ctr *core.Container, withClie
 	// К4: канарейка играет старую версию прежней командой записи — fakesrv
 	// принимает её только по явному разрешению.
 	fs.AllowLegacyWrite = true
+	// Каталог данных дочерних программ — временный БЕЗ имени теста: путь
+	// попадает в вопросы К8, а имя теста («как ожидается…») — в проверку
+	// «вопрос не подсказывает ответ».
+	confHome, err := os.MkdirTemp("", "canary-conf-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(confHome) })
 	return &fakeServer{exec: fs, hk: hk, env: &Env{
 		fam: fam, docker: "docker",
 		RemoteIn: func(cmd string, stdin []byte) (string, error) {
@@ -152,10 +160,11 @@ func emptyFakeOn(t *testing.T, fs *fakesrv.Server, ctr *core.Container, withClie
 			return string(out), err
 		},
 		Sess: sess, Ctr: ctr,
-		KeyEnv:  []string{"AMNEZIA_KEY=" + key},
-		HostKey: ln.Fingerprint(),
-		Ask:     func(string) Answer { return AnswerSkip },
-		Out:     io.Discard,
+		KeyEnv:   []string{"AMNEZIA_KEY=" + key},
+		HostKey:  ln.Fingerprint(),
+		Ask:      func(string) Answer { return AnswerSkip },
+		Out:      io.Discard,
+		ConfHome: confHome,
 	}}
 }
 
@@ -360,7 +369,7 @@ func TestMain(m *testing.M) {
 	case strings.HasPrefix(base, "fakecli-serial"):
 		os.Exit(serialCLI())
 	}
-	os.Exit(m.Run())
+	os.Exit(runIsolated(m))
 }
 
 // serialCLI — настоящая программа, но вызовы идут по одному (замок —

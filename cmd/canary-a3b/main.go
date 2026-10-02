@@ -117,6 +117,14 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ОТКАЗ:", err)
 		return 2
 	}
+	// Долг 02.10: конфиги canary-* дочерние программы сохраняют во
+	// временный каталог, а не в настоящий каталог данных пользователя.
+	confHome, err := os.MkdirTemp("", "amnezia-canary-data-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ОТКАЗ: временный каталог для конфигов canary-* не создан:", err)
+		return 2
+	}
+	fmt.Printf("Конфиги canary-* сохраняются во временный каталог: %s (настоящий каталог данных не трогается)\n", confHome)
 	in := bufio.NewReader(os.Stdin)
 	ask := func(q string) canary.Answer {
 		fmt.Printf("%s (да/нет/пропустить): ", q)
@@ -203,6 +211,7 @@ func run() int {
 			Out:        os.Stdout,
 			RaceRounds: *rounds,
 			ServerIP:   *serverIP,
+			ConfHome:   confHome,
 		}
 		if sudoKey != "" {
 			env.SudoKeyEnv = []string{"AMNEZIA_KEY=" + sudoKey}
