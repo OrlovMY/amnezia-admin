@@ -294,7 +294,10 @@ func goTestCommand(t *testing.T, path, job string) []string {
 // (`|| true`, `-run NOTHING`, `-list .`) оставляет команды равными, и
 // сравнение их между собой её не видит. Поэтому смысл команды проверяется
 // отдельно: флаги только отсюда, оба обязательны, после пакетов ничего.
-var allowedGoTestFlags = map[string]bool{"-race": true, "-count=1": true}
+// -timeout=20m (решение ядра 02.10): пакет cmd/gui на macOS с -race
+// перерос 10 минут go test по умолчанию. Значение — одно слово и
+// обязательное: разное в двух файлах или пропавшее — провал.
+var allowedGoTestFlags = map[string]bool{"-race": true, "-count=1": true, "-timeout=20m": true}
 
 // goTestProblem — первая причина, по которой команда go test ничего не
 // гарантирует, или пустая строка. Одна точка сообщения на все причины.

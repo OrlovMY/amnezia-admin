@@ -16,7 +16,7 @@ import (
 func TestSavedConfigRoundTrip(t *testing.T) {
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	ct := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	nu, err := sess.AddUser(ct, "Carol")
 	if err != nil {
 		t.Fatal(err)

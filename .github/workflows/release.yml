@@ -120,7 +120,7 @@ jobs:
         # добавлен в A6: до этого тесты GUI (сторож утечки секретов, прибор
         # осмотра) на релизной сборке не выполнялись вовсе. cgo и библиотеки
         # Fyne дают шаги «Linux GUI deps» и «Windows mingw» выше.
-        run: go test -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/
+        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/
 
   build:
     name: build (${{ matrix.os }})

@@ -7,7 +7,7 @@
 //
 // Server разбирает РОВНО те серверные команды, что на 2026-09-14 шлёт core
 // (docker ps/exec, резервное копирование, wg syncconf/show, sudo-фолбэк,
-// test -f, sha256sum — PR-2, CAS) — и только их. Любая другая команда
+// test -f, запись со сверкой под замком — A3б) — и только их. Любая другая команда
 // возвращает ошибку "неизвестная команда": это не удобство, а страж — если
 // core когда-нибудь начнёт слать на
 // сервер что-то новое или изменит текст существующей команды, тест на
@@ -15,15 +15,20 @@
 package fakesrv
 
 import (
+	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,17 +50,103 @@ type Server struct {
 	// чтение файла: PR-2 пользуется этим же полем, а не заводит своё.
 	FailRead map[string]error
 
-	// FailWriteFrom — путь → номер по счёту вызова записи ИМЕННО ЭТОГО пути
-	// (счёт с 1), начиная с которого запись возвращает ошибку; более ранние
-	// вызовы по этому же пути — как обычно. Нужен, чтобы первая (apply-time)
-	// запись прошла, а вторая (restore-time) — упала (review
-	// changes-requested, круг 2, Medium: TestRestoreTriesBothFilesIndependently
-	// должен реально провоцировать разные исходы записи одного и того же
-	// пути на разных этапах). Раньше рядом был безусловный хук FailWrite
-	// (падал всегда, вне зависимости от номера вызова) — удалён (review
-	// PR-2, carryover 3, 2026-09-14): последний пользователь переехал на
-	// FailWriteFrom, и поле осталось без единого вызывающего.
-	FailWriteFrom map[string]int
+	// WriteFault — номер по счёту команды записи (apply и rollback вместе,
+	// счёт с 1) → исход, подменяющий настоящий: код выхода и, если Written,
+	// файлы перед этим всё-таки записываются (A3б: «неизвестно, записано
+	// ли» бывает и после записи).
+	WriteFault map[int]WriteFault
+
+	// ForeignWriteAfter — как ForeignWrite, но «другой писатель» пишет СРАЗУ
+	// ПОСЛЕ успешной N-й команды записи (раунд 5: файлы после отката не
+	// совпали с прежними).
+	ForeignWriteAfter map[int]map[string][]byte
+
+	// FailReadTimes — путь → сколько следующих чтений `cat` этого файла
+	// упадут (потом — как обычно). Раунд 5: проверка после записи не
+	// прочитала файл, а проверка после отката — прочитала.
+	FailReadTimes map[string]int
+
+	// FailWgShowFrom — если > 0, `wg show … dump` падает начиная с N-го
+	// вызова (счёт с 1). Раунд 6: «рантайм неизвестен» после отката.
+	FailWgShowFrom int
+	wgShowCalls    int
+
+	// FailBackup — если задана, команда резервной копии вернёт эту ошибку,
+	// ничего не скопировав (A3б PR-3, раунд 4: исход «запись не начиналась»).
+	FailBackup error
+
+	// ForeignWrite — номер по счёту команды записи (как в WriteFault) →
+	// файлы (путь → байты), которые «другой писатель» записывает на сервер
+	// непосредственно ПЕРЕД этой командой. Боевой путь исходов «изменён
+	// другим» (N = 1) и «откат не тронул чужое» (N = 2 после сбоя verify)
+	// без обёртки над Runner — нужен тестам через настоящий SSH (A3б PR-3).
+	ForeignWrite map[int]map[string][]byte
+
+	// FailMvTo — имя файла (wg0.conf или clientsTable): mv на него в
+	// настоящем скрипте падает с «Permission denied» (подменой mv в PATH).
+	FailMvTo string
+
+	// Violations — нарушения протокола, замеченные сервером (повтор записи
+	// под sudo после начатой записи).
+	Violations []string
+
+	// TempLeft — сколько временных файлов *.aa.* скрипт оставил после себя
+	// (сумма по всем командам записи); читать после работы Session.
+	TempLeft int
+
+	// FailDockerPS — `docker ps` возвращает эту ошибку (контейнеры не
+	// перечислить).
+	FailDockerPS error
+
+	// AllowLegacyWrite — принимать прежнюю запись v0.2.0 (см. reLegacyWrite).
+	AllowLegacyWrite bool
+
+	// LegacyTmpSplit — прежняя запись идёт ДВУМЯ шагами, как на настоящем
+	// сервере: `cat > P.tmp`, пауза LegacyTmpGap вне мьютекса, затем
+	// `mv P.tmp P`. Два писателя сталкиваются на общем P.tmp: mv второго
+	// не находит файла — «mv: can't rename 'P.tmp': No such file or
+	// directory», код 1 (прогон канарейки 02.10). Без этого флага прежняя
+	// запись атомарна и столкновения не моделирует.
+	LegacyTmpSplit bool
+	LegacyTmpGap   time.Duration
+
+	// LockHoldFor — команда записи под замком (reCASWrite) перед исполнением
+	// «держит замок /run/lock» столько времени вне мьютекса; LockHeld()
+	// в это время true. Модель окна, в которое К5 канарейки обязан оборвать
+	// запись. Обрыв клиента команду на «сервере» не прерывает — как у
+	// настоящего flock+timeout на хосте.
+	LockHoldFor time.Duration
+	// LockHoldAbort — первая удержанная запись после паузы НЕ выполняется
+	// (код 124, как timeout на хосте): модель записи, умершей вместе с
+	// оборванным клиентом. Без флага она завершается — модель записи,
+	// пережившей клиента.
+	LockHoldAbort bool
+	// LockShared — замок LockHoldFor НЕ взаимоисключающий (модель стенда,
+	// где ожидание второй записи измерить нельзя: держатели перекрываются).
+	LockShared bool
+	// LockReleaseOnDisconnect — удерживаемая запись прерывается и отпускает
+	// замок, как только её SSH-клиент отключился (см. RunCancel).
+	LockReleaseOnDisconnect bool
+	lockAborted             atomic.Bool
+	// lockMu — сам замок /run/lock: записи под замком при LockHoldFor > 0
+	// взаимоисключающие, как у flock (вторая ЖДЁТ первую).
+	lockMu  sync.Mutex
+	heldMu  sync.Mutex
+	held    map[string]string // «PID» держателя → командная строка
+	nextPID int
+
+	// LockBusy — замок на хосте занят: команда записи возвращает код 4
+	// (flock -E 4), ничего не записав.
+	LockBusy bool
+
+	// MissingTool — нет утилиты. "timeout"/"flock" (на хосте) — модель: код
+	// 127 оболочки. Утилиты контейнера (sha256sum, base64, mv, rm) убираются
+	// из PATH настоящего скрипта — код 5 даёт сам скрипт.
+	MissingTool string
+
+	// FailTool — утилита контейнера (сейчас "sha256sum"), которая в
+	// настоящем скрипте запускается, но падает с кодом 1.
+	FailTool string
 
 	// FailSyncconf — если задана, `wg syncconf` вернёт эту ошибку, а рантайм
 	// (множество применённых peer'ов) не меняется.
@@ -75,24 +166,28 @@ type Server struct {
 	// выполняются как обычно.
 	DenyOnce bool
 
-	// NoSha256 — если true, `sha256sum` вернёт ошибку "sh: sha256sum: not
-	// found" (PR-2, CAS, Г4): на сервере с неизвестным busybox команды может
-	// не быть, и это должно быть отказом без записи, а не паникой/успехом.
-	NoSha256 bool
-
 	// DropPeerOnSync — если задан, `wg syncconf` "применяется" без ошибки, но
 	// этот PublicKey исключается из результирующего рантайма (PR-2,
 	// TestVerifyMissingPeerRestores): имитирует случай, когда syncconf
 	// вернул код 0, но peer фактически не поднялся.
 	DropPeerOnSync string
 
+	// CommandDelay — задержка каждой команды ДО её исполнения, вне общего
+	// мьютекса: модель сетевой задержки настоящего сервера (десятки мс на
+	// команду). Без неё fakesrv отвечает за доли мс, и гонку двух копий
+	// программы гасит любая межпроцессная пауза на клиенте (опрос замка
+	// known_hosts, PR #31) — стенд перестаёт её воспроизводить.
+	CommandDelay time.Duration
+
 	mu            sync.Mutex
 	files         map[string][]byte
 	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
 	commands      []string
+	stdins        [][]byte // stdin команд записи
+	writeStarted  string   // команда записи, дошедшая до скрипта последней командой
 	denyOnceUsed  bool
-	syncconfCalls int            // счётчик вызовов syncconf — для FailSyncconfFrom
-	writeCalls    map[string]int // счётчик вызовов записи по пути — для FailWriteFrom
+	syncconfCalls int // счётчик вызовов syncconf — для FailSyncconfFrom
+	writeCalls    int // счётчик команд записи — для WriteFault
 }
 
 // New создаёт Server с дефолтным состоянием: один контейнер amnezia-awg,
@@ -148,6 +243,15 @@ func (s *Server) Commands() []string {
 	return out
 }
 
+// Stdins — stdin всех команд записи (apply и rollback) по порядку.
+func (s *Server) Stdins() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]byte, len(s.stdins))
+	copy(out, s.stdins)
+	return out
+}
+
 // File возвращает содержимое файла фейковой ФС и признак, что он существует.
 func (s *Server) File(path string) ([]byte, bool) {
 	s.mu.Lock()
@@ -199,23 +303,79 @@ func (s *Server) RuntimePeers() []string {
 var (
 	reDockerPS = `docker ps --format '{{.Names}}'`
 	reCat      = regexp.MustCompile(`^docker exec (\S+) cat (\S+)$`)
-	reWrite    = regexp.MustCompile(`^docker exec -i (\S+) sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
+	// reCASWrite — A3б: запись обоих файлов со сверкой под flock на каталоге
+	// /run/lock. Тело скрипта берётся из команды и ИСПОЛНЯЕТСЯ настоящим sh
+	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
+	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
+	// TestCASLockLineRealFlock (Linux).
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
-		`cp (\S+)/wg0\.conf (\S+)/backup/wg0\.conf\.\$ts && ` +
+		`cp (\S+)/(wg0\.conf|awg0\.conf) (\S+)/backup/(wg0\.conf|awg0\.conf)\.\$ts && ` +
 		`\(cp (\S+)/clientsTable (\S+)/backup/clientsTable\.\$ts 2>/dev/null; ` +
-		`ls -1t (\S+)/backup/wg0\.conf\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
+		`ls -1t (\S+)/backup/(wg0\.conf|awg0\.conf)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
 		`ls -1t (\S+)/backup/clientsTable\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
-	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c 'wg syncconf wg0 <\(wg-quick strip (\S+)/wg0\.conf\)'$`)
-	reWgShow   = regexp.MustCompile(`^docker exec (\S+) wg show wg0 dump$`)
-	// reSha256 — PR-2, Г4: единственная новая серверная команда этого PR (CAS).
-	reSha256 = regexp.MustCompile(`^docker exec (\S+) sha256sum (\S+)$`)
+	// PR-W1: утилита, интерфейс и файл — из таблицы семейства WG; fakesrv
+	// принимает только согласованные тройки (wg, wg0, wg0.conf) и (awg,
+	// awg0, awg0.conf) — смешение (awg + wg0.conf и т.п.) — неизвестная
+	// команда.
+	reSyncconf = regexp.MustCompile(`^docker exec (\S+) bash -c '(wg|awg) syncconf (wg0|awg0) <\((wg|awg)-quick strip (\S+)/(wg0\.conf|awg0\.conf)\)'$`)
+	// reLegacyWrite — прежняя запись v0.2.0 (`cat > P.tmp && mv P.tmp P`),
+	// без замка и без сверки. Продукт её больше не шлёт (T7); принимается
+	// ТОЛЬКО при AllowLegacyWrite — для канарейки, которая играет роль
+	// старой версии в К4 (PR-W1).
+	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) (?:env LC_ALL=C )?sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
+	reWgShow      = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
 // Commands() ДО обработки (в том числе отклонённая хуками) — тесты проверяют
 // "ни одной записи не произошло" именно по этому журналу.
 func (s *Server) Run(cmd string, stdin []byte) (string, error) {
+	return s.RunCancel(cmd, stdin, nil)
+}
+
+// RunCancel — Run с сигналом «клиент отключился» (gone; nil — нет): при
+// LockReleaseOnDisconnect удерживаемая запись под замком, чей клиент
+// отключился, не выполняется и сразу отпускает замок — модель обрыва, при
+// котором запись на хосте умирает вместе с клиентом.
+func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (string, error) {
+	// Настройки, действующие ВНЕ общего мьютекса, читаются под ним одним
+	// снимком (CI -race 02.10: тесты меняют их через Configure, пока
+	// сессии SSH уже обслуживаются).
+	s.mu.Lock()
+	delay, hold, shared, abort := s.CommandDelay, s.LockHoldFor, s.LockShared, s.LockHoldAbort
+	release := s.LockReleaseOnDisconnect
+	split, gap := s.AllowLegacyWrite && s.LegacyTmpSplit, s.LegacyTmpGap
+	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if hold > 0 && reCASWrite.MatchString(cmd) {
+		if !shared {
+			s.lockMu.Lock()
+			defer s.lockMu.Unlock()
+		}
+		pid := s.addHeld(cmd)
+		defer s.delHeld(pid)
+		if release && gone != nil {
+			select {
+			case <-time.After(hold):
+			case <-gone:
+				return "", &ExitError{Cmd: cmd, Status: 255, Stderr: "клиент отключился: запись прервана, замок отпущен"}
+			}
+		} else {
+			time.Sleep(hold)
+		}
+		if abort && s.lockAborted.CompareAndSwap(false, true) {
+			return "", &ExitError{Cmd: cmd, Status: 124, Stderr: "timeout: прервано (модель обрыва)"}
+		}
+	}
+	if split {
+		if m := reLegacyWrite.FindStringSubmatch(cmd); m != nil && m[2] == m[3] && m[2] == m[4] {
+			return s.legacySplit(cmd, m[2], stdin, gap)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, cmd)
@@ -226,6 +386,20 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 		isSudo = true
 		actual = strings.TrimPrefix(actual, "sudo ")
 	}
+	// Второй признак SEC F1: повтор ТОЙ ЖЕ команды записи под sudo сразу
+	// после того, как она дошла до скрипта, — повтор после (возможно)
+	// частичной записи. Отказ и запись в Violations.
+	started := s.writeStarted
+	s.writeStarted = ""
+	// Повтор под sudo — и старой формы («sudo » + вся команда), и новой
+	// (AU-LOGIC H1: «… /run/lock/ env LC_ALL=C sudo -n docker exec …» —
+	// sudo внутри замка). Прежде признак искал только префикс «sudo » и для
+	// новой формы молчал (AU-LOGIC M-2).
+	plain := strings.Replace(actual, CASSudoInfix, "docker exec", 1)
+	if started != "" && ((isSudo && started == actual) || (plain != actual && started == plain)) {
+		s.Violations = append(s.Violations, "повтор записи под sudo после начатой записи")
+		return "", fmt.Errorf("fakesrv: НАРУШЕНИЕ: повтор записи под sudo после начатой записи: %.80q", cmd)
+	}
 	if s.DenyOnce && !isSudo && !s.denyOnceUsed {
 		s.denyOnceUsed = true
 		return "", fmt.Errorf("команда %q: permission denied", cmd)
@@ -234,14 +408,84 @@ func (s *Server) Run(cmd string, stdin []byte) (string, error) {
 	return s.dispatch(actual, stdin)
 }
 
+// Configure — изменить настройки сервера под его мьютексом: так тест
+// меняет их, пока сессии SSH уже обслуживаются, без гонки с Run.
+func (s *Server) Configure(f func(*Server)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f(s)
+}
+
+// Held — держатели замка сейчас: «PID» → командная строка (см. LockHoldFor).
+func (s *Server) Held() map[string]string {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	out := map[string]string{}
+	for k, v := range s.held {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Server) addHeld(cmd string) string {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	if s.held == nil {
+		s.held = map[string]string{}
+	}
+	s.nextPID++
+	pid := fmt.Sprint(5000 + s.nextPID)
+	s.held[pid] = cmd
+	return pid
+}
+
+func (s *Server) delHeld(pid string) {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	delete(s.held, pid)
+}
+
+// legacySplit — см. LegacyTmpSplit.
+func (s *Server) legacySplit(cmd, path string, stdin []byte, gap time.Duration) (string, error) {
+	tmp := path + ".tmp"
+	s.mu.Lock()
+	s.commands = append(s.commands, cmd)
+	if s.files == nil {
+		s.files = map[string][]byte{}
+	}
+	s.files[tmp] = append([]byte(nil), stdin...)
+	s.mu.Unlock()
+	if gap <= 0 {
+		gap = 20 * time.Millisecond
+	}
+	time.Sleep(gap)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.files[tmp]
+	if !ok {
+		// stderr — ровно сообщение mv, как у настоящего сервера (код 1).
+		return "", errors.New("mv: can't rename '" + tmp + "': No such file or directory")
+	}
+	s.files[path] = data
+	delete(s.files, tmp)
+	return "", nil
+}
+
 func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	switch {
 	case cmd == reDockerPS:
+		if s.FailDockerPS != nil {
+			return "", s.FailDockerPS
+		}
 		return strings.Join(s.Names, "\n"), nil
 
 	case reCat.MatchString(cmd):
 		m := reCat.FindStringSubmatch(cmd)
 		path := m[2]
+		if s.FailReadTimes[path] > 0 {
+			s.FailReadTimes[path]--
+			return "", fmt.Errorf("fakesrv: имитированный отказ чтения %s", path)
+		}
 		if s.FailRead != nil {
 			if err, ok := s.FailRead[path]; ok {
 				return "", err
@@ -253,24 +497,19 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		}
 		return string(data), nil
 
-	case reWrite.MatchString(cmd):
-		m := reWrite.FindStringSubmatch(cmd)
-		path := m[2]
-		if m[3] != path || m[4] != path {
+	case s.AllowLegacyWrite && reLegacyWrite.MatchString(cmd):
+		m := reLegacyWrite.FindStringSubmatch(cmd)
+		if m[2] != m[3] || m[2] != m[4] {
 			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
-		}
-		if s.writeCalls == nil {
-			s.writeCalls = map[string]int{}
-		}
-		s.writeCalls[path]++
-		if n, ok := s.FailWriteFrom[path]; ok && n > 0 && s.writeCalls[path] >= n {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: write: имитированный отказ (вызов №%d по пути %s)", cmd, s.writeCalls[path], path)
 		}
 		if s.files == nil {
 			s.files = map[string][]byte{}
 		}
-		s.files[path] = append([]byte(nil), stdin...)
+		s.files[m[2]] = append([]byte(nil), stdin...)
 		return "", nil
+
+	case reCASWrite.MatchString(cmd):
+		return s.casWrite(cmd, reCASWrite.FindStringSubmatch(cmd), stdin)
 
 	case reTestFile.MatchString(cmd):
 		m := reTestFile.FindStringSubmatch(cmd)
@@ -281,22 +520,28 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return "no\n", nil
 
 	case reBackup.MatchString(cmd):
+		if s.FailBackup != nil {
+			return "", s.FailBackup
+		}
 		m := reBackup.FindStringSubmatch(cmd)
-		dir := m[2]
-		for _, g := range m[3:] {
+		dir, file := m[2], m[4]
+		for _, g := range []string{m[3], m[5], m[7], m[8], m[9], m[11]} {
 			if g != dir {
 				return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 			}
 		}
-		wg0, ok := s.files[dir+"/wg0.conf"]
+		if m[6] != file || m[10] != file {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		wg0, ok := s.files[dir+"/"+file]
 		if !ok {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: cp: %s/wg0.conf: No such file or directory", cmd, dir)
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: cp: %s/%s: No such file or directory", cmd, dir, file)
 		}
 		ts := time.Now().Format("20060102-150405")
 		if s.files == nil {
 			s.files = map[string][]byte{}
 		}
-		s.files[dir+"/backup/wg0.conf."+ts] = append([]byte(nil), wg0...)
+		s.files[dir+"/backup/"+file+"."+ts] = append([]byte(nil), wg0...)
 		if ct, ok := s.files[dir+"/clientsTable"]; ok {
 			s.files[dir+"/backup/clientsTable."+ts] = append([]byte(nil), ct...)
 		}
@@ -304,7 +549,10 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 
 	case reSyncconf.MatchString(cmd):
 		m := reSyncconf.FindStringSubmatch(cmd)
-		dir := m[2]
+		if !wgTriple(m[2], m[3], m[6]) || m[4] != m[2] {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		dir, file := m[5], m[6]
 		s.syncconfCalls++
 		if s.FailSyncconf != nil {
 			return "", s.FailSyncconf
@@ -312,9 +560,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		if s.FailSyncconfFrom > 0 && s.syncconfCalls >= s.FailSyncconfFrom {
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg syncconf: имитированный отказ (вызов №%d)", cmd, s.syncconfCalls)
 		}
-		wg0, ok := s.files[dir+"/wg0.conf"]
+		wg0, ok := s.files[dir+"/"+file]
 		if !ok {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: wg-quick: %s/wg0.conf: No such file or directory", cmd, dir)
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: %s-quick: %s/%s: No such file or directory", cmd, m[2], dir, file)
 		}
 		peers := peerKeysFromConf(string(wg0))
 		if s.DropPeerOnSync != "" {
@@ -323,20 +571,14 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		s.peers = peers
 		return "", nil
 
-	case reSha256.MatchString(cmd):
-		if s.NoSha256 {
-			return "", fmt.Errorf("команда %q: exit status 127; stderr: sh: sha256sum: not found", cmd)
-		}
-		m := reSha256.FindStringSubmatch(cmd)
-		path := m[2]
-		data, ok := s.files[path]
-		if !ok {
-			return "", fmt.Errorf("команда %q: exit status 1; stderr: sha256sum: %s: No such file or directory", cmd, path)
-		}
-		sum := sha256.Sum256(data)
-		return fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), path), nil
-
 	case reWgShow.MatchString(cmd):
+		if m := reWgShow.FindStringSubmatch(cmd); !wgTriple(m[2], m[3], "") {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		s.wgShowCalls++
+		if s.FailWgShowFrom > 0 && s.wgShowCalls >= s.FailWgShowFrom {
+			return "", fmt.Errorf("fakesrv: имитированный отказ wg show (вызов №%d)", s.wgShowCalls)
+		}
 		var b strings.Builder
 		b.WriteString("serverpriv\tserverpub\t51820\toff\n") // строка интерфейса — parsePeerStats её пропускает
 		for pub := range s.peers {
@@ -371,4 +613,226 @@ func peerKeysFromConf(text string) map[string]bool {
 		}
 	}
 	return peers
+}
+
+// WriteFault — подменённый исход команды записи (см. Server.WriteFault).
+type WriteFault struct {
+	Code    int
+	Written bool
+}
+
+// ExitError — отказ команды с кодом выхода. Метод ExitStatus совпадает по
+// форме с golang.org/x/crypto/ssh.ExitError: core распознаёт код одинаково
+// у настоящего SSH и у фейка, а SSHServer отдаёт этот код клиенту.
+type ExitError struct {
+	Cmd    string
+	Status int
+	Stderr string
+}
+
+func (e *ExitError) Error() string {
+	return fmt.Sprintf("команда %q: exit status %d; stderr: %s", e.Cmd, e.Status, e.Stderr)
+}
+
+// ExitStatus — код выхода.
+func (e *ExitError) ExitStatus() int { return e.Status }
+
+// CASSudoInfix — как повтор под sudo выглядит внутри команды записи (копия
+// из core: fakesrv core не импортирует; сверяет TestServerCommandSudoRetryUnchanged).
+const CASSudoInfix = "env LC_ALL=C sudo -n docker exec"
+
+// casWrite исполняет команду записи: хуки хоста (замок занят, нет
+// timeout/flock) — модель, тело скрипта — настоящий sh (execScript). Весь Run
+// идёт под s.mu, поэтому две команды записи взаимно исключены, как под flock.
+func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) {
+	dir, wantWg, wantTbl, file := m[4], m[5], m[6], m[7]
+	fail := func(code int, stderr string) (string, error) {
+		return "", &ExitError{Cmd: cmd, Status: code, Stderr: stderr}
+	}
+	switch s.MissingTool {
+	case "timeout", "flock":
+		return fail(127, "sh: "+s.MissingTool+": not found")
+	}
+	if s.LockBusy {
+		return fail(4, "")
+	}
+	s.writeCalls++
+	for path, data := range s.ForeignWrite[s.writeCalls] {
+		if s.files == nil {
+			s.files = map[string][]byte{}
+		}
+		s.files[path] = append([]byte(nil), data...)
+	}
+	s.writeStarted = cmd
+	s.stdins = append(s.stdins, append([]byte(nil), stdin...))
+	fault, faulty := s.WriteFault[s.writeCalls]
+	if faulty && !fault.Written {
+		return fail(fault.Code, "имитированный отказ записи")
+	}
+
+	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, file, stdin)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return fail(code, stderr)
+	}
+	for path, data := range s.ForeignWriteAfter[s.writeCalls] {
+		s.files[path] = append([]byte(nil), data...)
+	}
+	if faulty {
+		return fail(fault.Code, "имитированный отказ после записи")
+	}
+	return "", nil
+}
+
+// execScript исполняет НАСТОЯЩИЙ скрипт из команды (core.CASWriteScript —
+// fakesrv берёт его из текста команды, импортировать core нельзя) настоящим
+// sh на временном каталоге с копией двух файлов, затем забирает результат
+// обратно в память. Замок flock моделирует s.mu: весь Run идёт под ним.
+// Нет sh — громкий отказ с причиной, а не тихая подмена моделью.
+func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, stdin []byte) (int, string, error) {
+	casFiles := []string{file, "clientsTable"}
+	sh, err := FindSh()
+	if err != nil {
+		return 0, "", err
+	}
+	tmp, err := os.MkdirTemp("", "fakesrv-cas-")
+	if err != nil {
+		return 0, "", fmt.Errorf("fakesrv: временный каталог: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	work := filepath.Join(tmp, "d")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		return 0, "", fmt.Errorf("fakesrv: %w", err)
+	}
+	for _, name := range casFiles {
+		if data, ok := s.files[dir+"/"+name]; ok {
+			if err := os.WriteFile(filepath.Join(work, name), data, 0o600); err != nil {
+				return 0, "", fmt.Errorf("fakesrv: %w", err)
+			}
+		}
+	}
+	env := os.Environ()
+	if s.FailMvTo != "" || s.MissingTool != "" || s.FailTool != "" {
+		shim, err := s.toolShim(sh, tmp)
+		if err != nil {
+			return 0, "", err
+		}
+		env = append(env, "PATH="+shim)
+	}
+	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl, file)
+	cmd.Env = env
+	cmd.Stdin = bytes.NewReader(stdin)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return 0, "", fmt.Errorf("fakesrv: не удалось запустить %s: %w", sh, err)
+		}
+		code = ee.ExitCode()
+	}
+	for _, name := range casFiles {
+		data, err := os.ReadFile(filepath.Join(work, name))
+		switch {
+		case err == nil:
+			if s.files == nil {
+				s.files = map[string][]byte{}
+			}
+			s.files[dir+"/"+name] = data
+		case os.IsNotExist(err):
+			delete(s.files, dir+"/"+name)
+		default:
+			return 0, "", fmt.Errorf("fakesrv: %w", err)
+		}
+	}
+	left, _ := filepath.Glob(filepath.Join(work, "*.aa.*"))
+	s.TempLeft += len(left)
+	return code, strings.TrimSpace(errb.String()), nil
+}
+
+// FindSh — путь к POSIX sh: из PATH, а на Windows ещё и из Git for Windows.
+// Ошибка называет причину: без sh fakesrv не может исполнить скрипт записи.
+func FindSh() (string, error) {
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p, nil
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{`C:\Program Files\Git\bin\sh.exe`, `C:\Program Files\Git\usr\bin\sh.exe`} {
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+	return "", errors.New("fakesrv: не найден POSIX sh — скрипт записи (core.CASWriteScript) исполняется настоящей оболочкой, без неё проверка невозможна; на Windows установите Git for Windows (Git\\bin\\sh.exe)")
+}
+
+// casTools — внешние утилиты скрипта записи в контейнере.
+var casTools = []string{"sha256sum", "base64", "mv", "rm"}
+
+// toolShim — каталог, который становится ЕДИНСТВЕННЫМ PATH скрипта: обёртки
+// над настоящими утилитами, кроме MissingTool (её нет вовсе), FailTool
+// (падает) и mv на FailMvTo (Permission denied).
+func (s *Server) toolShim(sh, tmp string) (string, error) {
+	out, err := exec.Command(sh, "-c", "for t in "+strings.Join(casTools, " ")+"; do command -v $t || exit 1; done").Output()
+	if err != nil {
+		return "", fmt.Errorf("fakesrv: не найдены утилиты для скрипта записи (%s) в sh: %w", strings.Join(casTools, ", "), err)
+	}
+	paths := strings.Fields(string(out))
+	if len(paths) != len(casTools) {
+		return "", fmt.Errorf("fakesrv: пути утилит: %q", out)
+	}
+	shim := filepath.Join(tmp, "shim")
+	if err := os.Mkdir(shim, 0o700); err != nil {
+		return "", fmt.Errorf("fakesrv: %w", err)
+	}
+	for i, tool := range casTools {
+		if tool == s.MissingTool {
+			continue
+		}
+		body := "#!/bin/sh\n"
+		switch {
+		case tool == s.FailTool:
+			body += "echo \"" + tool + ": имитированный отказ\" >&2\nexit 1\n"
+		case tool == "mv" && s.FailMvTo != "":
+			body += "for a; do last=$a; done\ncase \"$last\" in */" + s.FailMvTo +
+				") echo \"mv: cannot move to $last: Permission denied\" >&2; exit 1;; esac\n"
+			body += "exec \"" + paths[i] + "\" \"$@\"\n"
+		default:
+			body += "exec \"" + paths[i] + "\" \"$@\"\n"
+		}
+		if err := os.WriteFile(filepath.Join(shim, tool), []byte(body), 0o700); err != nil {
+			return "", fmt.Errorf("fakesrv: %w", err)
+		}
+	}
+	return shim, nil
+}
+
+// wgTriple — согласованы ли утилита, интерфейс и (если задан) файл:
+// (wg, wg0, wg0.conf) или (awg, awg0, awg0.conf).
+func wgTriple(tool, iface, file string) bool {
+	switch tool {
+	case "wg":
+		return iface == "wg0" && (file == "" || file == "wg0.conf")
+	case "awg":
+		return iface == "awg0" && (file == "" || file == "awg0.conf")
+	}
+	return false
+}
+
+// NewAWG2 — сервер с контейнером amnezia-awg2 (AWG2/AWG3: каталог
+// /opt/amnezia/awg, файл awg0.conf, утилиты awg/awg-quick, интерфейс awg0)
+// и тем же начальным содержимым, что New(), плюс параметры AWG2 в
+// [Interface]. wg0.conf в каталоге нет.
+func NewAWG2() *Server {
+	s := New()
+	s.Names = []string{"amnezia-awg2"}
+	wg0 := s.files["/opt/amnezia/awg/wg0.conf"]
+	delete(s.files, "/opt/amnezia/awg/wg0.conf")
+	awg := strings.Replace(string(wg0), "ListenPort = 51820\n",
+		"ListenPort = 51820\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 20\nS2 = 30\nS3 = 15\nS4 = 25\nH1 = 100-200\nH2 = 300-400\nH3 = 500-600\nH4 = 700-800\n# I1 = <b 0xdeadbeef>\n", 1)
+	s.files["/opt/amnezia/awg/awg0.conf"] = []byte(awg)
+	return s
 }

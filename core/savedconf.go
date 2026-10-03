@@ -315,7 +315,7 @@ func normAddrs(s string) string {
 // wg0.conf нет, параметры сохранены в записи); ключ сервера — из PrivateKey
 // [Interface] wg0.conf. Не найдено — ошибка, а не пустые строки (признак 2).
 func (s *Session) ClientPeerParams(c *Container, cl ClientEntry) (ServerPeer, error) {
-	text, err := s.catIn(c, c.Dir+"/wg0.conf")
+	text, err := s.catConf(c)
 	if err != nil {
 		return ServerPeer{}, fmt.Errorf("wg0.conf не прочитан: %w", err)
 	}

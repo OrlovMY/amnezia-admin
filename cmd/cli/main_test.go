@@ -20,7 +20,7 @@ import (
 func TestDryRunFlagPrintsDiffAndWritesNothing(t *testing.T) {
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 
 	plan, err := sess.PlanAddUser(c, "Канарейка")
 	if err != nil {
@@ -45,7 +45,7 @@ func TestDryRunFlagPrintsDiffAndWritesNothing(t *testing.T) {
 	}
 
 	for _, cmd := range srv.Commands() {
-		if strings.Contains(cmd, "cat > ") {
+		if strings.Contains(cmd, "flock") {
 			t.Errorf("PlanAddUser не должен писать: %q", cmd)
 		}
 		if strings.Contains(cmd, "syncconf") {
@@ -63,7 +63,7 @@ func TestDryRunFlagPrintsDiffAndWritesNothing(t *testing.T) {
 func TestPrintPlanNoChangeShowsNote(t *testing.T) {
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 
 	clients, err := sess.LoadClients(c)
 	if err != nil {
@@ -98,7 +98,7 @@ func TestPrintPlanNoChangeShowsNote(t *testing.T) {
 // которую эта развилка вынесена из main() — и проверка Commands() на
 // отсутствие записи/sync/backup для каждого действия.
 func TestRunDryRunAllActionsWriteNothing(t *testing.T) {
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 
 	for _, cmd := range []string{"add", "del", "rename", "toggle", "rekey"} {
 		t.Run(cmd, func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestRunDryRunAllActionsWriteNothing(t *testing.T) {
 			}
 
 			for _, sent := range srv.Commands() {
-				if strings.Contains(sent, "cat > ") {
+				if strings.Contains(sent, "flock") {
 					t.Errorf("%s: dry-run не должен писать: %q", cmd, sent)
 				}
 				if strings.Contains(sent, "syncconf") {

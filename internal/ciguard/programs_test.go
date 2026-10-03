@@ -56,6 +56,21 @@ var allowedShellCalls = map[string]string{
 	`bash scripts/dev-tools.sh`:                               "ci.yml: пиновый shellcheck",
 }
 
+// allowedPackageInstalls — ЗАКРЫТЫЙ список вызовов установки пакетов, где
+// имя ПАКЕТА совпадает с именем оболочки (A3б, PR-2). apt-get имя пакета не
+// исполняет, поэтому это не «код мимо лексера»; но исключение — только для
+// вызова целиком, слово в слово, и каждая запись обязана встречаться ровно
+// один раз (пропавшая или размноженная — красная). Любой другой вызов с
+// оболочкой аргументом краснеет по-прежнему, в том числе `sudo apt-get
+// install -y busybox sh` или тот же пакет другой строкой.
+//
+// Ключ — файл и вызов (AU-LOGIC L2): та же строка в release.yml — красная,
+// установка пакета не попадает в релизную цепочку незамеченной.
+var allowedPackageInstalls = map[string]string{
+	"../../.github/workflows/ci.yml|sudo apt-get install -y busybox": "ci.yml, шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
+		"(скрипт записи A3б исполняется в busybox sh, как в контейнере на busybox); dash в Ubuntu есть всегда (/bin/sh)",
+}
+
 type progRule struct {
 	why   string
 	check func(args []shWord) string // nil — аргументы не проверяются
@@ -177,6 +192,7 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	seen := map[string]int{}
 	distinct := map[string]bool{} // все буквальные имена в позиции команды, кроме функций
 	placeUsed := map[string]int{}
+	installUsed := map[string]int{}
 	textUsed := map[string]int{}
 	textAll := map[string]bool{} // все разные тексты, включая незнакомые
 	cmds := 0
@@ -259,7 +275,9 @@ func TestCommandProgramsClosedList(t *testing.T) {
 				}
 			}
 			// оболочка аргументом — в кавычках или без
-			if w.lit != "bash" {
+			if _, ok := allowedPackageInstalls[s.file+"|"+call]; ok {
+				installUsed[s.file+"|"+call]++
+			} else if w.lit != "bash" {
 				for _, a := range args {
 					if b := a.lit[strings.LastIndexByte(a.lit, '/')+1:]; !a.dyn && shells[b] {
 						fail(t, "%s: оболочка «%s» аргументом в «%s» — код мимо лексера", where, a.raw, call)
@@ -270,6 +288,15 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	}
 	if cmds == 0 {
 		fatal(t, "не найдено ни одной команды — разбор пуст, тест ничего не проверил")
+	}
+	for key := range allowedPackageInstalls {
+		switch n := installUsed[key]; {
+		case n == 0:
+			fail(t, "вызов allowedPackageInstalls «%s» не встречается ни разу слово в слово — запись устарела "+
+				"или вызов изменён (изменённый вызов краснеет отдельно как «оболочка аргументом»)", key)
+		case n > 1:
+			fail(t, "вызов allowedPackageInstalls «%s» встречается %d раз вместо одного — вызов размножен", key, n)
+		}
 	}
 	for key := range allowedDynPlaces {
 		if placeUsed[key] != 1 {

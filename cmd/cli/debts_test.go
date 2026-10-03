@@ -319,7 +319,7 @@ func TestDebtsListGreenOnlyActive(t *testing.T) {
 		out, _ := json.Marshal(list)
 		srv.SetFile(path, out)
 		sess := core.NewSessionWithRunner(handshakeRunner{srv}, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-		cur := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+		cur := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 		var o bytes.Buffer
 		if _, err := listUsers(&o, sess, cur); err != nil {
 			t.Fatalf("listUsers: %v", err)

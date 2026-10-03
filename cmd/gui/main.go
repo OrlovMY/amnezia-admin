@@ -28,6 +28,7 @@ import (
 	"amnezia-admin/internal/guiview"
 	"amnezia-admin/internal/kbdlayout"
 	"amnezia-admin/internal/version"
+	"amnezia-admin/internal/writeoutcome"
 )
 
 type ui struct {
@@ -1033,7 +1034,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			u.containers = containers
 			u.cur = &u.containers[0]
 			for i := range u.containers {
-				if u.containers[i].Managed {
+				if u.containers[i].Managed() {
 					u.cur = &u.containers[i]
 					break
 				}
@@ -1444,9 +1445,14 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	addBtn.Importance = widget.HighImportance
 	u.refreshBtn, u.addBtn, u.renameBtn, u.toggleBtn, u.regenBtn, u.delBtn = refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn
 
-	top := container.NewBorder(nil, nil,
-		container.NewHBox(server, widget.NewLabel("Протокол:"), u.protoSelect),
-		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn),
+	// W2 раунд 2 (UX-01 Р4): список протоколов — отдельной строкой на всю
+	// ширину окна. В одной строке с кнопками поле было 127.9 т., а подписи
+	// W2 доходят до 505 т. — Select усекал их многоточием, и «— только
+	// просмотр» / «— не поддерживается» не было видно. Сторож — TestProtoLabelFits.
+	top := container.NewVBox(
+		container.NewBorder(nil, nil, server,
+			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
+		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
 }
@@ -2272,12 +2278,12 @@ func (u *ui) setBusy(busy bool) {
 // !Managed обрывался ранним guard'ом — "LoadClients для !Managed падает",
 // предпосылка не проверялась и была неверна; см. секцию А задания).
 //
-// refresh() НЕ содержит собственных условий по Container.Managed (Э3а,
+// refresh() НЕ содержит собственных условий по Container.Managed() (Э3а,
 // решение ядра 15.09): что грузить (LoadClientsView — всегда), нужна ли
 // серверная статистика (wg show), доступно ли управление и что написать в
 // статусе — решает ТОЛЬКО guiview.ViewState по результату LoadClientsView.
 // Так табличный тест на подмену ViewState (Э3б) реально ловит регресс: если
-// бы refresh() держал свой параллельный guard "if !cur.Managed", подмена в
+// бы refresh() держал свой параллельный guard "if !cur.Managed()", подмена в
 // guiview его бы не увидела.
 //
 // Снимок cur делается дважды: один раз здесь (для запроса к нужному
@@ -2428,26 +2434,15 @@ func newPlanStatusLabel() *widget.Label {
 	return l
 }
 
-// isCASRefusal распознаёт отказ CAS (core/txn.go: checkCAS/casCheckFile) через
-// errors.Is(err, core.ErrCASMismatch) (review PR-2, carryover 1 — раньше
-// распознавание шло по русским подстрокам текста ошибки, что ломалось при
-// любой правке формулировки). В обоих случаях (расхождение контрольной
-// суммы и невозможность её проверить) план построен по УЖЕ неактуальному
-// чтению, поэтому его нельзя молча повторно "Применить" — план устарел, а не
-// произошёл преходящий сбой вроде сети.
-func isCASRefusal(err error) bool {
-	return errors.Is(err, core.ErrCASMismatch)
-}
-
 // showDiffWindow показывает окно с построчными diff'ами обоих файлов плана
 // и кнопкой «Применить» (дублирующая «Закрыть» кнопка — встроенный dismiss
 // диалога). «Применить» вызывает sess.Apply(plan) ТОГО ЖЕ плана, что был
-// построен Plan*-вызовом до открытия окна: CAS поймает, если сервер
-// изменился, пока окно было открыто — в этом случае (isCASRefusal) кнопку
-// «Применить» обратно не включаем (UX-01, ревью, High): план устарел, повтор
-// того же плана всегда провалится тем же образом, нужно закрыть окно и
-// начать заново. Для прочих ошибок (сеть, права и т.п.) повтор осмыслен —
-// кнопка включается снова. При успехе onApplied получает результат Apply
+// построен Plan*-вызовом до открытия окна: сверка в команде записи поймает,
+// если сервер изменился, пока окно было открыто. После исхода записи
+// (internal/writeoutcome, A3б PR-3) кнопка «Применить» снова включается
+// только там, где точно ничего не записано и план не устарел (Text.Retry);
+// прежде это решал isCASRefusal (только «изменён другим»). Для прочих ошибок
+// (сеть до записи и т.п.) повтор осмыслен — кнопка включается снова. При успехе onApplied получает результат Apply
 // (nil для всех действий, кроме add/rekey) — вызывающий код сам решает, что
 // делать дальше (showConfigDialog, refresh, текст статуса), диалог
 // закрывается сам.
@@ -2481,18 +2476,29 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 				fyne.Do(func() {
 					u.setBusy(false)
 					if err != nil {
-						if isCASRefusal(err) {
-							// Цвет отказа (UI-01, ревью круга 2, Low) — состояние
-							// должно отличаться от "Применяю..." не только
-							// словами: DangerImportance == theme.ColorNameError.
-							statusLabel.Importance = widget.DangerImportance
-							statusLabel.SetText("План устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию.")
-							return // applyBtn остаётся Disabled — повтор того же плана бессмыслен
+						// A3б PR-3: исход записи — различимый текст из
+						// internal/writeoutcome; «Применить» снова доступна
+						// ТОЛЬКО там, где точно ничего не записано и план не
+						// устарел (t.Retry): «занято», «нет утилиты», «замок».
+						// «Изменён другим» — план устарел; «неизвестно»,
+						// «частично», «откат не тронул чужое» — повтор того же
+						// плана вслепую недопустим.
+						// Повтор — ОДНО решение для обеих ветвей (раунд 4,
+						// AU-LOGIC Н-1/Н-2): guiview.ApplyRetryAllowed —
+						// закрытый список writeoutcome; неклассифицированное —
+						// без повтора. Сторож TestApplyErrorsClassified держит,
+						// что на пути Apply неклассифицированного нет вовсе.
+						if guiview.ApplyRetryAllowed(err) {
+							applyBtn.Enable()
 						}
-						statusLabel.Importance = widget.MediumImportance
-						statusLabel.SetText("")
-						applyBtn.Enable()
-						dialog.ShowError(err, u.win)
+						if t, ok := writeoutcome.Describe(err); ok {
+							statusLabel.Importance = widget.DangerImportance
+							statusLabel.SetText(guiview.ApplyStatus(t))
+						} else {
+							statusLabel.Importance = widget.MediumImportance
+							statusLabel.SetText("")
+						}
+						u.showError(err)
 						return
 					}
 					d.Hide()
@@ -2529,6 +2535,38 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	d.Resize(fyne.NewSize(700, 520))
 	d.Show()
 }
+
+// showError — ошибка операции. Исход записи на сервер (A3б PR-3) —
+// собственный диалог с заголовком исхода, «что случилось», «что делать» и
+// подробностями ядра (текст выделяемый: путь резервных копий копируется);
+// прочие ошибки — стандартный диалог Fyne, как раньше.
+func (u *ui) showError(err error) {
+	t, ok := writeoutcome.Describe(err)
+	if !ok {
+		dialog.ShowError(err, u.win)
+		return
+	}
+	showWriteOutcomeDialog(u, t, err)
+}
+
+// showWriteOutcomeDialog — диалог исхода записи: заголовок исхода, текст с
+// подробностями в прокрутке (выделяемый), «Закрыть». Отдельно от showError,
+// чтобы сторож запаса ширины строил ровно этот диалог для каждого текста.
+func showWriteOutcomeDialog(u *ui, t writeoutcome.Text, err error) {
+	msg := widget.NewLabel(writeoutcome.Message(t, err))
+	msg.Wrapping = fyne.TextWrapWord
+	msg.Selectable = true
+	d := dialog.NewCustom(t.Title, "Закрыть", container.NewVScroll(msg), u.win)
+	d.Resize(fyne.NewSize(writeErrorDialogWidth, writeErrorDialogHeight))
+	d.Show()
+}
+
+// Размер диалога исхода записи: текст с подробностями бывает длинным (путь
+// резервных копий, код выхода, stderr) — он в прокрутке, диалог не растёт.
+const (
+	writeErrorDialogWidth  = 600 // Т3-б (раунд 3): длиннейший заголовок исхода требует 581.8 т., заголовок диалога Fyne не переносится
+	writeErrorDialogHeight = 320
+)
 
 // ---------- предупреждение о гонке при одновременной работе (A3а) ----------
 
@@ -2599,16 +2637,18 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 
 	content := container.NewVBox(body, container.NewHBox(contBtn))
 	d = dialog.NewCustom(guiview.WarningTitle(), guiview.WarnCancelLabel(), content, u.win)
-	d.Resize(fyne.NewSize(560, 300))
+	// A3б PR-3: текст — одна фраза (решение владельца), прежний размер
+	// 560×300 был под три абзаца A3а.
+	d.Resize(fyne.NewSize(460, 180))
 	d.Show()
 }
 
 // ---------- создание ----------
 
 func (u *ui) addDialog() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	entry := widget.NewEntry()
@@ -2638,7 +2678,7 @@ func (u *ui) addDialog() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onCreated(nu)
@@ -2662,7 +2702,7 @@ func (u *ui) addDialog() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("создание %q", name), plan, func(nu *core.NewUser) {
@@ -2723,6 +2763,10 @@ func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
 // (для сканирования приложением AmneziaWG на телефоне) и кнопку сохранения
 // .conf на диск. Используется и после создания нового пользователя, и после
 // перевыпуска (re-key) — verb это причастие в диалоге ("создан"/"перевыпущен").
+// awg2ConfigDialogWidth — ширина «Конфиг готов» со строкой честности
+// AmneziaWG 2 (QR и строка рядом). Меньше минимального окна 972.
+const awg2ConfigDialogWidth = 760
+
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	var qrObj fyne.CanvasObject
 	if png, err := core.QRPNG(nu.Config, 256); err == nil {
@@ -2819,6 +2863,13 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 
 	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
 	hint.Wrapping = fyne.TextWrapWord
+	// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче;
+	// пустая Note — метки нет.
+	noteLabel := widget.NewLabel(nu.Note)
+	noteLabel.Wrapping = fyne.TextWrapWord
+	if nu.Note == "" {
+		noteLabel.Hide()
+	}
 
 	// Д6 (осмотр 29.09.2026, решение владельца — прокрутка содержимого):
 	// после сохранения (путь, подсказка о новом месте) и после отказа (совет)
@@ -2840,13 +2891,25 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		moveHint,
 		hint,
 	))
-	content = container.NewBorder(container.NewCenter(qrObj), container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	// Финальный раунд (AU-UX М1): строка честности AmneziaWG 2 — ВНЕ
+	// прокрутки, справа от QR: видна целиком при открытии на любом
+	// допустимом окне (сторож TestAWG2NoteFullyVisible). В прокрутке она
+	// не помещалась даже первой: подпись 111.4 т. при видимой прокрутке
+	// 104.9 т. (1229×620) и 61.9 т. (972×517). Диалог с ней шире
+	// (awg2ConfigDialogWidth), чтобы рядом с QR она шла в 4–5 строк.
+	var qrTop fyne.CanvasObject = container.NewCenter(qrObj)
+	dialogW := float32(480)
+	if nu.Note != "" {
+		qrTop = container.NewBorder(nil, nil, qrObj, nil, container.NewVBox(noteLabel))
+		dialogW = awg2ConfigDialogWidth
+	}
+	content = container.NewBorder(qrTop, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
 	// Размер увеличен (ревью UX-01): путь ~75 знаков переносится на 2–3
 	// строки, к нему добавились кнопка копирования и одноразовая подсказка.
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	autoSave()
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(480, 560))
+	d.Resize(fyne.NewSize(dialogW, 560))
 	d.Show()
 }
 
@@ -2867,9 +2930,9 @@ func scrollToEnd(outer *fyne.Container, s *container.Scroll) {
 // ---------- переименование ----------
 
 func (u *ui) renameSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -2910,7 +2973,7 @@ func (u *ui) renameSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onRenamed(newName)
@@ -2934,7 +2997,7 @@ func (u *ui) renameSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("переименование %q → %q", victim.Name(), newName), plan, func(_ *core.NewUser) {
@@ -2956,9 +3019,9 @@ func (u *ui) renameSelected() {
 // ---------- отключение/включение ----------
 
 func (u *ui) toggleSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3004,7 +3067,7 @@ func (u *ui) toggleSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onToggled(note)
@@ -3024,7 +3087,7 @@ func (u *ui) toggleSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("%s %q", noun, victim.Name()), plan, func(_ *core.NewUser) {
@@ -3050,9 +3113,9 @@ func (u *ui) toggleSelected() {
 // ---------- перевыпуск конфига (re-key) ----------
 
 func (u *ui) regenerateSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3087,7 +3150,7 @@ func (u *ui) regenerateSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onRegenerated(nu)
@@ -3107,7 +3170,7 @@ func (u *ui) regenerateSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("перевыпуск конфига %q", victim.Name()), plan, func(nu *core.NewUser) {
@@ -3138,9 +3201,9 @@ func (u *ui) regenerateSelected() {
 var errProtoSwitched = errors.New("протокол переключён, пока шёл запрос активности")
 
 func (u *ui) deleteSelected() {
-	if !u.cur.Managed {
+	if !u.cur.Managed() {
 		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Proto), u.win)
+			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
 	idx := u.selectedRow
@@ -3177,7 +3240,7 @@ func (u *ui) deleteSelected() {
 					if err != nil {
 						u.setBusy(false)
 						u.status.SetText("")
-						dialog.ShowError(err, u.win)
+						u.showError(err)
 						return
 					}
 					onDeleted()
@@ -3197,7 +3260,7 @@ func (u *ui) deleteSelected() {
 				u.setBusy(false)
 				planStatus.SetText("")
 				if err != nil {
-					dialog.ShowError(err, u.win)
+					u.showError(err)
 					return
 				}
 				u.showDiffWindow(fmt.Sprintf("удаление %q", victim.Name()), plan, func(_ *core.NewUser) {

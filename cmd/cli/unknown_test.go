@@ -33,7 +33,7 @@ func (f *failWgShow) Run(cmd string, stdin []byte) (string, error) {
 }
 
 func a1Container() *core.Container {
-	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 }
 
 func a1Creds() *core.ServerCreds {

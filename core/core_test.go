@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -259,7 +261,7 @@ AllowedIPs = 10.8.1.2/32
 
 	srv := fakesrv.New()
 	sess := NewSessionWithRunner(srv, &ServerCreds{Host: "1.2.3.4", User: "root", Password: "x"})
-	c := &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: SupportYes}
 	if err := sess.DeleteByID(c, ""); err == nil {
 		t.Fatal("DeleteByID(\"\") должен вернуть ошибку")
 	}
@@ -1077,7 +1079,7 @@ func testCreds() *ServerCreds {
 }
 
 func awgContainer() *Container {
-	return &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	return &Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: SupportYes}
 }
 
 // TestLoadClientsMissingVsError — "нет файла" не ошибка, "не удалось
@@ -1117,7 +1119,7 @@ func TestLoadClientsMissingVsError(t *testing.T) {
 			t.Fatal("AddUser: expected error")
 		}
 		for _, cmd := range srv.Commands() {
-			if strings.Contains(cmd, "cat > ") {
+			if isCASWriteCmd(cmd) {
 				t.Fatalf("AddUser не должен был выполнить ни одной записи, но выполнил: %q", cmd)
 			}
 		}
@@ -1159,7 +1161,7 @@ func TestAwg2Unsupported(t *testing.T) {
 	if awg2 == nil {
 		t.Fatalf("amnezia-awg2 не найден среди контейнеров: %+v", containers)
 	}
-	if awg2.Managed {
+	if awg2.Managed() {
 		t.Error("amnezia-awg2 должен быть Managed == false")
 	}
 
@@ -1190,8 +1192,6 @@ var cmdTemplates = []string{
 	"docker ps --format '{{.Names}}'",
 	// core.go:241
 	"docker exec " + dyn + " cat " + dyn,
-	// core.go:246
-	"docker exec -i " + dyn + " sh -c 'cat > " + dyn + ".tmp && mv " + dyn + ".tmp " + dyn + "'",
 	// core.go:258-264
 	"docker exec " + dyn + " sh -c 'mkdir -p " + dyn + "/backup && ts=$(date +%Y%m%d-%H%M%S) && " +
 		"cp " + dyn + "/wg0.conf " + dyn + "/backup/wg0.conf.$ts && " +
@@ -1204,8 +1204,98 @@ var cmdTemplates = []string{
 	"docker exec " + dyn + " bash -c 'wg syncconf wg0 <(wg-quick strip " + dyn + "/wg0.conf)'",
 	// core.go: LoadClients (Г3, новая команда этого PR)
 	"docker exec " + dyn + " sh -c 'test -f " + dyn + "/clientsTable && echo yes || echo no'",
-	// core/txn.go: casCheckFile (PR-2, Г4 — CAS по sha256sum, fail-safe, единственная новая команда PR-2)
-	"docker exec " + dyn + " sha256sum " + dyn,
+	// core/caswrite.go (A3б): запись обоих файлов со сверкой под flock — применить.
+	// Заменила две команды: отдельные `sha256sum` и `cat > P.tmp && mv`.
+	casWriteTemplate("amnezia-admin-apply"),
+	// core/caswrite.go (A3б): то же — откатить (сверка с нашими записанными байтами).
+	casWriteTemplate("amnezia-admin-rollback"),
+}
+
+// casScriptLiteral — ДОСЛОВНАЯ копия core.CASWriteScript. Копия, а не ссылка
+// на константу: сторож обязан краснеть, если текст скрипта изменят.
+const casScriptLiteral = `umask 077
+d=$1; ww=$2; wt=$3; cf=$4
+for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
+nw="$d/$cf.aa.$$"; nt="$d/clientsTable.aa.$$"
+rm -f "$d/$cf".aa.* "$d"/clientsTable.aa.* || exit 1
+IFS= read -r W || exit 1
+IFS= read -r T || exit 1
+if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
+printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
+hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
+hw=$(hsum "$d/$cf") || { rm -f "$nw" "$nt"; exit 1; }
+ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
+if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: $cf" >&2; exit 3; fi
+if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
+if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: $cf: $e" >&2; exit 1; }; fi
+e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
+exit 0`
+
+func casWriteTemplate(label string) string {
+	return "timeout 75 flock -w 15 -E 4 /run/lock/ docker exec -i " + dyn +
+		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn + " " + dyn
+}
+
+// casWriteTemplateSudo — повтор записи под sudo (AU-LOGIC PR-4, H1): sudo
+// внутри замка, прямо перед docker.
+func casWriteTemplateSudo(label string) string {
+	return "timeout 75 flock -w 15 -E 4 /run/lock/ env LC_ALL=C sudo -n docker exec -i " + dyn +
+		" timeout 50 sh -c '" + casScriptLiteral + "' " + label + " " + dyn + " " + dyn + " " + dyn + " " + dyn
+}
+
+// sockDeniedRunner — docker без sudo не пускает к сокету: запись без sudo
+// отказывает, повтор под sudo уходит в fakesrv.
+type sockDeniedRunner struct{ srv *fakesrv.Server }
+
+func (r sockDeniedRunner) Run(cmd string, stdin []byte) (string, error) {
+	if strings.Contains(cmd, "flock") && !strings.Contains(cmd, "sudo") {
+		return "", &fakesrv.ExitError{Cmd: "x", Status: 1,
+			Stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"}
+	}
+	return r.srv.Run(cmd, stdin)
+}
+
+// TestServerCommandSudoRetryUnchanged — T7 для повтора под sudo: запись и
+// откат при отказе сокета идут командами-шаблонами casWriteTemplateSudo,
+// ровно по одной; прочие команды — из cmdTemplates.
+func TestServerCommandSudoRetryUnchanged(t *testing.T) {
+	srv := fakesrv.New()
+	sess := NewSessionWithRunner(sockDeniedRunner{srv}, testCreds())
+	c := awgContainer()
+	if _, err := sess.AddUser(c, "Carol"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+	if _, err := sess.AddUser(c, "Dave"); err == nil {
+		t.Fatal("AddUser при сбое syncconf: ждали ошибку отката")
+	}
+	sudoT := []*regexp.Regexp{mustTemplateRegex(casWriteTemplateSudo("amnezia-admin-apply")), mustTemplateRegex(casWriteTemplateSudo("amnezia-admin-rollback"))}
+	var others []*regexp.Regexp
+	for _, tmpl := range cmdTemplates {
+		others = append(others, mustTemplateRegex(tmpl))
+	}
+	seen := make([]int, 2)
+	for _, cmd := range srv.Commands() {
+		cmd = strings.TrimPrefix(cmd, "sudo ") // чтения — общим фолбэком «sudo docker …»
+		matched := false
+		for i, re := range sudoT {
+			if re.MatchString(cmd) {
+				seen[i]++
+				matched = true
+			}
+		}
+		for _, re := range others {
+			if re.MatchString(cmd) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("%s команда вне шаблонов: %.120q", t7Marker, cmd)
+		}
+	}
+	if seen[0] != 2 || seen[1] != 1 {
+		t.Errorf("%s записей под sudo %d (ждали ровно 2), откатов под sudo %d (ждали ровно 1)", t7Marker, seen[0], seen[1])
+	}
 }
 
 func mustTemplateRegex(tmpl string) *regexp.Regexp {
@@ -1216,8 +1306,9 @@ func mustTemplateRegex(tmpl string) *regexp.Regexp {
 // TestServerCommandsUnchanged — эталон на запрет В2 п.2: серверные команды,
 // проверенные на живом сервере, не должны измениться ни на байт. Прогоняет
 // весь набор операций и сверяет каждую команду из Commands() с множеством
-// шаблонов cmdTemplates (порядок и кратность не важны, но каждый шаблон
-// обязан встретиться хотя бы раз). Обязательно DenyOnce == false — иначе
+// шаблонов cmdTemplates; число команд каждого шаблона — ТОЧНО t7Want, в обе
+// стороны (serverCommandsVerdict), вердикт держит канарейка
+// TestServerCommandsGuardCanary. Обязательно DenyOnce == false — иначе
 // команды пойдут с префиксом "sudo " и не совпадут ни с одним шаблоном
 // (sudo-фолбэк проверяет отдельный TestSudoFallback).
 func TestServerCommandsUnchanged(t *testing.T) {
@@ -1289,16 +1380,67 @@ func TestServerCommandsUnchanged(t *testing.T) {
 		t.Fatalf("Carol2 не найдена после RegenerateUser: %+v", clients)
 	}
 
-	if err := sess.DeleteByID(c, carol2ID); err != nil {
-		t.Fatalf("DeleteByID: %v", err)
+	// Посадки канарейки (TestServerCommandsGuardCanary): только в дочернем
+	// процессе, по переменной окружения.
+	plant := os.Getenv(t7PlantEnv)
+	if plant != "drop-delete" {
+		if err := sess.DeleteByID(c, carol2ID); err != nil {
+			t.Fatalf("DeleteByID: %v", err)
+		}
 	}
+	if plant == "extra-stats" {
+		if _, err := sess.GetPeerStats(c); err != nil {
+			t.Fatalf("GetPeerStats: %v", err)
+		}
+	}
+	if plant == "alien-cmd" {
+		_, _ = sess.r.Run("docker exec amnezia-awg rm -f /opt/amnezia/awg/wg0.conf", nil)
+	}
+
+	// Откат (A3б): сбой syncconf после записи — единственный путь к команде
+	// отката.
+	srv.FailSyncconf = fmt.Errorf("wg: syncconf: I/O error")
+	if _, err := sess.AddUser(c, "Dave"); err == nil {
+		t.Fatal("AddUser при сбое syncconf: ждали ошибку отката")
+	}
+	srv.FailSyncconf = nil
 
 	templates := make([]*regexp.Regexp, len(cmdTemplates))
 	for i, tmpl := range cmdTemplates {
 		templates[i] = mustTemplateRegex(tmpl)
 	}
-	seen := make([]bool, len(templates))
-	for _, cmd := range srv.Commands() {
+	for _, msg := range serverCommandsVerdict(templates, cmdTemplates, t7Want, srv.Commands()) {
+		t.Errorf("%s %s", t7Marker, msg)
+	}
+}
+
+// t7Marker — метка вердикта сторожа; канарейка требует её в выводе упавшего
+// дочернего процесса, чтобы красный был «по своей причине».
+const t7Marker = "T7-ВЕРДИКТ:"
+
+const t7PlantEnv = "AMNEZIA_T7_PLANT"
+
+// t7Want — ТОЧНОЕ число команд каждого шаблона (индексы cmdTemplates) в
+// сценарии TestServerCommandsUnchanged. Сравнение в обе стороны: и лишняя,
+// и недостающая команда — красный.
+var t7Want = []int{
+	1,  // docker ps
+	31, // cat
+	7,  // backup
+	7,  // wg show
+	7,  // syncconf
+	10, // test -f
+	7,  // запись (apply): AddUser, RenameUser, SetEnabled×2, RegenerateUser, DeleteByID, AddUser(Dave)
+	1,  // откат
+}
+
+// serverCommandsVerdict — вердикт сторожа: список нарушений (пустой — чисто).
+// Общий для всех семейств (W1, ревью QA: у T7-awg2 был свой, немой):
+// templates — регулярки шаблонов raw, want — ТОЧНОЕ число команд каждого.
+func serverCommandsVerdict(templates []*regexp.Regexp, raw []string, want []int, cmds []string) []string {
+	var bad []string
+	seen := make([]int, len(templates))
+	for _, cmd := range cmds {
 		matched := -1
 		for i, re := range templates {
 			if re.MatchString(cmd) {
@@ -1307,14 +1449,96 @@ func TestServerCommandsUnchanged(t *testing.T) {
 			}
 		}
 		if matched < 0 {
-			t.Fatalf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd)
+			bad = append(bad, fmt.Sprintf("команда не совпала ни с одним шаблоном (серверная строка изменилась?): %q", cmd))
+			continue
 		}
-		seen[matched] = true
+		seen[matched]++
 	}
-	for i, ok := range seen {
-		if !ok {
-			t.Errorf("шаблон ни разу не встретился: %s", cmdTemplates[i])
+	if len(want) != len(templates) || len(raw) != len(templates) {
+		bad = append(bad, fmt.Sprintf("эталон: %d чисел и %d шаблонов на %d регулярок", len(want), len(raw), len(templates)))
+		return bad
+	}
+	for i := range templates {
+		if seen[i] != want[i] {
+			bad = append(bad, fmt.Sprintf("шаблон #%d: команд %d, ждали ровно %d: %.80s", i, seen[i], want[i], raw[i]))
 		}
+	}
+	return bad
+}
+
+// TestServerCommandsGuardCanary — сторож обязан УРОНИТЬ прогон, а не только
+// найти дефект (guards-can-stop-failing): TestServerCommandsUnchanged
+// запускается дочерним процессом с посаженным дефектом, и тот обязан упасть с
+// меткой вердикта. Три посадки: недостающая команда, лишняя команда, чужая
+// команда — одностороннее ослабление сравнения или Errorf→Logf дают зелёный
+// дочерний прогон, и канарейка краснеет.
+func TestServerCommandsGuardCanary(t *testing.T) {
+	if os.Getenv(t7PlantEnv) != "" {
+		t.Skip("дочерний процесс")
+	}
+	// W1, ревью QA (блокер): те же три посадки — и для сторожа amnezia-awg2
+	// (TestServerCommandsAWG2 на fakesrv.NewAWG2()).
+	for _, guard := range []string{"TestServerCommandsUnchanged", "TestServerCommandsAWG2"} {
+		for _, plant := range []string{"drop-delete", "extra-stats", "alien-cmd"} {
+			guard, plant := guard, plant
+			t.Run(guard+"/"+plant, func(t *testing.T) {
+				// Без -test.v: вывод t.Logf прошедшего теста не печатается вовсе,
+				// а метка ищется только в блоке упавшего теста (от строки
+				// «--- FAIL: <сторож>» до следующей «---»).
+				cmd := exec.Command(os.Args[0], "-test.run", "^"+guard+"$", "-test.count=1")
+				cmd.Env = append(os.Environ(), t7PlantEnv+"="+plant)
+				out, err := cmd.CombinedOutput()
+				if err == nil {
+					t.Fatalf("сторож %s не уронил прогон на посадке %q:\n%s", guard, plant, out)
+				}
+				if !t7FailBlockHasMarker(string(out), guard) {
+					t.Fatalf("прогон упал не по вердикту сторожа (нет %q в блоке провала %s) на посадке %q:\n%s", t7Marker, guard, plant, out)
+				}
+			})
+		}
+	}
+}
+
+// t7FailBlockHasMarker — есть ли метка вердикта в блоке провала сторожа guard.
+func t7FailBlockHasMarker(out, guard string) bool {
+	in := false
+	for _, l := range strings.Split(out, "\n") {
+		trim := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(trim, "--- FAIL: "+guard+" "):
+			in = true
+		case strings.HasPrefix(trim, "---") || trim == "FAIL" || trim == "PASS":
+			in = false
+		case in && strings.Contains(l, ": "+t7Marker):
+			return true
+		}
+	}
+	return false
+}
+
+// TestCASTimeoutInvariant — SEC R2': внешний таймаут больше ожидания замка
+// плюс внутренний; тот же порядок — в тексте команды.
+func TestCASTimeoutInvariant(t *testing.T) {
+	if casOuterTimeout <= casLockWait+casInnerTimeout {
+		t.Errorf("внешний таймаут %d не больше ожидания замка %d + внутреннего %d", casOuterTimeout, casLockWait, casInnerTimeout)
+	}
+	cmd, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", strings.Repeat("a", 64), CASAbsent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outer, wait, inner int
+	if _, err := fmt.Sscanf(cmd, "timeout %d flock -w %d", &outer, &wait); err != nil {
+		t.Fatalf("разбор команды: %v", err)
+	}
+	i := strings.Index(cmd, "docker exec -i amnezia-awg timeout ")
+	if i < 0 {
+		t.Fatal("в команде нет внутреннего timeout")
+	}
+	if _, err := fmt.Sscanf(cmd[i:], "docker exec -i amnezia-awg timeout %d", &inner); err != nil {
+		t.Fatalf("разбор внутреннего timeout: %v", err)
+	}
+	if outer <= wait+inner {
+		t.Errorf("в команде внешний %d не больше %d + %d", outer, wait, inner)
 	}
 }
 

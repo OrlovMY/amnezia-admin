@@ -134,7 +134,13 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 			t.Setenv("XDG_CONFIG_HOME", "rel")
 			t.Setenv("HOME", "")
 		}
-		u.showConfigDialog(osmotrNewUser(), "создан")
+		nu := osmotrNewUser()
+		if state == "AmneziaWG 2" {
+			// UX W3 В4: строка честности amnezia-awg2 в окне — постоянная
+			// сцена, а не только подмена ревьюера.
+			nu.Note = core.AWG2ConfigNote
+		}
+		u.showConfigDialog(nu, "создан")
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
 		mins := osmotrFrame(pop, nil)
@@ -151,7 +157,7 @@ func openDiff(t *testing.T, u *ui, sized func()) osmotrScene {
 	sized()
 	srv := fakesrv.New()
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	cl, err := sess.LoadClients(c)
 	if err != nil || len(cl) == 0 {
 		t.Fatalf("fakesrv: %v", err)
@@ -259,12 +265,16 @@ var moreForms = []osmotrForm{
 	{name: "(д) конфиг готов, сохранён", open: openConfig("сохранён"), width: 472,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь"})},
 	{name: "(д) конфиг готов, отказ сохранения", open: openConfig("отказ"), width: 472, inventory: invConfigBase},
+	// Финальный раунд (AU-UX М1): строка честности — вне прокрутки, справа
+	// от QR, диалог шире (awg2ConfigDialogWidth − 8 = 752).
+	{name: "(д) конфиг готов, AmneziaWG 2", open: openConfig("AmneziaWG 2"), width: awg2ConfigDialogWidth - 8,
+		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь", "подпись:Параметры маскировки взяты из файла серв…"})},
 	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
 			"кнопка:Применить", "подпись:", "кнопка:Закрыть"}},
-	{name: "(д) предупреждение о гонке", open: openRace, width: 552,
+	{name: "(д) предупреждение (приложение Amnezia)", open: openRace, width: 452,
 		inventory: []string{"подпись:" + firstLine(guiview.WarningTitle()), "подпись:" + firstLine(guiview.WarningBody()),
 			"кнопка:" + guiview.WarnContinueLabel(), "кнопка:" + guiview.WarnCancelLabel()}},
 	{name: "(е) неизвестный сервер", open: openHostKeyPrompt, width: 472,

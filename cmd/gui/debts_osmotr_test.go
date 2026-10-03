@@ -321,7 +321,7 @@ func openDiffDisableRecordOnly(t *testing.T, u *ui, sized func()) osmotrScene {
 	}
 	srv.SetFile(wg, []byte(strings.Join(kept, "\n\n")))
 	sess := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: "203.0.113.10", User: "root", Password: "x"})
-	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Managed: true}
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	plan, err := sess.PlanSetEnabled(c, id, false)
 	if err != nil {
 		t.Fatalf("PlanSetEnabled: %v", err)

@@ -19,9 +19,11 @@ package fakesrv
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -44,6 +46,7 @@ func NewHostKey() (ssh.Signer, error) {
 // SSHServer — работающий SSH-сервер поверх net.Listener; каждая сессия exec
 // исполняется через переданный exec (*Server).
 type SSHServer struct {
+	exec *Server // для run == nil (ListenSSH): RunCancel с сигналом отключения
 	ln   net.Listener
 	fp   string
 	wg   sync.WaitGroup
@@ -85,6 +88,61 @@ type SSHServer struct {
 // (cmd/fakeserver и тесты и так передают только "127.0.0.1:…", но ограничение
 // внутри функции не даёт этому стать негласным допущением).
 func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*SSHServer, error) {
+	if exec == nil {
+		return nil, fmt.Errorf("fakesrv: ListenSSH: exec (*Server) обязателен")
+	}
+	return listenSSH(addr, user, password, hostKey, exec, nil)
+}
+
+// ListenSSHSudoOnly — как ListenSSH, но пользователь user устроен как в
+// sudoers «user ALL=(root) NOPASSWD: /usr/bin/docker» без группы docker:
+// docker без sudo не пускает к сокету (текст настоящего docker), а sudo
+// разрешает запустить ТОЛЬКО docker — любую другую программу отвергает
+// текстом настоящего sudo. Модель пользователя канарейки PR4.2 и H1.
+func ListenSSHSudoOnly(addr, user, password string, hostKey ssh.Signer, exec *Server) (*SSHServer, error) {
+	if exec == nil {
+		return nil, fmt.Errorf("fakesrv: ListenSSHSudoOnly: exec (*Server) обязателен")
+	}
+	return listenSSH(addr, user, password, hostKey, exec, func(cmd string, stdin []byte) (string, error) {
+		return sudoOnlyRun(user, exec, cmd, stdin)
+	})
+}
+
+// sudoOnlyRun — политика ListenSSHSudoOnly поверх exec.Run.
+func sudoOnlyRun(user string, exec *Server, cmd string, stdin []byte) (string, error) {
+	f := strings.Fields(cmd)
+	for i, w := range f {
+		if w != "sudo" {
+			continue
+		}
+		j := i + 1
+		for j < len(f) && strings.HasPrefix(f[j], "-") {
+			j++
+		}
+		if j >= len(f) || f[j] != "docker" {
+			prog := "?"
+			if j < len(f) {
+				prog = f[j]
+			}
+			return "", &ExitError{Cmd: cmd, Status: 1, Stderr: "Sorry, user " + user + " is not allowed to execute '" + prog + "' as root on fakesrv."}
+		}
+	}
+	for i, w := range f {
+		if w != "docker" {
+			continue
+		}
+		j := i - 1
+		for j >= 0 && strings.HasPrefix(f[j], "-") {
+			j--
+		}
+		if j < 0 || f[j] != "sudo" {
+			return "", &ExitError{Cmd: cmd, Status: 1, Stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: connect: permission denied"}
+		}
+	}
+	return exec.Run(cmd, stdin)
+}
+
+func listenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server, run func(string, []byte) (string, error)) (*SSHServer, error) {
 	if hostKey == nil {
 		return nil, fmt.Errorf("fakesrv: ListenSSH: hostKey обязателен")
 	}
@@ -116,12 +174,14 @@ func ListenSSH(addr, user, password string, hostKey ssh.Signer, exec *Server) (*
 	}
 
 	s := &SSHServer{
+		exec:  exec,
 		ln:    ln,
 		fp:    ssh.FingerprintSHA256(hostKey.PublicKey()),
 		conns: make(map[net.Conn]struct{}),
 	}
 	s.wg.Add(1)
-	go s.acceptLoop(cfg, exec)
+	go s.acceptLoop(cfg, run)
+
 	return s, nil
 }
 
@@ -153,7 +213,7 @@ func (s *SSHServer) Close() error {
 	return err
 }
 
-func (s *SSHServer) acceptLoop(cfg *ssh.ServerConfig, exec *Server) {
+func (s *SSHServer) acceptLoop(cfg *ssh.ServerConfig, run func(string, []byte) (string, error)) {
 	defer s.wg.Done()
 	for {
 		conn, err := s.ln.Accept()
@@ -183,12 +243,12 @@ func (s *SSHServer) acceptLoop(cfg *ssh.ServerConfig, exec *Server) {
 				delete(s.conns, conn)
 				s.mu.Unlock()
 			}()
-			s.handleConn(conn, cfg, exec)
+			s.handleConn(conn, cfg, run)
 		}()
 	}
 }
 
-func (s *SSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig, exec *Server) {
+func (s *SSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig, run func(string, []byte) (string, error)) {
 	defer conn.Close()
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
@@ -197,6 +257,13 @@ func (s *SSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig, exec *Serve
 		return
 	}
 	defer sconn.Close()
+	// run == nil — обычный ListenSSH: команды идут в exec.RunCancel с
+	// сигналом «клиент отключился» (LockReleaseOnDisconnect).
+	if run == nil {
+		gone := make(chan struct{})
+		go func() { _ = sconn.Wait(); close(gone) }()
+		run = func(cmd string, stdin []byte) (string, error) { return s.exec.RunCancel(cmd, stdin, gone) }
+	}
 	go ssh.DiscardRequests(reqs)
 
 	var wg sync.WaitGroup
@@ -212,7 +279,7 @@ func (s *SSHServer) handleConn(conn net.Conn, cfg *ssh.ServerConfig, exec *Serve
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleSession(ch, chReqs, exec)
+			handleSession(ch, chReqs, run)
 		}()
 	}
 	wg.Wait()
@@ -235,7 +302,7 @@ type exitStatusMsg struct {
 // канал. Любой другой тип запроса ("pty-req", "shell", "subsystem",
 // "env", "window-change", …) отклоняется явным отказом (WantReply=false
 // запросы — как OpenSSH, дают false без падения).
-func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request, exec *Server) {
+func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request, run func(string, []byte) (string, error)) {
 	defer ch.Close()
 	for req := range reqs {
 		if req.Type != "exec" {
@@ -257,7 +324,7 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request, exec *Server) {
 		}
 
 		stdin, _ := io.ReadAll(ch)
-		out, runErr := exec.Run(m.Command, stdin)
+		out, runErr := run(m.Command, stdin)
 
 		if _, werr := io.WriteString(ch, out); werr != nil {
 			return
@@ -266,6 +333,10 @@ func handleSession(ch ssh.Channel, reqs <-chan *ssh.Request, exec *Server) {
 		if runErr != nil {
 			fmt.Fprint(ch.Stderr(), runErr.Error())
 			code = 1
+			var ee *ExitError
+			if errors.As(runErr, &ee) {
+				code = uint32(ee.Status)
+			}
 		}
 		sendExitStatus(ch, code)
 		return // одна exec-сессия на канал — после неё канал закрывается (defer)
