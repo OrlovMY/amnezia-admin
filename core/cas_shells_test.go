@@ -511,6 +511,57 @@ func shellsScript() (script string, ok bool) {
 	return "", false
 }
 
+// pathSubstitutionProblem — пусто, если оболочка rs не находит sha256sum,
+// когда его нет в PATH-обёртке; иначе — что произошло.
+func pathSubstitutionProblem(t *testing.T, rs realShell) string {
+	t.Helper()
+	d := rs.shimDir(t, "sha256sum", "", "")
+	args := append(append([]string{}, rs.shArg...), "-c", "printf x | sha256sum")
+	cmd := exec.Command(rs.sh, args...)
+	cmd.Env = []string{"PATH=" + d}
+	out, err := cmd.CombinedOutput()
+	return substitutionVerdict(string(out), err)
+}
+
+// substitutionVerdict — «подмена действует» только при ненулевом коде И
+// сообщении оболочки «not found» / «No such file»: иной ненулевой код
+// (например, апплет запустился и упал по своей причине) — не доказательство,
+// что утилиту искали по PATH.
+func substitutionVerdict(out string, err error) string {
+	o := strings.TrimSpace(out)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("sha256sum исполнился без себя в PATH: %q", o)
+	case strings.Contains(o, "not found") || strings.Contains(o, "No such file"):
+		return ""
+	default:
+		return fmt.Sprintf("sha256sum без себя в PATH дал %v без «not found»/«No such file»: %q — неизвестно, искали ли его по PATH", err, o)
+	}
+}
+
+// TestSubstitutionVerdict — три состояния предусловия: подмена действует,
+// не действует, неизвестно. Чистая функция — идёт на любой ОС; сам запуск
+// оболочки (pathSubstitutionProblem) проверяет только job linux в CI.
+func TestSubstitutionVerdict(t *testing.T) {
+	exit127 := fmt.Errorf("exit status 127")
+	for _, c := range []struct {
+		name, out string
+		err       error
+		ok        bool
+	}{
+		{"busybox: not found", "sh: sha256sum: not found", exit127, true},
+		{"dash: not found", "sh: 1: sha256sum: not found", exit127, true},
+		{"нет файла", "sh: sha256sum: No such file or directory", exit127, true},
+		{"апплет исполнился (busybox-static)", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881  -", nil, false},
+		{"упал по другой причине — неизвестно", "sha256sum: invalid option", fmt.Errorf("exit status 1"), false},
+		{"пустой вывод и код — неизвестно", "", exit127, false},
+	} {
+		if got := substitutionVerdict(c.out, c.err); (got == "") != c.ok {
+			t.Errorf("%s: substitutionVerdict(%q, %v) = %q, ждали подмена действует=%v", c.name, c.out, c.err, got, c.ok)
+		}
+	}
+}
+
 func TestCASScriptRealShells(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("ОС %s: busybox sh и dash проверяются на Linux (CI, job checks linux); здесь скрипт исполняет fakesrv системным sh", runtime.GOOS)
@@ -528,6 +579,18 @@ func TestCASScriptRealShells(t *testing.T) {
 	script, ok := shellsScript()
 	if !ok {
 		t.Fatalf("%s посадка %q не применилась к CASWriteScript (nocheck: нет строки сверки `\"$hw\" != \"$ww\"`; extprintf: нет `printf %%s \"$` или внешнего printf)", shellsPlantBroken, os.Getenv(shellsPlantEnv))
+	}
+	// Предусловие сценариев «утилиты нет / утилита падает»: оболочка ищет
+	// утилиту по PATH. Сборка busybox с FEATURE_SH_STANDALONE (busybox-static
+	// Ubuntu) вызывает свои апплеты в обход PATH — подмена в ней молча не
+	// действует, и сценарий дал бы ложное «код 0, ждали 5» (инцидент
+	// v0.3.0-rc.1: в release.yml не было шага установки пакета busybox).
+	// Такое окружение называется по имени, а не выдаётся за дефект скрипта.
+	for _, rs := range shells {
+		if p := pathSubstitutionProblem(t, rs); p != "" {
+			t.Fatalf("%s %s: подмена утилит не действует в этой сборке (%s) — сценарии «утилиты нет» здесь не моделируются; "+
+				"нужна сборка, ищущая утилиты по PATH (пакет busybox, не busybox-static)", shellsMarker, rs.name, p)
+		}
 	}
 	scen := shellScenarios()
 	if os.Getenv(shellsPlantEnv) == "drop" {
