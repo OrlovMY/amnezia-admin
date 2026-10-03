@@ -110,6 +110,30 @@ type Server struct {
 	LegacyTmpSplit bool
 	LegacyTmpGap   time.Duration
 
+	// LegacyPairWait — если > 0, прежняя запись (reLegacyWrite) ждёт вне
+	// мьютекса вторую прежнюю запись не дольше LegacyPairWait, и обе
+	// выполняются только вместе. Два прежних писателя тогда гарантированно
+	// перекрываются: оба прочитали файлы до того, как кто-то записал, —
+	// потеря обновления детерминирована (CI macOS 03.10: без барьера гонка
+	// при двух попытках случалась не всегда). Одиночная запись (до/после
+	// гонки) ждёт LegacyPairWait и идёт одна.
+	LegacyPairWait time.Duration
+	pairMu         sync.Mutex
+	pairCh         chan struct{}
+
+	// LegacySerialize — если > 0, цикл прежнего писателя (чтение файла
+	// конфигурации … прежняя запись clientsTable) исполняется целиком по
+	// одному: чтение wg0.conf/awg0.conf ждёт, пока предыдущий цикл не
+	// закончится прежней записью clientsTable (или не истечёт
+	// LegacySerialize — для одиночных чтений вне цикла). Модель стенда, на
+	// котором гонку НЕ вызвать (AU Medium-1 K4-FLAKY: доезд ветки «гонку не
+	// удалось вызвать»).
+	LegacySerialize time.Duration
+	serMu           sync.Mutex
+	serSem          chan struct{}
+	serHeld         bool
+	serGen          uint64
+
 	// LockHoldFor — команда записи под замком (reCASWrite) перед исполнением
 	// «держит замок /run/lock» столько времени вне мьютекса; LockHeld()
 	// в это время true. Модель окна, в которое К5 канарейки обязан оборвать
@@ -347,7 +371,24 @@ func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (stri
 	delay, hold, shared, abort := s.CommandDelay, s.LockHoldFor, s.LockShared, s.LockHoldAbort
 	release := s.LockReleaseOnDisconnect
 	split, gap := s.AllowLegacyWrite && s.LegacyTmpSplit, s.LegacyTmpGap
+	pairWait, serial := s.LegacyPairWait, s.LegacySerialize
+	if !s.AllowLegacyWrite {
+		serial = 0
+	}
+	if !s.AllowLegacyWrite {
+		pairWait = 0
+	}
 	s.mu.Unlock()
+	if pairWait > 0 && reLegacyWrite.MatchString(cmd) {
+		s.legacyPair(pairWait)
+	}
+	if serial > 0 {
+		if reConfCat.MatchString(cmd) {
+			s.serAcquire(serial)
+		} else if m := reLegacyWrite.FindStringSubmatch(cmd); m != nil && strings.HasSuffix(m[4], "/clientsTable") {
+			defer s.serRelease(0)
+		}
+	}
 	if delay > 0 {
 		time.Sleep(delay)
 	}
@@ -406,6 +447,62 @@ func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (stri
 	}
 
 	return s.dispatch(actual, stdin)
+}
+
+// legacyPair — встреча двух прежних записей (см. LegacyPairWait): первая
+// ждёт вторую не дольше wait, вторая отпускает обе.
+func (s *Server) legacyPair(wait time.Duration) {
+	s.pairMu.Lock()
+	if ch := s.pairCh; ch != nil {
+		s.pairCh = nil
+		s.pairMu.Unlock()
+		close(ch)
+		return
+	}
+	ch := make(chan struct{})
+	s.pairCh = ch
+	s.pairMu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(wait):
+		s.pairMu.Lock()
+		if s.pairCh == ch {
+			s.pairCh = nil
+		}
+		s.pairMu.Unlock()
+	}
+}
+
+// reConfCat — чтение файла конфигурации семейства WG (см. LegacySerialize).
+var reConfCat = regexp.MustCompile(`^(?:sudo -n )?docker exec \S+ cat \S+/(?:wg0|awg0)\.conf$`)
+
+// serAcquire — занять цикл прежнего писателя (LegacySerialize); не
+// закрытый прежней записью clientsTable цикл освобождается через wait.
+func (s *Server) serAcquire(wait time.Duration) {
+	s.serMu.Lock()
+	if s.serSem == nil {
+		s.serSem = make(chan struct{}, 1)
+	}
+	sem := s.serSem
+	s.serMu.Unlock()
+	sem <- struct{}{}
+	s.serMu.Lock()
+	s.serHeld = true
+	s.serGen++
+	gen := s.serGen
+	s.serMu.Unlock()
+	time.AfterFunc(wait, func() { s.serRelease(gen) })
+}
+
+// serRelease — освободить цикл; gen ≠ 0 — только если это тот же цикл.
+func (s *Server) serRelease(gen uint64) {
+	s.serMu.Lock()
+	defer s.serMu.Unlock()
+	if !s.serHeld || (gen != 0 && gen != s.serGen) {
+		return
+	}
+	s.serHeld = false
+	<-s.serSem
 }
 
 // Configure — изменить настройки сервера под его мьютексом: так тест

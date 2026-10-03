@@ -41,6 +41,56 @@ func TestOldWriterRestoresFiles(t *testing.T) {
 	}
 }
 
+// TestOldWriterRaceDeterministic — CI macOS 03.10 (run 37111940783): гонка
+// прежней записи на fakesrv была вероятностной, и TestExistingClientKept
+// падал «на пустом НЕ ПРОВЕРЕНО — гонку не удалось вызвать». С барьером
+// LegacyPairWait (emptyFakeOn) два писателя перекрываются в каждом раунде:
+// потеря есть всегда, и при одном раунде тоже. Барьер у стенда обязан быть
+// включён (QA Low) — иначе тест проверял бы удачу планировщика.
+func TestOldWriterRaceDeterministic(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		f := emptyFake(t, false)
+		var pair time.Duration
+		f.exec.Configure(func(s *fakesrv.Server) { pair = s.LegacyPairWait })
+		if pair <= 0 {
+			t.Fatalf("у стенда emptyFakeOn барьер LegacyPairWait не включён (%v)", pair)
+		}
+		f.env.RaceRounds = 1
+		o, err := f.env.oldWriterRace()
+		if err != nil {
+			t.Fatalf("контроль: %v", err)
+		}
+		if o.Lost == 0 {
+			t.Fatalf("попытка %d: потери нет (готово %d, .tmp %d) — гонка не воспроизведена", i, o.Done, o.Collided)
+		}
+	}
+}
+
+// TestK4NoRaceNotChecked — AU Medium-1 (K4-FLAKY): доезд ветки «гонку не
+// удалось вызвать». Настоящий oldWriterRace на fakesrv, барьера нет, циклы
+// прежних писателей сериализованы (LegacySerialize) — потерь и
+// столкновений нет; К4 обязан быть НЕ ПРОВЕРЕНО, а не ПРОЙДЕН.
+func TestK4NoRaceNotChecked(t *testing.T) {
+	f := emptyFake(t, false)
+	f.exec.Configure(func(s *fakesrv.Server) {
+		s.LegacyPairWait = 0
+		s.LegacySerialize = 500 * time.Millisecond
+	})
+	f.env.NewBin = serialFake(t, newCLI(t))
+	f.env.RaceRounds = 2
+	o, err := f.env.oldWriterRace()
+	if err != nil {
+		t.Fatalf("контроль: %v", err)
+	}
+	if o.Done != 4 || o.Lost != 0 || o.Collided != 0 {
+		t.Fatalf("сериализованный контроль: готово %d, потеряно %d, .tmp %d — ждали 4/0/0", o.Done, o.Lost, o.Collided)
+	}
+	r := f.env.race()
+	if r.Status != NotChecked || !strings.Contains(r.Detail, "гонку не удалось вызвать") {
+		t.Fatalf("К4 без гонки: %s — %s", r.Status, r.Detail)
+	}
+}
+
 // TestK7NotApplicableOnAWG2 — К7 (v0.2.0 после всего) для amnezia-awg2 —
 // «НЕ ПРИМЕНИМО» с причиной; v0.2.0 при этом не запускается.
 func TestK7NotApplicableOnAWG2(t *testing.T) {

@@ -143,7 +143,13 @@ func emptyFakeOn(t *testing.T, fs *fakesrv.Server, ctr *core.Container, withClie
 	t.Cleanup(sess.Close)
 	// К4: канарейка играет старую версию прежней командой записи — fakesrv
 	// принимает её только по явному разрешению.
-	fs.Configure(func(s *fakesrv.Server) { s.AllowLegacyWrite = true })
+	// Барьер LegacyPairWait: два прежних писателя К4 гарантированно
+	// перекрываются — гонка воспроизводится детерминированно (CI macOS
+	// 03.10, run 37111940783: без барьера контроль иногда не ловил потерю).
+	fs.Configure(func(s *fakesrv.Server) {
+		s.AllowLegacyWrite = true
+		s.LegacyPairWait = time.Second
+	})
 	// Каталог данных дочерних программ — временный БЕЗ имени теста: путь
 	// попадает в вопросы К8, а имя теста («как ожидается…») — в проверку
 	// «вопрос не подсказывает ответ».
