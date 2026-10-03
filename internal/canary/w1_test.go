@@ -41,7 +41,27 @@ func TestOldWriterRestoresFiles(t *testing.T) {
 	}
 }
 
-// TestK7NotApplicableOnAWG2 — К7 (v0.2.0 после всего) для amnezia-awg2 —
+// TestOldWriterRaceDeterministic — CI macOS 03.10 (run 37111940783): гонка
+// прежней записи на fakesrv была вероятностной, и TestExistingClientKept
+// падал «на пустом НЕ ПРОВЕРЕНО — гонку не удалось вызвать». С барьером
+// LegacyPairWait (emptyFakeOn) два писателя перекрываются в каждом раунде:
+// потеря есть всегда, и при одном раунде тоже. Подмена «барьера нет»
+// (LegacyPairWait = 0) при сериализующей задержке команд этот тест роняет.
+func TestOldWriterRaceDeterministic(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		f := emptyFake(t, false)
+		f.env.RaceRounds = 1
+		o, err := f.env.oldWriterRace()
+		if err != nil {
+			t.Fatalf("контроль: %v", err)
+		}
+		if o.Lost == 0 {
+			t.Fatalf("попытка %d: потери нет (готово %d, .tmp %d) — гонка не воспроизведена", i, o.Done, o.Collided)
+		}
+	}
+}
+
+// TestK7NotApplicableOnAWG2 —К7 (v0.2.0 после всего) для amnezia-awg2 —
 // «НЕ ПРИМЕНИМО» с причиной; v0.2.0 при этом не запускается.
 func TestK7NotApplicableOnAWG2(t *testing.T) {
 	ctr := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "awg2", Support: core.SupportYes}

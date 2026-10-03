@@ -110,6 +110,17 @@ type Server struct {
 	LegacyTmpSplit bool
 	LegacyTmpGap   time.Duration
 
+	// LegacyPairWait — если > 0, прежняя запись (reLegacyWrite) ждёт вне
+	// мьютекса вторую прежнюю запись не дольше LegacyPairWait, и обе
+	// выполняются только вместе. Два прежних писателя тогда гарантированно
+	// перекрываются: оба прочитали файлы до того, как кто-то записал, —
+	// потеря обновления детерминирована (CI macOS 03.10: без барьера гонка
+	// при двух попытках случалась не всегда). Одиночная запись (до/после
+	// гонки) ждёт LegacyPairWait и идёт одна.
+	LegacyPairWait time.Duration
+	pairMu         sync.Mutex
+	pairCh         chan struct{}
+
 	// LockHoldFor — команда записи под замком (reCASWrite) перед исполнением
 	// «держит замок /run/lock» столько времени вне мьютекса; LockHeld()
 	// в это время true. Модель окна, в которое К5 канарейки обязан оборвать
@@ -347,7 +358,14 @@ func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (stri
 	delay, hold, shared, abort := s.CommandDelay, s.LockHoldFor, s.LockShared, s.LockHoldAbort
 	release := s.LockReleaseOnDisconnect
 	split, gap := s.AllowLegacyWrite && s.LegacyTmpSplit, s.LegacyTmpGap
+	pairWait := s.LegacyPairWait
+	if !s.AllowLegacyWrite {
+		pairWait = 0
+	}
 	s.mu.Unlock()
+	if pairWait > 0 && reLegacyWrite.MatchString(cmd) {
+		s.legacyPair(pairWait)
+	}
 	if delay > 0 {
 		time.Sleep(delay)
 	}
@@ -406,6 +424,30 @@ func (s *Server) RunCancel(cmd string, stdin []byte, gone <-chan struct{}) (stri
 	}
 
 	return s.dispatch(actual, stdin)
+}
+
+// legacyPair — встреча двух прежних записей (см. LegacyPairWait): первая
+// ждёт вторую не дольше wait, вторая отпускает обе.
+func (s *Server) legacyPair(wait time.Duration) {
+	s.pairMu.Lock()
+	if ch := s.pairCh; ch != nil {
+		s.pairCh = nil
+		s.pairMu.Unlock()
+		close(ch)
+		return
+	}
+	ch := make(chan struct{})
+	s.pairCh = ch
+	s.pairMu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(wait):
+		s.pairMu.Lock()
+		if s.pairCh == ch {
+			s.pairCh = nil
+		}
+		s.pairMu.Unlock()
+	}
 }
 
 // Configure — изменить настройки сервера под его мьютексом: так тест
