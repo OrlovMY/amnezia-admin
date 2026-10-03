@@ -88,6 +88,7 @@ jobs:
         # Ниже нет глушителя кода возврата: отсутствие gcc обязано ронять job (св. 3).
         if: matrix.os == 'windows'
         run: |
+          set -euo pipefail
           printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
           export PATH="/c/msys64/mingw64/bin:$PATH"
           gcc --version
@@ -107,9 +108,24 @@ jobs:
         # заголовков он не соберёт даже типы.
         if: matrix.os == 'linux'
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev
           gcc --version
+
+      - name: Оболочки для скрипта записи (busybox, dash)
+        # Инцидент v0.3.0-rc.1: этого шага здесь не было, и на теге
+        # TestCASScriptRealShells исполнялся в busybox-static из образа
+        # ubuntu-24.04. Та сборка вызывает свои апплеты (sha256sum, base64,
+        # mv) в обход PATH, поэтому подмена «утилиты нет / утилита падает»
+        # в ней не действует — тест получал «код 0, ждали 5». Шаг дословно
+        # повторяет ci.yml (job checks); совпадение шагов подготовки
+        # окружения двух файлов стережёт internal/ciguard
+        # (TestTestJobEnvironmentMatches). Пояснения — в ci.yml.
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y busybox
 
       - name: go vet
         run: go vet ./...

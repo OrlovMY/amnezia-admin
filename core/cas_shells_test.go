@@ -511,6 +511,21 @@ func shellsScript() (script string, ok bool) {
 	return "", false
 }
 
+// pathSubstitutionProblem — пусто, если оболочка rs не находит sha256sum,
+// когда его нет в PATH-обёртке; иначе — что произошло.
+func pathSubstitutionProblem(t *testing.T, rs realShell) string {
+	t.Helper()
+	d := rs.shimDir(t, "sha256sum", "", "")
+	args := append(append([]string{}, rs.shArg...), "-c", "printf x | sha256sum")
+	cmd := exec.Command(rs.sh, args...)
+	cmd.Env = []string{"PATH=" + d}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return fmt.Sprintf("sha256sum исполнился без себя в PATH: %q", strings.TrimSpace(string(out)))
+	}
+	return ""
+}
+
 func TestCASScriptRealShells(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("ОС %s: busybox sh и dash проверяются на Linux (CI, job checks linux); здесь скрипт исполняет fakesrv системным sh", runtime.GOOS)
@@ -528,6 +543,18 @@ func TestCASScriptRealShells(t *testing.T) {
 	script, ok := shellsScript()
 	if !ok {
 		t.Fatalf("%s посадка %q не применилась к CASWriteScript (nocheck: нет строки сверки `\"$hw\" != \"$ww\"`; extprintf: нет `printf %%s \"$` или внешнего printf)", shellsPlantBroken, os.Getenv(shellsPlantEnv))
+	}
+	// Предусловие сценариев «утилиты нет / утилита падает»: оболочка ищет
+	// утилиту по PATH. Сборка busybox с FEATURE_SH_STANDALONE (busybox-static
+	// Ubuntu) вызывает свои апплеты в обход PATH — подмена в ней молча не
+	// действует, и сценарий дал бы ложное «код 0, ждали 5» (инцидент
+	// v0.3.0-rc.1: в release.yml не было шага установки пакета busybox).
+	// Такое окружение называется по имени, а не выдаётся за дефект скрипта.
+	for _, rs := range shells {
+		if p := pathSubstitutionProblem(t, rs); p != "" {
+			t.Fatalf("%s %s: подмена утилит не действует в этой сборке (%s) — сценарии «утилиты нет» здесь не моделируются; "+
+				"нужна сборка, ищущая утилиты по PATH (пакет busybox, не busybox-static)", shellsMarker, rs.name, p)
+		}
 	}
 	scen := shellScenarios()
 	if os.Getenv(shellsPlantEnv) == "drop" {

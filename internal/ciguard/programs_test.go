@@ -64,11 +64,13 @@ var allowedShellCalls = map[string]string{
 // оболочкой аргументом краснеет по-прежнему, в том числе `sudo apt-get
 // install -y busybox sh` или тот же пакет другой строкой.
 //
-// Ключ — файл и вызов (AU-LOGIC L2): та же строка в release.yml — красная,
-// установка пакета не попадает в релизную цепочку незамеченной.
+// Ключ — файл и вызов (AU-LOGIC L2): установка пакета не попадает в
+// релизную цепочку незамеченной — каждый файл назван поимённо.
 var allowedPackageInstalls = map[string]string{
 	"../../.github/workflows/ci.yml|sudo apt-get install -y busybox": "ci.yml, шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
 		"(скрипт записи A3б исполняется в busybox sh, как в контейнере на busybox); dash в Ubuntu есть всегда (/bin/sh)",
+	"../../.github/workflows/release.yml|sudo apt-get install -y busybox": "release.yml, job test: тот же шаг, что в ci.yml " +
+		"(инцидент v0.3.0-rc.1: без него тест шёл в busybox-static, где подмена утилит не действует); совпадение шагов — TestTestJobEnvironmentMatches",
 }
 
 type progRule struct {

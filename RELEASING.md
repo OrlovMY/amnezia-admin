@@ -304,6 +304,11 @@ sha256(CASWriteCommandSudo)=470a1c657646f7591751f157a0c71a8e57a124af63d780fffed5
 > 02.10.2026: `release.yml` изменён (`go test -timeout=20m`, вслед за
 > `ci.yml`) — по правилу CLAUDE.md первый тег после этой правки — только
 > `rc`.
+>
+> 03.10.2026: `release.yml` изменён снова — в job `test` добавлен шаг
+> «Оболочки для скрипта записи (busybox, dash)», как в `ci.yml` (инцидент
+> `v0.3.0-rc.1`: без него `TestCASScriptRealShells` шёл в busybox-static и
+> падал). Следующий тег — только `v0.3.0-rc.2`, не `v0.3.0`.
 
 ```sh
 git tag -a v0.1.0-rc.1 -m "amnezia-admin 0.1.0-rc.1"

@@ -126,6 +126,7 @@ const (
 	gtm  = "TestGoTestPackagesMatch"
 	att  = "TestReleaseAttestsChecksums"
 	arch = "TestReleaseRunnerArchStep"
+	tenv = "TestTestJobEnvironmentMatches"
 )
 
 var plants = []plant{
@@ -215,7 +216,7 @@ var plants = []plant{
 	{name: "r4-sc-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          SHELLCHECK_BIN: /nonexistent\n"),
 		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env SHELLCHECK_BIN=/nonexistent"},
 	{name: "r4-sc-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  SHELLCHECK_BIN: /nonexistent\n\n"),
-		wantTest: goenv, also: []string{keys}, wantMsg: "workflow: env SHELLCHECK_BIN=/nonexistent"},
+		wantTest: goenv, also: []string{keys, tenv}, wantMsg: "workflow: env SHELLCHECK_BIN=/nonexistent"},
 	{name: "r4-sc-githubenv", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"\n"),
 		wantTest: goenv, wantMsg: "SHELLCHECK_BIN «echo \"SHELLCHECK_BIN=/nonexistent\" >> \"$GITHUB_ENV\"»"},
 	{name: "r4-go-env-w", edits: ci("        run: bash scripts/dev-tools.sh\n", "        run: |\n          bash scripts/dev-tools.sh\n          go env -w GOFLAGS=-n\n"),
@@ -231,7 +232,7 @@ var plants = []plant{
 		wantTest: goenv, wantMsg: "$GITHUB_ENV вне закрытого списка (он пуст) «echo \"PATH=/tmp/f:$PATH\" >> \"$GITHUB_ENV\"»"},
 	{name: "r5-githubpath-after-setup-go", edits: ci("      - name: Linux GUI deps\n",
 		"      - name: Поздний mingw\n        run: printf '%s\\n' 'C:\\msys64\\mingw64\\bin' >> \"$GITHUB_PATH\"\n\n      - name: Linux GUI deps\n"),
-		wantTest: goenv, wantMsg: "запись в $GITHUB_PATH после setup-go"},
+		wantTest: goenv, wantMsg: "запись в $GITHUB_PATH после setup-go", also: []string{tenv}},
 	{name: "r5-canary-exit0", edits: ci("2>&1)\" || rc=$?\n", "2>&1)\" || rc=$?\n          exit 0\n"),
 		wantTest: canaryLogic, wantMsg: "заглушка go в режиме zero: шаг прошёл, а должен упасть — канарейка молчит"},
 	{name: "r5-canary-no-grep", edits: ci(`if [ "$rc" -eq 0 ] || ! grep -q 'SC2086' <<< "$out"; then`, `if [ "$rc" -eq 0 ]; then`),
@@ -240,7 +241,7 @@ var plants = []plant{
 	{name: "r6-bash-env-step", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          BASH_ENV: /tmp/x\n"),
 		wantTest: goenv, wantMsg: "«actionlint (оба workflow)»: env BASH_ENV=/tmp/x вне закрытого списка имён"},
 	{name: "r6-bash-env-workflow", edits: ci("permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n\nenv:\n  BASH_ENV: /tmp/x\n\n"),
-		wantTest: goenv, also: []string{keys}, wantMsg: "workflow: env BASH_ENV=/tmp/x вне закрытого списка имён"},
+		wantTest: goenv, also: []string{keys, tenv}, wantMsg: "workflow: env BASH_ENV=/tmp/x вне закрытого списка имён"},
 	{name: "r6-foo", edits: ci("      - name: actionlint (оба workflow)\n", "      - name: actionlint (оба workflow)\n        env:\n          FOO: 1\n"),
 		wantTest: goenv, wantMsg: "env FOO=1 вне закрытого списка имён"},
 	{name: "r6-shellopts-job", edits: ci("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    env:\n      SHELLOPTS: \"\"\n"),
@@ -424,14 +425,22 @@ var plants = []plant{
 		wantTest: progs, wantMsg: `оболочка «"bash"» аргументом`},
 	// --- A3б PR-2: исключение allowedPackageInstalls — только вызов целиком, ровно один раз ---
 	{name: "a3b-install-extra-shell", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox sh\n"),
-		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox sh»"},
+		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox sh»", also: []string{tenv}},
 	{name: "a3b-install-twice", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox\n          sudo apt-get install -y busybox\n"),
-		wantTest: progs, wantMsg: "встречается 2 раз вместо одного"},
-	{name: "a3b-install-in-release", edits: rel("        # заголовков он не соберёт даже типы.\n        if: matrix.os == 'linux'\n        run: |\n          sudo apt-get update\n",
-		"        # заголовков он не соберёт даже типы.\n        if: matrix.os == 'linux'\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y busybox\n"),
-		wantTest: progs, wantMsg: "оболочка «busybox» аргументом в «sudo apt-get install -y busybox»"},
+		wantTest: progs, wantMsg: "встречается 2 раз вместо одного", also: []string{tenv}},
+	{name: "a3b-install-twice-release", edits: rel("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox\n          sudo apt-get install -y busybox\n"),
+		wantTest: progs, wantMsg: "встречается 2 раз вместо одного", also: []string{tenv}},
+	// --- инцидент v0.3.0-rc.1: окружение job test release.yml = job checks ci.yml ---
+	{name: "rc1-shells-step-gone-release", edits: rel("        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        run: echo нет\n"),
+		wantTest: tenv, wantMsg: "release.yml test нет шага установки busybox", also: []string{progs}},
+	{name: "rc1-shells-gate-release", edits: rel("        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        if: matrix.os == 'macos'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"),
+		wantTest: tenv, wantMsg: "release.yml test нет шага установки busybox"},
+	{name: "rc1-env-step-extra-ci", edits: ci("          sudo apt-get install -y libgl1-mesa-dev xorg-dev\n", "          sudo apt-get install -y libgl1-mesa-dev xorg-dev libfoo-dev\n"),
+		wantTest: tenv, wantMsg: "шаги подготовки окружения тестов разошлись"},
+	{name: "rc1-job-env-release", edits: rel("  test:\n    name: test (${{ matrix.os }})\n", "  test:\n    name: test (${{ matrix.os }})\n    env:\n      GOFLAGS: -mod=mod\n"),
+		wantTest: tenv, wantMsg: "env: job", also: []string{goenv}},
 	{name: "a3b-install-gone", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox-static\n"),
-		wantTest: progs, wantMsg: "не встречается ни разу слово в слово"},
+		wantTest: progs, wantMsg: "не встречается ни разу слово в слово", also: []string{tenv}},
 	{name: "r1-dyn-place-moved", edits: rel(`              out="$("./$bin" version)"`, `              out="$("./$bin" version 2>&1)"`),
 		wantTest: progs, wantMsg: `место allowedDynPlaces «../../.github/workflows/release.yml|out="$("./$bin" version)"|"./$bin"» встречается 0 раз`},
 	// --- раунд 4: R2 — trap ---
@@ -662,6 +671,7 @@ var mainTests = []string{
 	"TestCIMatrixMatchesReleaseBuild",
 	"TestCheckoutsDoNotPersistCredentials",
 	"TestGoTestPackagesMatch",
+	"TestTestJobEnvironmentMatches",
 	"TestNoEarlyExitPipeReader",
 	"TestNoToolEnvironmentOverrides",
 	"TestReleaseAttestsChecksums",
