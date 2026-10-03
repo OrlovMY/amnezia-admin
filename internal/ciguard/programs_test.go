@@ -64,14 +64,18 @@ var allowedShellCalls = map[string]string{
 // оболочкой аргументом краснеет по-прежнему, в том числе `sudo apt-get
 // install -y busybox sh` или тот же пакет другой строкой.
 //
-// Ключ — файл и вызов (AU-LOGIC L2): установка пакета не попадает в
-// релизную цепочку незамеченной — каждый файл назван поимённо.
+// Ключ — вызов; исключение выдаётся ПАРЕ ci.yml/release.yml (installPair),
+// и в каждом из двух файлов вызов обязан встречаться ровно один раз. В любом
+// другом файле тот же вызов краснеет как «оболочка аргументом» (AU-LOGIC L2).
 var allowedPackageInstalls = map[string]string{
-	"../../.github/workflows/ci.yml|sudo apt-get install -y busybox": "ci.yml, шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
-		"(скрипт записи A3б исполняется в busybox sh, как в контейнере на busybox); dash в Ubuntu есть всегда (/bin/sh)",
-	"../../.github/workflows/release.yml|sudo apt-get install -y busybox": "release.yml, job test: тот же шаг, что в ci.yml " +
-		"(инцидент v0.3.0-rc.1: без него тест шёл в busybox-static, где подмена утилит не действует); совпадение шагов — TestTestJobEnvironmentMatches",
+	"sudo apt-get install -y busybox": "шаг «Оболочки для скрипта записи»: busybox для TestCASScriptRealShells " +
+		"(скрипт записи A3б исполняется в busybox sh, как в контейнере на busybox); dash в Ubuntu есть всегда (/bin/sh). " +
+		"Выдано ПАРЕ ci.yml/release.yml (инцидент v0.3.0-rc.1: шаг был в одном файле) — ровно один раз в каждом",
 }
+
+// installPair — файлы, которым выдаются исключения allowedPackageInstalls:
+// только вместе, иначе окружение тестов на теге и на PR расходится.
+var installPair = []string{ciYML, releaseYML}
 
 type progRule struct {
 	why   string
@@ -277,7 +281,7 @@ func TestCommandProgramsClosedList(t *testing.T) {
 				}
 			}
 			// оболочка аргументом — в кавычках или без
-			if _, ok := allowedPackageInstalls[s.file+"|"+call]; ok {
+			if _, ok := allowedPackageInstalls[call]; ok && (s.file == ciYML || s.file == releaseYML) {
 				installUsed[s.file+"|"+call]++
 			} else if w.lit != "bash" {
 				for _, a := range args {
@@ -291,7 +295,13 @@ func TestCommandProgramsClosedList(t *testing.T) {
 	if cmds == 0 {
 		fatal(t, "не найдено ни одной команды — разбор пуст, тест ничего не проверил")
 	}
-	for key := range allowedPackageInstalls {
+	var installKeys []string
+	for call := range allowedPackageInstalls {
+		for _, f := range installPair {
+			installKeys = append(installKeys, f+"|"+call)
+		}
+	}
+	for _, key := range installKeys {
 		switch n := installUsed[key]; {
 		case n == 0:
 			fail(t, "вызов allowedPackageInstalls «%s» не встречается ни разу слово в слово — запись устарела "+

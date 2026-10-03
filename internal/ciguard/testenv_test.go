@@ -1,21 +1,25 @@
-// Файл testenv_test.go — окружение job test (release.yml) обязано совпадать
-// с окружением job checks (ci.yml).
+// Файл testenv_test.go — job test (release.yml) до шага go test обязан
+// совпадать с job checks (ci.yml) шаг в шаг.
 //
 // Инцидент v0.3.0-rc.1 (03.10.2026). Шаг «Оболочки для скрипта записи»
-// (busybox) появился только в ci.yml. На PR тест TestCASScriptRealShells шёл
-// в пакете busybox и был зелёным; на теге тот же тест шёл в busybox-static
-// из образа ubuntu-24.04, который вызывает свои апплеты в обход PATH, —
-// подмена «утилиты нет» не действовала, и релиз упал. Списки go test
-// сверялись (TestGoTestPackagesMatch), а то, ЧЕМ подготовлено окружение
-// этих тестов, — нет.
+// (busybox) был только в ci.yml. На теге TestCASScriptRealShells шёл в
+// busybox-static образа ubuntu-24.04, который вызывает апплеты в обход PATH,
+// — подмена «утилиты нет» не действовала, и релиз упал.
 //
-// Правило: шаг подготовки окружения — любой шаг с uses: actions/setup-*,
-// любой шаг, чьё тело ставит пакеты или пишет в $GITHUB_PATH/$GITHUB_ENV, —
-// обязан стоять в обоих job, в том же порядке, с тем же условием if:, тем же
-// телом (без комментариев и отступов), теми же env:/with:/shell:. Окружение
-// уровня workflow и job (env:, defaults:) — тоже. Признак «подготовка» —
-// по содержимому шага, а не по имени из списка: новый шаг установки,
-// добавленный в один файл, краснеет сам, без правки сторожа.
+// Первая версия сторожа сверяла только шаги, похожие на подготовку
+// окружения (по маркерам), и не смотрела, где они стоят. AU-LOGIC High-1:
+// шаг busybox, перенесённый ПОСЛЕ go test, оставлял сторож зелёным. Поэтому
+// правило — закрытый список, а не перечень плохого:
+//
+//  1. ВСЕ шаги от начала job до шага go test включительно (шаг go test
+//     находится по команде в теле, а не по имени) совпадают в двух файлах по
+//     порядку и содержимому: name, uses, if, shell, env, with, run (без
+//     комментариев и отступов). Различия — только из таблиц ниже, у каждой
+//     записи причина; неиспользованная запись — красная.
+//  2. После go test ни в одном из двух job нет шага подготовки окружения
+//     (setup-*, установка пакетов, запись в $GITHUB_PATH/$GITHUB_ENV):
+//     такой шаг тестам уже не служит, а выглядит, будто служит.
+//  3. env:/defaults: уровня workflow и job совпадают.
 package ciguard
 
 import (
@@ -25,10 +29,24 @@ import (
 	"testing"
 )
 
+// onlyInOne — шаги до go test, которые есть только в одном из двух job.
+// Ключ — файл и имя шага.
+var onlyInOne = map[string]string{
+	releaseYML + "|Гарантировать origin/main для merge-base": "релиз: ссылка origin/main для проверки происхождения тега; на PR тега нет",
+	releaseYML + "|Происхождение тега":                       "релиз: тег — предок origin/main и semver; на PR тега нет",
+	ciYML + "|Версии инструментов (раннер предъявляет себя)": "ci.yml: печать версий инструментов; окружение не меняет (тело сверено ниже: без маркеров подготовки)",
+}
+
+// withDiffs — ключи with:, которым разрешено различаться у шага uses.
+// Ключ — префикс uses и имя ключа.
+var withDiffs = map[string]string{
+	"actions/checkout@|fetch-depth": "релизу нужна полная история для merge-base тега с origin/main; тестам глубина не важна",
+}
+
 // envMarkers — признаки тела шага, меняющего окружение следующих шагов.
 var envMarkers = []string{
 	"apt-get", "apt ", "dpkg", "brew ", "choco ", "pacman", "winget", "pip install", "go install",
-	"GITHUB_PATH", "GITHUB_ENV",
+	"GITHUB_PATH", "GITHUB_ENV", "curl", "wget",
 }
 
 func isEnvStep(s fullStep) bool {
@@ -67,19 +85,69 @@ func mapStr(m map[string]string) string {
 	return b.String()
 }
 
-func envStepKey(s fullStep) string {
-	return fmt.Sprintf("имя=%q uses=%q if=%q shell=%q env=%q with=%q\n%s",
-		s.Name, s.Uses, normalizeGate(s.If), s.Shell, mapStr(s.Env), mapStr(s.With), normBody(s.Run))
+func stepTitle(s fullStep) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Uses
 }
 
-func envStepsOfJob(j fullJob) []string {
-	var out []string
-	for _, s := range j.Steps {
-		if isEnvStep(s) {
-			out = append(out, envStepKey(s))
+func stepKey(s fullStep, usedWith map[string]bool) string {
+	with := map[string]string{}
+	for k, v := range s.With {
+		skip := false
+		for wk := range withDiffs {
+			pre, key, _ := strings.Cut(wk, "|")
+			if strings.HasPrefix(s.Uses, pre) && k == key {
+				usedWith[wk] = true
+				skip = true
+			}
+		}
+		if !skip {
+			with[k] = v
 		}
 	}
-	return out
+	return fmt.Sprintf("имя=%q uses=%q if=%q shell=%q env=%q with=%q\n%s",
+		s.Name, s.Uses, normalizeGate(s.If), s.Shell, mapStr(s.Env), mapStr(with), normBody(s.Run))
+}
+
+func isGoTestStep(s fullStep) bool {
+	for _, l := range strings.Split(stripShellComments(s.Run), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "go test") {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixSteps — шаги до go test включительно (без шагов из onlyInOne) и
+// шаги после него.
+func prefixSteps(t *testing.T, path string, j fullJob, usedOnly, usedWith map[string]bool) (before []string, after []fullStep) {
+	t.Helper()
+	gt := -1
+	for i, s := range j.Steps {
+		if isGoTestStep(s) {
+			if gt >= 0 {
+				fail(t, "в %s два шага go test — граница «до go test» неоднозначна", path)
+			}
+			gt = i
+		}
+	}
+	if gt < 0 {
+		fatal(t, "в %s не найден шаг go test (по команде в теле) — сторож ничего не сверяет", path)
+	}
+	for _, s := range j.Steps[:gt+1] {
+		k := path + "|" + s.Name
+		if _, ok := onlyInOne[k]; ok {
+			usedOnly[k] = true
+			if isEnvStep(s) {
+				fail(t, "%s: шаг «%s» из onlyInOne меняет окружение — исключение выдано только шагу, который окружение не трогает", path, s.Name)
+			}
+			continue
+		}
+		before = append(before, stepKey(s, usedWith))
+	}
+	return before, j.Steps[gt+1:]
 }
 
 func TestTestJobEnvironmentMatches(t *testing.T) {
@@ -99,14 +167,20 @@ func TestTestJobEnvironmentMatches(t *testing.T) {
 		fail(t, "окружение тестов разошлось: defaults.run.shell job — ci.yml checks %q, release.yml test %q", a, b)
 	}
 
-	inCI, inRel := envStepsOfJob(ciJ), envStepsOfJob(relJ)
-	// Оба списка могут потерять шаг одновременно — равенство этого не
-	// заметит. Шаг busybox нужен TestCASScriptRealShells: без него тест идёт
-	// в busybox-static образа, где подмена утилит не действует.
-	for name, steps := range map[string][]string{"ci.yml checks": inCI, "release.yml test": inRel} {
-		if len(steps) == 0 {
-			fatal(t, "в %s не найдено ни одного шага подготовки окружения — сторож ничего не сверяет", name)
+	usedOnly, usedWith := map[string]bool{}, map[string]bool{}
+	inCI, afterCI := prefixSteps(t, ciYML, ciJ, usedOnly, usedWith)
+	inRel, afterRel := prefixSteps(t, releaseYML, relJ, usedOnly, usedWith)
+
+	for name, after := range map[string][]fullStep{"ci.yml checks": afterCI, "release.yml test": afterRel} {
+		for _, s := range after {
+			if isEnvStep(s) {
+				fail(t, "%s: шаг подготовки окружения «%s» стоит ПОСЛЕ go test — тестам он не служит "+
+					"(повтор v0.3.0-rc.1: тесты идут без него)", name, stepTitle(s))
+			}
 		}
+	}
+	// Оба файла могут потерять шаг одновременно — равенство этого не заметит.
+	for name, steps := range map[string][]string{"ci.yml checks": inCI, "release.yml test": inRel} {
 		found := false
 		for _, s := range steps {
 			if strings.Contains(s, "sudo apt-get install -y busybox") && strings.Contains(s, `if="matrix.os == 'linux'"`) {
@@ -114,8 +188,18 @@ func TestTestJobEnvironmentMatches(t *testing.T) {
 			}
 		}
 		if !found {
-			fail(t, "в %s нет шага установки busybox под if: matrix.os == 'linux' — TestCASScriptRealShells "+
+			fail(t, "в %s до go test нет шага установки busybox под if: matrix.os == 'linux' — TestCASScriptRealShells "+
 				"пойдёт в busybox-static образа, где подмена утилит не действует (инцидент v0.3.0-rc.1)", name)
+		}
+	}
+	for k := range onlyInOne {
+		if !usedOnly[k] {
+			fail(t, "запись onlyInOne «%s» не использована (шага нет до go test) — убери её", k)
+		}
+	}
+	for k := range withDiffs {
+		if !usedWith[k] {
+			fail(t, "запись withDiffs «%s» не использована — убери её", k)
 		}
 	}
 	n := len(inCI)
@@ -131,7 +215,7 @@ func TestTestJobEnvironmentMatches(t *testing.T) {
 			b = inRel[i]
 		}
 		if a != b {
-			fail(t, "шаги подготовки окружения тестов разошлись (№%d по порядку) — на теге тесты идут не в том "+
+			fail(t, "шаги job до go test разошлись (№%d по порядку, без onlyInOne) — на теге тесты идут не в том "+
 				"окружении, что на PR:\n  ci.yml, job checks:\n%s\n  release.yml, job test:\n%s", i+1, indent(a), indent(b))
 			return
 		}

