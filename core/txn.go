@@ -44,6 +44,16 @@ type Plan struct {
 	// note — то, что человек обязан узнать о плане сверх diff (раунд 5
 	// долгов, Н-4): например, что peer уже убран и правится только запись.
 	note string
+
+	// xraySummary — предпросмотр XRay по клиентам (имя и отпечаток UUID):
+	// построчный diff JSON показал бы переформатирование файла, UUID и
+	// privateKey (проект БК, 1.2).
+	xraySummary string
+}
+
+// ConfPath — путь файла конфигурации сервера плана (подпись предпросмотра).
+func (p *Plan) ConfPath() string {
+	return p.Container.Dir + "/" + ConfFileName(p.Container)
 }
 
 // Note — пояснение к плану для предпросмотра и итога; пусто — пояснять нечего.
@@ -59,6 +69,13 @@ const NoteDisableRecordOnly = "Доступ уже отрезан: клиент�
 // Значения секретов (PresharedKey/PrivateKey в wg0.conf, "psk" в
 // clientsTable) замаскированы — см. maskSecrets.
 func (p *Plan) Diff() (wgDiff, tblDiff string) {
+	if IsXRay(p.Container) {
+		conf := "(без изменений)"
+		if p.RestartsXRay() {
+			conf = "server.json будет записан заново (меняется только список клиентов) — XRay будет перезапущен"
+		}
+		return conf, p.xraySummary
+	}
 	return maskSecrets(lineDiff(p.wgBefore, p.wgAfter)),
 		maskTableSecrets(lineDiff(p.tblBefore, p.tblAfter))
 }
@@ -541,6 +558,9 @@ func maskFreeText(s string) string {
 		}
 		return g[1] + g[2] + hiddenPlaceholder
 	})
+	// UUID — учётные данные клиента XRay (AL-01): в свободном тексте
+	// маскируется любой UUID целиком, независимо от имени поля.
+	s = reUUIDAnywhere.ReplaceAllString(s, hiddenPlaceholder)
 	return reFreeTextSecret.ReplaceAllStringFunc(s, func(m string) string {
 		g := reFreeTextSecret.FindStringSubmatch(m)
 		name, sep, val := g[1], g[2], g[3]
@@ -986,6 +1006,9 @@ func (s *Session) PlanSetEnabled(c *Container, clientID string, enabled bool) (*
 }
 
 func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
+	if IsXRay(c) && c.Managed() {
+		return s.planXRayAdd(c, name)
+	}
 	if !c.Managed() {
 		return nil, fmt.Errorf("создание пользователей для %s не поддерживается этой программой", c.Title())
 	}
@@ -1086,6 +1109,9 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 }
 
 func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error) {
+	if IsXRay(c) && c.Managed() {
+		return s.planXRayDelete(c, clientID)
+	}
 	if !c.Managed() {
 		return nil, fmt.Errorf("удаление пользователей для %s не поддерживается этой программой", c.Title())
 	}
@@ -1139,6 +1165,9 @@ func (s *Session) planDeleteLocked(c *Container, clientID string) (*Plan, error)
 }
 
 func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) {
+	if IsXRay(c) && c.Managed() {
+		return s.planXRayRekey(c, clientID)
+	}
 	if !c.Managed() {
 		return nil, fmt.Errorf("перевыпуск конфигов для %s не поддерживается этой программой", c.Title())
 	}
@@ -1265,6 +1294,9 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 }
 
 func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Plan, error) {
+	if IsXRay(c) && c.Managed() {
+		return s.planXRayRename(c, clientID, newName)
+	}
 	if !c.Managed() {
 		return nil, fmt.Errorf("переименование пользователей для %s не поддерживается этой программой", c.Title())
 	}
@@ -1316,6 +1348,9 @@ func (s *Session) planRenameLocked(c *Container, clientID, newName string) (*Pla
 }
 
 func (s *Session) planSetEnabledLocked(c *Container, clientID string, enabled bool) (*Plan, error) {
+	if IsXRay(c) && c.Managed() {
+		return s.planXRaySetEnabled(c, clientID, enabled)
+	}
 	if !c.Managed() {
 		return nil, fmt.Errorf("управление пользователями для %s не поддерживается этой программой", c.Title())
 	}
@@ -1534,6 +1569,13 @@ func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 	// «изменён другим», «занято», «нет утилиты» — ничего не записано;
 	// «неизвестно» — откат вслепую был бы тем же угадыванием.
 	wgChanged := !bytes.Equal(p.wgBefore, p.wgAfter)
+	if IsXRay(c) && wgChanged {
+		// XRay: есть ли чем проверить, что он поднялся после перезапуска.
+		// Нечем — не пишем (запись не начиналась).
+		if err := s.xrayPrecheck(c); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.casWrite(c, CASLabelApply, p.wgSHA, p.tblWant(), wgBytesIf(wgChanged, p.wgAfter), p.tblAfter); err != nil {
 		return nil, err
 	}
@@ -1570,11 +1612,23 @@ func (p *Plan) tblWant() string {
 
 func (s *Session) applySteps(c *Container, p *Plan, wgChanged bool) error {
 	if wgChanged {
-		if err := s.syncWg(c); err != nil {
-			return fmt.Errorf("wg syncconf: %w", err)
+		if err := s.activate(c); err != nil {
+			return err
 		}
 	}
 	return s.verify(c, p, wgChanged)
+}
+
+// activate — применить файл конфигурации сервера: syncconf у семейства WG,
+// перезапуск у XRay.
+func (s *Session) activate(c *Container) error {
+	if IsXRay(c) {
+		return s.restartXRay(c)
+	}
+	if err := s.syncWg(c); err != nil {
+		return fmt.Errorf("wg syncconf: %w", err)
+	}
+	return nil
 }
 
 // verify — шаг 5: (a) файлы на сервере байт в байт равны wgAfter/tblAfter;
@@ -1598,12 +1652,13 @@ func (s *Session) applySteps(c *Container, p *Plan, wgChanged bool) error {
 // или PSK возможно только как расхождение РАНТАЙМА с файлом — оно исчезает
 // после перезапуска контейнера или повторного применения.
 func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
+	cf := ConfFileName(c)
 	wgNow, err := s.catConf(c)
 	if err != nil {
-		return fmt.Errorf("проверка wg0.conf: %w", err)
+		return fmt.Errorf("проверка %s: %w", cf, err)
 	}
 	if wgNow != string(p.wgAfter) {
-		return fmt.Errorf("проверка не пройдена: wg0.conf на сервере не совпадает с ожидаемым")
+		return fmt.Errorf("проверка не пройдена: %s на сервере не совпадает с ожидаемым", cf)
 	}
 	tblNow, err := s.catIn(c, c.Dir+"/clientsTable")
 	if err != nil {
@@ -1614,6 +1669,9 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 	}
 	if !checkPeers {
 		return nil
+	}
+	if IsXRay(c) {
+		return s.verifyXRay(c)
 	}
 	stats, err := s.GetPeerStats(c)
 	if err != nil {
@@ -1665,7 +1723,8 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	// (A3б, окно 2): если после нас файлы изменил другой, откат стёр бы его
 	// запись, которой уже сказано «готово». Оба файла — одной командой.
 	if werr := s.casWrite(c, CASLabelRollback, sha256Hex(p.wgAfter), sha256Hex(p.tblAfter), wgBytesIf(wgChanged, p.wgBefore), tblBefore); werr != nil {
-		backups := fmt.Sprintf("резервные копии на сервере: %s/backup/wg0.conf.* и %s/backup/clientsTable.* (самые свежие)", c.Dir, c.Dir)
+		cf := ConfFileName(c)
+		backups := fmt.Sprintf("резервные копии на сервере: %s/backup/%s.* и %s/backup/clientsTable.* (самые свежие)", c.Dir, cf, c.Dir)
 		// A3б PR-3, раунд 4 (AU-LOGIC Н-1): исход отката — ТИПОМ, а не
 		// строкой через %v. Прежде «откат занят / нет утилиты / неизвестно»
 		// сворачивались в безликую ошибку: интерфейс её не узнавал, снова
@@ -1680,13 +1739,13 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 			return &rollbackForeignError{msg: fmt.Sprintf("ВНИМАНИЕ: откат не выполнен: после нашей записи файлы на сервере изменил другой — откат стёр бы его изменения. Обновите список; %s; исходная причина: %v", backups, cause)}
 		case isCASPartial(werr):
 			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
-				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, откат выполнен частично — wg0.conf вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", backups, cause)}
+				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, откат выполнен частично — %s вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", cf, backups, cause)}
 		case errors.Is(werr, ErrWriteUnknown):
 			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
-				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — неизвестно, вернулись ли wg0.conf и clientsTable (%s); %s; исходная причина: %v", rollbackReason(werr), backups, cause)}
+				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — неизвестно, вернулись ли %s и clientsTable (%s); %s; исходная причина: %v", cf, rollbackReason(werr), backups, cause)}
 		}
 		return &restoreError{kind: ErrRollbackNotDone, cause: cause, rollback: werr,
-			msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — wg0.conf и clientsTable НЕ восстановлены (%s); %s; исходная причина: %v", rollbackReason(werr), backups, cause)}
+			msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, восстановить не удалось — %s и clientsTable НЕ восстановлены (%s); %s; исходная причина: %v", cf, rollbackReason(werr), backups, cause)}
 	}
 
 	// Оба файла точно на месте. Повторный syncconf — попытка вернуть и
@@ -1694,7 +1753,7 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	// выше) — решает то, что реально проверим ниже.
 	var syncErr error
 	if wgChanged {
-		syncErr = s.syncWg(c)
+		syncErr = s.activate(c)
 	}
 
 	files, filesWhy := s.measureFilesAfterRollback(c, p.wgBefore, tblBefore)
@@ -1713,6 +1772,10 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		// выносим ОТДЕЛЬНЫМИ строками ПОСЛЕ причины (ревью UX-01, круг 2).
 		scope := "\nПроверено: содержимое обоих файлов байт в байт; набор активных подключений на сервере." +
 			"\nНе проверялись: AllowedIPs и PSK в работающем сервере (только в файлах)."
+		if IsXRay(c) && runtime != checkNotNeeded {
+			scope = "\nПроверено: содержимое обоих файлов байт в байт; XRay перезапущен с прежним server.json и его процесс работает." +
+				"\nПринят ли каждый клиент — проверить нечем (у XRay нет списка подключённых)."
+		}
 		if runtime == checkNotNeeded {
 			// Раунд 7 (AU-LOGIC Н-6): wg0.conf этой операцией не менялся,
 			// работающий сервер не мерился — слова «проверено» о нём нет.
@@ -1734,7 +1797,7 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("%s. Исходная причина: %v%s", done, cause, scope)}
 	case ErrRolledBackNotApplied:
 		// только клетка «файлы совпали с прежними × рантайм не совпал»
-		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены и проверены, но применить их не удалось — работающий сервер к прежнему состоянию не вернулся (%s): активные подключения могут отличаться от wg0.conf до повторного применения или перезапуска контейнера; исходная причина: %v", runtimeWhy, cause)}
+		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: файлы восстановлены и проверены, но применить их не удалось — работающий сервер к прежнему состоянию не вернулся (%s): активные подключения могут отличаться от %s до повторного применения или перезапуска контейнера; исходная причина: %v", runtimeWhy, ConfFileName(c), cause)}
 	case ErrRolledBackFilesDiffer:
 		return &restoreError{kind: kind, cause: cause, msg: fmt.Sprintf("ВНИМАНИЕ: откат записан, но файлы на сервере после него не совпали с прежними (%s; работающий сервер: %s) — возможно, их изменили в другом месте; исходная причина: %v", filesWhy, runtimeWhy, cause)}
 	}
@@ -1783,7 +1846,7 @@ var rollbackOutcome = map[rollbackCell]error{
 func (s *Session) measureFilesAfterRollback(c *Container, wgBefore, tblBefore []byte) (checkState, string) {
 	wgNow, wgErr := s.catConf(c)
 	if wgErr != nil {
-		return checkUnknown, fmt.Sprintf("wg0.conf не прочитан: %v", wgErr)
+		return checkUnknown, fmt.Sprintf("%s не прочитан: %v", ConfFileName(c), wgErr)
 	}
 	tblNow, tblErr := s.catIn(c, c.Dir+"/clientsTable")
 	if tblErr != nil {
@@ -1801,6 +1864,22 @@ func (s *Session) measureFilesAfterRollback(c *Container, wgBefore, tblBefore []
 func (s *Session) measureRuntimeAfterRollback(c *Container, wgBefore []byte, wgChanged bool, syncErr error) (checkState, string) {
 	if !wgChanged {
 		return checkNotNeeded, "не менялся этой операцией и не проверялся"
+	}
+	if IsXRay(c) {
+		// XRay: рантайм — живость процесса после второго перезапуска. Три
+		// состояния: жив — совпал (работает с прежним файлом); мёртв — не
+		// совпал; проверить нечем — неизвестно.
+		st, why := s.waitXRay(c)
+		if syncErr != nil {
+			why += fmt.Sprintf(" (повторный перезапуск: %v)", syncErr)
+		}
+		switch st {
+		case xrayAlive:
+			return checkSame, why
+		case xrayDead:
+			return checkDiffer, why
+		}
+		return checkUnknown, why
 	}
 	stats, err := s.GetPeerStats(c)
 	if err != nil {

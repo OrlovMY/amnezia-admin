@@ -63,7 +63,7 @@ func TestW2DiscoveryTable(t *testing.T) {
 		{"awg + wireguard (docker отдал wireguard первым)", []string{"amnezia-wireguard", "amnezia-awg"},
 			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}, {"amnezia-wireguard", core.SupportYes, "WireGuard"}}, "amnezia-awg", ""},
 		{"только amnezia-xray", []string{"amnezia-xray"},
-			[]w2want{{"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly}}, "amnezia-xray", ""},
+			[]w2want{{"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly + ": не удалось прочитать server.json"}}, "amnezia-xray", ""},
 		{"только amnezia-openvpn", []string{"amnezia-openvpn"},
 			[]w2want{{"amnezia-openvpn", core.SupportKnownNo, "OpenVPN" + viewOnly}}, "amnezia-openvpn", ""},
 		{"amnezia-ipsec, amnezia-torwebsite", []string{"amnezia-torwebsite", "amnezia-ipsec"},
@@ -79,7 +79,7 @@ func TestW2DiscoveryTable(t *testing.T) {
 		// (Р3-5). Вместо этой строки — все 16 типов разом: каждый опознан.
 		{"все 16 типов", all16, nil, "amnezia-awg", ""},
 		{"чужие контейнеры вместе с amnezia", []string{"nginx", "amnezia-xray", "portainer", "amnezia-awg"},
-			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}, {"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly}}, "amnezia-awg", ""},
+			[]w2want{{"amnezia-awg", core.SupportYes, "AmneziaWG (старый)"}, {"amnezia-xray", core.SupportKnownNo, "XRay" + viewOnly + ": не удалось прочитать server.json"}}, "amnezia-awg", ""},
 	} {
 		t.Run(c.set, func(t *testing.T) {
 			srv, sess, cs, err := w2find(t, c.names)
@@ -170,13 +170,15 @@ func TestW2ThreeStatesDistinct(t *testing.T) {
 // FindContainers; «только просмотр» только там, где список действительно
 // читается (LoadClientsView без ErrContainerDirUnknown).
 func TestW2FourLabels(t *testing.T) {
-	_, sess, cs, err := w2find(t, []string{"amnezia-awg", "amnezia-xray", "amnezia-mtproxy", "amnezia-foo"})
+	// AL-01: XRay стал управляемым по формату server.json — пример «только
+	// просмотр» без причины теперь OpenVPN.
+	_, sess, cs, err := w2find(t, []string{"amnezia-awg", "amnezia-openvpn", "amnezia-mtproxy", "amnezia-foo"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
 		"amnezia-awg":     "AmneziaWG (старый)",
-		"amnezia-xray":    "XRay — только просмотр",
+		"amnezia-openvpn": "OpenVPN — только просмотр",
 		"amnezia-mtproxy": "MTProxy (Telegram) — не поддерживается, пользователей не показать",
 		"amnezia-foo":     "незнакомый контейнер amnezia-foo",
 	}

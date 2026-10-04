@@ -33,7 +33,7 @@ var wgFamilies = []WGFamily{
 
 // casConfFiles — закрытый список имён файла конфигурации, которые
 // принимает команда записи (аргумент $4 CASWriteScript).
-var casConfFiles = map[string]bool{"wg0.conf": true, "awg0.conf": true}
+var casConfFiles = map[string]bool{"wg0.conf": true, "awg0.conf": true, xrayConfFile: true}
 
 // WGFamilyOf — строка таблицы для контейнера c. Контейнер вне таблицы —
 // ошибка: его файл, утилита и интерфейс неизвестны, и угадывать их нельзя.
@@ -62,11 +62,11 @@ func WGFamilies() []WGFamily {
 
 // confPath — путь к файлу конфигурации сервера контейнера c.
 func confPath(c *Container) (string, error) {
-	f, err := WGFamilyOf(c)
+	f, err := confFileOf(c)
 	if err != nil {
 		return "", err
 	}
-	return path.Join(c.Dir, f.File), nil
+	return path.Join(c.Dir, f), nil
 }
 
 // catConf — содержимое файла конфигурации сервера.

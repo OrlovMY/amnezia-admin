@@ -96,6 +96,9 @@ const (
 	SeenNever
 	// SeenWas — клиент в ответе, было рукопожатие (When).
 	SeenWas
+	// SeenNotSupported — протокол не отдаёт статистику вовсе (XRay, AL-01):
+	// о подключениях неизвестно ничего — не «не подключался».
+	SeenNotSupported
 )
 
 // LastSeen — исход классификации; When заполнен только при SeenWas.

@@ -140,7 +140,7 @@ func CASWriteCommandSudo(label, container, dir, file, wantWg, wantTbl string) (s
 
 func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error) {
 	if !casConfFiles[file] {
-		return "", fmt.Errorf("недопустимое имя файла конфигурации %q (допустимы: wg0.conf, awg0.conf)", file)
+		return "", fmt.Errorf("недопустимое имя файла конфигурации %q (допустимы: wg0.conf, awg0.conf, server.json)", file)
 	}
 	if label != CASLabelApply && label != CASLabelRollback {
 		return "", fmt.Errorf("недопустимая метка записи %q", label)
@@ -296,7 +296,7 @@ func (e *casWriteError) Is(target error) bool {
 }
 
 var (
-	reCASChanged = regexp.MustCompile(`changed: (wg0\.conf|clientsTable)`)
+	reCASChanged = regexp.MustCompile(`changed: (wg0\.conf|server\.json|clientsTable)`)
 	reCASMissing = regexp.MustCompile(`missing tool: (\S+)`)
 )
 
@@ -377,11 +377,11 @@ func stderrTail(err error) string {
 // casWrite заменяет оба файла, только если их текущие суммы равны
 // wantWg/wantTbl. nil — записано; иначе *casWriteError с исходом.
 func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl []byte) error {
-	fam, err := WGFamilyOf(c)
+	confFile, err := confFileOf(c)
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", err)
 	}
-	cmd, err := CASWriteCommand(label, c.Name, c.Dir, fam.File, wantWg, wantTbl)
+	cmd, err := CASWriteCommand(label, c.Name, c.Dir, confFile, wantWg, wantTbl)
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", notStarted{err})
 	}
@@ -393,7 +393,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	_, runErr := s.run(cmd, stdin)
 	sudoRefused := false
 	if casDeniedBeforeWrite(runErr) {
-		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, fam.File, wantWg, wantTbl)
+		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, confFile, wantWg, wantTbl)
 		if err != nil {
 			return fmt.Errorf("запись не выполнена: %w", err)
 		}
@@ -408,7 +408,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	case casWritten:
 		return nil
 	case casChanged:
-		file := "wg0.conf или clientsTable" // какой — неизвестно (SEC F2)
+		file := confFile + " или clientsTable" // какой — неизвестно (SEC F2)
 		if m := reCASChanged.FindStringSubmatch(stderrTail(runErr)); m != nil {
 			file = m[1]
 		}
@@ -416,7 +416,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 			msg: fmt.Sprintf("файл %s/%s изменился с момента чтения — обновите список и повторите", c.Dir, file)}
 	case casPartial:
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: fmt.Sprintf("записано частично: wg0.conf заменён, clientsTable — нет (%s); обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", stderrTail(runErr), c.Dir)}
+			msg: fmt.Sprintf("записано частично: %s заменён, clientsTable — нет (%s)%s; обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", confFile, stderrTail(runErr), xrayNotRestarted(c), c.Dir)}
 	case casBusy:
 		// A3б PR-3 (Low аудита PR-1): замок может держать и посторонняя
 		// программа, не только наша копия.

@@ -1,0 +1,40 @@
+{
+    "inbounds": [
+        {
+            "port": $XRAY_SERVER_PORT,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "flow": "xtls-rprx-vision",
+                        "id": "$XRAY_CLIENT_ID"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "realitySettings": {
+                    "dest": "$XRAY_SITE_NAME:443",
+                    "fingerprint": "chrome",
+                    "privateKey": "$XRAY_PRIVATE_KEY",
+                    "serverNames": [
+                        "$XRAY_SITE_NAME"
+                    ],
+                    "shortIds": [
+                        "$XRAY_SHORT_ID"
+                    ]
+                },
+                "security": "reality"
+            }
+        }
+    ],
+    "log": {
+        "loglevel": "error"
+    },
+    "outbounds": [
+        {
+            "protocol": "freedom"
+        }
+    ]
+}
