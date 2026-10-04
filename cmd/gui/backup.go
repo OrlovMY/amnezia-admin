@@ -36,8 +36,23 @@ const (
 	restoreAddrCheck   = "Понимаю: адрес другой или не проверен — выданные конфиги могут не работать"
 	restoreXRayCheck   = "Перезапустить XRay (все подключения XRay оборвутся)"
 	restoreSkipXRay    = "Перенести без XRay — XRay на новом сервере останется прежним"
+	restoreXRayHint    = "Выберите, что делать с XRay:"
 	backupCopyPathText = "Скопировать путь"
 )
+
+// requestedSize — заданный размер окон копии (сторож AU-UX р2 Р2-1 сверяет
+// его с окном программы: Fyne молча обрезает диалог по окну).
+var requestedSize = map[dialog.Dialog]fyne.Size{}
+
+// lastSizedDialog — последнее окно, которому задан размер (для сторожа).
+var lastSizedDialog dialog.Dialog
+
+// sizeDialog — единственная точка задания размера окон копии.
+func sizeDialog(d dialog.Dialog, s fyne.Size) {
+	requestedSize[d] = s
+	lastSizedDialog = d
+	d.Resize(s)
+}
 
 // backupResolve — разрешение имён (шов теста).
 var backupResolve core.Resolver = net.LookupIP
@@ -53,7 +68,7 @@ func (u *ui) backupMenu() {
 		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
 		save, restore)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
-	d.Resize(fyne.NewSize(560, 300))
+	sizeDialog(d, fyne.NewSize(560, 300))
 	d.Show()
 }
 
@@ -120,7 +135,7 @@ func (u *ui) backupResult(path string, b *core.Backup, err error) dialog.Dialog 
 		}))
 	}
 	d := dialog.NewCustom("Копия сервера", "Закрыть", container.NewVScroll(container.NewVBox(objs...)), u.win)
-	d.Resize(fyne.NewSize(640, 420))
+	sizeDialog(d, fyne.NewSize(640, 420))
 	d.Show()
 	return d
 }
@@ -178,8 +193,7 @@ type restoreView struct {
 	d         dialog.Dialog
 	apply     *escButton
 	addrCheck *widget.Check
-	xrayCheck *widget.Check
-	skipXRay  *widget.Check
+	xrayRadio *widget.RadioGroup // «одно из двух», без выбора по умолчанию
 	text      string
 }
 
@@ -226,17 +240,16 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 	}
 	if xray {
 		sections = append(sections, restartSections()...)
-		v.xrayCheck = widget.NewCheck(restoreXRayCheck, func(bool) { update() })
-		v.skipXRay = widget.NewCheck(restoreSkipXRay, func(bool) { update() })
-		sections = append(sections, v.xrayCheck, v.skipXRay)
+		v.xrayRadio = widget.NewRadioGroup([]string{restoreXRayCheck, restoreSkipXRay}, func(string) { update() })
+		sections = append(sections, wrapLabel(restoreXRayHint, true), v.xrayRadio)
 	}
 	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() { u.doRestore(rp, v) })
 	v.d, v.apply = cw.d, cw.ok
 	update = func() {
 		can := !compat.Stop && planErr == nil && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
 		if xray {
-			// ровно один явный выбор про XRay
-			can = can && (v.xrayCheck.Checked != v.skipXRay.Checked)
+			// явный выбор про XRay (AU-UX р2 Р2-2)
+			can = can && v.xrayRadio.Selected != ""
 		}
 		if can {
 			v.apply.Enable()
@@ -262,7 +275,7 @@ func (u *ui) runRestore(rp *core.RestorePlan, xrayOK bool, now time.Time) (strin
 }
 
 func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
-	xrayOK := v.xrayCheck != nil && v.xrayCheck.Checked
+	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == restoreXRayCheck
 	v.d.Hide()
 	u.setBusy(true)
 	goSafe(func() {
@@ -283,7 +296,7 @@ func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) d
 		text = strings.Join(core.RestoreOutcomeLines(auto, outs), "\n")
 	}
 	d := dialog.NewCustom("Итог восстановления", "Закрыть", container.NewVScroll(wrapLabel(text, false)), u.win)
-	d.Resize(fyne.NewSize(640, 420))
+	sizeDialog(d, fyne.NewSize(640, 420))
 	d.Show()
 	return d
 }

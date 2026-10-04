@@ -95,7 +95,7 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	content := container.NewBorder(nil, container.NewCenter(container.NewHBox(cancelBtn, okBtn)), nil, nil, body)
 	d = dialog.NewCustomWithoutButtons(title, content, u.win)
 	d.SetOnClosed(restoreKeys)
-	d.Resize(fyne.NewSize(560, 380))
+	sizeDialog(d, fyne.NewSize(560, 380))
 	cv.SetOnTypedKey(func(e *fyne.KeyEvent) {
 		if e.Name == fyne.KeyEscape {
 			restoreKeys()
