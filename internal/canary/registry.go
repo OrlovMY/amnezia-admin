@@ -23,10 +23,15 @@ type Scope int
 const (
 	// ScopeWG — на каждом проверяемом контейнере семейства WG, обязательно.
 	ScopeWG Scope = iota
-	// ScopeWGOptional — на контейнере WG по условию (П3 — сбой init, У2 —
-	// создан временный пользователь, П0-итог — режим -server-ip). Не
-	// ожидается, но допустим.
+	// ScopeWGOptional — П3: строка только при сбое init, а тогда Run
+	// возвращает ошибку и прогон контейнера остановлен (complete=false) —
+	// обязательным он не бывает по построению.
 	ScopeWGOptional
+	// ScopeWGIfServerIP — П0-итог: обязателен, если задан -server-ip.
+	ScopeWGIfServerIP
+	// ScopeWGIfSudoUser — У2: обязателен, если канарейка создала временного
+	// sudo-пользователя.
+	ScopeWGIfSudoUser
 	// ScopeK8 — К8: на amnezia-awg2 — К8.1–К8.8, на прочих — одна строка К8.
 	ScopeK8
 	// ScopeK9 — К9 на amnezia-xray и на каждом проверяемом контейнере WG:
@@ -83,8 +88,8 @@ var Steps = []StepDef{
 	{"К8.7", "второе устройство на AWG2 не теряет связь", ScopeK8},
 	{"К8.8", "формат awg show dump сходится с разбором parsePeerStats", ScopeK8},
 	{"У", "уборка canary-*", ScopeWG},
-	{"У2", "временный пользователь " + TempUser + " удалён", ScopeWGOptional},
-	{"П0-итог", "существующие клиенты не изменились", ScopeWGOptional},
+	{"У2", "временный пользователь " + TempUser + " удалён", ScopeWGIfSudoUser},
+	{"П0-итог", "существующие клиенты не изменились", ScopeWGIfServerIP},
 	{"К9", "запись с ключами под замком", ScopeK9},
 	{"К9.0", "файлы прочитаны", ScopeK9},
 	{"К9.1", "запись с ключами (те же байты): файлы заменены (новый inode), права 0600, без временных файлов", ScopeK9},
@@ -162,7 +167,11 @@ func expectedK9() []group {
 // контейнера (или прогона); complete — прогон этого контейнера дошёл до
 // конца (иначе отсутствие шагов — следствие остановки, и о нём уже сказано);
 // kind — "wg", "k9" или "run". ID вне реестра — НЕ ПРОЙДЕН всегда.
-func Audit(where string, rows []Result, complete bool, kind string) []Result {
+// RunConds — условия прогона контейнера, от которых зависит, обязателен ли
+// шаг: задан -server-ip (П0-итог), создан временный sudo-пользователь (У2).
+type RunConds struct{ ServerIP, SudoUser bool }
+
+func Audit(where string, rows []Result, complete bool, kind string, conds RunConds) []Result {
 	var out []Result
 	have := map[string]bool{}
 	for _, r := range rows {
@@ -176,6 +185,16 @@ func Audit(where string, rows []Result, complete bool, kind string) []Result {
 	switch kind {
 	case "wg":
 		gs = expectedWG()
+		if conds.ServerIP {
+			for _, id := range idsOf(ScopeWGIfServerIP) {
+				gs = append(gs, group{[][]string{{id}}})
+			}
+		}
+		if conds.SudoUser {
+			for _, id := range idsOf(ScopeWGIfSudoUser) {
+				gs = append(gs, group{[][]string{{id}}})
+			}
+		}
 	case "k9":
 		gs = expectedK9()
 	case "run":

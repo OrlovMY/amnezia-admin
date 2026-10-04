@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"amnezia-admin/internal/fakesrv"
 )
@@ -28,10 +29,41 @@ var reStepLine = regexp.MustCompile(`(?m)^\[[^\]]+\] (\S+) `)
 // реестра. Подсадки (проверены вручную, см. ОТЧЁТ-A3Б-Р4.md): убрать вызов
 // finish из run; убрать вызов K9; добавить в реестр шаг без исполнения;
 // вернуть строку с ID вне реестра — каждая роняет тест.
+//
+// Режим «условия» (AU-LOGIC р3 Medium-1): -server-ip и созданный временный
+// sudo-пользователь — П0-итог и У2 обязательны; подсадки «П0-итог не
+// добавляется» и «У2 не добавляется» роняют тест.
 func TestProgramStepsMatchRegistry(t *testing.T) {
 	if testing.Short() {
 		t.Skip("прогон программы канарейки целиком")
 	}
+	t.Run("без условий", func(t *testing.T) { checkProgram(t, false) })
+	t.Run("server-ip и sudo-пользователь", func(t *testing.T) {
+		// швы: fakesrv не отвечает на docker inspect .Created и не умеет useradd
+		oldAge, oldSudo := ageCheck, sudoKeyMaker
+		t.Cleanup(func() { ageCheck, sudoKeyMaker = oldAge, oldSudo })
+		ageCheck = func(func(string) (string, error), []string, time.Time) Result {
+			return stepR("П0-свежесть", Pass, "шов теста")
+		}
+		undone := 0
+		sudoKeyMaker = func(func(string, []byte) (string, error), string, string, func() (string, error)) func() ([]string, func() error, error) {
+			return func() ([]string, func() error, error) {
+				return []string{"AMNEZIA_KEY=vpn://sudo-stub"}, func() error { undone++; return nil }, nil
+			}
+		}
+		o := checkProgram(t, true)
+		for _, id := range []string{"П0-итог", "У2"} {
+			if !regexp.MustCompile(`(?m)^\[[^\]]+\] ` + id + ` `).MatchString(o) {
+				t.Errorf("при выполненном условии нет строки %s", id)
+			}
+		}
+		if undone == 0 {
+			t.Error("временный пользователь не удалялся — шов sudo не сработал, У2 не проверен")
+		}
+	})
+}
+
+func checkProgram(t *testing.T, withConds bool) string {
 	tmp := t.TempDir()
 	t.Setenv("TMP", tmp)
 	t.Setenv("TEMP", tmp)
@@ -71,7 +103,11 @@ func TestProgramStepsMatchRegistry(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	env := map[string]string{"AMNEZIA_KEY": key}
-	code := Main([]string{"-not-production", RequiredConfirmation, "-new", cli, "-hostkey", ln.Fingerprint(), "-rounds", "2"},
+	args := []string{"-not-production", RequiredConfirmation, "-new", cli, "-hostkey", ln.Fingerprint(), "-rounds", "2"}
+	if withConds {
+		args = append(args, "-server-ip", "127.0.0.1")
+	}
+	code := Main(args,
 		func(k string) string { return env[k] }, strings.NewReader(""), &out, &errOut)
 	o := out.String()
 	if code == 0 {
@@ -122,4 +158,5 @@ func TestProgramStepsMatchRegistry(t *testing.T) {
 	if t.Failed() || os.Getenv("CANARY_SHOW") != "" {
 		fmt.Fprintln(os.Stderr, o)
 	}
+	return o
 }

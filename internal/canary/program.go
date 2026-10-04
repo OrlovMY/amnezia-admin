@@ -236,7 +236,7 @@ func Main(args []string, getenv func(string) string, stdin io.Reader, stdout, st
 		} else if creds.User == "root" {
 			// PR4.2: временный пользователь без root на ТЕСТОВОМ сервере;
 			// пароль случайный, уходит только через stdin chpasswd (SEC S2).
-			env.MakeSudoKey = NewSudoKeyMaker(remoteIn, creds.Host, creds.Port, func() (string, error) {
+			env.MakeSudoKey = sudoKeyMaker(remoteIn, creds.Host, creds.Port, func() (string, error) {
 				buf := make([]byte, 16)
 				if _, err := rand.Read(buf); err != nil {
 					return "", err
@@ -315,6 +315,7 @@ func Main(args []string, getenv func(string) string, stdin io.Reader, stdout, st
 	var order []string
 	per := map[string][]Result{}
 	stopped := map[string]bool{}
+	conds := map[string]RunConds{}
 	var runErr error
 	cleanFailed := false
 	for i := range sel {
@@ -335,6 +336,8 @@ func Main(args []string, getenv func(string) string, stdin io.Reader, stdout, st
 		if err != nil {
 			stopped[ctr.Name] = true
 		}
+		// условия прогона для сверки с реестром (AU-LOGIC р3 Medium-1)
+		conds[ctr.Name] = RunConds{ServerIP: *serverIP != "", SudoUser: env.sudoUndo != nil}
 		if err != nil && runErr == nil {
 			runErr = fmt.Errorf("%s: %w", ctr.Name, err)
 		}
@@ -343,9 +346,12 @@ func Main(args []string, getenv func(string) string, stdin io.Reader, stdout, st
 		all = append(all, rs...)
 	}
 	return finish(out, &runState{remote: remote, remoteIn: remoteIn, foundNames: foundNames, sel: sel, skipXRay: skipXRay,
-		order: order, per: per, stopped: stopped, runRows: runRows, all: all, famRows: famRows, famNotes: famNotes,
+		order: order, per: per, stopped: stopped, conds: conds, runRows: runRows, all: all, famRows: famRows, famNotes: famNotes,
 		runErr: runErr, cleanFailed: cleanFailed, skipped: skipped})
 }
+
+// sudoKeyMaker — шов теста программы: fakesrv не моделирует useradd.
+var sudoKeyMaker = NewSudoKeyMaker
 
 // runState — всё, что run собрал к концу шагов WG, для finish.
 type runState struct {
@@ -356,8 +362,9 @@ type runState struct {
 	skipXRay    bool
 	order       []string
 	per         map[string][]Result
-	stopped     map[string]bool // Run контейнера вернул ошибку (остановлен)
-	runRows     []Result        // строки прогона (П4, П0-свежесть, П0-сервер)
+	stopped     map[string]bool
+	conds       map[string]RunConds // условия прогона контейнера // Run контейнера вернул ошибку (остановлен)
+	runRows     []Result            // строки прогона (П4, П0-свежесть, П0-сервер)
 	all         []Result
 	famRows     []Result
 	famNotes    []string
@@ -417,16 +424,16 @@ func finish(out io.Writer, st *runState) int {
 		}
 	}
 	for _, name := range st.order {
-		addAudit(name, Audit(name, st.per[name], !st.stopped[name], "wg"))
+		addAudit(name, Audit(name, st.per[name], !st.stopped[name], "wg", st.conds[name]))
 	}
 	for _, tg := range targets {
 		rs, ok := k9[tg.Container]
 		if !ok {
 			continue
 		}
-		addAudit(tg.Container, Audit(tg.Container, rs, true, "k9"))
+		addAudit(tg.Container, Audit(tg.Container, rs, true, "k9", RunConds{}))
 	}
-	addAudit("прогон", Audit("прогон", append(append([]Result(nil), st.runRows...), st.famRows...), true, "run"))
+	addAudit("прогон", Audit("прогон", append(append([]Result(nil), st.runRows...), st.famRows...), true, "run", RunConds{}))
 	order := st.order
 	for _, tg := range targets {
 		rs, ok := k9[tg.Container]

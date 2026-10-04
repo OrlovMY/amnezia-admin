@@ -201,13 +201,17 @@ func AgeCheck(remote func(string) (string, error), names []string, now time.Time
 // контейнерам семейства WG (envs) — не больше MaxExisting на сервер.
 // Снимок каждого контейнера остаётся в его Env (П0-итог); П0 в Run
 // пропускает только при пройденной предпроверке.
+// ageCheck — шов теста программы: fakesrv не отвечает на docker inspect
+// .Created (TestProgramStepsMatchRegistry, режим -server-ip).
+var ageCheck = AgeCheck
+
 func Preflight(remote func(string) (string, error), envs []*Env, names []string, now time.Time) []Result {
 	// Прежняя отметка не переживает новую предпроверку (признак 4): не
 	// прошла — снимков и отметки нет, даже если раньше проходила.
 	for _, e := range envs {
 		e.existing, e.preflightOK, e.k6 = nil, false, k6Window{}
 	}
-	age := AgeCheck(remote, names, now)
+	age := ageCheck(remote, names, now)
 	cnt := step("П0-сервер")
 	total := 0
 	var parts []string
