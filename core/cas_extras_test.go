@@ -168,6 +168,85 @@ func TestCASExtrasPartial(t *testing.T) {
 	fileIs(t, srv, "xray_private.key", "PRIV-OLD\n")
 }
 
+// TestCASExtrasFirstMoveFailsNothingWritten — QA Н1: файл конфигурации не
+// меняется, первая же замена (ключ) не удалась → код 1, «неизвестно,
+// записано ли» по закрытому списку, но НЕ «записано частично»: ничего не
+// заменено. Подмена «m=1 с начала» в скрипте даёт код 6 и роняет тест.
+func TestCASExtrasFirstMoveFailsNothingWritten(t *testing.T) {
+	for _, first := range []string{"xray_public.key", "clientsTable"} {
+		t.Run(first, func(t *testing.T) {
+			srv, s, p := extrasFixture(t)
+			if first == "clientsTable" {
+				p.extra[2].after, p.extra[3].after = p.extra[2].before, p.extra[3].before // ключи не меняются
+			}
+			srv.FailMvTo = first
+			_, err := s.Apply(p)
+			if err == nil || errors.Is(err, ErrWritePartial) {
+				t.Fatalf("ждали отказ без «записано частично», получили %v", err)
+			}
+			if !strings.Contains(err.Error(), "код выхода 1") {
+				t.Errorf("ждали код 1: %v", err)
+			}
+			fileIs(t, srv, "xray_public.key", "PUB-OLD\n")
+			fileIs(t, srv, "xray_private.key", "PRIV-OLD\n")
+		})
+	}
+}
+
+// TestCASExtrasUnreadableNotSame — AU Medium-1: ключ не читается ни при
+// проверке, ни после отката → не «совпал»: итог отката «не проверен»
+// (ErrRollbackUnverified), не «откат выполнен». Подмена «не прочитан →
+// совпал» в measureExtras роняет тест.
+func TestCASExtrasUnreadableNotSame(t *testing.T) {
+	srv, s, p := extrasFixture(t)
+	srv.FailRead = map[string]error{xdir + "/xray_private.key": errors.New("read: сбой")}
+	_, err := s.Apply(p)
+	if !errors.Is(err, ErrRollbackUnverified) {
+		t.Fatalf("ждали ErrRollbackUnverified, получили %v", err)
+	}
+	if errors.Is(err, ErrRolledBack) {
+		t.Errorf("непрочитанный ключ засчитан как «откат выполнен»: %v", err)
+	}
+	if st, _ := s.measureExtras(p.Container, p.extra, false); st != checkUnknown {
+		t.Errorf("measureExtras при непрочитанном ключе = %v, ждали checkUnknown", st)
+	}
+}
+
+// TestPartialWhatNoLabel — AU Low-1: код 6 без метки «not moved:» —
+// «неизвестно», а не «заменены: все».
+func TestPartialWhatNoLabel(t *testing.T) {
+	xs := []casExtraWrite{{name: "xray_public.key", data: []byte("x")}}
+	got := partialWhat("server.json", true, xs, "что-то другое")
+	if !strings.Contains(got, "неизвестно") || strings.Contains(got, "заменены:") {
+		t.Errorf("без метки: %q", got)
+	}
+	got = partialWhat("server.json", true, xs, "not moved: xray_public.key: denied")
+	if got != "заменены: server.json; НЕ заменены: xray_public.key, clientsTable" {
+		t.Errorf("с меткой: %q", got)
+	}
+}
+
+// TestCASExtrasBackupUmask — SEC Н-1: резервная копия ключа делается под
+// umask 077.
+func TestCASExtrasBackupUmask(t *testing.T) {
+	srv, s, p := extrasFixture(t)
+	if _, err := s.Apply(p); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range srv.Commands() {
+		if strings.Contains(c, "/backup/xray_p") {
+			n++
+			if !strings.Contains(c, "sh -c 'umask 077 && ") {
+				t.Errorf("резервная копия ключа без umask 077: %.90s", c)
+			}
+		}
+	}
+	if n != 2 {
+		t.Errorf("команд резервной копии ключей %d, ждали 2", n)
+	}
+}
+
 // TestCASExtrasRefuseCreate — ключа на сервере нет, а план его меняет:
 // отказ до записи (вернуть отсутствие откат не умеет).
 func TestCASExtrasRefuseCreate(t *testing.T) {

@@ -2143,7 +2143,8 @@ func (s *Session) backupExtras(c *Container, xs []planExtra) error {
 		if _, ok := casExtraFiles[x.name]; !ok {
 			return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{fmt.Errorf("недопустимое имя %q", x.name)})
 		}
-		cmd := fmt.Sprintf("docker exec %s sh -c 'mkdir -p %s/backup && ts=$(date +%%Y%%m%%d-%%H%%M%%S) && "+
+		// SEC Н-1: umask 077 — копия ключа сервера получает права 600.
+		cmd := fmt.Sprintf("docker exec %s sh -c 'umask 077 && mkdir -p %s/backup && ts=$(date +%%Y%%m%%d-%%H%%M%%S) && "+
 			"cp %s/%s %s/backup/%s.$ts && "+
 			"(ls -1t %s/backup/%s.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done)'",
 			c.Name, c.Dir, c.Dir, x.name, c.Dir, x.name, c.Dir, x.name)

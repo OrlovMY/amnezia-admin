@@ -41,7 +41,7 @@ const shellsPlantBroken = "ПОСАДКА-НЕ-ЛЕГЛА:"
 const shellsPlantEnv = "AMNEZIA_SHELLS_PLANT"
 
 // shellsWantScenarios — ТОЧНОЕ число сценариев на каждую оболочку.
-const shellsWantScenarios = 16
+const shellsWantScenarios = 17
 
 type realShell struct {
 	name  string
@@ -348,6 +348,10 @@ func shellScenarios() []scenario {
 		{"ключи XRay: устаревшая сумма ключа — код 3, ничего не записано", func(t *testing.T, rs realShell, script string) []string {
 			d, r := extrasRun(t, rs, script, "", true)
 			return expectExtras(d, r, 3, "changed: xray_public.key", "PUB-OLD", "PRIV-OLD", tblOld)
+		}},
+		{"ключи XRay: первая замена (ключ) падает, server.json не меняется — код 1, ничего не заменено", func(t *testing.T, rs realShell, script string) []string {
+			d, r := extrasRun(t, rs, script, "xray_public.key", false)
+			return expectExtras(d, r, 1, "not moved: xray_public.key", "PUB-OLD", "PRIV-OLD", tblOld)
 		}},
 		{"ключи XRay: mv ключа падает после замены соседнего — код 6", func(t *testing.T, rs realShell, script string) []string {
 			d, r := extrasRun(t, rs, script, "xray_private.key", false)

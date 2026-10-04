@@ -143,15 +143,20 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 		return -1, out, err
 	}
 
+	skipped := func(id, name string) Result {
+		r := row(id, name)
+		r.Detail = "не выполнялся: К9.0 не пройден — запись не начиналась"
+		return r
+	}
 	r0 := row("К9.0", "файлы прочитаны")
 	before, err := read()
 	if err != nil {
 		r0.Detail = err.Error()
-		return []Result{r0, row("К9.1", "запись с ключами"), row("К9.2", "сверка ключа останавливает запись")}
+		return []Result{r0, skipped("К9.1", "запись с ключами"), skipped("К9.2", "сверка ключа останавливает запись")}
 	}
 	if !before[tg.Conf].exists || !before["clientsTable"].exists {
 		r0.Detail = "нет " + tg.Conf + " или clientsTable — протокол установлен не полностью"
-		return []Result{r0, row("К9.1", "запись с ключами"), row("К9.2", "сверка ключа останавливает запись")}
+		return []Result{r0, skipped("К9.1", "запись с ключами"), skipped("К9.2", "сверка ключа останавливает запись")}
 	}
 	var present9 []string
 	var extras []core.CASExtra
@@ -165,7 +170,29 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 	rs := []Result{r0}
 
 	// К9.1 — запись тех же байтов всеми шестью путями.
-	r1 := row("К9.1", "запись с ключами (те же байты), права 0600, без временных файлов")
+	r1 := row("К9.1", "запись с ключами (те же байты): файлы заменены (новый inode), права 0600, без временных файлов")
+	// AU Medium-2: те же байты не отличают «заменили» от «не трогали» —
+	// замену доказывает новый inode каждого записанного файла.
+	written := append([]string{"clientsTable"}, present9...)
+	inodes := func() ([]string, error) {
+		o, err := dk("cd " + k9Dir + " && stat -c %i " + strings.Join(written, " "))
+		if err != nil {
+			return nil, err
+		}
+		f := strings.Fields(o)
+		if len(f) != len(written) {
+			return nil, fmt.Errorf("ответ stat не разобран: %s", oneLine(o))
+		}
+		return f, nil
+	}
+	ino0, ierr := inodes()
+	if ierr != nil {
+		r1.Detail = "inode до записи не прочитаны: " + ierr.Error() + " — запись не выполнялась"
+		rs = append(rs, r1)
+		r2 := row("К9.2", "устаревшая сумма ключа — «изменился», ничего не записано")
+		r2.Detail = "не выполнялся: К9.1 не дошёл до записи"
+		return append(rs, r2)
+	}
 	code, out, err := write(before, extras)
 	switch {
 	case err != nil:
@@ -180,6 +207,21 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 		}
 		if n := same(before, after); n != "" {
 			r1.Status, r1.Detail = Fail, n+" после записи тех же байтов изменился"
+			break
+		}
+		ino1, err := inodes()
+		if err != nil {
+			r1.Detail = "inode после записи не прочитаны: " + err.Error()
+			break
+		}
+		var kept []string
+		for i, n := range written {
+			if ino0[i] == ino1[i] {
+				kept = append(kept, n)
+			}
+		}
+		if len(kept) > 0 {
+			r1.Status, r1.Detail = Fail, "код 0, но inode не изменился (файл не заменён): "+strings.Join(kept, ", ")
 			break
 		}
 		perm, err := dk("cd " + k9Dir + " && stat -c %a clientsTable " + strings.Join(present9, " ") + "; ls -a | grep -c \"\\.aa\\.\" || true")
@@ -204,7 +246,7 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 			r1.Status, r1.Detail = Fail, "остались временные файлы *.aa.*: "+ls[len(ls)-1]
 			break
 		}
-		r1.Status, r1.Detail = Pass, fmt.Sprintf("код 0; суммы всех файлов прежние; права 600 у clientsTable и %d ключей; временных нет", len(present9))
+		r1.Status, r1.Detail = Pass, fmt.Sprintf("код 0; inode всех записанных файлов новые; суммы прежние; права 600 у clientsTable и %d ключей; временных нет", len(present9))
 	}
 	rs = append(rs, r1)
 

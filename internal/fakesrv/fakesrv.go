@@ -339,7 +339,7 @@ var (
 	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf|server\.json)((?: (?:xray_(?:uuid|short_id|public|private)|wireguard_(?:server_public_key|psk))\.key (?:[0-9a-f]{64}|absent))*)$`)
 	// reBackupExtra — Р-4: резервная копия дополнительного файла записи
 	// (ключ XRay) перед записью.
-	reBackupExtra = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
+	reBackupExtra = regexp.MustCompile(`^docker exec (\S+) sh -c 'umask 077 && mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/((?:xray_(?:uuid|short_id|public|private)|wireguard_(?:server_public_key|psk))\.key) (\S+)/backup/(\S+)\.\$ts && ` +
 		`\(ls -1t (\S+)/backup/(\S+)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
