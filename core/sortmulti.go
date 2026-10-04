@@ -40,9 +40,22 @@ func compareByColumn(a, b ClientEntry, stats map[string]PeerStat, col SortColumn
 			return 0
 		}
 	case SortByCreated:
+		// QA-01 р4 Н3: разобранные — по времени; не разобранные — в конце
+		// при любом направлении (unknownOrder), между собой — по строке.
 		ac, bc := a.Created(), b.Created()
+		ta, oka := CreatedTime(ac)
+		tb, okb := CreatedTime(bc)
+		if oka && okb {
+			switch {
+			case ta.Before(tb):
+				return -1
+			case ta.After(tb):
+				return 1
+			}
+			return 0
+		}
 		switch {
-		case ac < bc: // RFC3339 сравнивается лексикографически = хронологически
+		case ac < bc:
 			return -1
 		case ac > bc:
 			return 1
@@ -120,6 +133,17 @@ func SortClientsMultiKey(clients []ClientEntry, stats map[string]PeerStat, prima
 // значение известно, а про b нет (a выше); 1 — наоборот; 0 — одинаково
 // (или колонка не из статистики). Не зависит от направления сортировки.
 func unknownOrder(a, b ClientEntry, stats map[string]PeerStat, col SortColumn) int {
+	if col == SortByCreated {
+		_, ka := CreatedTime(a.Created())
+		_, kb := CreatedTime(b.Created())
+		switch {
+		case ka && !kb:
+			return -1
+		case !ka && kb:
+			return 1
+		}
+		return 0
+	}
 	if col != SortByActivityCol && col != SortByTraffic {
 		return 0
 	}

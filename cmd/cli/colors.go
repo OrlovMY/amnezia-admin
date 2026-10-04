@@ -75,9 +75,11 @@ func printErr(err error) {
 func errText(err error, paint func(string) string) string {
 	t, ok := writeoutcome.Describe(err)
 	if !ok {
-		return paint("Ошибка: ") + err.Error()
+		return paint("Ошибка: ") + core.MaskText(err.Error())
 	}
-	return paint(t.Title) + "\n" + writeoutcome.Message(t, err)
+	// AL-01: граница показа — UUID клиентов XRay и прочие секреты не
+	// печатаются (core.MaskText — та же маскировка, что у ответов сервера).
+	return paint(t.Title) + "\n" + core.MaskText(writeoutcome.Message(t, err))
 }
 
 // colorDecision — общее для всех ОС правило: цвет только в терминал и

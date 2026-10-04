@@ -133,6 +133,16 @@ type Session struct {
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
 	// реентерабелен, повторный Lock из-под уже взятого — deadlock.
 	mu sync.Mutex
+
+	// xrayStart0, xrayStartApply — время запуска контейнера XRay (docker
+	// inspect StartedAt) до записи и после перезапуска при применении; "" —
+	// не прочитано. Перезапускался ли XRay, доказывается ИЗМЕРЕНИЕМ, а не
+	// кодом выхода docker restart (AU-LOGIC р2 Medium-1). xrayActs — число
+	// попыток применения за Apply; xrayNoRestart — измерено «не
+	// перезапускался».
+	xrayStart0, xrayStartApply string
+	xrayActs                   int
+	xrayNoRestart              bool
 }
 
 func (s *Session) Close() {
@@ -328,6 +338,16 @@ func (s *Session) FindContainers() ([]Container, error) {
 	// причина — в Reason (подпись строит guiview.ProtoLabel). Proto — имя
 	// с версией (AWGName), без суффикса состояния.
 	for i := range res {
+		if IsXRay(&res[i]) {
+			// XRay (AL-01): вторая ось — форма server.json и служебный UUID.
+			f := s.XRayFormatOf(&res[i])
+			res[i].Reason = f.Reason
+			if f.State == FormatKnown {
+				res[i].Support = SupportYes
+			} else {
+				res[i].Support = SupportKnownNo
+			}
+		}
 		if isAWG2(&res[i]) {
 			f := s.AWGFormatOf(&res[i])
 			res[i].Proto = AWGName(f)
@@ -356,11 +376,10 @@ func (s *Session) catIn(c *Container, path string) (string, error) {
 func (s *Session) backup(c *Container) error {
 	// Имя файла — из таблицы семейства WG (PR-W1): wg0.conf | awg0.conf.
 	// Для wg0.conf команда байт в байт прежняя.
-	fam, err := WGFamilyOf(c)
+	f, err := confFileOf(c)
 	if err != nil {
 		return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{err})
 	}
-	f := fam.File
 	cmd := fmt.Sprintf(
 		"docker exec %s sh -c 'mkdir -p %s/backup && ts=$(date +%%Y%%m%%d-%%H%%M%%S) && "+
 			"cp %s/%s %s/backup/%s.$ts && "+
@@ -1151,6 +1170,27 @@ type NewUser struct {
 	// Note — что человек обязан узнать при выдаче (amnezia-awg2: параметры
 	// маскировки взяты из файла сервера, AWG2ConfigNote); "" — нечего.
 	Note string
+	// Link — что кодировать в QR, если не сам Config (XRay: ссылка
+	// vless://); "" — QR из Config.
+	Link string
+	// Ext — расширение файла конфига; "" — ".conf" (XRay: ".json").
+	Ext string
+}
+
+// QRText — текст для QR-кода конфига.
+func (u *NewUser) QRText() string {
+	if u.Link != "" {
+		return u.Link
+	}
+	return u.Config
+}
+
+// FileExt — расширение файла конфига.
+func (u *NewUser) FileExt() string {
+	if u.Ext != "" {
+		return u.Ext
+	}
+	return ".conf"
 }
 
 // AddUser создаёт пользователя: peer в wg0.conf, запись в clientsTable, wg syncconf.
@@ -1163,6 +1203,9 @@ func (s *Session) AddUser(c *Container, name string) (*NewUser, error) {
 	p, err := s.planAddUserLocked(c, name)
 	if err != nil {
 		return nil, err
+	}
+	if p.RestartsXRay() {
+		return nil, ErrXRayNeedsConfirm
 	}
 	return s.applyLocked(p)
 }
@@ -1217,6 +1260,9 @@ func (s *Session) DeleteByID(c *Container, clientID string) error {
 	if err != nil {
 		return err
 	}
+	if p.RestartsXRay() {
+		return ErrXRayNeedsConfirm
+	}
 	_, err = s.applyLocked(p)
 	return err
 }
@@ -1266,6 +1312,9 @@ func (s *Session) RegenerateUser(c *Container, clientID string) (*NewUser, error
 	p, err := s.planRekeyLocked(c, clientID)
 	if err != nil {
 		return nil, err
+	}
+	if p.RestartsXRay() {
+		return nil, ErrXRayNeedsConfirm
 	}
 	return s.applyLocked(p)
 }
@@ -1319,6 +1368,9 @@ func (s *Session) RenameUser(c *Container, clientID, newName string) error {
 	if err != nil {
 		return err
 	}
+	if p.RestartsXRay() {
+		return ErrXRayNeedsConfirm
+	}
 	_, err = s.applyLocked(p)
 	return err
 }
@@ -1340,6 +1392,9 @@ func (s *Session) SetEnabledNoted(c *Container, clientID string, enabled bool) (
 	p, err := s.planSetEnabledLocked(c, clientID, enabled)
 	if err != nil {
 		return "", err
+	}
+	if p.RestartsXRay() {
+		return "", ErrXRayNeedsConfirm
 	}
 	if _, err = s.applyLocked(p); err != nil {
 		return "", err

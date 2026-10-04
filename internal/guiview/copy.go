@@ -88,6 +88,15 @@ type Row struct {
 	// нулевой Stats при StatsFailed=false, то есть измеренным нулём
 	// (задание НЕЗНАНИЕ-ТРАФИК).
 	Peer core.PeerReading
+
+	// XRay (AL-01): строка контейнера XRay — статистики нет, трафик «—»,
+	// «Активность» — состояние доступа; XRayService — служебный UUID.
+	XRay        bool
+	XRayService bool
+	XRayAccess  core.XRayAccess
+	// KeyShown — что показать в колонке ключа вместо ClientID (отпечаток
+	// UUID XRay: UUID — учётные данные); "" — ClientID.
+	KeyShown string
 }
 
 // CellText — текст ячейки (row, col) таблицы пользователей, ровно тот, что
@@ -99,15 +108,23 @@ func CellText(r Row, col int) string {
 	case 1:
 		return r.Name
 	case 2:
-		if rs := []rune(r.Created); len(rs) > CreatedCellRunes {
-			return string(rs[:CreatedCellRunes])
-		}
-		return r.Created
+		// QA-01 р4 Н2: нормализованная дата с годом (core.CreatedText);
+		// в буфер — исходная строка целиком (CopyValue)
+		return core.CreatedText(r.Created)
 	case 3:
+		if r.XRay {
+			return xrayActivity(r)
+		}
 		return ActivityText(r.CanManage, r.Enabled, r.Peer)
 	case 4:
+		if r.XRay {
+			return "—"
+		}
 		return TrafficText(r.CanManage, r.Enabled, r.Peer)
 	case 5:
+		if r.KeyShown != "" {
+			return r.KeyShown
+		}
 		return r.ClientID
 	}
 	return ""
@@ -142,7 +159,11 @@ func CopyRow(r Row) string {
 	parts := make([]string, 0, len(rowFieldOrder))
 	for _, c := range rowFieldOrder {
 		v := CopyValue(r, c)
-		if label := rowFieldLabels[c]; label != "" {
+		label := rowFieldLabels[c]
+		if c == 3 && r.XRay {
+			label = XRayAccessHeader
+		}
+		if label != "" {
 			v = label + ": " + v
 		}
 		parts = append(parts, v)

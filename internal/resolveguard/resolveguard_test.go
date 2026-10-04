@@ -65,9 +65,12 @@ var rawFuncs = map[string]bool{"ResolveClient": true, "ResolveNonNumeric": true}
 // пункта интерактивного меню; девять флаговых мест (четыре в runDryRun,
 // четыре в боевых ветках del/rename/toggle/rekey, одно в show-config —
 // задача 01.10.2026; печатает Note() тем же resolveByFlag, только читает).
+// AL-01 (XRay): +1 resolveByFlag — show-config XRay (showXRayConfig), +1
+// resolveInteractive — пункт меню 9 «Сохранить конфиг клиента XRay»; оба
+// только читают и печатают Note() через обёртку.
 // Счёт, а не «больше нуля»: исчезновение одного места — ровно тот дефект,
 // от которого сторож.
-var wrapperCalls = map[string]int{"resolveInteractive": 4, "resolveByFlag": 9}
+var wrapperCalls = map[string]int{"resolveInteractive": 5, "resolveByFlag": 10}
 
 type finding struct {
 	pos  string

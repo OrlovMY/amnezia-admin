@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -125,6 +126,21 @@ type SaveResult struct {
 // трогается, берётся «<имя> (2).conf», «(3)»… и Occupied называет занятое.
 // Запись атомарная: временный файл 0600 в том же каталоге и rename.
 func SaveClientConfig(dir, name, config, replaces string) (SaveResult, error) {
+	return SaveClientConfigExt(dir, name, config, replaces, ".conf")
+}
+
+// SaveUserConfig — SaveClientConfig для выданного конфига: расширение и
+// «чей файл» — по виду конфига (XRay — .json и UUID клиента).
+func SaveUserConfig(dir string, u *NewUser) (SaveResult, error) {
+	return SaveClientConfigExt(dir, u.Name, u.Config, u.Replaces, u.FileExt())
+}
+
+// SaveClientConfigExt — SaveClientConfig с расширением ext (".conf" или
+// ".json" у XRay). Чей файл — по ключу клиента в конфиге (configIdentity).
+func SaveClientConfigExt(dir, name, config, replaces, ext string) (SaveResult, error) {
+	if ext != ".conf" && ext != ".json" {
+		return SaveResult{}, fmt.Errorf("недопустимое расширение конфига %q — конфиг не сохранён", ext)
+	}
 	var r SaveResult
 	if !filepath.IsAbs(dir) {
 		return r, fmt.Errorf("каталог для конфигов %q не абсолютный — конфиг не сохранён", dir)
@@ -140,7 +156,7 @@ func SaveClientConfig(dir, name, config, replaces string) (SaveResult, error) {
 	// затирает первую. Тот же механизм, что у known_hosts (PR #31).
 	err := withConfigsLock(dir, func() error {
 		var err error
-		r, err = saveClientConfigLocked(dir, name, config, replaces, r)
+		r, err = saveClientConfigLocked(dir, name, config, replaces, ext, r)
 		return err
 	})
 	return r, err
@@ -184,20 +200,17 @@ func withConfigsLock(dir string, fn func() error) error {
 	return fn()
 }
 
-func saveClientConfigLocked(dir, name, config, replaces string, r SaveResult) (SaveResult, error) {
+func saveClientConfigLocked(dir, name, config, replaces, ext string, r SaveResult) (SaveResult, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return r, fmt.Errorf("каталог конфигов %s не прочитан — не проверить, не занято ли имя; конфиг не сохранён: %w", dir, err)
 	}
-	mine := ""
-	if pub, err := pubFromPriv(parseWgConf(config).iface["PrivateKey"]); err == nil {
-		mine = pub
-	}
+	mine := configIdentity(config, ext)
 	base := SanitizeName(name)
 	for n := 1; n <= 1000; n++ {
-		cand := base + ".conf"
+		cand := base + ext
 		if n > 1 {
-			cand = fmt.Sprintf("%s (%d).conf", base, n)
+			cand = fmt.Sprintf("%s (%d)%s", base, n, ext)
 		}
 		existing := ""
 		for _, e := range entries {
@@ -207,7 +220,7 @@ func saveClientConfigLocked(dir, name, config, replaces string, r SaveResult) (S
 			}
 		}
 		if existing != "" {
-			if !sameClientFile(filepath.Join(dir, existing), mine, replaces) {
+			if !sameClientFile(filepath.Join(dir, existing), mine, replaces, ext) {
 				if r.Occupied == "" {
 					r.Occupied = existing
 				}
@@ -227,16 +240,45 @@ func saveClientConfigLocked(dir, name, config, replaces string, r SaveResult) (S
 // sameClientFile — файл p содержит конфиг клиента с ключом mine или
 // replaces. Не читается, не разбирается, не обычный — НЕ этот клиент
 // (перезаписывать нельзя).
-func sameClientFile(p, mine, replaces string) bool {
+func sameClientFile(p, mine, replaces, ext string) bool {
 	b, err := readSavedFile(p)
 	if err != nil {
 		return false
 	}
-	pub, err := pubFromPriv(parseWgConf(string(b)).iface["PrivateKey"])
-	if err != nil {
+	pub := configIdentity(string(b), ext)
+	if pub == "" {
 		return false
 	}
 	return (mine != "" && pub == mine) || (replaces != "" && pub == replaces)
+}
+
+// configIdentity — ключ клиента в тексте конфига: публичный ключ из
+// PrivateKey (.conf) или UUID пользователя vless (.json XRay); "" — не
+// разобрать (такой файл — не этот клиент).
+func configIdentity(config, ext string) string {
+	if ext == ".json" {
+		var c struct {
+			Outbounds []struct {
+				Settings struct {
+					Vnext []struct {
+						Users []struct {
+							ID string `json:"id"`
+						} `json:"users"`
+					} `json:"vnext"`
+				} `json:"settings"`
+			} `json:"outbounds"`
+		}
+		if json.Unmarshal([]byte(config), &c) != nil || len(c.Outbounds) == 0 || len(c.Outbounds[0].Settings.Vnext) == 0 ||
+			len(c.Outbounds[0].Settings.Vnext[0].Users) == 0 || !reUUID.MatchString(c.Outbounds[0].Settings.Vnext[0].Users[0].ID) {
+			return ""
+		}
+		return c.Outbounds[0].Settings.Vnext[0].Users[0].ID
+	}
+	pub, err := pubFromPriv(parseWgConf(config).iface["PrivateKey"])
+	if err != nil {
+		return ""
+	}
+	return pub
 }
 
 // atomicWrite0600 — временный файл 0600 в каталоге dir, затем rename на

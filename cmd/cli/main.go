@@ -185,8 +185,21 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		// QA раунд 1: незнакомый — не «протокол»
 		return nil, fmt.Errorf("незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет", c.Name)
 	}
+	if core.IsXRay(c) && c.Dir != "" {
+		// XRay: и при «только просмотр» — список с причиной, а не ошибка
+		// (живая проверка 04.10).
+		return listXRay(w, s, c)
+	}
+	if !c.Managed() && c.Reason != "" {
+		// AL-01: причина экземпляра (XRay с незнакомым server.json, AWG2) —
+		// подпись та же, что в списке протоколов и в GUI.
+		return nil, fmt.Errorf("%s", guiview.ProtoLabel(*c))
+	}
 	if !c.Managed() {
-		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG (старый) и WireGuard)", c.Title())
+		return nil, fmt.Errorf("для протокола %s управление пользователями не реализовано (поддерживаются AmneziaWG, WireGuard и XRay)", c.Title())
+	}
+	if core.IsXRay(c) {
+		return listXRay(w, s, c)
 	}
 	clients, err := s.LoadClients(c)
 	if err != nil {
@@ -220,10 +233,7 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		absent := 0                 // включённые клиенты, которых нет в ответе `wg show`
 		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
-			created := cl.Created()
-			if r := []rune(created); len(r) > 19 {
-				created = string(r[:19])
-			}
+			created := core.CreatedText(cl.Created())
 			r := core.ReadPeer(stats, statsFailed, cl.ClientID)
 			switch cl.EnabledState() {
 			case core.EnabledActive:
@@ -371,13 +381,18 @@ func saveUserConfig(w io.Writer, u *core.NewUser, proto string) error {
 // тест подставлял свой и не писал в настоящий каталог данных владельца — тот
 // же приём, что с writeCrashLog(dir,…) в cmd/gui (A4).
 func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) error {
-	res, err := core.SaveClientConfig(dir, u.Name, u.Config, u.Replaces)
+	res, err := core.SaveUserConfig(dir, u)
 	abs, createdDir := res.Path, res.DirWasMissing
 	if err != nil {
 		return saveFailed(w, u, err)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
+	if u.IP == "" {
+		// XRay: адреса у клиента нет
+		fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q готов (протокол %s).", u.Name, proto)))
+	} else {
+		fmt.Fprintln(w, cOK(fmt.Sprintf("Пользователь %q создан (IP %s, протокол %s).", u.Name, u.IP, proto)))
+	}
 	fmt.Fprintln(w, "Конфиг сохранён: "+cAccent(abs))
 	if res.Occupied != "" {
 		// К-1: имя занято конфигом другого клиента — его файл не тронут
@@ -388,7 +403,11 @@ func saveUserConfigTo(w io.Writer, dir string, u *core.NewUser, proto string) er
 		// сохраняется впервые (ревью UX-01).
 		fmt.Fprintln(w, cDim(core.FirstSaveHint))
 	}
-	fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
+	if u.FileExt() == ".json" {
+		fmt.Fprintln(w, "Импортируйте файл в приложение Amnezia (Импорт → выбрать файл) или передайте клиенту ссылку vless:// (amnezia-admin show-config -name … -print).")
+	} else {
+		fmt.Fprintln(w, "Импортируйте файл в приложение AmneziaWG или Amnezia (Импорт → выбрать .conf).")
+	}
 	if u.Note != "" {
 		// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче.
 		fmt.Fprintln(w, cWarn(u.Note))
@@ -437,7 +456,7 @@ func printContainers(containers []core.Container, withNotes bool) {
 func printPlan(w io.Writer, p *core.Plan) {
 	wgDiff, tblDiff := p.Diff()
 	dir := p.Container.Dir
-	printFileDiff(w, dir+"/wg0.conf", wgDiff)
+	printFileDiff(w, p.ConfPath(), wgDiff)
 	printFileDiff(w, dir+"/clientsTable", tblDiff)
 	if n := p.Note(); n != "" {
 		fmt.Fprintln(w, n) // Н-4, раунд 5: что правится только запись — прямо
@@ -647,6 +666,9 @@ func interactive() (code int) {
 			item("6", "Переименовать пользователя")
 			item("7", "Отключить/включить пользователя")
 			item("8", "Перевыпустить конфиг")
+			if core.IsXRay(cur) {
+				item("9", "Сохранить конфиг клиента XRay (собирается с сервера)")
+			}
 		}
 		if len(containers) > 1 {
 			item("4", "Сменить протокол/контейнер")
@@ -662,6 +684,12 @@ func interactive() (code int) {
 			}
 		case "2":
 			name := ask("Имя нового пользователя: ")
+			if core.IsXRay(cur) {
+				if _, err := runXRayAdd(in, os.Stdout, os.Stderr, true, false, sess, cur, name); err != nil {
+					printErr(err)
+				}
+				break
+			}
 			u, err := sess.AddUser(cur, name)
 			if err != nil {
 				printErr(err)
@@ -692,6 +720,12 @@ func interactive() (code int) {
 				break
 			}
 			victim := clients[idx]
+			if core.IsXRay(cur) {
+				if _, err := runXRayAction(in, os.Stdout, os.Stderr, true, false, sess, cur, "del", victim); err != nil {
+					printErr(err)
+				}
+				break
+			}
 			card := buildCard(sess, cur, victim, "удалить")
 			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
 			if !proceed {
@@ -749,6 +783,12 @@ func interactive() (code int) {
 				break
 			}
 			victim := clients[idx]
+			if core.IsXRay(cur) {
+				if _, err := runXRayAction(in, os.Stdout, os.Stderr, true, false, sess, cur, "toggle", victim); err != nil {
+					printErr(err)
+				}
+				break
+			}
 			// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ,
 			// разрешено (раунд 4, решение ядра): итог от прежней записи не
 			// зависит и исправляет её.
@@ -802,6 +842,12 @@ func interactive() (code int) {
 				printErr(core.EnabledUnknownError(victim))
 				break
 			}
+			if core.IsXRay(cur) {
+				if _, err := runXRayAction(in, os.Stdout, os.Stderr, true, false, sess, cur, "rekey", victim); err != nil {
+					printErr(err)
+				}
+				break
+			}
 			card := buildCard(sess, cur, victim, "перевыпустить конфиг")
 			proceed, _ := confirmOrExit(in, os.Stdout, os.Stderr, true, false, card)
 			if !proceed {
@@ -813,6 +859,31 @@ func interactive() (code int) {
 				break
 			}
 			if err := saveUserConfig(os.Stdout, u, cur.Proto); err != nil {
+				printErr(err)
+			}
+		case "9":
+			if !core.IsXRay(cur) || !cur.Managed() {
+				break
+			}
+			clients, err := listUsers(os.Stdout, sess, cur)
+			if err != nil {
+				printErr(err)
+				break
+			}
+			ident := ask("\nЧей конфиг сохранить (имя или номер строки: #3): ")
+			if ident == "" {
+				break
+			}
+			idx := resolveInteractive(os.Stdout, clients, ident)
+			if idx < 0 {
+				break
+			}
+			nu, err := sess.XRayClientConfig(cur, clients[idx].ClientID)
+			if err != nil {
+				printErr(err)
+				break
+			}
+			if err := saveUserConfig(os.Stdout, nu, cur.Proto); err != nil {
 				printErr(err)
 			}
 		case "4":
@@ -889,7 +960,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	name := fs.String("name", "", "имя пользователя (для add/del/rename/toggle)")
 	newname := fs.String("newname", "", "новое имя (для rename)")
 	dryRun := fs.Bool("dry-run", false, "показать изменения wg0.conf и clientsTable, ничего не записывая")
-	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение) без вопроса (для скриптов)")
+	yes := fs.Bool("yes", false, "выполнить необратимое действие (del/rekey/toggle-отключение; у XRay — любое действие, перезапускающее XRay) без вопроса (для скриптов)")
 	printConf := fs.Bool("print", false, "show-config: напечатать содержимое конфига (с ПРИВАТНЫМ ключом клиента) — только если ключ сервера сверен и совпал")
 	printUnverified := fs.Bool("print-unverified", false, "show-config: напечатать содержимое, даже если ключ сервера не совпал или не сверен")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
@@ -980,6 +1051,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
 			break
 		}
+		if core.IsXRay(cur) && cur.Managed() {
+			code, e := runXRayAdd(stdin, stdout, stderr, isTTY, *yes, sess, cur, *name)
+			if e == nil && code != 0 {
+				return code
+			}
+			err = e
+			break
+		}
 		u, e := sess.AddUser(cur, *name)
 		if e == nil {
 			e = saveUserConfig(stdout, u, cur.Proto)
@@ -999,6 +1078,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		idx, e := resolveByFlag(stdout, clients, *name)
 		if e != nil {
+			err = e
+			break
+		}
+		if core.IsXRay(cur) {
+			code, e := runXRayAction(stdin, stdout, stderr, isTTY, *yes, sess, cur, cmd, clients[idx])
+			if e == nil && code != 0 {
+				return code
+			}
 			err = e
 			break
 		}
@@ -1047,6 +1134,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
+		if core.IsXRay(cur) {
+			code, e := runXRayAction(stdin, stdout, stderr, isTTY, *yes, sess, cur, cmd, clients[idx])
+			if e == nil && code != 0 {
+				return code
+			}
+			err = e
+			break
+		}
 		// Неизвестная включённость: enable = false — отключение, разрешено
 		// (раунд 4, решение ядра).
 		enable := clients[idx].Disabled()
@@ -1082,6 +1177,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			err = e
 			break
 		}
+		if core.IsXRay(cur) {
+			code, e := runXRayAction(stdin, stdout, stderr, isTTY, *yes, sess, cur, cmd, clients[idx])
+			if e == nil && code != 0 {
+				return code
+			}
+			err = e
+			break
+		}
 		if clients[idx].EnabledState() == core.EnabledUnknown {
 			// У1: до карточки подтверждения — действие всё равно невозможно
 			err = core.EnabledUnknownError(clients[idx])
@@ -1096,6 +1199,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = e
 	case "show-config":
+		if core.IsXRay(cur) && cur.Managed() {
+			err = showXRayConfig(stdout, sess, cur, *name, *printConf || *printUnverified)
+			break
+		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
 		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config)", cmd)

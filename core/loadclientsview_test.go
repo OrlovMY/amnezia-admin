@@ -275,7 +275,8 @@ func TestContainersWasNowTable(t *testing.T) {
 
 				// Сведение W2+W3: причина «только просмотр» экземпляра
 				// (amnezia-awg2 без awg0.conf) — в подписи после формы W2.
-				awg2Reason := map[string]string{"amnezia-awg2": "файл настроек сервера не прочитан"}[spec.name]
+				// AL-01: amnezia-xray — то же устройство: server.json в стенде нет.
+				awg2Reason := map[string]string{"amnezia-awg2": "файл настроек сервера не прочитан", "amnezia-xray": "не удалось прочитать server.json"}[spec.name]
 				full := spec.proto
 				if awg2Reason != "" {
 					full += " — только просмотр: " + awg2Reason

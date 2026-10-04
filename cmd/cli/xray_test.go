@@ -1,0 +1,281 @@
+package main
+
+// AL-01: XRay в CLI через полный run() и настоящий SSH (fakesrv.ListenSSH).
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"amnezia-admin/core"
+	"amnezia-admin/internal/fakesrv"
+)
+
+var reUUIDFull = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+func setupXRayRun(t *testing.T) (key, kh string, exec *fakesrv.Server) {
+	t.Helper()
+	t.Cleanup(core.SetXRayWaits(0, 0))
+	const user, password = "root", "fakepw-xray-test"
+	hostKey, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec = fakesrv.NewXRay("master")
+	srv, err := fakesrv.ListenSSH("127.0.0.1:0", user, password, hostKey, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	key = buildTestVpnKey(t, srv.Addr(), user, password)
+	kh = filepath.Join(t.TempDir(), "known_hosts")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key, "-hostkey", srv.Fingerprint()}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("list: %d %s", code, errOut.String())
+	}
+	return key, kh, exec
+}
+
+func xrayWrites(exec *fakesrv.Server) int {
+	n := 0
+	for _, c := range exec.Commands() {
+		if strings.Contains(c, "flock") || strings.HasPrefix(c, "docker restart") || strings.Contains(c, "/backup") {
+			n++
+		}
+	}
+	return n
+}
+
+func xrayIDOf(t *testing.T, exec *fakesrv.Server, name string) string {
+	t.Helper()
+	b, _ := exec.File("/opt/amnezia/xray/clientsTable")
+	var list []core.ClientEntry
+	if err := json.Unmarshal(b, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range list {
+		if c.Name() == name {
+			return c.ClientID
+		}
+	}
+	return ""
+}
+
+// TestXRayCLIList — список: «—» и пояснение вместо трафика, служебная
+// строка, отпечатки вместо UUID.
+func TestXRayCLIList(t *testing.T) {
+	key, kh, _ := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	s := out.String()
+	for _, want := range []string{"Alice", "Bob", "Admin [Android  (16.0)]", core.XRayInstallNote, core.XRayStatsNote, "включён"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("нет %q в\n%s", want, s)
+		}
+	}
+	if reUUIDFull.MatchString(s) || strings.Contains(s, "0 B") || strings.Contains(s, "не подключался") {
+		t.Errorf("UUID или ложный ноль в списке:\n%s", s)
+	}
+}
+
+// TestXRayCLIRefuseWithoutYes — без терминала и без -yes каждое действие с
+// перезапуском — отказ, код 2, ни одной команды записи и перезапуска; в
+// выводе — предупреждение. Включение (у WG без вопроса) у XRay тоже
+// спрашивает: оно перезапускает XRay.
+func TestXRayCLIRefuseWithoutYes(t *testing.T) {
+	for _, args := range [][]string{
+		{"add", "-name", "Carol"},
+		{"del", "-name", "Alice"},
+		{"rekey", "-name", "Alice"},
+		{"toggle", "-name", "Alice"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			key, kh, exec := setupXRayRun(t)
+			before := xrayWrites(exec)
+			var out, errOut bytes.Buffer
+			code := run(append(args, "-key", key), strings.NewReader("y\n"), &out, &errOut, kh)
+			if code != 2 || xrayWrites(exec) != before || exec.XRayRestarts() != 0 {
+				t.Fatalf("код %d, записей %d→%d, перезапусков %d; %s", code, before, xrayWrites(exec), exec.XRayRestarts(), errOut.String())
+			}
+			if !strings.Contains(out.String(), "XRay будет перезапущен") || !strings.Contains(out.String(), "узнать нельзя") {
+				t.Errorf("нет предупреждения:\n%s", out.String())
+			}
+			if reUUIDFull.MatchString(out.String() + errOut.String()) {
+				t.Errorf("UUID в выводе:\n%s", out.String())
+			}
+		})
+	}
+	// включение отключённого — тоже вопрос
+	key, kh, exec := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"toggle", "-key", key, "-name", "Bob", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("отключение -yes: %d %s", code, errOut.String())
+	}
+	n := exec.XRayRestarts()
+	out.Reset()
+	if code := run([]string{"toggle", "-key", key, "-name", "Bob"}, strings.NewReader(""), &out, &errOut, kh); code != 2 || exec.XRayRestarts() != n {
+		t.Fatalf("включение без -yes: код %d, перезапусков %d→%d", code, n, exec.XRayRestarts())
+	}
+}
+
+// TestXRayCLIYes — -yes печатает предупреждение и выполняет; add — 1
+// перезапуск и файл .json; del — карточка с отпечатком и «неизвестно»;
+// rename — без предупреждения и без перезапуска.
+func TestXRayCLIYes(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"add", "-key", key, "-name", "Carol", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("add: %d %s", code, errOut.String())
+	}
+	if exec.XRayRestarts() != 1 || !strings.Contains(out.String(), "XRay будет перезапущен") || !strings.Contains(out.String(), "Carol.json") {
+		t.Fatalf("add: перезапусков %d\n%s", exec.XRayRestarts(), out.String())
+	}
+	if reUUIDFull.MatchString(out.String()) {
+		t.Errorf("UUID в выводе add:\n%s", out.String())
+	}
+
+	out.Reset()
+	alice := xrayIDOf(t, exec, "Alice")
+	if code := run([]string{"del", "-key", key, "-name", "Alice", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("del: %d %s", code, errOut.String())
+	}
+	s := out.String()
+	if exec.XRayRestarts() != 2 || !strings.Contains(s, core.UUIDPrint(alice)) || strings.Contains(s, alice) ||
+		!strings.Contains(s, "неизвестно (XRay не отдаёт статистику)") || !strings.Contains(s, "XRay будет перезапущен") {
+		t.Fatalf("del:\n%s", s)
+	}
+
+	out.Reset()
+	if code := run([]string{"rename", "-key", key, "-name", "Bob", "-newname", "Боб"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("rename: %d %s", code, errOut.String())
+	}
+	if exec.XRayRestarts() != 2 || strings.Contains(out.String(), "перезапущен") {
+		t.Fatalf("rename перезапускает или предупреждает:\n%s", out.String())
+	}
+}
+
+// TestXRayCLIShowConfig — конфиг существующего клиента: без -print UUID не
+// печатается; с -print — ссылка vless://.
+func TestXRayCLIShowConfig(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"show-config", "-key", key, "-name", "Bob"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	if reUUIDFull.MatchString(out.String()) || !strings.Contains(out.String(), "Bob.json") {
+		t.Fatalf("без -print:\n%s", out.String())
+	}
+	out.Reset()
+	if code := run([]string{"show-config", "-key", key, "-name", "Bob", "-print"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "vless://"+xrayIDOf(t, exec, "Bob")+"@") || exec.XRayRestarts() != 0 {
+		t.Fatalf("-print:\n%s", out.String())
+	}
+}
+
+// TestXRayCLIListReadOnly — живая проверка 04.10: «только просмотр»
+// (xray_uuid.key не прочитан) — список с причиной и код 0, а не ошибка; и
+// действие отказывает без записи.
+func TestXRayCLIListReadOnly(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	exec.DeleteFile("/opt/amnezia/xray/xray_uuid.key")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("код %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Alice") || !strings.Contains(out.String(), "Только просмотр") {
+		t.Fatalf("список: %s", out.String())
+	}
+	before := xrayWrites(exec)
+	out.Reset()
+	if code := run([]string{"del", "-key", key, "-name", "Alice", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code == 0 || xrayWrites(exec) != before {
+		t.Fatalf("действие при только просмотре: код %d, записей %d→%d", code, before, xrayWrites(exec))
+	}
+}
+
+// TestXRayCLIInstallRowRefused — строка клиента установки: удалить нельзя.
+func TestXRayCLIInstallRowRefused(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	before := xrayWrites(exec)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"del", "-key", key, "-name", "Admin [Android  (16.0)]", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code == 0 || xrayWrites(exec) != before ||
+		!strings.Contains(errOut.String(), "клиент установки XRay") {
+		t.Fatalf("код %d, записей %d→%d: %s", code, before, xrayWrites(exec), errOut.String())
+	}
+}
+
+// TestXRayCLIListAligned — живая проверка 2bf470c: пометка клиента
+// установки — сноской; колонка UUID у всех строк начинается в одной позиции.
+func TestXRayCLIListAligned(t *testing.T) {
+	key, kh, _ := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	col := -1
+	rows := 0
+	for _, l := range strings.Split(out.String(), "\n") {
+		i := strings.Index(l, "…")
+		if i < 0 || !strings.Contains(l, "—") {
+			continue
+		}
+		rows++
+		pos := len([]rune(l[:i]))
+		if col < 0 {
+			col = pos
+		} else if pos != col {
+			t.Errorf("колонка UUID съехала (%d ≠ %d): %q", pos, col, l)
+		}
+	}
+	if rows != 3 || !strings.Contains(out.String(), "* "+core.XRayInstallNote) {
+		t.Fatalf("строк %d, сноски нет:\n%s", rows, out.String())
+	}
+}
+
+// TestXRayCLIInstallShowConfig — AU-UX Р3-1: show-config для клиента
+// установки разрешён (только чтение), изменения — нет.
+func TestXRayCLIInstallShowConfig(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"show-config", "-key", key, "-name", "Admin [Android  (16.0)]"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	if exec.XRayRestarts() != 0 || !strings.Contains(out.String(), ".json") {
+		t.Fatalf("%s", out.String())
+	}
+}
+
+// TestXRayCLIDateHasYear — QA-01 р4 Н2: дата формата приложения в list и в
+// карточке — с годом.
+func TestXRayCLIDateHasYear(t *testing.T) {
+	key, kh, _ := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"add", "-key", key, "-name", "Carol", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	out.Reset()
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	year := fmt.Sprint(time.Now().Year())
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "Carol") && !strings.Contains(l, year+"-") {
+			t.Errorf("list без года: %q", l)
+		}
+	}
+	out.Reset()
+	if code := run([]string{"del", "-key", key, "-name", "Carol"}, strings.NewReader(""), &out, &errOut, kh); code != 2 {
+		t.Fatalf("код %d", code)
+	}
+	if !strings.Contains(out.String(), "Создан:                 "+year+"-") {
+		t.Errorf("карточка без года:\n%s", out.String())
+	}
+}

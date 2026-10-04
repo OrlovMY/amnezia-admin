@@ -203,6 +203,10 @@ type Server struct {
 	// known_hosts, PR #31) — стенд перестаёт её воспроизводить.
 	CommandDelay time.Duration
 
+	// XRay — хуки контейнера amnezia-xray (AL-01, xray.go).
+	XRay XRayHooks
+	xray *xrayRuntime
+
 	mu            sync.Mutex
 	files         map[string][]byte
 	peers         map[string]bool // публичные ключи peer'ов, применённые последним syncconf
@@ -332,12 +336,12 @@ var (
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
 	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
 	// TestCASLockLineRealFlock (Linux).
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf|server\.json)$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
-		`cp (\S+)/(wg0\.conf|awg0\.conf) (\S+)/backup/(wg0\.conf|awg0\.conf)\.\$ts && ` +
+		`cp (\S+)/(wg0\.conf|awg0\.conf|server\.json) (\S+)/backup/(wg0\.conf|awg0\.conf|server\.json)\.\$ts && ` +
 		`\(cp (\S+)/clientsTable (\S+)/backup/clientsTable\.\$ts 2>/dev/null; ` +
-		`ls -1t (\S+)/backup/(wg0\.conf|awg0\.conf)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
+		`ls -1t (\S+)/backup/(wg0\.conf|awg0\.conf|server\.json)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done; ` +
 		`ls -1t (\S+)/backup/clientsTable\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
 	// PR-W1: утилита, интерфейс и файл — из таблицы семейства WG; fakesrv
 	// принимает только согласованные тройки (wg, wg0, wg0.conf) и (awg,
@@ -684,6 +688,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return b.String(), nil
 
 	default:
+		if out, err, ok := s.dispatchXRay(cmd); ok {
+			return out, err
+		}
 		return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
 	}
 }

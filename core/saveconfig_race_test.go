@@ -169,7 +169,7 @@ func TestSameClientFileTable(t *testing.T) {
 		{"файла нет", filepath.Join(dir, "нет.conf"), pub, "", false},
 		{"у нового конфига ключа нет", otherP, "", "", false},
 	} {
-		if got := sameClientFile(c.path, c.mine, c.rp); got != c.want {
+		if got := sameClientFile(c.path, c.mine, c.rp, ".conf"); got != c.want {
 			t.Errorf("%s: %v, ожидалось %v", c.name, got, c.want)
 		}
 	}

@@ -24,8 +24,11 @@ func TestContainerFlag(t *testing.T) {
 
 	out.Reset()
 	errOut.Reset()
-	if code := run([]string{"list", "-key", key, "-container", "amnezia-xray"}, strings.NewReader(""), &out, &errOut, kh); code == 0 {
-		t.Errorf("list на xray прошёл — выбран не тот контейнер (ждали отказ «управление не реализовано»): %q", out.String())
+	// AL-01 (живая проверка 04.10): XRay «только просмотр» — список с
+	// причиной, код 0; выбран именно xray — в выводе его причина, не Alice.
+	if code := run([]string{"list", "-key", key, "-container", "amnezia-xray"}, strings.NewReader(""), &out, &errOut, kh); code != 0 ||
+		!strings.Contains(out.String(), "Только просмотр: не удалось прочитать server.json") || strings.Contains(out.String(), "Alice") {
+		t.Errorf("list -container amnezia-xray: код %d, вывод %q", code, out.String())
 	}
 
 	out.Reset()
