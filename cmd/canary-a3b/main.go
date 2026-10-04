@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -338,6 +339,51 @@ func run() int {
 		order = append(order, ctr.Name)
 		per[ctr.Name] = rs
 		all = append(all, rs...)
+	}
+	return finish(out, remote, remoteIn, foundNames, sel, skipXRay, order, per, all, famRows, famNotes, runErr, cleanFailed, skipped)
+}
+
+// finish — К9 (запись с ключами, Р-4) и итог: таблица «шаг × контейнер»,
+// семейства, строка ИТОГ. К9 исполняется здесь — на amnezia-xray (если
+// найден и не пропущен) и на каждом проверяемом контейнере WG, — и его
+// строки входят и в таблицу, и в итог. Вынесено из run, чтобы сторож
+// TestFinishRunsK9 проверял ровно тот код, что печатает итог.
+func finish(out io.Writer, remote func(string) (string, error), remoteIn func(string, []byte) (string, error),
+	foundNames []string, sel []core.Container, skipXRay bool, order []string, per map[string][]canary.Result,
+	all []canary.Result, famRows []canary.Result, famNotes []string, runErr error, cleanFailed bool, skipped []string) int {
+	fmt.Fprintln(out, "\n===== К9: запись с ключами под замком =====")
+	xrayFound := false
+	for _, n := range foundNames {
+		xrayFound = xrayFound || n == canary.XRayFamily
+	}
+	targets := []canary.K9Target{canary.K9XRayTarget}
+	found := []bool{xrayFound}
+	for i := range sel {
+		if f, err := core.WGFamilyOf(&sel[i]); err == nil {
+			targets = append(targets, canary.K9WGTarget(f))
+			found = append(found, true)
+		}
+	}
+	for i, tg := range targets {
+		var rs []canary.Result
+		if runErr != nil || cleanFailed {
+			rs = []canary.Result{{ID: "К9", Name: tg.Container + ": запись с ключами под замком", Detail: "не выполнялся: прогон WG не завершён"}}
+			if i == 0 && skipXRay {
+				rs = nil
+			}
+		} else {
+			rs = canary.K9(remote, remoteIn, tg, found[i], i == 0 && skipXRay)
+		}
+		for _, r := range rs {
+			fmt.Fprintf(out, "[%s] %s %s — %s\n", r.Status, r.ID, r.Name, r.Detail)
+		}
+		if len(rs) > 0 {
+			if _, ok := per[tg.Container]; !ok {
+				order = append(order, tg.Container)
+			}
+			per[tg.Container] = append(per[tg.Container], rs...)
+			all = append(all, rs...)
+		}
 	}
 	fmt.Fprintln(out, "\n"+canary.Table(order, per))
 	for _, r := range famRows {
