@@ -29,6 +29,7 @@ func xraySession(t *testing.T, srv *fakesrv.Server) (*core.Session, *core.Contai
 	t.Helper()
 	t.Cleanup(core.SetXRayWaits(0, 0))
 	sess := core.NewSessionWithRunner(srv, raceCreds())
+	xrayApplySess = sess
 	cs, err := sess.FindContainers()
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +41,22 @@ func xraySession(t *testing.T, srv *fakesrv.Server) (*core.Session, *core.Contai
 	}
 	t.Fatalf("amnezia-xray не найден: %+v", cs)
 	return nil, nil
+}
+
+// xrayApply — подтверждённый путь записи XRay: план → Apply того же плана
+// (обёртки «план и сразу запись» для XRay с перезапуском отказывают).
+var xrayApplySess *core.Session
+
+func xrayApply(p *core.Plan, err error) (*core.NewUser, error) {
+	if err != nil {
+		return nil, err
+	}
+	return xrayApplySess.Apply(p)
+}
+
+func xrayApplyErr(p *core.Plan, err error) error {
+	_, err = xrayApply(p, err)
+	return err
 }
 
 func fileOf(t *testing.T, srv *fakesrv.Server, p string) []byte {
@@ -222,7 +239,7 @@ func TestXRayUnknownNotEmpty(t *testing.T) {
 func TestXRayAddRestartsOnce(t *testing.T) {
 	srv := fakesrv.NewXRay("master")
 	sess, x := xraySession(t, srv)
-	nu, err := sess.AddUser(x, "Carol")
+	nu, err := xrayApply(sess.PlanAddUser(x, "Carol"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +299,7 @@ func TestXRayDisableEnableDeleteRekey(t *testing.T) {
 	alice := clientsOf(t, srv)["Alice"]["id"].(string)
 	bob := clientsOf(t, srv)["Bob"]["id"].(string)
 
-	if err := sess.SetEnabled(x, alice, false); err != nil {
+	if err := xrayApplyErr(sess.PlanSetEnabled(x, alice, false)); err != nil {
 		t.Fatal(err)
 	}
 	if contains(fakesrv.XRayIDs(fileOf(t, srv, xrayConf)), alice) || clientsOf(t, srv)["Alice"]["disabled"] != true || srv.XRayRestarts() != 1 {
@@ -292,19 +309,19 @@ func TestXRayDisableEnableDeleteRekey(t *testing.T) {
 	if v.Access[alice] != core.XRayDisabled || v.Access[bob] != core.XRayActive {
 		t.Errorf("доступ: %v", v.Access)
 	}
-	if _, err := sess.RegenerateUser(x, alice); err == nil {
+	if _, err := xrayApply(sess.PlanRekey(x, alice)); err == nil {
 		t.Error("перевыпуск отключённого")
 	}
 	if _, err := sess.XRayClientConfig(x, alice); err == nil {
 		t.Error("конфиг отключённого выдан")
 	}
-	if err := sess.SetEnabled(x, alice, true); err != nil {
+	if err := xrayApplyErr(sess.PlanSetEnabled(x, alice, true)); err != nil {
 		t.Fatal(err)
 	}
 	if !contains(fakesrv.XRayIDs(fileOf(t, srv, xrayConf)), alice) || clientsOf(t, srv)["Alice"]["disabled"] != nil || srv.XRayRestarts() != 2 {
 		t.Fatalf("включение: %d", srv.XRayRestarts())
 	}
-	nu, err := sess.RegenerateUser(x, bob)
+	nu, err := xrayApply(sess.PlanRekey(x, bob))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +330,7 @@ func TestXRayDisableEnableDeleteRekey(t *testing.T) {
 	if nb == bob || contains(ids, bob) || !contains(ids, nb) || nu.Replaces != bob || !strings.Contains(nu.Link, nb) || srv.XRayRestarts() != 3 {
 		t.Fatalf("перевыпуск: %v %d", ids, srv.XRayRestarts())
 	}
-	if err := sess.DeleteByID(x, alice); err != nil {
+	if err := xrayApplyErr(sess.PlanDelete(x, alice)); err != nil {
 		t.Fatal(err)
 	}
 	if contains(fakesrv.XRayIDs(fileOf(t, srv, xrayConf)), alice) || clientsOf(t, srv)["Alice"] != nil || srv.XRayRestarts() != 4 {
@@ -385,7 +402,7 @@ func TestXRayRollbackTable(t *testing.T) {
 			srv.XRay = c.hooks
 			conf0, tbl0 := fileOf(t, srv, xrayConf), fileOf(t, srv, xrayTbl)
 			sess, x := xraySession(t, srv)
-			_, err := sess.AddUser(x, "Carol")
+			_, err := xrayApply(sess.PlanAddUser(x, "Carol"))
 			if !errors.Is(err, c.want) {
 				t.Fatalf("ждали %v, получено %v", c.want, err)
 			}
@@ -415,7 +432,7 @@ func TestXRayPrecheckNoTool(t *testing.T) {
 			srv := fakesrv.NewXRay("dev")
 			srv.XRay = h
 			sess, x := xraySession(t, srv)
-			_, err := sess.AddUser(x, "Carol")
+			_, err := xrayApply(sess.PlanAddUser(x, "Carol"))
 			if !errors.Is(err, core.ErrWriteNotStarted) || writeCmds(srv) != 0 {
 				t.Fatalf("%v; записей %d", err, writeCmds(srv))
 			}
@@ -436,7 +453,7 @@ func TestXRayPartialNoRestart(t *testing.T) {
 	srv := fakesrv.NewXRay("master")
 	srv.FailMvTo = "clientsTable"
 	sess, x := xraySession(t, srv)
-	_, err := sess.AddUser(x, "Carol")
+	_, err := xrayApply(sess.PlanAddUser(x, "Carol"))
 	if !errors.Is(err, core.ErrWritePartial) || srv.XRayRestarts() != 0 {
 		t.Fatalf("%v; перезапусков %d", err, srv.XRayRestarts())
 	}
@@ -549,7 +566,7 @@ func TestXRaySaveConfigJSON(t *testing.T) {
 		t.Fatalf("чужой файл: %+v %v", r2, err)
 	}
 	// перевыпуск Bob — свой файл перезаписывается
-	nu2, err := sess.RegenerateUser(x, bob)
+	nu2, err := xrayApply(sess.PlanRekey(x, bob))
 	if err != nil {
 		t.Fatal(err)
 	}

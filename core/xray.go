@@ -458,7 +458,7 @@ func xrayFormatOf(err error) XRayFormat {
 	case err == nil:
 		return XRayFormat{State: FormatKnown}
 	case errors.As(err, &u):
-		return XRayFormat{State: FormatUnknownKey, Reason: "формат не знаком этой версии программы: " + u.why}
+		return XRayFormat{State: FormatUnknownKey, Reason: "формат не знаком этой версии программы: " + u.why + "; управляйте этим XRay в приложении Amnezia"}
 	case errors.As(err, &r):
 		return XRayFormat{State: FormatUnreadable, Reason: "не удалось прочитать " + r.what, Err: r.err}
 	}
@@ -734,6 +734,12 @@ func (s *Session) XRayClientConfig(c *Container, clientID string) (*NewUser, err
 
 // ---------- планы ----------
 
+// ErrXRayNeedsConfirm — обёртка «план и сразу запись» (AddUser, DeleteByID,
+// SetEnabled…) получила план XRay с перезапуском: такой план пишется только
+// через Plan* → подтверждение перезапуска → Apply того же плана (решение
+// владельца 1; AU-LOGIC High-2). Ничего не записано.
+var ErrXRayNeedsConfirm = errors.New("изменение XRay перезапускает его и рвёт подключения: нужен план и подтверждение перезапуска — ничего не записано")
+
 var errXRayService = errors.New("служебный UUID XRay (создан при установке) программа не меняет: его нельзя удалить, отключить или перевыпустить")
 
 // xrayPlan — план XRay из прочитанного состояния и нового списка UUID и записей.
@@ -985,9 +991,10 @@ func (p *Plan) RestartsXRay() bool {
 // XRayRestartWarning — текст предупреждения перед действием, перезапускающим
 // XRay (решение владельца 1; слова — проект БК, раздел 3). Число
 // подключённых XRay узнать нельзя — так и сказано, а не «0».
-const XRayRestartWarning = "XRay будет перезапущен.\n" +
-	"Чтобы изменение заработало, программа перезапустит XRay на сервере. У всех, кто сейчас подключён по XRay " +
-	"(сколько их — узнать нельзя: XRay не отдаёт статистику), связь оборвётся на несколько секунд, затем их приложения подключатся заново.\n" +
+const XRayRestartWarning = "XRay будет перезапущен: соединения ВСЕХ пользователей XRay оборвутся " +
+	"(сколько их сейчас подключено — узнать нельзя: XRay не отдаёт статистику).\n" +
+	"На тестовом сервере перезапуск занимал 1–3 секунды; когда переподключится приложение пользователя, зависит от приложения.\n" +
+	"Пользователей WireGuard и AmneziaWG это не затрагивает.\n" +
 	"Если перезапуск не удастся, программа вернёт прежние настройки — это ещё один перезапуск."
 
 // XRayRestartTitle, XRayRestartConfirm — заголовок и кнопка подтверждения.
@@ -1061,6 +1068,7 @@ func (s *Session) restartXRay(c *Container) error {
 	if _, err := s.docker("docker restart "+c.Name, nil); err != nil {
 		return fmt.Errorf("перезапуск XRay: %w", err)
 	}
+	s.xrayRestarts++
 	return nil
 }
 
@@ -1069,8 +1077,13 @@ func (s *Session) restartXRay(c *Container) error {
 // и не знаем»).
 func (s *Session) xrayPrecheck(c *Container) error {
 	st, why := s.xrayLiveness(c)
-	if st == xrayLiveUnknown {
+	switch st {
+	case xrayLiveUnknown:
 		return fmt.Errorf("перед записью: %s — после перезапуска не проверить, работает ли XRay; ничего не записано: %w", why, notStarted{errors.New(why)})
+	case xrayDead:
+		// QA Н1 (решение ядра): XRay уже не работает — перезапуск с новым
+		// файлом не отличить от прежней поломки; не пишем.
+		return fmt.Errorf("XRay не работает уже сейчас (процесса xray нет) — ничего не записано; сначала выясните, почему он остановлен: %w", notStarted{errors.New(why)})
 	}
 	return nil
 }

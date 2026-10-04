@@ -37,6 +37,10 @@ var (
 type XRayHooks struct {
 	// FailRestart — `docker restart` возвращает эту ошибку; процесс не трогается.
 	FailRestart error
+	// FailRestartFrom — если > 0, `docker restart` падает начиная с N-го
+	// вызова (счёт с 1); до этого — как обычно (AU-LOGIC High-1).
+	FailRestartFrom int
+	restartCalls    int
 	// DeadOnRestart — номер перезапуска (с 1) → xray после него не поднялся.
 	DeadOnRestart map[int]bool
 	// NoPidof — в контейнере нет pidof (проверка отвечает notool).
@@ -193,6 +197,10 @@ func (s *Server) dispatchXRay(cmd string) (out string, err error, ok bool) {
 		}
 		if s.XRay.FailRestart != nil {
 			return "", s.XRay.FailRestart, true
+		}
+		s.XRay.restartCalls++
+		if s.XRay.FailRestartFrom > 0 && s.XRay.restartCalls >= s.XRay.FailRestartFrom {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: Error response from daemon: имитированный отказ перезапуска", cmd), true
 		}
 		s.xray.restarts++
 		conf := s.files[XRayDir+"/server.json"]

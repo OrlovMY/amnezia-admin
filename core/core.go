@@ -133,6 +133,11 @@ type Session struct {
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
 	// реентерабелен, повторный Lock из-под уже взятого — deadlock.
 	mu sync.Mutex
+
+	// xrayRestarts — сколько перезапусков XRay удалось за текущий Apply
+	// (AL-01, AU-LOGIC High-1): откат без единого удачного перезапуска —
+	// «не перезапускался», а не «перезапущен».
+	xrayRestarts int
 }
 
 func (s *Session) Close() {
@@ -1194,6 +1199,9 @@ func (s *Session) AddUser(c *Container, name string) (*NewUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.RestartsXRay() {
+		return nil, ErrXRayNeedsConfirm
+	}
 	return s.applyLocked(p)
 }
 
@@ -1247,6 +1255,9 @@ func (s *Session) DeleteByID(c *Container, clientID string) error {
 	if err != nil {
 		return err
 	}
+	if p.RestartsXRay() {
+		return ErrXRayNeedsConfirm
+	}
 	_, err = s.applyLocked(p)
 	return err
 }
@@ -1296,6 +1307,9 @@ func (s *Session) RegenerateUser(c *Container, clientID string) (*NewUser, error
 	p, err := s.planRekeyLocked(c, clientID)
 	if err != nil {
 		return nil, err
+	}
+	if p.RestartsXRay() {
+		return nil, ErrXRayNeedsConfirm
 	}
 	return s.applyLocked(p)
 }
@@ -1349,6 +1363,9 @@ func (s *Session) RenameUser(c *Container, clientID, newName string) error {
 	if err != nil {
 		return err
 	}
+	if p.RestartsXRay() {
+		return ErrXRayNeedsConfirm
+	}
 	_, err = s.applyLocked(p)
 	return err
 }
@@ -1370,6 +1387,9 @@ func (s *Session) SetEnabledNoted(c *Container, clientID string, enabled bool) (
 	p, err := s.planSetEnabledLocked(c, clientID, enabled)
 	if err != nil {
 		return "", err
+	}
+	if p.RestartsXRay() {
+		return "", ErrXRayNeedsConfirm
 	}
 	if _, err = s.applyLocked(p); err != nil {
 		return "", err

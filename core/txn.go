@@ -1557,6 +1557,7 @@ func (s *Session) Apply(p *Plan) (*NewUser, error) {
 
 func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 	c := p.Container
+	s.xrayRestarts = 0
 
 	// 1. backup — существующая команда, без изменений. Стоит ДО записи и
 	// потому до сверки: сверка теперь внутри команды записи (A3б).
@@ -1775,6 +1776,9 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		if IsXRay(c) && runtime != checkNotNeeded {
 			scope = "\nПроверено: содержимое обоих файлов байт в байт; XRay перезапущен с прежним server.json и его процесс работает." +
 				"\nПринят ли каждый клиент — проверить нечем (у XRay нет списка подключённых)."
+			if s.xrayRestarts == 0 {
+				scope = "\nПроверено: содержимое обоих файлов байт в байт; XRay не перезапускался — работает с прежним server.json, его процесс жив."
+			}
 		}
 		if runtime == checkNotNeeded {
 			// Раунд 7 (AU-LOGIC Н-6): wg0.conf этой операцией не менялся,
@@ -1869,10 +1873,22 @@ func (s *Session) measureRuntimeAfterRollback(c *Container, wgBefore []byte, wgC
 		// XRay: рантайм — живость процесса после второго перезапуска. Три
 		// состояния: жив — совпал (работает с прежним файлом); мёртв — не
 		// совпал; проверить нечем — неизвестно.
-		st, why := s.waitXRay(c)
 		if syncErr != nil {
-			why += fmt.Sprintf(" (повторный перезапуск: %v)", syncErr)
+			// AU-LOGIC High-1: ошибка повторного перезапуска не отбрасывается.
+			if s.xrayRestarts == 0 {
+				// Ни одного удачного перезапуска: XRay работает прежним
+				// процессом, то есть с прежним server.json, — если жив.
+				st, why := s.xrayLiveness(c)
+				if st == xrayAlive {
+					return checkSame, "XRay не перезапускался ни разу — работает с прежним server.json (" + why + ")"
+				}
+				return checkUnknown, fmt.Sprintf("XRay не перезапускался (%v), %s", syncErr, why)
+			}
+			// Новый файл уже применялся, а вернуть прежний перезапуском не
+			// удалось — с каким файлом работает XRay, неизвестно.
+			return checkUnknown, fmt.Sprintf("повторный перезапуск XRay не удался (%v) — с каким server.json он работает, неизвестно", syncErr)
 		}
+		st, why := s.waitXRay(c)
 		switch st {
 		case xrayAlive:
 			return checkSame, why
