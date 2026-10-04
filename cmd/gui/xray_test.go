@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -176,5 +177,18 @@ func TestXRayGUIDeleteCard(t *testing.T) {
 	}
 	if m := u.cellMenu(widget.TableCellID{Row: len(u.clients) - 1, Col: 1}); m == nil || len(m.Items) != 1 {
 		t.Errorf("меню служебной строки: %+v", m)
+	}
+}
+
+// TestXRayGUIReadFailNotStale — сбой чтения server.json при обновлении:
+// таблица не показывает прежний список как текущий, кнопки выключены,
+// причина в статусе (признак 4).
+func TestXRayGUIReadFailNotStale(t *testing.T) {
+	u, srv := xrayUI(t)
+	srv.FailRead = map[string]error{"/opt/amnezia/xray/server.json": errors.New("i/o timeout")}
+	u.refresh()
+	waitGUIGoroutines(t)
+	if len(u.clients) != 0 || u.canManage || !strings.Contains(u.status.Text, "не показан") || !strings.Contains(u.status.Text, "server.json") {
+		t.Fatalf("строк %d, canManage %v, статус %q", len(u.clients), u.canManage, u.status.Text)
 	}
 }

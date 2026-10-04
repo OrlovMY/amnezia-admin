@@ -68,11 +68,18 @@ func (u *ui) refreshXRay(cur *core.Container) {
 			if cur != u.cur {
 				return
 			}
-			u.canManage = true
 			if err != nil {
-				u.status.SetText("Ошибка: " + core.MaskText(err.Error()) + " · показаны данные прошлого чтения.")
+				// Прежний список мог быть списком ДРУГОГО протокола (переключение)
+				// — показывать его под XRay нельзя: таблица очищается, кнопки
+				// выключаются, причина — в статусе (признак 4: не «старое
+				// молча»).
+				u.canManage = false
+				u.clients = nil
+				u.table.Refresh()
+				u.status.SetText("Ошибка: " + core.MaskText(err.Error()) + " · список XRay не показан.")
 				return
 			}
+			u.canManage = true
 			u.xrayView = v
 			clients := append([]core.ClientEntry{}, v.Clients...)
 			u.peerStats = map[string]core.PeerStat{}
