@@ -1782,6 +1782,11 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 			return fmt.Errorf("проверка не пройдена: peer %s не применился на сервере", pk)
 		}
 	}
+	if p.Action == "restore" {
+		// Р-5: замена целиком меняет [Interface] — ключ и порт работающего
+		// интерфейса обязаны совпасть с записанным файлом.
+		return s.verifyRestoredIface(c, p.wgAfter)
+	}
 	return nil
 }
 
