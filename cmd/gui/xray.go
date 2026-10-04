@@ -51,6 +51,18 @@ func (u *ui) xrayServiceRow(cl core.ClientEntry) bool {
 // рядом «Отмена» и кнопка действия; фокус на «Отмена»; Esc — отмена.
 // danger — кнопка действия опасного вида. Возвращает окно (тестам).
 func (u *ui) confirmWindow(title string, sections []fyne.CanvasObject, okText string, danger bool, onOK func()) dialog.Dialog {
+	return u.confirmWindowBtn(title, sections, okText, danger, onOK).d
+}
+
+// confirmWin — окно подтверждения и его кнопка «OK».
+type confirmWin struct {
+	d  dialog.Dialog
+	ok *escButton
+}
+
+// confirmWindowBtn — то же, и кнопка подтверждения (окно восстановления
+// включает её по галкам).
+func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText string, danger bool, onOK func()) confirmWin {
 	var d dialog.Dialog
 	cv := u.win.Canvas()
 	prevKey := cv.OnTypedKey()
@@ -97,7 +109,7 @@ func (u *ui) confirmWindow(title string, sections []fyne.CanvasObject, okText st
 	d.Show()
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
-	return d
+	return confirmWin{d, okBtn}
 }
 
 // escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В

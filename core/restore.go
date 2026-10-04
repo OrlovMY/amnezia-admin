@@ -212,6 +212,8 @@ type RestoreOutcome struct {
 	Container string
 	State     RestoreState
 	Err       error
+	// Checked — граница проверки (только у RestoreDone).
+	Checked string
 }
 
 // RestoreOptions — параметры переезда.
@@ -234,18 +236,44 @@ func AutoCopyName(host string, now time.Time) string {
 	return fmt.Sprintf("%s-%s-перед-восстановлением.aabk", h, now.UTC().Format("20060102-150405"))
 }
 
+// classify — исход контейнера по ошибке Apply. Порядок существенен
+// (AU-LOGIC р2 High-1): ошибка отката (restoreError) несёт в Unwrap и
+// причину, и исход отката — сентинелы «ничего не записано» (занято, нет
+// утилиты, sudo) у неё относятся к ОТКАТУ, а запись уже была. Поэтому
+// сначала — откат (по его kind), затем «записано частично/неизвестно», и
+// только у ошибки без отката — «ничего не записано». Всё неопознанное —
+// «неизвестно», не «восстановлен» и не «ничего не записано».
 func classify(err error) RestoreState {
-	switch {
-	case err == nil:
+	if err == nil {
 		return RestoreDone
-	case errors.Is(err, ErrRolledBack):
-		return RestoreRolledBack
+	}
+	var re *restoreError
+	if errors.As(err, &re) {
+		if re.kind == ErrRolledBack {
+			return RestoreRolledBack
+		}
+		return RestoreUnknown
+	}
+	var rf *rollbackForeignError
+	switch {
+	case errors.As(err, &rf):
+		return RestoreUnknown
+	case errors.Is(err, ErrWritePartial), errors.Is(err, ErrWriteUnknown):
+		return RestoreUnknown
 	case errors.Is(err, ErrWriteNotStarted), errors.Is(err, ErrCASMismatch), errors.Is(err, ErrServerBusy),
 		errors.Is(err, ErrServerToolMissing), errors.Is(err, ErrSudoDenied):
 		return RestoreNotWritten
 	}
 	return RestoreUnknown
 }
+
+// Граница проверки у восстановленного контейнера (AU-LOGIC р2 High-2):
+// своя у WG и у XRay; печатается только у «восстановлен».
+const (
+	RestoreCheckedWG   = "проверено: файлы байт в байт, набор клиентов, открытый ключ и порт работающего сервера; параметры маскировки AWG в работающем сервере не сверялись"
+	RestoreCheckedXRay = "проверено: файлы байт в байт и что процесс XRay после перезапуска жив; принял ли он каждого клиента — проверить нечем"
+	RestoreOutsideNote = "Открыт ли порт снаружи (файрвол хостера), программа изнутри проверить не может."
+)
 
 // Restore — применение плана: автокопия цели, затем контейнеры по очереди
 // до первого сбоя. Ошибка — автокопия не снята или не записана: тогда
@@ -284,34 +312,45 @@ func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string,
 			_, aerr := s.Apply(it.plan)
 			o.State, o.Err = classify(aerr), aerr
 			failed = aerr != nil
+			if o.State == RestoreDone {
+				o.Checked = RestoreCheckedWG
+				if IsXRay(it.plan.Container) {
+					o.Checked = RestoreCheckedXRay
+				}
+			}
 		}
 		outs = append(outs, o)
 	}
 	return autoCopy, outs, nil
 }
 
-// RestoreRuntimeNote — граница проверки после замены (Р-5): что сверено.
-const RestoreRuntimeNote = "Проверено: файлы байт в байт; набор клиентов, открытый ключ и порт работающего сервера совпали с копией. " +
-	"Параметры маскировки AWG (Jc…H4, S3/S4, I1–I5, поля AWG3) в работающем сервере не сверялись — вывод awg show их не показывает в разобранном программой виде. " +
-	"Открыт ли порт снаружи (файрвол хостера), программа изнутри проверить не может."
-
-// ifaceRuntimeOf — открытый ключ и порт работающего интерфейса (первая
-// строка wg/awg show dump). Приватный ключ (первое поле) не читается.
+// ifaceRuntimeOf — открытый ключ и порт работающего интерфейса: отдельными
+// командами «<tool> show <iface> public-key» и «… listen-port» (SEC-01 Н-3:
+// dump не читается — его первая строка начинается с ПРИВАТНОГО ключа
+// интерфейса).
 func (s *Session) ifaceRuntimeOf(c *Container) (pub, port string, err error) {
 	fam, err := WGFamilyOf(c)
 	if err != nil {
 		return "", "", err
 	}
-	out, err := s.docker(fmt.Sprintf("docker exec %s %s show %s dump", c.Name, fam.Tool, fam.Iface), nil)
-	if err != nil {
-		return "", "", fmt.Errorf("%s show: %w", fam.Tool, err)
+	get := func(what string) (string, error) {
+		out, err := s.docker(fmt.Sprintf("docker exec %s %s show %s %s", c.Name, fam.Tool, fam.Iface, what), nil)
+		if err != nil {
+			return "", fmt.Errorf("%s show %s: %w", fam.Tool, what, err)
+		}
+		v := strings.TrimSpace(out)
+		if v == "" || strings.ContainsAny(v, " \t\n") {
+			return "", fmt.Errorf("%s show %s: ответ не разобран", fam.Tool, what)
+		}
+		return v, nil
 	}
-	line := strings.SplitN(strings.TrimRight(out, "\r\n"), "\n", 2)[0]
-	f := strings.Split(strings.TrimRight(line, "\r"), "\t")
-	if len(f) < 3 {
-		return "", "", fmt.Errorf("%s show: строка интерфейса не разобрана", fam.Tool)
+	if pub, err = get("public-key"); err != nil {
+		return "", "", err
 	}
-	return f[1], f[2], nil
+	if port, err = get("listen-port"); err != nil {
+		return "", "", err
+	}
+	return pub, port, nil
 }
 
 // verifyRestoredIface — Р-5: ключ и порт работающего интерфейса равны

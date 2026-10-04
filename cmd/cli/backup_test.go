@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -56,7 +57,7 @@ func TestCLIBackupWarnsBeforeWrite(t *testing.T) {
 	if w < 0 || r < 0 || w > r {
 		t.Fatalf("предупреждение не до записи (%d, %d):\n%s", w, r, out)
 	}
-	for _, part := range []string{"PSK", "Reality", "UUID", "Windows", "перевыпустите"} {
+	for _, part := range []string{"секретный ключ", "общие секреты", "ключ маскировки", "Windows", "смените ключ сервера"} {
 		if !strings.Contains(out[w:r], part) {
 			t.Errorf("в предупреждении нет «%s»", part)
 		}
@@ -113,17 +114,22 @@ func TestCLIRestore(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "предпросмотр") || !strings.Contains(out, "УДАЛЕНЫ клиенты нового сервера") || flocks(tgt) != 0 {
 		t.Fatalf("предпросмотр: %d %s\n%s", code, e, out)
 	}
-	if code, _, _ := cliRun(t, khB, "", "restore", "-key", keyB, "-file", p, "-apply"); code != 2 || flocks(tgt) != 0 {
+	// QA-01 р2 Н3: без терминала, -apply без -yes — код 2 и ни одной записи,
+	// даже если на stdin «согласие» (вопрос без терминала не задаётся).
+	if code, _, _ := cliRun(t, khB, "y\ny\n", "restore", "-key", keyB, "-file", p, "-apply"); code != 2 || flocks(tgt) != 0 {
 		t.Fatalf("-apply без -yes: код %d, записей %d", code, flocks(tgt))
 	}
 	wg, _ := tgt.File("/opt/amnezia/awg/wg0.conf")
 	tgt.SetFile("/opt/amnezia/awg/wg0.conf", []byte(strings.Replace(string(wg), "ListenPort = 51820", "ListenPort = 40000", 1)))
 	code, out, _ = cliRun(t, khB, "", "restore", "-key", keyB, "-file", p, "-apply", "-yes")
-	if code != exitRestoreStopped || !strings.Contains(out, "ОСТАНОВЛЕН") || flocks(tgt) != 0 {
-		t.Fatalf("порт другой: код %d\n%s", code, out)
+	if code != exitRestoreStopped || !strings.Contains(out, "ОСТАНОВЛЕН") || !strings.Contains(out, "  1. amnezia-awg, порт:") || flocks(tgt) != 0 {
+		t.Fatalf("порт другой (расхождения списком): код %d\n%s", code, out)
 	}
 	tgt.SetFile("/opt/amnezia/awg/wg0.conf", wg)
 	code, out, e = cliRun(t, khB, "", "restore", "-key", keyB, "-file", p, "-apply", "-yes")
+	if rm := strings.Index(out, "Будут УДАЛЕНЫ клиенты нового сервера"); rm < 0 || rm > strings.Index(out, "Копия: формат") {
+		t.Errorf("раздел удаляемых не первым:\n%s", out)
+	}
 	if code != 0 || !strings.Contains(out, "amnezia-awg: восстановлен") {
 		t.Fatalf("восстановление: %d %s\n%s", code, e, out)
 	}
@@ -160,5 +166,33 @@ func TestCLIBackupSummaryNotIncluded(t *testing.T) {
 	_, out, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p)
 	if strings.Contains(out, "Все протоколы сервера сохранены") || !strings.Contains(out, "Не входят в копию: amnezia-openvpn") {
 		t.Errorf("итог:\n%s", out)
+	}
+}
+
+// TestBackupCLIErrorsMasked — SEC-01 р2: в backup.go ни одна ошибка не
+// печатается напрямую — только через backupErr (errText → MaskText).
+// Подсадка «fmt.Fprintln(errOut, err)» роняет сторож.
+func TestBackupCLIErrorsMasked(t *testing.T) {
+	src, err := os.ReadFile("backup.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`fmt\.Fprint\w*\([^\n]*\berr\b`)
+	n := 0
+	for i, l := range strings.Split(string(src), "\n") {
+		if strings.Contains(l, "fmt.Fprint") {
+			n++
+		}
+		if re.MatchString(l) && !strings.Contains(l, "errText(") {
+			t.Errorf("backup.go:%d: ошибка печатается в обход backupErr: %s", i+1, strings.TrimSpace(l))
+		}
+	}
+	if n < 5 {
+		t.Fatalf("сторож ничего не видит: строк вывода %d", n)
+	}
+	var b bytes.Buffer
+	backupErr(&b, "x: ", errors.New("клиент 3f1c2a9e-1b2c-4d5e-8f90-0123456789ab утёк"))
+	if strings.Contains(b.String(), "3f1c2a9e-1b2c") {
+		t.Errorf("backupErr не маскирует: %s", b.String())
 	}
 }

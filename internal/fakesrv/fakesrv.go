@@ -367,6 +367,8 @@ var (
 	// старой версии в К4 (PR-W1).
 	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) (?:env LC_ALL=C )?sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
 	reWgShow      = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
+	// reWgShowField — открытый ключ и порт интерфейса (без приватного ключа).
+	reWgShowField = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) (public-key|listen-port)$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -705,6 +707,20 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			s.ifacePub, s.ifacePort = ifaceRuntime(string(wg0))
 		}
 		return "", nil
+
+	case reWgShowField.MatchString(cmd):
+		m := reWgShowField.FindStringSubmatch(cmd)
+		if !wgTriple(m[2], m[3], "") {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		pub, port := "serverpub", "51820"
+		if s.ifacePub != "" {
+			pub, port = s.ifacePub, s.ifacePort
+		}
+		if m[4] == "public-key" {
+			return pub + "\n", nil
+		}
+		return port + "\n", nil
 
 	case reWgShow.MatchString(cmd):
 		if m := reWgShow.FindStringSubmatch(cmd); !wgTriple(m[2], m[3], "") {

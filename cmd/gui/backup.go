@@ -35,6 +35,7 @@ const (
 	restoreApplyText   = "Заменить данные сервера"
 	restoreAddrCheck   = "Понимаю: адрес другой или не проверен — выданные конфиги могут не работать"
 	restoreXRayCheck   = "Перезапустить XRay (все подключения XRay оборвутся)"
+	restoreSkipXRay    = "Перенести без XRay — XRay на новом сервере останется прежним"
 	backupCopyPathText = "Скопировать путь"
 )
 
@@ -49,10 +50,10 @@ func (u *ui) backupMenu() {
 	save := widget.NewButtonWithIcon(backupSaveText, theme.DocumentSaveIcon(), func() { d.Hide(); u.backupDialog() })
 	restore := widget.NewButtonWithIcon(backupRestoreText, theme.FolderOpenIcon(), func() { d.Hide(); u.restorePick() })
 	body := container.NewVBox(
-		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. Приватных ключей клиентов на сервере нет и в копии тоже — выданные конфиги продолжат работать, если сервер получит прежний адрес или конфиги выданы по имени.", false),
+		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
 		save, restore)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
-	d.Resize(fyne.NewSize(560, 260))
+	d.Resize(fyne.NewSize(560, 300))
 	d.Show()
 }
 
@@ -119,7 +120,7 @@ func (u *ui) backupResult(path string, b *core.Backup, err error) dialog.Dialog 
 		}))
 	}
 	d := dialog.NewCustom("Копия сервера", "Закрыть", container.NewVScroll(container.NewVBox(objs...)), u.win)
-	d.Resize(fyne.NewSize(640, 460))
+	d.Resize(fyne.NewSize(640, 420))
 	d.Show()
 	return d
 }
@@ -175,62 +176,75 @@ func (u *ui) restoreFromFile(path string) {
 // restoreView — окно восстановления (поля — для тестов).
 type restoreView struct {
 	d         dialog.Dialog
-	apply     *widget.Button
+	apply     *escButton
 	addrCheck *widget.Check
 	xrayCheck *widget.Check
+	skipXRay  *widget.Check
 	text      string
 }
 
-// restoreWindow — сводка копии, проверка цели, план; кнопка замены
-// включена, только если нет СТОП, план построен и (при необходимости)
-// подтверждён адрес.
+// restoreWindow — устройство окна подтверждения XRay (AU-UX H1): «Отмена» и
+// «Заменить данные сервера» внизу рядом, фокус на «Отмена», Esc — отмена.
+// Разделы: удаляемые клиенты (M2, первым), расхождения при СТОП (списком),
+// сводка копии, проверка нового сервера, план; галки. Кнопка замены включена,
+// только если нет СТОП, план построен, адрес подтверждён (если нужно) и про
+// XRay сделан явный выбор — перезапустить или перенести без него (M1).
 func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.RestorePlan, planErr error) *restoreView {
 	v := &restoreView{}
-	lines := core.BackupSummaryLines(b)
-	lines = append(lines, "")
-	lines = append(lines, core.CompatLines(compat)...)
-	switch {
-	case compat.Stop:
-		lines = append(lines, "", "ПЕРЕЕЗД ОСТАНОВЛЕН до записи: исправьте расхождения на новом сервере и повторите. Обновление версии при переезде программа не делает.")
-	case planErr != nil:
-		lines = append(lines, "", "План не построен: "+core.MaskText(planErr.Error()))
-	case rp != nil:
-		lines = append(lines, "")
-		lines = append(lines, core.RestorePlanLines(rp)...)
+	var sections []fyne.CanvasObject
+	var all []string
+	addSection := func(lines []string, bold bool) {
+		if len(lines) == 0 {
+			return
+		}
+		sections = append(sections, wrapLabel(strings.Join(lines, "\n"), bold))
+		all = append(all, lines...)
 	}
-	v.text = strings.Join(lines, "\n")
-	objs := []fyne.CanvasObject{wrapLabel(v.text, false)}
+	if rp != nil {
+		addSection(core.RemovedLines(rp), true)
+	}
+	addSection(core.CompatStopLines(compat), true)
+	if planErr != nil && !compat.Stop {
+		addSection([]string{"План не построен: " + core.MaskText(planErr.Error())}, true)
+	}
+	addSection(core.BackupSummaryLines(b), false)
+	addSection(core.CompatLines(compat), false)
+	if rp != nil {
+		addSection(core.RestorePlanLines(rp), false)
+	}
+	v.text = strings.Join(all, "\n")
 	xray := false
 	if rp != nil {
 		for _, it := range rp.Items {
 			xray = xray || it.RestartsXRay
 		}
 	}
-	update := func() {}
+	var update func()
 	if compat.NeedAddressConfirm {
 		v.addrCheck = widget.NewCheck(restoreAddrCheck, func(bool) { update() })
-		objs = append(objs, v.addrCheck)
+		sections = append(sections, v.addrCheck)
 	}
 	if xray {
-		objs = append(objs, restartSections()...)
-		v.xrayCheck = widget.NewCheck(restoreXRayCheck, nil)
-		objs = append(objs, v.xrayCheck)
+		sections = append(sections, restartSections()...)
+		v.xrayCheck = widget.NewCheck(restoreXRayCheck, func(bool) { update() })
+		v.skipXRay = widget.NewCheck(restoreSkipXRay, func(bool) { update() })
+		sections = append(sections, v.xrayCheck, v.skipXRay)
 	}
-	v.apply = widget.NewButtonWithIcon(restoreApplyText, theme.WarningIcon(), func() { u.doRestore(rp, v) })
-	v.apply.Importance = widget.DangerImportance
+	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() { u.doRestore(rp, v) })
+	v.d, v.apply = cw.d, cw.ok
 	update = func() {
-		ok := !compat.Stop && planErr == nil && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
-		if ok {
+		can := !compat.Stop && planErr == nil && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
+		if xray {
+			// ровно один явный выбор про XRay
+			can = can && (v.xrayCheck.Checked != v.skipXRay.Checked)
+		}
+		if can {
 			v.apply.Enable()
 		} else {
 			v.apply.Disable()
 		}
 	}
 	update()
-	content := container.NewBorder(nil, container.NewCenter(v.apply), nil, nil, container.NewVScroll(container.NewVBox(objs...)))
-	v.d = dialog.NewCustom("Восстановить из копии на этом сервере", "Отмена", content, u.win)
-	v.d.Resize(fyne.NewSize(760, 560))
-	v.d.Show()
 	return v
 }
 
@@ -269,7 +283,7 @@ func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) d
 		text = strings.Join(core.RestoreOutcomeLines(auto, outs), "\n")
 	}
 	d := dialog.NewCustom("Итог восстановления", "Закрыть", container.NewVScroll(wrapLabel(text, false)), u.win)
-	d.Resize(fyne.NewSize(700, 480))
+	d.Resize(fyne.NewSize(640, 420))
 	d.Show()
 	return d
 }

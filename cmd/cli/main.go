@@ -15,7 +15,7 @@
 //	amnezia-admin show-config -key vpn://... -name Vasya [-print]
 //	amnezia-admin backup -key vpn://... [-o файл.aabk]
 //	amnezia-admin backup-info файл.aabk
-//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-apply] [-address-changes] [-yes]
+//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -978,6 +978,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	backupFile := fs.String("file", "", "restore: файл копии .aabk")
 	apply := fs.Bool("apply", false, "restore: выполнить замену (без флага — только предпросмотр)")
 	addrChanges := fs.Bool("address-changes", false, "restore: продолжить, хотя адрес выдачи другой или не проверен")
+	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -1060,7 +1061,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	case "backup":
 		return runBackup(stdout, stderr, sess, *outFile, time.Now())
 	case "restore":
-		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *apply, *addrChanges, *yes, time.Now())
+		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
 	case "add":
