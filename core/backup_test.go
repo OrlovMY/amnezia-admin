@@ -68,7 +68,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	}
 	c := ctrOf(t, got, "amnezia-awg")
 	wg, _ := srv.File("/opt/amnezia/awg/wg0.conf")
-	if f := fileOfB(c, "wg0.conf"); f.Status != FileSaved || !bytes.Equal(f.Data, wg) {
+	if f := fileOfB(c, "wg0.conf"); f.Status != FileSaved || !bytes.Equal(f.Data.Bytes(), wg) {
 		t.Errorf("wg0.conf после круга: %s", f.Status)
 	}
 	if c.Port != "51820" || c.Subnet != "10.8.1.1/24" || c.Version != "старый AWG" || c.VersionState != VersionKnown {
@@ -107,6 +107,14 @@ func TestBackupFileStates(t *testing.T) {
 			t.Errorf("контейнер %s, полная=%v — ждали не прочитан и неполная", c.Status, b.Complete)
 		}
 	})
+	t.Run("фраза «No such file» о другом пути — unreadable", func(t *testing.T) {
+		srv := fakesrv.New()
+		srv.FailRead = map[string]error{"/opt/amnezia/awg/clientsTable": errors.New("stderr: sh: /etc/x: No such file or directory")}
+		b, _ := backupSession(t, srv).CollectBackup("t", backupNow, okResolver)
+		if f := fileOfB(ctrOf(t, b, "amnezia-awg"), "clientsTable"); f.Status != FileUnreadable {
+			t.Errorf("clientsTable: %s, ждали unreadable", f.Status)
+		}
+	})
 	t.Run("ключевых файлов нет — absent", func(t *testing.T) {
 		srv := fakesrv.New()
 		b, _ := backupSession(t, srv).CollectBackup("t", backupNow, okResolver)
@@ -121,7 +129,7 @@ func TestBackupFileStates(t *testing.T) {
 		srv := fakesrv.New()
 		srv.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("PSK-SERVER\n"))
 		b, _ := backupSession(t, srv).CollectBackup("t", backupNow, okResolver)
-		if f := fileOfB(ctrOf(t, b, "amnezia-awg"), "wireguard_psk.key"); f.Status != FileSaved || string(f.Data) != "PSK-SERVER\n" {
+		if f := fileOfB(ctrOf(t, b, "amnezia-awg"), "wireguard_psk.key"); f.Status != FileSaved || string(f.Data.Bytes()) != "PSK-SERVER\n" {
 			t.Errorf("wireguard_psk.key: %s", f.Status)
 		}
 	})
@@ -325,11 +333,11 @@ func TestBackupGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("золотой файл формата 1 не прочитан: %v", err)
 	}
-	if b.Format != 1 || b.Server.Host != "golden.example.test" || b.IssuedAddress.ResolveStatus != ResolveOK {
+	if b.FormatVersion != 1 || b.Server.Host != "golden.example.test" || b.IssuedAddress.ResolveStatus != ResolveOK {
 		t.Errorf("золотой файл: %+v", b.Server)
 	}
 	c := ctrOf(t, b, "amnezia-awg")
-	if f := fileOfB(c, "wireguard_psk.key"); string(f.Data) != "golden-test-psk\n" {
+	if f := fileOfB(c, "wireguard_psk.key"); string(f.Data.Bytes()) != "golden-test-psk\n" {
 		t.Errorf("wireguard_psk.key в золотом файле: %s", f.Status)
 	}
 }

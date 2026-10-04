@@ -172,7 +172,11 @@ func (r *CompatReport) versionRow(bc BackupContainer, c *Container, conf []byte)
 	v, st, why := protoVersion(c, conf)
 	switch {
 	case bc.VersionState != VersionKnown:
-		r.add(bc.Name, "протокол и версия", CompatUnknown, "версию протокола в копии определить не удалось — переезд невозможен: версии не сверить")
+		why := bc.VersionReason
+		if why == "" {
+			why = "причина в копии не записана"
+		}
+		r.add(bc.Name, "протокол и версия", CompatUnknown, "версию протокола в копии определить не удалось ("+why+") — переезд невозможен: версии не сверить")
 	case st != VersionKnown:
 		r.add(bc.Name, "протокол и версия", CompatUnknown, "версию определить не удалось на новом сервере ("+why+") — "+installHint(bc))
 	case v != bc.Version:
@@ -245,9 +249,15 @@ func addressVerdict(a IssuedAddress, targetHost string, resolve Resolver) (Addre
 		case strings.EqualFold(targetHost, a.Value):
 			return AddrByName, "Конфиги выданы по имени " + a.Value + ", и новый сервер доступен по этому же имени: выданные этой программой конфиги будут работать."
 		case !tok || !nok:
-			return AddrByName, "Конфиги выданы по имени " + a.Value + ". Куда оно указывает сейчас, проверить не удалось — после переезда перенаправьте имя на новый сервер (" + targetHost + ")."
+			// AU-LOGIC Medium-1 (решение ядра): не разрешилось — «проверить
+			// не удалось» с подтверждением, а не «по имени».
+			return AddrUnknown, "Проверить адрес не удалось: имя " + a.Value + " или адрес нового сервера " + targetHost + " сейчас не разрешились. Неизвестно, будут ли работать выданные конфиги; после переезда имя должно указывать на новый сервер."
 		case intersects(nips, tips):
 			return AddrByName, "Конфиги выданы по имени " + a.Value + "; имя уже указывает на новый сервер (" + strings.Join(tips, ", ") + ")."
+		case a.ResolvedIP != "" && intersects(nips, strings.Split(a.ResolvedIP, ",")):
+			// QA-01 (б), решение ядра: имя всё ещё ведёт на СТАРЫЙ сервер —
+			// адрес отличается, нужно подтверждение.
+			return AddrDiffers, "Конфиги выданы по имени " + a.Value + ", и оно всё ещё указывает на старый сервер (" + strings.Join(nips, ", ") + "), а не на новый (" + strings.Join(tips, ", ") + "). Перенаправьте имя на новый сервер — иначе пользователи будут стучаться на старый."
 		}
 		return AddrByName, "Конфиги выданы по имени " + a.Value + "; сейчас оно указывает на " + strings.Join(nips, ", ") + ", а не на новый сервер (" + strings.Join(tips, ", ") + "). После восстановления перенаправьте имя на новый сервер, иначе пользователи будут стучаться на старый."
 	}

@@ -42,18 +42,42 @@ const BackupFormat = 1
 // BackupMagic — первая строка файла копии.
 const BackupMagic = "AABK"
 
-// Secret — байты секрета: печатается только размер.
-type Secret []byte
+// Secret — байты секрета. Внутри — указатель (SEC-01): глагол %p у
+// структуры, содержащей Secret, fmt печатает без вызова методов полей, и
+// []byte выдал бы содержимое; указатель вложенного поля печатается адресом.
+type Secret struct{ b *[]byte }
 
-func (s Secret) String() string   { return fmt.Sprintf("[скрыто, %d байт]", len(s)) }
+// NewSecret — Secret с копией байтов.
+func NewSecret(b []byte) Secret {
+	c := append([]byte(nil), b...)
+	return Secret{&c}
+}
+
+// Bytes — копия байтов (только для записи на сервер и в файл копии).
+func (s Secret) Bytes() []byte {
+	if s.b == nil {
+		return nil
+	}
+	return append([]byte(nil), (*s.b)...)
+}
+
+// Len — размер.
+func (s Secret) Len() int {
+	if s.b == nil {
+		return 0
+	}
+	return len(*s.b)
+}
+
+func (s Secret) String() string   { return fmt.Sprintf("[скрыто, %d байт]", s.Len()) }
 func (s Secret) GoString() string { return s.String() }
 
-// Format — любой глагол fmt (%v, %+v, %s, %q, %x, %#v) печатает только размер.
+// Format — любой глагол fmt печатает только размер.
 func (s Secret) Format(f fmt.State, _ rune) { fmt.Fprint(f, s.String()) }
 
 // MarshalJSON — в файл копии (и только туда) — base64.
 func (s Secret) MarshalJSON() ([]byte, error) {
-	return json.Marshal(base64.StdEncoding.EncodeToString(s))
+	return json.Marshal(base64.StdEncoding.EncodeToString(s.Bytes()))
 }
 
 // UnmarshalJSON — из base64.
@@ -66,8 +90,24 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if err != nil {
 		return err
 	}
-	*s = d
+	*s = NewSecret(d)
 	return nil
+}
+
+// Format у типов копии (SEC-01): глагол, неверный для типа (например %p у
+// структуры), fmt печатает БЕЗ вызова методов поля — сырые байты Secret.
+// Поэтому сами типы, содержащие Secret, печатаются сводкой без данных при
+// любом глаголе.
+func (f BackupFile) Format(st fmt.State, _ rune) {
+	fmt.Fprintf(st, "{%s %s %s}", f.Name, f.Status, f.Data.String())
+}
+
+func (c BackupContainer) Format(st fmt.State, _ rune) {
+	fmt.Fprintf(st, "{%s %s файлов %d}", c.Name, c.Status, len(c.Files))
+}
+
+func (b Backup) Format(st fmt.State, _ rune) {
+	fmt.Fprintf(st, "{копия формата %d, сервер %s, контейнеров %d, полная %v}", b.FormatVersion, b.Server.Host, len(b.Containers), b.Complete)
 }
 
 // Состояния файла в копии — три плюс «не входит» у контейнера.
@@ -107,22 +147,25 @@ type BackupFile struct {
 	Status string `json:"status"`
 	SHA256 string `json:"sha256,omitempty"`
 	Size   int    `json:"size,omitempty"`
-	Data   Secret `json:"data,omitempty"`
+	Data   Secret `json:"data"`
 	Reason string `json:"reason,omitempty"` // для unreadable — без содержимого
 }
 
 // BackupContainer — контейнер в копии.
 type BackupContainer struct {
-	Name         string       `json:"name"`
-	Proto        string       `json:"proto"`
-	Dir          string       `json:"dir,omitempty"`
-	Status       string       `json:"status"`
-	Reason       string       `json:"reason,omitempty"`
-	Version      string       `json:"version,omitempty"` // «1.5», «2», «3.1», «старый AWG», «WireGuard», «XRay»
-	VersionState string       `json:"version_state,omitempty"`
-	Port         string       `json:"port,omitempty"`
-	Subnet       string       `json:"subnet,omitempty"` // Address [Interface] (WG); у XRay нет
-	Files        []BackupFile `json:"files,omitempty"`
+	Name         string `json:"name"`
+	Proto        string `json:"proto"`
+	Dir          string `json:"dir,omitempty"`
+	Status       string `json:"status"`
+	Reason       string `json:"reason,omitempty"`
+	Version      string `json:"version,omitempty"` // «1.5», «2», «3.1», «старый AWG», «WireGuard», «XRay»
+	VersionState string `json:"version_state,omitempty"`
+	// VersionReason — почему версия не определена (QA-01 (а)): показывается
+	// в проверке цели.
+	VersionReason string       `json:"version_reason,omitempty"`
+	Port          string       `json:"port,omitempty"`
+	Subnet        string       `json:"subnet,omitempty"` // Address [Interface] (WG); у XRay нет
+	Files         []BackupFile `json:"files,omitempty"`
 }
 
 // IssuedAddress — адрес, по которому были выданы конфиги (hostName ключа
@@ -136,9 +179,9 @@ type IssuedAddress struct {
 
 // Backup — манифест копии.
 type Backup struct {
-	Format      int    `json:"format"`
-	CreatedAt   string `json:"created_at"` // UTC RFC 3339
-	ToolVersion string `json:"tool_version"`
+	FormatVersion int    `json:"format"`
+	CreatedAt     string `json:"created_at"` // UTC RFC 3339
+	ToolVersion   string `json:"tool_version"`
 	// Complete — нет ни одного контейнера «не удалось прочитать» или
 	// «несогласованный снимок». «Не входит» полноты не отменяет, но всегда
 	// перечисляется.
@@ -180,8 +223,8 @@ func EncodeBackup(b *Backup, layer BackupLayer) ([]byte, error) {
 	if layer == nil {
 		return nil, errors.New("слой копии не задан")
 	}
-	if b.Format != BackupFormat {
-		return nil, fmt.Errorf("формат копии %d, программа пишет %d", b.Format, BackupFormat)
+	if b.FormatVersion != BackupFormat {
+		return nil, fmt.Errorf("формат копии %d, программа пишет %d", b.FormatVersion, BackupFormat)
 	}
 	plain, err := json.Marshal(b)
 	if err != nil {
@@ -250,35 +293,92 @@ func DecodeBackup(data []byte, layers ...BackupLayer) (*Backup, error) {
 	if err := dec.Decode(&b); err != nil {
 		return nil, notRead("манифест не разобран")
 	}
-	if b.Format != ver {
-		return nil, notRead("версия формата в заголовке (%d) и в манифесте (%d) расходятся", ver, b.Format)
+	if b.FormatVersion != ver {
+		return nil, notRead("версия формата в заголовке (%d) и в манифесте (%d) расходятся", ver, b.FormatVersion)
 	}
-	for _, c := range b.Containers {
-		for _, fl := range c.Files {
-			if fl.Status != FileSaved {
-				continue
-			}
-			s := sha256.Sum256(fl.Data)
-			if hex.EncodeToString(s[:]) != fl.SHA256 || len(fl.Data) != fl.Size {
-				return nil, notRead("файл %s/%s внутри копии повреждён", c.Name, fl.Name)
-			}
-		}
+	if err := validateBackup(&b); err != nil {
+		return nil, err
 	}
 	return &b, nil
 }
 
-// WriteBackupFile — запись копии: атомарно (временный файл рядом и
-// переименование), права 0600. Файл уже есть — отказ (копии не
-// перезаписываются).
+// validateBackup — закрытые списки и инварианты манифеста (QA-01 Н1). Любой
+// дефект — «копия не прочитана»: восстановление пишет только по закрытому
+// списку файлов протокола, и копия, которой нельзя верить в мелочи, не
+// читается вовсе.
+func validateBackup(b *Backup) error {
+	incomplete := false
+	seen := map[string]bool{}
+	for _, c := range b.Containers {
+		if seen[c.Name] {
+			return notRead("контейнер %s указан дважды", c.Name)
+		}
+		seen[c.Name] = true
+		switch c.Status {
+		case CtrSaved, CtrUnreadable:
+		case CtrNotIncluded, CtrInconsistent:
+			if len(c.Files) != 0 {
+				return notRead("у контейнера %s в состоянии %s есть файлы", c.Name, c.Status)
+			}
+			incomplete = incomplete || c.Status == CtrInconsistent
+			continue
+		default:
+			return notRead("состояние контейнера %q не из закрытого списка", c.Status)
+		}
+		incomplete = incomplete || c.Status == CtrUnreadable
+		known, _, ok := lookupContainer(c.Name)
+		if !ok || known.Dir != c.Dir {
+			return notRead("контейнер %s с каталогом %q этой программе не известен", c.Name, c.Dir)
+		}
+		names, required, ok := backupFilesOf(&known)
+		if !ok {
+			return notRead("контейнер %s копией не поддерживается", c.Name)
+		}
+		if len(c.Files) != len(names) {
+			return notRead("состав файлов %s не тот (%d вместо %d)", c.Name, len(c.Files), len(names))
+		}
+		for i, fl := range c.Files {
+			if fl.Name != names[i] {
+				return notRead("файл %q в %s не из закрытого списка (ждали %s)", fl.Name, c.Name, names[i])
+			}
+			switch fl.Status {
+			case FileSaved:
+				s := sha256.Sum256(fl.Data.Bytes())
+				if hex.EncodeToString(s[:]) != fl.SHA256 || fl.Data.Len() != fl.Size {
+					return notRead("файл %s/%s внутри копии повреждён", c.Name, fl.Name)
+				}
+			case FileAbsent, FileUnreadable:
+				if fl.Data.Len() != 0 || fl.SHA256 != "" || fl.Size != 0 {
+					return notRead("у файла %s/%s в состоянии %s есть данные", c.Name, fl.Name, fl.Status)
+				}
+			default:
+				return notRead("состояние файла %q не из закрытого списка", fl.Status)
+			}
+			if c.Status == CtrSaved && (fl.Status == FileUnreadable || (required[fl.Name] && fl.Status != FileSaved)) {
+				return notRead("контейнер %s «сохранён», а файл %s — %s", c.Name, fl.Name, fl.Status)
+			}
+		}
+		if c.Status == CtrSaved && c.VersionState != VersionKnown && c.VersionState != VersionUnknown {
+			return notRead("состояние версии %s %q не из закрытого списка", c.Name, c.VersionState)
+		}
+	}
+	if b.Complete == incomplete {
+		return notRead("признак полноты копии не соответствует состояниям контейнеров")
+	}
+	return nil
+}
+
+// WriteBackupFile — запись копии: временный файл рядом (имя
+// «.<имя>.tmp-XXXX.aabk» — попадает под *.aabk в .gitignore), права 0600,
+// fsync, затем итоговое имя — жёсткой ссылкой os.Link: она отказывает, если
+// имя занято (SEC-01: Rename молча заменил бы файл, появившийся между
+// проверкой и записью). Копии не перезаписываются.
 func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 	data, err := EncodeBackup(b, layer)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(path); err == nil {
-		return fmt.Errorf("файл %s уже есть — копия не перезаписывается", path)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".aabk-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*.aabk")
 	if err != nil {
 		return err
 	}
@@ -299,11 +399,21 @@ func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(path); err == nil {
-		return fmt.Errorf("файл %s уже есть — копия не перезаписывается", path)
+	if beforeBackupLink != nil {
+		beforeBackupLink()
 	}
-	return os.Rename(name, path)
+	if err := os.Link(name, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("файл %s уже есть — копия не перезаписывается", path)
+		}
+		return fmt.Errorf("копия не записана под именем %s: %v", path, err)
+	}
+	return nil
 }
+
+// beforeBackupLink — шов теста: «имя появилось между записью временного
+// файла и созданием итогового».
+var beforeBackupLink func()
 
 // ReadBackupFile — копия из файла.
 func ReadBackupFile(path string, layers ...BackupLayer) (*Backup, error) {
@@ -340,7 +450,8 @@ func (s *Session) readFileState(c *Container, name string) (data []byte, status,
 	if err == nil {
 		return []byte(out), FileSaved, ""
 	}
-	if strings.Contains(stderrText(err), "No such file or directory") {
+	// AU-LOGIC Low-1: «нет» — только если фраза относится к пути ЭТОГО файла.
+	if strings.Contains(stderrText(err), c.Dir+"/"+name+": No such file or directory") {
 		return nil, FileAbsent, ""
 	}
 	return nil, FileUnreadable, "не прочитан: " + MaskText(stderrTail(err))
@@ -359,7 +470,7 @@ func (s *Session) snapshotContainer(c *Container, names []string) ([]BackupFile,
 			f := BackupFile{Name: n, Status: st, Reason: why}
 			if st == FileSaved {
 				sum := sha256.Sum256(d)
-				f.SHA256, f.Size, f.Data = hex.EncodeToString(sum[:]), len(d), Secret(d)
+				f.SHA256, f.Size, f.Data = hex.EncodeToString(sum[:]), len(d), NewSecret(d)
 			}
 			fs = append(fs, f)
 		}
@@ -459,7 +570,7 @@ func (s *Session) CollectBackup(toolVersion string, now time.Time, resolve Resol
 	if err != nil {
 		return nil, fmt.Errorf("список контейнеров не получен: %w", err)
 	}
-	b := &Backup{Format: BackupFormat, CreatedAt: now.UTC().Format(time.RFC3339), ToolVersion: toolVersion, Complete: true}
+	b := &Backup{FormatVersion: BackupFormat, CreatedAt: now.UTC().Format(time.RFC3339), ToolVersion: toolVersion, Complete: true}
 	if s.Creds != nil {
 		b.Server.Host = s.Creds.Host
 		b.IssuedAddress = issuedAddress(s.Creds.Host, resolve)
@@ -492,8 +603,8 @@ func (s *Session) CollectBackup(toolVersion string, now time.Time, resolve Resol
 		if bc.Status != CtrSaved {
 			b.Complete = false
 		} else {
-			conf := []byte(files[0].Data)
-			bc.Version, bc.VersionState, _ = protoVersion(c, conf)
+			conf := files[0].Data.Bytes()
+			bc.Version, bc.VersionState, bc.VersionReason = protoVersion(c, conf)
 			bc.Port, bc.Subnet = portSubnet(c, conf)
 		}
 		b.Containers = append(b.Containers, bc)

@@ -143,6 +143,12 @@ func TestCheckTargetUnreadableInBackup(t *testing.T) {
 // роняет оба.
 func TestAddressVerdicts(t *testing.T) {
 	newIP := func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("198.51.100.9")}, nil }
+	thirdIP := func(h string) ([]net.IP, error) {
+		if h == "vpn.example.org" {
+			return []net.IP{net.ParseIP("192.0.2.50")}, nil
+		}
+		return []net.IP{net.ParseIP("198.51.100.9")}, nil
+	}
 	cases := []struct {
 		name     string
 		srcHost  string
@@ -155,9 +161,11 @@ func TestAddressVerdicts(t *testing.T) {
 		{"IP тот же (перенесён)", "203.0.113.1", "203.0.113.1", nil, AddrSame, false, "Адрес тот же"},
 		{"IP другой", "203.0.113.1", "198.51.100.9", nil, AddrDiffers, true, "НЕ ПРИДУТ"},
 		{"имя, цель по тому же имени", "vpn.example.org", "vpn.example.org", okResolver, AddrByName, false, "этому же имени"},
-		{"имя указывает на старый", "vpn.example.org", "198.51.100.9", okResolver, AddrByName, false, "перенаправьте имя"},
+		{"имя указывает на старый", "vpn.example.org", "198.51.100.9", okResolver, AddrDiffers, true, "всё ещё указывает на старый"},
+		{"имя указывает на третий адрес", "vpn.example.org", "198.51.100.9", thirdIP, AddrByName, false, "перенаправьте имя"},
 		{"имя уже на новом", "vpn.example.org", "198.51.100.9", newIP, AddrByName, false, "уже указывает на новый"},
 		{"IP в копии, имя цели не разрешилось", "203.0.113.1", "new.example.org", badResolver, AddrUnknown, true, "не удалось"},
+		{"имя в копии не разрешилось", "vpn.example.org", "198.51.100.9", badResolver, AddrUnknown, true, "не разрешились"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
