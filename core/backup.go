@@ -415,6 +415,12 @@ func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 // файла и созданием итогового».
 var beforeBackupLink func()
 
+// BackupFileName — имя файла копии: «<хост>-<дата-время UTC>.aabk» (хост не
+// секрет).
+func BackupFileName(host string, now time.Time) string {
+	return fmt.Sprintf("%s-%s.aabk", reSafeName.ReplaceAllString(host, "_"), now.UTC().Format("20060102-150405"))
+}
+
 // ReadBackupFile — копия из файла.
 func ReadBackupFile(path string, layers ...BackupLayer) (*Backup, error) {
 	data, err := os.ReadFile(path)
