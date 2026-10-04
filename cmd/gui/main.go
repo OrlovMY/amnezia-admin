@@ -70,6 +70,9 @@ type ui struct {
 	// xrayWarnShown — последнее показанное предупреждение о перезапуске XRay
 	// (тесты нажимают в нём кнопки).
 	xrayWarnShown dialog.Dialog
+	// xrayLoadedFor — для какого контейнера загружен u.xrayView (сбой
+	// чтения: прежний список показывается, только если он этого XRay).
+	xrayLoadedFor *core.Container
 
 	// warnSess, warnFreq — предупреждение о гонке при одновременной работе
 	// (A3а). Состояние сеанса хранится ЗДЕСЬ, а не в guiview: пакет решений
@@ -2187,7 +2190,7 @@ func (u *ui) buildTable() {
 			hl.onTap = nil
 			return
 		}
-		text := headers[id.Col]
+		text := u.headerText(id.Col)
 		col := tableColumnSort[id.Col]
 		if col != core.SortNone && col == u.sortPrimary {
 			if u.sortPrimaryDir == core.Desc {
@@ -2703,24 +2706,28 @@ func (u *ui) addDialog() {
 		if name == "" {
 			return
 		}
+		if core.IsXRay(u.cur) {
+			// XRay (AL-01): план → одно окно подтверждения → Apply того же
+			// плана; при «Отмена» форма остаётся открытой.
+			u.xrayAdd(name, func(nu *core.NewUser) { d.Hide(); onCreated(nu) })
+			return
+		}
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmXRayRestart(core.IsXRay(u.cur), func() {
-			u.confirmRaceWarning(guiview.OpAddUser, func() {
-				d.Hide()
-				u.setBusy(true)
-				u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
-				goSafe(func() {
-					nu, err := u.sess.AddUser(u.cur, name)
-					fyne.Do(func() {
-						if err != nil {
-							u.setBusy(false)
-							u.status.SetText("")
-							u.showError(err)
-							return
-						}
-						onCreated(nu)
-					})
+		u.confirmRaceWarning(guiview.OpAddUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
+			goSafe(func() {
+				nu, err := u.sess.AddUser(u.cur, name)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						u.showError(err)
+						return
+					}
+					onCreated(nu)
 				})
 			})
 		})
@@ -3081,9 +3088,10 @@ func (u *ui) toggleSelected() {
 	// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ, разрешено
 	// (раунд 4 долгов, решение ядра): итог от прежней записи не зависит.
 	enable := victim.Disabled()
-	// XRay: перезапуск — кроме отключения клиента, которого в server.json
-	// уже нет (правится только запись).
-	xrayRestarts := core.IsXRay(u.cur) && !(!enable && u.xrayView.Access[victim.ClientID] == core.XRayNoAccess)
+	if core.IsXRay(u.cur) {
+		u.xrayToggle(victim, enable)
+		return
+	}
 	title := "Отключить пользователя?"
 	verb := "Отключаю"
 	verbDone := "отключён"
@@ -3108,22 +3116,20 @@ func (u *ui) toggleSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmXRayRestart(xrayRestarts, func() {
-			u.confirmRaceWarning(guiview.OpToggleUser, func() {
-				d.Hide()
-				u.setBusy(true)
-				u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
-				goSafe(func() {
-					note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
-					fyne.Do(func() {
-						if err != nil {
-							u.setBusy(false)
-							u.status.SetText("")
-							u.showError(err)
-							return
-						}
-						onToggled(note)
-					})
+		u.confirmRaceWarning(guiview.OpToggleUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
+			goSafe(func() {
+				note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						u.showError(err)
+						return
+					}
+					onToggled(note)
 				})
 			})
 		})
@@ -3185,6 +3191,10 @@ func (u *ui) regenerateSelected() {
 		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
 		return
 	}
+	if core.IsXRay(u.cur) {
+		u.xrayRekey(victim)
+		return
+	}
 
 	var d dialog.Dialog
 	onRegenerated := func(nu *core.NewUser) {
@@ -3196,22 +3206,20 @@ func (u *ui) regenerateSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmXRayRestart(core.IsXRay(u.cur), func() {
-			u.confirmRaceWarning(guiview.OpRekeyUser, func() {
-				d.Hide()
-				u.setBusy(true)
-				u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
-				goSafe(func() {
-					nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
-					fyne.Do(func() {
-						if err != nil {
-							u.setBusy(false)
-							u.status.SetText("")
-							u.showError(err)
-							return
-						}
-						onRegenerated(nu)
-					})
+		u.confirmRaceWarning(guiview.OpRekeyUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
+			goSafe(func() {
+				nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						u.showError(err)
+						return
+					}
+					onRegenerated(nu)
 				})
 			})
 		})
@@ -3273,6 +3281,10 @@ func (u *ui) deleteSelected() {
 	if u.xrayServiceRow(victim) {
 		return
 	}
+	if core.IsXRay(u.cur) {
+		u.xrayDelete(victim)
+		return
+	}
 	// Снимок контейнера, как в refresh(): всё, что летит в goroutine,
 	// берёт cur, а не читает u.cur из другого потока.
 	cur := u.cur
@@ -3287,26 +3299,24 @@ func (u *ui) deleteSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmXRayRestart(core.IsXRay(cur) && u.xrayView.Access[victim.ClientID] != core.XRayDisabled, func() {
-			u.confirmRaceWarning(guiview.OpDeleteUser, func() {
-				d.Hide()
-				u.setBusy(true)
-				u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
-				goSafe(func() {
-					// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
-					// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
-					// снимка (см. refresh()) была применена к соседним двум
-					// вызовам и пропущена ровно у необратимого (ревью BE-01).
-					err := u.sess.DeleteByID(cur, victim.ClientID)
-					fyne.Do(func() {
-						if err != nil {
-							u.setBusy(false)
-							u.status.SetText("")
-							u.showError(err)
-							return
-						}
-						onDeleted()
-					})
+		u.confirmRaceWarning(guiview.OpDeleteUser, func() {
+			d.Hide()
+			u.setBusy(true)
+			u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
+			goSafe(func() {
+				// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
+				// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
+				// снимка (см. refresh()) была применена к соседним двум
+				// вызовам и пропущена ровно у необратимого (ревью BE-01).
+				err := u.sess.DeleteByID(cur, victim.ClientID)
+				fyne.Do(func() {
+					if err != nil {
+						u.setBusy(false)
+						u.status.SetText("")
+						u.showError(err)
+						return
+					}
+					onDeleted()
 				})
 			})
 		})

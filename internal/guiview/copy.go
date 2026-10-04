@@ -160,7 +160,11 @@ func CopyRow(r Row) string {
 	parts := make([]string, 0, len(rowFieldOrder))
 	for _, c := range rowFieldOrder {
 		v := CopyValue(r, c)
-		if label := rowFieldLabels[c]; label != "" {
+		label := rowFieldLabels[c]
+		if c == 3 && r.XRay {
+			label = XRayAccessHeader
+		}
+		if label != "" {
 			v = label + ": " + v
 		}
 		parts = append(parts, v)

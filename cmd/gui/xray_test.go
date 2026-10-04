@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -158,16 +159,20 @@ func TestXRayGUIRestartWarning(t *testing.T) {
 	}
 }
 
-// TestXRayGUIDeleteCard — карточка удаления ничего не утверждает о
-// подключениях и не показывает UUID; служебная строка — без действий.
+// TestXRayGUIDeleteCard — одно окно удаления (AU-UX M2): карточка без UUID
+// и без «подключений не было», «Что изменится», предупреждение о перезапуске;
+// служебная строка — без действий.
 func TestXRayGUIDeleteCard(t *testing.T) {
 	u, srv := xrayUI(t)
 	u.selectedRow = xrayRowOf(t, u, "Alice")
 	u.deleteSelected()
+	waitGUIGoroutines(t)
 	card := strings.Join(visibleTexts(topPopup(t, u.win.Canvas())), " | ")
-	if !strings.Contains(card, guiview.XRayDeleteActivity) || reUUIDGUI.MatchString(card) || strings.Contains(card, "не было") {
+	if !strings.Contains(card, guiview.XRayDeleteActivity) || reUUIDGUI.MatchString(card) || strings.Contains(card, "не было") ||
+		!strings.Contains(card, "соединения ВСЕХ пользователей XRay") || !strings.Contains(card, "Что изменится") {
 		t.Errorf("карточка: %s", card)
 	}
+	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Отмена"))
 	u.selectedRow = len(u.clients) - 1
 	before := xrayWritesGUI(srv)
 	u.deleteSelected()
@@ -180,15 +185,117 @@ func TestXRayGUIDeleteCard(t *testing.T) {
 	}
 }
 
-// TestXRayGUIReadFailNotStale — сбой чтения server.json при обновлении:
-// таблица не показывает прежний список как текущий, кнопки выключены,
-// причина в статусе (признак 4).
-func TestXRayGUIReadFailNotStale(t *testing.T) {
+// TestXRayGUIReadFailStale — AU-UX M3: сбой чтения XRay — прежний список
+// этого XRay с пометкой «данные прошлого чтения», кнопки изменения выключены.
+func TestXRayGUIReadFailStale(t *testing.T) {
 	u, srv := xrayUI(t)
 	srv.FailRead = map[string]error{"/opt/amnezia/xray/server.json": errors.New("i/o timeout")}
 	u.refresh()
 	waitGUIGoroutines(t)
-	if len(u.clients) != 0 || u.canManage || !strings.Contains(u.status.Text, "не показан") || !strings.Contains(u.status.Text, "server.json") {
+	if len(u.clients) != 3 || u.canManage || !strings.Contains(u.status.Text, "данные прошлого чтения") || !strings.Contains(u.status.Text, "server.json") {
 		t.Fatalf("строк %d, canManage %v, статус %q", len(u.clients), u.canManage, u.status.Text)
+	}
+}
+
+// TestXRayGUIStaleViewStillWarns — AU-LOGIC High-2, доезд: список загружен,
+// пока он открыт, UUID клиента вписан в server.json (запись «отключён»).
+// Удаление в GUI решает по ПЛАНУ: предупреждение о перезапуске показано;
+// «Отмена» — ни записи, ни перезапуска.
+func TestXRayGUIStaleViewStillWarns(t *testing.T) {
+	u, srv := xrayUI(t)
+	alice := u.clients[xrayRowOf(t, u, "Alice")].ClientID
+	// стенд: Alice отключена по записи боевым путём
+	p, err := u.sess.PlanSetEnabled(u.cur, alice, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.sess.Apply(p); err != nil {
+		t.Fatal(err)
+	}
+	u.refresh()
+	waitGUIGoroutines(t)
+	// после загрузки списка UUID снова появился в server.json (другая программа)
+	conf, _ := srv.File("/opt/amnezia/xray/server.json")
+	ids := append(fakesrv.XRayIDs(conf), alice)
+	srv.SetFile("/opt/amnezia/xray/server.json", []byte(fakesrv.XRayWithClients(string(conf), ids...)))
+	restarts, writes := srv.XRayRestarts(), xrayWritesGUI(srv)
+	u.selectedRow = xrayRowOf(t, u, "Alice")
+	// по виду списка Alice «отключена» (UUID нет) — прежде предупреждения
+	// не было; по плану удаление меняет server.json → перезапуск
+	u.deleteSelected()
+	waitGUIGoroutines(t)
+	top := strings.Join(visibleTexts(topPopup(t, u.win.Canvas())), " | ")
+	if !strings.Contains(top, core.XRayRestartTitle) {
+		t.Fatalf("нет предупреждения о перезапуске: %s", top)
+	}
+	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Отмена"))
+	waitGUIGoroutines(t)
+	if srv.XRayRestarts() != restarts || xrayWritesGUI(srv) != writes {
+		t.Fatalf("записано без подтверждения: перезапусков %d→%d", restarts, srv.XRayRestarts())
+	}
+}
+
+// TestXRayGUIConfirmFocusEsc — AU-UX M1: обе кнопки внизу рядом и видны
+// целиком на обоих размерах окна; фокус на «Отмена»; Esc — отмена, ничего
+// не записано.
+func TestXRayGUIConfirmFocusEsc(t *testing.T) {
+	// размеры окна осмотра: стартовый 1229×620 и минимальный 972×517
+	// (как у сторожей «виден целиком» — TestQRFullyVisible и др.)
+	for _, size := range []fyne.Size{{Width: 1229, Height: 620}, {Width: 972, Height: 517}} {
+		t.Run(fmt.Sprintf("%vx%v", size.Width, size.Height), func(t *testing.T) {
+			u, srv := xrayUI(t)
+			u.win.Resize(size)
+			u.selectedRow = xrayRowOf(t, u, "Bob")
+			u.deleteSelected()
+			waitGUIGoroutines(t)
+			pop := topPopup(t, u.win.Canvas())
+			osmotrFrame(pop, nil)
+			cancel := buttonByText(t, pop, "Отмена")
+			ok := buttonByText(t, pop, core.XRayRestartConfirm)
+			if ok.Importance != widget.DangerImportance {
+				t.Error("кнопка перезапуска — не опасного вида")
+			}
+			if u.win.Canvas().Focused() != cancel {
+				t.Errorf("фокус не на «Отмена»: %T", u.win.Canvas().Focused())
+			}
+			win := u.win.Canvas().Size()
+			for _, b := range []*widget.Button{cancel, ok} {
+				p := fyne.CurrentApp().Driver().AbsolutePositionForObject(b)
+				if p.X < 0 || p.Y < 0 || p.X+b.Size().Width > win.Width+0.5 || p.Y+b.Size().Height > win.Height+0.5 || b.Size().Height < 1 {
+					t.Errorf("кнопка %q не видна целиком: %v %v в окне %v", b.Text, p, b.Size(), win)
+				}
+			}
+			pc := fyne.CurrentApp().Driver().AbsolutePositionForObject(cancel)
+			po := fyne.CurrentApp().Driver().AbsolutePositionForObject(ok)
+			if pc.Y != po.Y || po.X <= pc.X {
+				t.Errorf("кнопки не рядом в одном ряду: %v %v", pc, po)
+			}
+			before := xrayWritesGUI(srv)
+			u.win.Canvas().OnTypedKey()(&fyne.KeyEvent{Name: fyne.KeyEscape})
+			waitGUIGoroutines(t)
+			if u.win.Canvas().Overlays().Top() != nil || xrayWritesGUI(srv) != before || srv.XRayRestarts() != 0 {
+				t.Fatalf("Esc не отменил: оверлей %v, записей %d→%d", u.win.Canvas().Overlays().Top(), before, xrayWritesGUI(srv))
+			}
+		})
+	}
+}
+
+// TestXRayGUIOneWindowWithRace — AU-UX M2: предупреждение о гонке — разделом
+// того же окна, а не вторым окном; подтверждение пишет ровно один раз.
+func TestXRayGUIOneWindowWithRace(t *testing.T) {
+	u, srv := xrayUI(t)
+	u.warnSess = guiview.WarnSession{} // предупреждение о гонке ещё не показывалось
+	u.selectedRow = xrayRowOf(t, u, "Bob")
+	u.deleteSelected()
+	waitGUIGoroutines(t)
+	pop := topPopup(t, u.win.Canvas())
+	texts := strings.Join(visibleTexts(pop), " | ")
+	if !strings.Contains(texts, guiview.WarningTitle()) || !strings.Contains(texts, core.XRayRestartTitle) {
+		t.Fatalf("не одно окно: %s", texts)
+	}
+	test.Tap(buttonByText(t, pop, core.XRayRestartConfirm))
+	waitGUIGoroutines(t)
+	if srv.XRayRestarts() != 1 {
+		t.Fatalf("перезапусков %d", srv.XRayRestarts())
 	}
 }

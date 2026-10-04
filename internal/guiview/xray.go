@@ -47,3 +47,22 @@ func xrayActivity(r Row) string {
 	}
 	return core.XRayAccessText(r.XRayAccess)
 }
+
+// XRayAccessHeader — подпись колонки «Активность» у XRay (AU-UX Low).
+const XRayAccessHeader = "Доступ"
+
+// ErrorStatus — строка состояния об ошибке: ЕДИНСТВЕННОЕ место, где текст
+// ошибки идёт в строку состояния, — через границу маскировки core.MaskText
+// (SEC Н-2).
+func ErrorStatus(err error, suffix string) string {
+	return "Ошибка: " + core.MaskText(err.Error()) + suffix
+}
+
+// XRayStaleSuffix — хвост статуса при сбое чтения XRay: прежний список
+// этого XRay показан (stale) или списка нет.
+func XRayStaleSuffix(stale bool) string {
+	if stale {
+		return " · показаны данные прошлого чтения; изменения недоступны до успешного чтения."
+	}
+	return " · список XRay не показан."
+}
