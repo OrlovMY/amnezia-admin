@@ -64,6 +64,12 @@ type ui struct {
 	// (иначе они остаются Disable() — Д3), а рендер колонок активности/
 	// трафика в таблице пишет "—" вместо "?"/"0 B" при !canManage.
 	canManage bool
+	// xrayView — последний загруженный список XRay (AL-01): доступ записей,
+	// служебный UUID, сироты.
+	xrayView core.XRayView
+	// xrayWarnShown — последнее показанное предупреждение о перезапуске XRay
+	// (тесты нажимают в нём кнопки).
+	xrayWarnShown dialog.Dialog
 
 	// warnSess, warnFreq — предупреждение о гонке при одновременной работе
 	// (A3а). Состояние сеанса хранится ЗДЕСЬ, а не в guiview: пакет решений
@@ -2064,6 +2070,22 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 		return guiview.Row{}, false
 	}
 	cl := u.clients[row]
+	if u.cur != nil && core.IsXRay(u.cur) && u.canManage {
+		if cl.ClientID == core.XRayServiceRowID {
+			return guiview.XRayServiceRow(row+1, u.xrayView), true
+		}
+		return guiview.Row{
+			Num:        row + 1,
+			Name:       cl.Name(),
+			Created:    cl.Created(),
+			ClientID:   cl.ClientID,
+			Enabled:    cl.EnabledState(),
+			CanManage:  true,
+			XRay:       true,
+			XRayAccess: u.xrayView.Access[cl.ClientID],
+			KeyShown:   core.UUIDPrint(cl.ClientID),
+		}, true
+	}
 	return guiview.Row{
 		Num:       row + 1,
 		Name:      cl.Name(),
@@ -2095,6 +2117,13 @@ func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
 		return nil
 	}
 	col, row := id.Col, id.Row
+	if r.XRayService {
+		return fyne.NewMenu("",
+			fyne.NewMenuItem(guiview.MenuCopyValue, func() {
+				u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)
+			}),
+		)
+	}
 	return fyne.NewMenu("",
 		fyne.NewMenuItem(guiview.MenuCopyValue, func() {
 			u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)
@@ -2301,6 +2330,10 @@ func (u *ui) refresh() {
 	cur := u.cur
 	u.setBusy(true)
 	u.status.SetText("Загружаю список пользователей...")
+	if core.IsXRay(cur) && cur.Managed() {
+		u.refreshXRay(cur)
+		return
+	}
 	goSafe(func() {
 		clients, existed, err := u.sess.LoadClientsView(cur)
 		view := guiview.ViewState(*cur, clients, existed, err)
@@ -2466,45 +2499,47 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 		// При "Отмена" окно изменений остаётся открытым, кнопка "Применить"
 		// не Disable()-ится (её Disable стоит ВНУТРИ) — человек возвращается
 		// к тому же плану и закрывает окно сам кнопкой "Закрыть".
-		u.confirmRaceWarning(guiview.OpApplyPlan, func() {
-			applyBtn.Disable()
-			u.setBusy(true)
-			statusLabel.Importance = widget.MediumImportance
-			statusLabel.SetText("Применяю...")
-			goSafe(func() {
-				nu, err := u.sess.Apply(plan)
-				fyne.Do(func() {
-					u.setBusy(false)
-					if err != nil {
-						// A3б PR-3: исход записи — различимый текст из
-						// internal/writeoutcome; «Применить» снова доступна
-						// ТОЛЬКО там, где точно ничего не записано и план не
-						// устарел (t.Retry): «занято», «нет утилиты», «замок».
-						// «Изменён другим» — план устарел; «неизвестно»,
-						// «частично», «откат не тронул чужое» — повтор того же
-						// плана вслепую недопустим.
-						// Повтор — ОДНО решение для обеих ветвей (раунд 4,
-						// AU-LOGIC Н-1/Н-2): guiview.ApplyRetryAllowed —
-						// закрытый список writeoutcome; неклассифицированное —
-						// без повтора. Сторож TestApplyErrorsClassified держит,
-						// что на пути Apply неклассифицированного нет вовсе.
-						if guiview.ApplyRetryAllowed(err) {
-							applyBtn.Enable()
+		u.confirmXRayRestart(plan.RestartsXRay(), func() {
+			u.confirmRaceWarning(guiview.OpApplyPlan, func() {
+				applyBtn.Disable()
+				u.setBusy(true)
+				statusLabel.Importance = widget.MediumImportance
+				statusLabel.SetText("Применяю...")
+				goSafe(func() {
+					nu, err := u.sess.Apply(plan)
+					fyne.Do(func() {
+						u.setBusy(false)
+						if err != nil {
+							// A3б PR-3: исход записи — различимый текст из
+							// internal/writeoutcome; «Применить» снова доступна
+							// ТОЛЬКО там, где точно ничего не записано и план не
+							// устарел (t.Retry): «занято», «нет утилиты», «замок».
+							// «Изменён другим» — план устарел; «неизвестно»,
+							// «частично», «откат не тронул чужое» — повтор того же
+							// плана вслепую недопустим.
+							// Повтор — ОДНО решение для обеих ветвей (раунд 4,
+							// AU-LOGIC Н-1/Н-2): guiview.ApplyRetryAllowed —
+							// закрытый список writeoutcome; неклассифицированное —
+							// без повтора. Сторож TestApplyErrorsClassified держит,
+							// что на пути Apply неклассифицированного нет вовсе.
+							if guiview.ApplyRetryAllowed(err) {
+								applyBtn.Enable()
+							}
+							if t, ok := writeoutcome.Describe(err); ok {
+								statusLabel.Importance = widget.DangerImportance
+								statusLabel.SetText(guiview.ApplyStatus(t))
+							} else {
+								statusLabel.Importance = widget.MediumImportance
+								statusLabel.SetText("")
+							}
+							u.showError(err)
+							return
 						}
-						if t, ok := writeoutcome.Describe(err); ok {
-							statusLabel.Importance = widget.DangerImportance
-							statusLabel.SetText(guiview.ApplyStatus(t))
-						} else {
-							statusLabel.Importance = widget.MediumImportance
-							statusLabel.SetText("")
+						d.Hide()
+						if onApplied != nil {
+							onApplied(nu)
 						}
-						u.showError(err)
-						return
-					}
-					d.Hide()
-					if onApplied != nil {
-						onApplied(nu)
-					}
+					})
 				})
 			})
 		})
@@ -2524,7 +2559,7 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 		nil, nil,
 		container.NewVSplit(
 			container.NewBorder(
-				widget.NewLabelWithStyle(plan.Container.Dir+"/wg0.conf", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				widget.NewLabelWithStyle(plan.ConfPath(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 				nil, nil, nil, container.NewScroll(wgGrid)),
 			container.NewBorder(
 				widget.NewLabelWithStyle(plan.Container.Dir+"/clientsTable", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -2543,7 +2578,9 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 func (u *ui) showError(err error) {
 	t, ok := writeoutcome.Describe(err)
 	if !ok {
-		dialog.ShowError(err, u.win)
+		// AL-01: граница показа — UUID клиентов XRay и прочие секреты
+		// маскируются (core.MaskText), как в CLI.
+		dialog.ShowError(errors.New(core.MaskText(err.Error())), u.win)
 		return
 	}
 	showWriteOutcomeDialog(u, t, err)
@@ -2553,7 +2590,7 @@ func (u *ui) showError(err error) {
 // подробностями в прокрутке (выделяемый), «Закрыть». Отдельно от showError,
 // чтобы сторож запаса ширины строил ровно этот диалог для каждого текста.
 func showWriteOutcomeDialog(u *ui, t writeoutcome.Text, err error) {
-	msg := widget.NewLabel(writeoutcome.Message(t, err))
+	msg := widget.NewLabel(core.MaskText(writeoutcome.Message(t, err)))
 	msg.Wrapping = fyne.TextWrapWord
 	msg.Selectable = true
 	d := dialog.NewCustom(t.Title, "Закрыть", container.NewVScroll(msg), u.win)
@@ -2657,7 +2694,7 @@ func (u *ui) addDialog() {
 
 	var d dialog.Dialog
 	onCreated := func(nu *core.NewUser) {
-		u.status.SetText(fmt.Sprintf("Пользователь %q создан (IP %s).", nu.Name, nu.IP))
+		u.status.SetText(configDoneText(nu, "создан"))
 		u.showConfigDialog(nu, "создан")
 		u.refresh()
 	}
@@ -2668,20 +2705,22 @@ func (u *ui) addDialog() {
 		}
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmRaceWarning(guiview.OpAddUser, func() {
-			d.Hide()
-			u.setBusy(true)
-			u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
-			goSafe(func() {
-				nu, err := u.sess.AddUser(u.cur, name)
-				fyne.Do(func() {
-					if err != nil {
-						u.setBusy(false)
-						u.status.SetText("")
-						u.showError(err)
-						return
-					}
-					onCreated(nu)
+		u.confirmXRayRestart(core.IsXRay(u.cur), func() {
+			u.confirmRaceWarning(guiview.OpAddUser, func() {
+				d.Hide()
+				u.setBusy(true)
+				u.status.SetText(fmt.Sprintf("Создаю пользователя %q...", name))
+				goSafe(func() {
+					nu, err := u.sess.AddUser(u.cur, name)
+					fyne.Do(func() {
+						if err != nil {
+							u.setBusy(false)
+							u.status.SetText("")
+							u.showError(err)
+							return
+						}
+						onCreated(nu)
+					})
 				})
 			})
 		})
@@ -2748,7 +2787,7 @@ func writeConfigFileTo(dir string, nu *core.NewUser) (string, bool, error) {
 // saveConfigFileTo — запись, не затирающая файл ДРУГОГО клиента (К-1):
 // занятое имя — сохранено под «<имя> (2).conf», и r.Occupied это называет.
 func saveConfigFileTo(dir string, nu *core.NewUser) (core.SaveResult, error) {
-	return core.SaveClientConfig(dir, nu.Name, nu.Config, nu.Replaces)
+	return core.SaveUserConfig(dir, nu)
 }
 
 func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
@@ -2769,7 +2808,7 @@ const awg2ConfigDialogWidth = 760
 
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	var qrObj fyne.CanvasObject
-	if png, err := core.QRPNG(nu.Config, 256); err == nil {
+	if png, err := core.QRPNG(nu.QRText(), 256); err == nil {
 		res := fyne.NewStaticResource(core.SanitizeName(nu.Name)+"-qr.png", png)
 		img := canvas.NewImageFromResource(res)
 		img.FillMode = canvas.ImageFillOriginal
@@ -2819,7 +2858,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// каталог конфигураций — по нему потом работает меню «Показать QR».
 	// Кнопка — сохранить ЕЩЁ и в другое место.
 	saveBtn = widget.NewButtonWithIcon("Сохранить ещё в…", theme.DocumentSaveIcon(), func() {
-		u.saveConfigAs(nu.Name, nu.Config)
+		u.saveConfigAsExt(nu.Name, nu.Config, nu.FileExt())
 	})
 	autoSave := func() {
 		res, err := u.saveConfigFile(nu)
@@ -2862,6 +2901,9 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	}
 
 	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
+	if nu.Link != "" {
+		hint.SetText("QR — ссылка vless://: отсканируйте её в приложении Amnezia на телефоне или импортируйте файл .json.")
+	}
 	hint.Wrapping = fyne.TextWrapWord
 	// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче;
 	// пустая Note — метки нет.
@@ -2887,7 +2929,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		savedLabel,
 		failHint,
 		failDetail,
-		widget.NewLabelWithStyle(fmt.Sprintf("Пользователь %q %s (IP %s).", nu.Name, verb, nu.IP), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle(configDoneText(nu, verb), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
 		hint,
 	))
@@ -2941,6 +2983,9 @@ func (u *ui) renameSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if u.xrayServiceRow(victim) {
+		return
+	}
 	entry := widget.NewEntry()
 	entry.SetText(victim.Name())
 	// Курсор в КОНЕЦ предзаполненного имени (ревью UX-01): при курсоре в
@@ -3030,9 +3075,15 @@ func (u *ui) toggleSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if u.xrayServiceRow(victim) {
+		return
+	}
 	// Неизвестная включённость (У1): enable = false — ОТКЛЮЧЕНИЕ, разрешено
 	// (раунд 4 долгов, решение ядра): итог от прежней записи не зависит.
 	enable := victim.Disabled()
+	// XRay: перезапуск — кроме отключения клиента, которого в server.json
+	// уже нет (правится только запись).
+	xrayRestarts := core.IsXRay(u.cur) && !(!enable && u.xrayView.Access[victim.ClientID] == core.XRayNoAccess)
 	title := "Отключить пользователя?"
 	verb := "Отключаю"
 	verbDone := "отключён"
@@ -3057,20 +3108,22 @@ func (u *ui) toggleSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmRaceWarning(guiview.OpToggleUser, func() {
-			d.Hide()
-			u.setBusy(true)
-			u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
-			goSafe(func() {
-				note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
-				fyne.Do(func() {
-					if err != nil {
-						u.setBusy(false)
-						u.status.SetText("")
-						u.showError(err)
-						return
-					}
-					onToggled(note)
+		u.confirmXRayRestart(xrayRestarts, func() {
+			u.confirmRaceWarning(guiview.OpToggleUser, func() {
+				d.Hide()
+				u.setBusy(true)
+				u.status.SetText(fmt.Sprintf("%s %q...", verb, victim.Name()))
+				goSafe(func() {
+					note, err := u.sess.SetEnabledNoted(u.cur, victim.ClientID, enable)
+					fyne.Do(func() {
+						if err != nil {
+							u.setBusy(false)
+							u.status.SetText("")
+							u.showError(err)
+							return
+						}
+						onToggled(note)
+					})
 				})
 			})
 		})
@@ -3098,7 +3151,7 @@ func (u *ui) toggleSelected() {
 		})
 	})
 	// Д4 (осмотр 29.09.2026): без переноса ключ раздувал рамку — как Д3.
-	card := widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), victim.ClientID))
+	card := widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), core.KeyText(u.cur, victim.ClientID)))
 	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
 		card,
@@ -3124,6 +3177,9 @@ func (u *ui) regenerateSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if u.xrayServiceRow(victim) {
+		return
+	}
 	if victim.EnabledState() == core.EnabledUnknown {
 		// У1: включён ли — неизвестно; до вопроса, а не после него
 		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
@@ -3140,20 +3196,22 @@ func (u *ui) regenerateSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmRaceWarning(guiview.OpRekeyUser, func() {
-			d.Hide()
-			u.setBusy(true)
-			u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
-			goSafe(func() {
-				nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
-				fyne.Do(func() {
-					if err != nil {
-						u.setBusy(false)
-						u.status.SetText("")
-						u.showError(err)
-						return
-					}
-					onRegenerated(nu)
+		u.confirmXRayRestart(core.IsXRay(u.cur), func() {
+			u.confirmRaceWarning(guiview.OpRekeyUser, func() {
+				d.Hide()
+				u.setBusy(true)
+				u.status.SetText(fmt.Sprintf("Перевыпускаю конфиг для %q...", victim.Name()))
+				goSafe(func() {
+					nu, err := u.sess.RegenerateUser(u.cur, victim.ClientID)
+					fyne.Do(func() {
+						if err != nil {
+							u.setBusy(false)
+							u.status.SetText("")
+							u.showError(err)
+							return
+						}
+						onRegenerated(nu)
+					})
 				})
 			})
 		})
@@ -3212,10 +3270,13 @@ func (u *ui) deleteSelected() {
 		return
 	}
 	victim := u.clients[idx]
+	if u.xrayServiceRow(victim) {
+		return
+	}
 	// Снимок контейнера, как в refresh(): всё, что летит в goroutine,
 	// берёт cur, а не читает u.cur из другого потока.
 	cur := u.cur
-	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s", victim.Name(), victim.Created(), victim.ClientID)
+	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s", victim.Name(), victim.Created(), core.KeyText(cur, victim.ClientID))
 
 	var d dialog.Dialog
 	onDeleted := func() {
@@ -3226,24 +3287,26 @@ func (u *ui) deleteSelected() {
 	apply := func() {
 		// A3а: предупреждение о гонке непосредственно перед записью на
 		// сервер. При "Отмена" форма остаётся открытой — d.Hide() внутри.
-		u.confirmRaceWarning(guiview.OpDeleteUser, func() {
-			d.Hide()
-			u.setBusy(true)
-			u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
-			goSafe(func() {
-				// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
-				// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
-				// снимка (см. refresh()) была применена к соседним двум
-				// вызовам и пропущена ровно у необратимого (ревью BE-01).
-				err := u.sess.DeleteByID(cur, victim.ClientID)
-				fyne.Do(func() {
-					if err != nil {
-						u.setBusy(false)
-						u.status.SetText("")
-						u.showError(err)
-						return
-					}
-					onDeleted()
+		u.confirmXRayRestart(core.IsXRay(cur) && u.xrayView.Access[victim.ClientID] != core.XRayDisabled, func() {
+			u.confirmRaceWarning(guiview.OpDeleteUser, func() {
+				d.Hide()
+				u.setBusy(true)
+				u.status.SetText(fmt.Sprintf("Удаляю %q...", victim.Name()))
+				goSafe(func() {
+					// cur, а не u.cur: это ЕДИНСТВЕННЫЙ вызов диалога, который
+					// ПИШЕТ на сервер, и он тоже читался из goroutine. Конвенция
+					// снимка (см. refresh()) была применена к соседним двум
+					// вызовам и пропущена ровно у необратимого (ревью BE-01).
+					err := u.sess.DeleteByID(cur, victim.ClientID)
+					fyne.Do(func() {
+						if err != nil {
+							u.setBusy(false)
+							u.status.SetText("")
+							u.showError(err)
+							return
+						}
+						onDeleted()
+					})
 				})
 			})
 		})
@@ -3296,23 +3359,31 @@ func (u *ui) deleteSelected() {
 	diffBtn.Disable()
 	activity := widget.NewLabel("Узнаю, подключался ли клиент...")
 	activity.Wrapping = fyne.TextWrapWord
-	goSafe(func() {
-		hs, hsErr := u.sess.GetHandshakes(cur)
-		fyne.Do(func() {
-			// Сверка снимка — конвенция этого файла (см. refresh()): ответ
-			// про ДРУГОЙ контейнер отвечает не на тот вопрос: ключа victim в нём
-			// нет, и карточка сказала бы «нет в статистике сервера» про клиента,
-			// о котором на самом деле не спрашивали (ошибка ниже это исключает).
-			// Сегодня случай недостижим (диалог модальный), но конвенция
-			// стоит двух строк и переживёт снятие модальности.
-			if cur != u.cur {
-				hs, hsErr = nil, errProtoSwitched
-			}
-			activity.SetText(guiview.DeleteCardActivity(hs, victim.ClientID, hsErr, victim.Disabled()))
-			okBtn.Enable()
-			diffBtn.Enable()
+	if core.IsXRay(cur) {
+		// XRay: статистики нет — запроса нет, и карточка ничего не
+		// утверждает о подключениях (не «подключений не было»).
+		activity.SetText(guiview.XRayDeleteActivity)
+		okBtn.Enable()
+		diffBtn.Enable()
+	} else {
+		goSafe(func() {
+			hs, hsErr := u.sess.GetHandshakes(cur)
+			fyne.Do(func() {
+				// Сверка снимка — конвенция этого файла (см. refresh()): ответ
+				// про ДРУГОЙ контейнер отвечает не на тот вопрос: ключа victim в нём
+				// нет, и карточка сказала бы «нет в статистике сервера» про клиента,
+				// о котором на самом деле не спрашивали (ошибка ниже это исключает).
+				// Сегодня случай недостижим (диалог модальный), но конвенция
+				// стоит двух строк и переживёт снятие модальности.
+				if cur != u.cur {
+					hs, hsErr = nil, errProtoSwitched
+				}
+				activity.SetText(guiview.DeleteCardActivity(hs, victim.ClientID, hsErr, victim.Disabled()))
+				okBtn.Enable()
+				diffBtn.Enable()
+			})
 		})
-	})
+	}
 	// Д3 (осмотр 25.09.2026): без переноса ключ из широких знаков раздувал
 	// рамку с 452 до 570.8 т. TextWrapWord в Fyne рвёт слово, которое длиннее
 	// строки, по знакам — ключ без пробелов переносится, имя — по словам.

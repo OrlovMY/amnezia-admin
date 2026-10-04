@@ -48,6 +48,11 @@ func (u *ui) showSavedConfig(row int, save bool) {
 		return
 	}
 	cl := u.clients[row]
+	if u.cur != nil && core.IsXRay(u.cur) {
+		// XRay (AL-01): конфиг собирается с сервера — UUID хранится там.
+		u.showXRayConfig(cl)
+		return
+	}
 	sc := core.FindSavedConfigIn(savedSearchDirs(), cl.ClientID)
 	title := guiview.SavedConfigTitle(cl.Name())
 	switch sc.State {
@@ -238,6 +243,11 @@ func writeChosenConfig(w fyne.URIWriteCloser, config string) (string, error) {
 // saveConfigAs — «Сохранить ещё в…»: системное окно выбора файла, запись
 // туда. Ошибка — диалогом (тексты файловой системы, без содержимого).
 func (u *ui) saveConfigAs(name, config string) {
+	u.saveConfigAsExt(name, config, ".conf")
+}
+
+// saveConfigAsExt — saveConfigAs с расширением (XRay — .json, AL-01).
+func (u *ui) saveConfigAsExt(name, config, ext string) {
 	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
 		if err != nil {
 			u.showError(err) // сторож PR-3: только через showError
@@ -258,7 +268,7 @@ func (u *ui) saveConfigAs(name, config string) {
 			u.status.SetText("Конфиг сохранён: " + where)
 		}
 	}, u.win)
-	fd.SetFileName(core.SanitizeName(name) + ".conf")
-	fd.SetFilter(storage.NewExtensionFileFilter([]string{".conf"}))
+	fd.SetFileName(core.SanitizeName(name) + ext)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{ext}))
 	fd.Show()
 }
