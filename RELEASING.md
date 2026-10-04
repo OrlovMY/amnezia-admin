@@ -275,12 +275,12 @@ sha256(CASWriteCommandSudo)=470a1c657646f7591751f157a0c71a8e57a124af63d780fffed5
 компрометации, эти копии надо удалить на сервере вручную** — в них прежний
 ключ (`rm /opt/amnezia/<протокол>/backup/*.key.*` внутри контейнера).
 
-Суммы на верхушке ветки до канарейки:
+Суммы на верхушке ветки до канарейки (после исправления переменной цикла в `cl`, раунд 2 ревью PR #37):
 
 ```
-sha256(CASWriteScript)=e5436390a3f7515c97d3a20ed07303b1d0c05bd297186df69bff802c8315d551
-sha256(CASWriteCommand)=c9bf1085fead222400e645a7a21f3f2c2071954a40b53c7b1d0ebede815beb86
-sha256(CASWriteCommandSudo)=90be3a111d1c92d41caa59d27ac4c2c08c4bc936fd106d3e96d38d527fb960f6
+sha256(CASWriteScript)=90e1a065160f6b73c8453c905d751793e6063ebe2b07e83076af9a2c2cc011be
+sha256(CASWriteCommand)=9c2f6c6089dda7776b20e960559ddeb0f631978c20fcb8ee5085245535663cb8
+sha256(CASWriteCommandSudo)=9a82b3eb830d3788300acd162436bc4f14ae43fd5d66942255ac16658652be91
 ```
 
 **Флаги канарейки после W1/W3:**

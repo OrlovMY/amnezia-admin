@@ -71,8 +71,8 @@ func TestRunIncludesK8(t *testing.T) {
 	}
 	m := ids(rs2)
 	for _, s := range k8IDs {
-		if st, ok := m[s.id]; !ok || st != NotChecked {
-			t.Errorf("%s на amnezia-awg2: %v (есть %v)", s.id, st, ok)
+		if st, ok := m[s]; !ok || st != NotChecked {
+			t.Errorf("%s на amnezia-awg2: %v (есть %v)", s, st, ok)
 		}
 	}
 }

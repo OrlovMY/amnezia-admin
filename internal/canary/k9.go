@@ -56,18 +56,17 @@ func k9Sum(f k9File) string {
 // K9 — строки К9 для контейнера tg. present — контейнер найден; skip —
 // пропущен флагом.
 func K9(remote func(string) (string, error), remoteIn func(string, []byte) (string, error), tg K9Target, present, skip bool) []Result {
-	row := func(id, name string) Result { return Result{ID: id, Name: tg.Container + ": " + name} }
 	k9Dir, k9Keys := tg.Dir, tg.Keys
 	if skip {
 		return nil
 	}
 	if !present {
-		r := row("К9", "запись с ключами под замком")
+		r := step("К9")
 		r.Detail = "контейнера на сервере нет — живой проверки нет; установите его на тестовом сервере или пропустите осознанно: -skip-family " + tg.Container
 		return []Result{r}
 	}
 	if remoteIn == nil {
-		r := row("К9", "запись с ключами под замком")
+		r := step("К9")
 		r.Detail = "нет команды со stdin — запись не выполнялась"
 		return []Result{r}
 	}
@@ -143,20 +142,20 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 		return -1, out, err
 	}
 
-	skipped := func(id, name string) Result {
-		r := row(id, name)
+	skipped := func(id string) Result {
+		r := step(id)
 		r.Detail = "не выполнялся: К9.0 не пройден — запись не начиналась"
 		return r
 	}
-	r0 := row("К9.0", "файлы прочитаны")
+	r0 := step("К9.0")
 	before, err := read()
 	if err != nil {
 		r0.Detail = err.Error()
-		return []Result{r0, skipped("К9.1", "запись с ключами"), skipped("К9.2", "сверка ключа останавливает запись")}
+		return []Result{r0, skipped("К9.1"), skipped("К9.2")}
 	}
 	if !before[tg.Conf].exists || !before["clientsTable"].exists {
 		r0.Detail = "нет " + tg.Conf + " или clientsTable — протокол установлен не полностью"
-		return []Result{r0, skipped("К9.1", "запись с ключами"), skipped("К9.2", "сверка ключа останавливает запись")}
+		return []Result{r0, skipped("К9.1"), skipped("К9.2")}
 	}
 	var present9 []string
 	var extras []core.CASExtra
@@ -170,7 +169,7 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 	rs := []Result{r0}
 
 	// К9.1 — запись тех же байтов всеми шестью путями.
-	r1 := row("К9.1", "запись с ключами (те же байты): файлы заменены (новый inode), права 0600, без временных файлов")
+	r1 := step("К9.1")
 	// AU Medium-2: те же байты не отличают «заменили» от «не трогали» —
 	// замену доказывает новый inode каждого записанного файла.
 	written := append([]string{"clientsTable"}, present9...)
@@ -189,7 +188,7 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 	if ierr != nil {
 		r1.Detail = "inode до записи не прочитаны: " + ierr.Error() + " — запись не выполнялась"
 		rs = append(rs, r1)
-		r2 := row("К9.2", "устаревшая сумма ключа — «изменился», ничего не записано")
+		r2 := step("К9.2")
 		r2.Detail = "не выполнялся: К9.1 не дошёл до записи"
 		return append(rs, r2)
 	}
@@ -251,7 +250,7 @@ func K9(remote func(string) (string, error), remoteIn func(string, []byte) (stri
 	rs = append(rs, r1)
 
 	// К9.2 — устаревшая сумма ключа: код 3, имя ключа, ничего не записано.
-	r2 := row("К9.2", "устаревшая сумма ключа — «изменился», ничего не записано")
+	r2 := step("К9.2")
 	bad := append([]core.CASExtra(nil), extras...)
 	victim := -1
 	for i, x := range bad {

@@ -17,16 +17,7 @@ import (
 )
 
 // k8IDs — шаги К8 по порядку.
-var k8IDs = []struct{ id, name string }{
-	{"К8.1", "формат awg0.conf"},
-	{"К8.2", "добавление: ключ в awg show, параметры [Interface] не тронуты"},
-	{"К8.3", "конфиг импортируется на телефон, связь есть"},
-	{"К8.4", "выключить — связи нет, включить — есть"},
-	{"К8.5", "перевыпуск: старый не подключается, новый подключается"},
-	{"К8.6", "удаление: ключа нет в awg show"},
-	{"К8.7", "второе устройство на AWG2 не теряет связь"},
-	{"К8.8", "формат awg show dump сходится с разбором parsePeerStats"},
-}
+var k8IDs = []string{"К8.1", "К8.2", "К8.3", "К8.4", "К8.5", "К8.6", "К8.7", "К8.8"}
 
 var reANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
@@ -47,12 +38,12 @@ func (e *Env) isAWG2Ctr() bool { return e.fam.File == "awg0.conf" }
 // предусловия не подтверждены — все НЕ ПРОВЕРЕНО.
 func (e *Env) k8Rows(gateOK bool) []Result {
 	if !e.isAWG2Ctr() {
-		return []Result{{"К8", "AWG2/AWG3", NotApplicable, "контейнер " + e.Ctr.Name + " — не amnezia-awg2; К8 проверяется запуском с -container amnezia-awg2"}}
+		return []Result{stepR("К8", NotApplicable, "контейнер "+e.Ctr.Name+" — не amnezia-awg2; К8 проверяется запуском с -container amnezia-awg2")}
 	}
 	if !gateOK {
 		var rs []Result
 		for _, s := range k8IDs {
-			rs = append(rs, Result{s.id, s.name, NotChecked, "запись не выполнялась: предусловие К2 не подтверждено"})
+			rs = append(rs, stepR(s, NotChecked, "запись не выполнялась: предусловие К2 не подтверждено"))
 		}
 		return rs
 	}
@@ -153,7 +144,7 @@ func (e *Env) dump() (map[string]int, string, error) {
 func (e *Env) k8() []Result {
 	rs := make([]Result, len(k8IDs))
 	for i, s := range k8IDs {
-		rs[i] = Result{ID: s.id, Name: s.name, Detail: "не выполнялся: остановлено на предыдущем шаге"}
+		rs[i] = stepR(s, NotChecked, "не выполнялся: остановлено на предыдущем шаге")
 	}
 	set := func(i int, st Status, d string) { rs[i].Status, rs[i].Detail = st, d }
 

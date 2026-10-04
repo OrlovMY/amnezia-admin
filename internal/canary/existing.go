@@ -142,7 +142,7 @@ const MaxFreshAge = 72 * time.Hour
 // inspect, неразобранный ответ, не все контейнеры в ответе — НЕ ПРОВЕРЕНО
 // (СТОП).
 func AgeCheck(remote func(string) (string, error), names []string, now time.Time) Result {
-	r := Result{ID: "П0-свежесть", Name: fmt.Sprintf("контейнеры Amnezia поставлены не раньше %d ч назад", int(MaxFreshAge.Hours()))}
+	r := step("П0-свежесть")
 	if len(names) == 0 {
 		r.Detail = "контейнеров нет — СТОП"
 		return r
@@ -208,7 +208,7 @@ func Preflight(remote func(string) (string, error), envs []*Env, names []string,
 		e.existing, e.preflightOK, e.k6 = nil, false, k6Window{}
 	}
 	age := AgeCheck(remote, names, now)
-	cnt := Result{ID: "П0-сервер", Name: fmt.Sprintf("клиентов на сервере до проверки не больше %d", MaxExisting)}
+	cnt := step("П0-сервер")
 	total := 0
 	var parts []string
 	snaps := make([]*existingSnap, len(envs))
@@ -335,7 +335,7 @@ func (e *Env) takeSnap() (*existingSnap, string) {
 // canary-* (следы прошлого прогона). Снимок — из Preflight, снят до первой
 // записи на сервер.
 func (e *Env) existingAllowed() Result {
-	r := Result{ID: "П0", Name: "существующие клиенты сняты до первой записи"}
+	r := step("П0")
 	if !e.preflightOK || e.existing == nil {
 		r.Detail = "предпроверка сервера (П0-свежесть, П0-сервер) не пройдена или не выполнялась — СТОП"
 		return r
@@ -510,7 +510,7 @@ func addedAllowedIPs(was, got, peer string) (string, bool) {
 // Вне окна — любое изменение НЕ ПРОЙДЕН. Окно открыто, а снимок до или
 // после него не снят — НЕ ПРОВЕРЕНО: чья правка, не различить.
 func (e *Env) existingIntact() Result {
-	r := Result{ID: "П0-итог", Name: "существующие клиенты не изменились"}
+	r := step("П0-итог")
 	if e.existing == nil {
 		r.Status, r.Detail = NotApplicable, "снимка нет: сервер был пуст"
 		return r

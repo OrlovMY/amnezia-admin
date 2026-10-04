@@ -98,6 +98,10 @@ const CASOuterTimeout = casOuterTimeout
 // «not moved: <имя>» называет первый не заменённый файл. Без пар скрипт
 // ведёт себя как прежде.
 //
+// В функции cl переменная цикла — c, не n: переменные sh глобальны, и
+// цикл в cl затирал n цикла замены — «not moved:» называл не тот файл
+// (CI linux PR #37, сценарий «первая замена падает»).
+//
 // read, а не head -c: head на канале читает с запасом и съел бы начало
 // второй строки; read в POSIX sh читает по байту.
 const CASWriteScript = `umask 077
@@ -105,7 +109,7 @@ d=$1; ww=$2; wt=$3; cf=$4; shift 4; x="$*"
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
 nw="$d/$cf` + CASTempInfix + `$$"; nt="$d/clientsTable` + CASTempInfix + `$$"
 xn=""; set -- $x; while [ $# -gt 1 ]; do xn="$xn $1"; shift 2; done; [ $# -eq 0 ] || exit 1
-cl() { rm -f "$nw" "$nt"; for n in $xn; do rm -f "$d/$n` + CASTempInfix + `$$"; done; }
+cl() { rm -f "$nw" "$nt"; for c in $xn; do rm -f "$d/$c` + CASTempInfix + `$$"; done; }
 rm -f "$d/$cf"` + CASTempInfix + `* "$d"/clientsTable` + CASTempInfix + `* || exit 1
 for n in $xn; do rm -f "$d/$n"` + CASTempInfix + `* || exit 1; done
 IFS= read -r W || exit 1
@@ -166,10 +170,29 @@ var casExtraFiles = map[string]map[string]bool{
 	"wireguard_psk.key":               {"wg0.conf": true, "awg0.conf": true},
 }
 
+// CASExtraOrder — ЕДИНСТВЕННЫЙ порядок дополнительных файлов: в хвосте
+// команды, в замене (скрипт идёт по хвосту), в тексте частичной записи и в
+// планах. Не из обхода map: команда с другим порядком отвергается
+// (сторож TestCASExtrasOrderFixed).
+var CASExtraOrder = []string{
+	"xray_uuid.key", "xray_short_id.key", "xray_public.key", "xray_private.key",
+	"wireguard_server_public_key.key", "wireguard_psk.key",
+}
+
+func casExtraRank(name string) int {
+	for i, n := range CASExtraOrder {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // casExtraArgs — проверенный хвост команды « имя сумма …».
 func casExtraArgs(file string, extras []CASExtra) (string, error) {
 	var b strings.Builder
 	seen := map[string]bool{}
+	last := -1
 	for _, x := range extras {
 		if !casExtraFiles[x.Name][file] {
 			return "", fmt.Errorf("недопустимый дополнительный файл записи %q при %s", x.Name, file)
@@ -178,6 +201,11 @@ func casExtraArgs(file string, extras []CASExtra) (string, error) {
 			return "", fmt.Errorf("дополнительный файл записи %q указан дважды", x.Name)
 		}
 		seen[x.Name] = true
+		if r := casExtraRank(x.Name); r <= last {
+			return "", fmt.Errorf("дополнительные файлы записи не в порядке CASExtraOrder (%s)", x.Name)
+		} else {
+			last = r
+		}
 		if !reCASSum.MatchString(x.Want) {
 			return "", fmt.Errorf("недопустимая контрольная сумма")
 		}

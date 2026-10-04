@@ -1218,7 +1218,7 @@ d=$1; ww=$2; wt=$3; cf=$4; shift 4; x="$*"
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
 nw="$d/$cf.aa.$$"; nt="$d/clientsTable.aa.$$"
 xn=""; set -- $x; while [ $# -gt 1 ]; do xn="$xn $1"; shift 2; done; [ $# -eq 0 ] || exit 1
-cl() { rm -f "$nw" "$nt"; for n in $xn; do rm -f "$d/$n.aa.$$"; done; }
+cl() { rm -f "$nw" "$nt"; for c in $xn; do rm -f "$d/$c.aa.$$"; done; }
 rm -f "$d/$cf".aa.* "$d"/clientsTable.aa.* || exit 1
 for n in $xn; do rm -f "$d/$n".aa.* || exit 1; done
 IFS= read -r W || exit 1

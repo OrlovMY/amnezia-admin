@@ -184,6 +184,9 @@ func TestCASExtrasFirstMoveFailsNothingWritten(t *testing.T) {
 			if err == nil || errors.Is(err, ErrWritePartial) {
 				t.Fatalf("ждали отказ без «записано частично», получили %v", err)
 			}
+			if !strings.Contains(err.Error(), "not moved: "+first+":") {
+				t.Errorf("метка «not moved:» называет не тот файл (ждали %s): %v", first, err)
+			}
 			if !strings.Contains(err.Error(), "код выхода 1") {
 				t.Errorf("ждали код 1: %v", err)
 			}
@@ -244,6 +247,30 @@ func TestCASExtrasBackupUmask(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("команд резервной копии ключей %d, ждали 2", n)
+	}
+}
+
+// TestCASExtrasOrderFixed — порядок дополнительных файлов один:
+// CASExtraOrder. Та же команда дважды — байт в байт; другой порядок —
+// отказ (подмена «порядок из map» дала бы произвольный хвост).
+func TestCASExtrasOrderFixed(t *testing.T) {
+	good := strings.Repeat("a", 64)
+	xs := []CASExtra{{"xray_uuid.key", good}, {"xray_public.key", good}, {"xray_private.key", good}}
+	a, err1 := CASWriteCommand(CASLabelApply, "amnezia-xray", "/opt/amnezia/xray", "server.json", good, good, xs...)
+	b, err2 := CASWriteCommand(CASLabelApply, "amnezia-xray", "/opt/amnezia/xray", "server.json", good, good, xs...)
+	if err1 != nil || err2 != nil || a != b {
+		t.Fatalf("команда не детерминирована: %v %v", err1, err2)
+	}
+	if !strings.HasSuffix(a, "xray_uuid.key "+good+" xray_public.key "+good+" xray_private.key "+good) {
+		t.Errorf("хвост не в порядке CASExtraOrder: …%s", a[len(a)-100:])
+	}
+	swapped := []CASExtra{xs[0], xs[2], xs[1]}
+	if _, err := CASWriteCommand(CASLabelApply, "amnezia-xray", "/opt/amnezia/xray", "server.json", good, good, swapped...); err == nil {
+		t.Error("другой порядок принят")
+	}
+	wg := []CASExtra{{"wireguard_psk.key", good}, {"wireguard_server_public_key.key", good}}
+	if _, err := CASWriteCommand(CASLabelApply, "amnezia-awg", "/opt/amnezia/awg", "wg0.conf", good, good, wg...); err == nil {
+		t.Error("ключи WG не в порядке CASExtraOrder приняты")
 	}
 }
 
