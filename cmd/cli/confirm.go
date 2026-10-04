@@ -29,6 +29,12 @@ type ActionCard struct {
 	// порядок switch при печати (ревью QA-01, задание НЕЗНАНИЕ-ТРАФИК).
 	// Состояние не выводится из текста: тест утверждает по исходу.
 	Seen core.LastSeen
+
+	// Restart — действие перезапустит XRay и оборвёт подключения всем его
+	// клиентам (AL-01, решение владельца 1): карточка печатает предупреждение.
+	Restart bool
+	// KeyLabel — подпись ключа; "" — «Публичный ключ» (у XRay — отпечаток UUID).
+	KeyLabel string
 }
 
 // Дословные тексты поля «Последнее подключение» для исходов без даты.
@@ -37,6 +43,8 @@ const (
 	textLastSeenDisabled = "неизвестно (клиент отключён)"
 	textLastSeenAbsent   = "нет в статистике сервера (сейчас сервер его не принимает)"
 	textLastSeenNever    = "—"
+	// AL-01: XRay не отдаёт статистику — не «не подключался».
+	textLastSeenNotSupported = "неизвестно (XRay не отдаёт статистику)"
 )
 
 // capitalizeFirst делает первую букву заглавной, по рунам (не по байтам —
@@ -79,6 +87,9 @@ func renderCard(card ActionCard) string {
 		lastSeen = textLastSeenNever
 	case core.SeenDisabled:
 		lastSeen = textLastSeenDisabled
+	case core.SeenNotSupported:
+		// XRay: статистики нет вовсе — о подключениях ничего не утверждаем
+		lastSeen = textLastSeenNotSupported
 	case core.SeenAbsent:
 		lastSeen = textLastSeenAbsent
 		warn = "  ⚠ Клиента нет в статистике сервера — неизвестно, подключался ли он раньше."
@@ -90,7 +101,11 @@ func renderCard(card ActionCard) string {
 			"неизвестно, пользуется ли клиент этим доступом."
 	}
 	fmt.Fprintln(&b, "  Последнее подключение:  "+lastSeen)
-	fmt.Fprintln(&b, "  Публичный ключ:         "+cDim(card.Key))
+	keyLabel := "Публичный ключ:"
+	if card.KeyLabel != "" {
+		keyLabel = card.KeyLabel
+	}
+	fmt.Fprintln(&b, "  "+pad(keyLabel, 24)+cDim(card.Key))
 	if warn != "" {
 		fmt.Fprintln(&b, cWarn(warn))
 	}
@@ -99,6 +114,19 @@ func renderCard(card ActionCard) string {
 		// 8); подкоманда rekey его не показывала вовсе (ревью PR-5, Medium-2).
 		// В GUI такое предупреждение уже есть — CLI молчал.
 		fmt.Fprintln(&b, cWarn("  ⚠ Старый конфиг перестанет работать, пользователю нужно установить новый."))
+	}
+	if card.Restart {
+		b.WriteString(restartWarningText())
+	}
+	return b.String()
+}
+
+// restartWarningText — предупреждение о перезапуске XRay (core.XRayRestartWarning)
+// с отступом карточки; одно место печати для карточки и для add.
+func restartWarningText() string {
+	var b strings.Builder
+	for _, l := range strings.Split(core.XRayRestartWarning, "\n") {
+		fmt.Fprintln(&b, cWarn("  ⚠ "+l))
 	}
 	return b.String()
 }
@@ -109,6 +137,20 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 	// Прямой вызов при сборке карточки (как и было): данные свежие в момент
 	// принятия решения. Ошибка НЕ отбрасывается — она и есть третье
 	// состояние (A1, место № 5).
+	if core.IsXRay(cur) {
+		// XRay: статистики нет — запрос `wg show` не шлётся, исход
+		// «не поддерживается»; ключ — отпечаток UUID (UUID — учётные данные).
+		return ActionCard{
+			Action:    action,
+			Host:      sess.Creds.Host,
+			Container: cur.Name,
+			Name:      cl.Name(),
+			Created:   trunc19(cl.Created()),
+			Seen:      core.LastSeen{State: core.SeenNotSupported},
+			Key:       core.UUIDPrint(cl.ClientID),
+			KeyLabel:  "UUID (отпечаток):",
+		}
+	}
 	hs, err := sess.GetHandshakes(cur)
 	return ActionCard{
 		Action:    action,
@@ -187,7 +229,11 @@ func confirmOrExit(in io.Reader, out, errOut io.Writer, isTTY, yes bool, card Ac
 		fmt.Fprintln(errOut, "Действие не выполнено: без терминала требуется флаг -yes (для скриптов).")
 		return false, 2
 	}
-	fmt.Fprintf(out, "%s %q? (y/n): ", capitalizeFirst(card.Action), card.Name)
+	if card.Restart {
+		fmt.Fprintf(out, "%s %q и перезапустить XRay? (y/n): ", capitalizeFirst(card.Action), card.Name)
+	} else {
+		fmt.Fprintf(out, "%s %q? (y/n): ", capitalizeFirst(card.Action), card.Name)
+	}
 	answer := strings.ToLower(strings.TrimSpace(readLine(in)))
 	if answer == "y" || answer == "yes" {
 		return true, 0
