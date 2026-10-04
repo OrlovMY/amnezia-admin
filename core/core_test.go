@@ -1214,21 +1214,27 @@ var cmdTemplates = []string{
 // casScriptLiteral — ДОСЛОВНАЯ копия core.CASWriteScript. Копия, а не ссылка
 // на константу: сторож обязан краснеть, если текст скрипта изменят.
 const casScriptLiteral = `umask 077
-d=$1; ww=$2; wt=$3; cf=$4
+d=$1; ww=$2; wt=$3; cf=$4; shift 4; x="$*"
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
 nw="$d/$cf.aa.$$"; nt="$d/clientsTable.aa.$$"
+xn=""; set -- $x; while [ $# -gt 1 ]; do xn="$xn $1"; shift 2; done; [ $# -eq 0 ] || exit 1
+cl() { rm -f "$nw" "$nt"; for c in $xn; do rm -f "$d/$c.aa.$$"; done; }
 rm -f "$d/$cf".aa.* "$d"/clientsTable.aa.* || exit 1
+for n in $xn; do rm -f "$d/$n".aa.* || exit 1; done
 IFS= read -r W || exit 1
 IFS= read -r T || exit 1
-if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
-printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
+xw=""; for n in $xn; do IFS= read -r X || { cl; exit 1; }; if [ "$X" != "-" ]; then printf %s "$X" | base64 -d > "$d/$n.aa.$$" || { cl; exit 1; }; xw="$xw $n"; fi; done
+if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { cl; exit 1; }; fi
+printf %s "$T" | base64 -d > "$nt" || { cl; exit 1; }
 hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
-hw=$(hsum "$d/$cf") || { rm -f "$nw" "$nt"; exit 1; }
-ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
-if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: $cf" >&2; exit 3; fi
-if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: $cf: $e" >&2; exit 1; }; fi
-e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
+hw=$(hsum "$d/$cf") || { cl; exit 1; }
+ht=$(hsum "$d/clientsTable") || { cl; exit 1; }
+if [ "$hw" != "$ww" ]; then cl; echo "changed: $cf" >&2; exit 3; fi
+if [ "$ht" != "$wt" ]; then cl; echo "changed: clientsTable" >&2; exit 3; fi
+set -- $x; while [ $# -gt 1 ]; do h=$(hsum "$d/$1") || { cl; exit 1; }; if [ "$h" != "$2" ]; then cl; echo "changed: $1" >&2; exit 3; fi; shift 2; done
+m=0; if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { cl; echo "not moved: $cf: $e" >&2; exit 1; }; m=1; fi
+for n in $xw; do e=$(mv -f "$d/$n.aa.$$" "$d/$n" 2>&1) || { cl; echo "not moved: $n: $e" >&2; [ $m = 1 ] && exit 6; exit 1; }; m=1; done
+e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { cl; echo "not moved: clientsTable: $e" >&2; [ $m = 1 ] && exit 6; exit 1; }
 exit 0`
 
 func casWriteTemplate(label string) string {

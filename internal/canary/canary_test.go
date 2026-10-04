@@ -236,7 +236,18 @@ func TestFakesrvIsNeverPass(t *testing.T) {
 			t.Errorf("шаг %s «пройден» на fakesrv, который его не моделирует", id)
 		}
 	}
-	for _, id := range []string{"П2", "К2.1", "К2.2", "К2.3", "К2.4", "К2.9", "К2.10", "К3", "К4", "К5", "К6", "К7", "PR4.1", "PR4.2", "PR4.4"} {
+	// Раунд 2 ревью PR #37: список шагов — из реестра (все ScopeWG, кроме
+	// П0), а не перечнем в тесте.
+	var wgIDs []string
+	for _, st := range Steps {
+		if st.Scope == ScopeWG && st.ID != "П0" {
+			wgIDs = append(wgIDs, st.ID)
+		}
+	}
+	if len(wgIDs) < 20 {
+		t.Fatalf("реестр ScopeWG подозрительно мал: %v", wgIDs)
+	}
+	for _, id := range wgIDs {
 		found := false
 		for _, r := range rs {
 			if r.ID == id {
@@ -1240,5 +1251,30 @@ func TestRaceUnconfirmedOutcome(t *testing.T) {
 	delete(present, "canary-n-0-01")
 	if n := countLost(st, present); n != 1 {
 		t.Errorf("запись «не подтверждено» пропала, а потерь %d", n)
+	}
+}
+
+// TestNoStepNameLiterals — названия шагов только из реестра: в коде
+// канарейки (кроме registry.go) нет литералов «Name: "…"» у Result.
+func TestNoStepNameLiterals(t *testing.T) {
+	files, _ := filepath.Glob("*.go")
+	n := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "registry.go" {
+			continue
+		}
+		n++
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range strings.Split(string(b), "\n") {
+			if strings.Contains(l, "Result{") && strings.Contains(l, "Name: \"") {
+				t.Errorf("%s:%d: название шага литералом, а не из реестра: %s", f, i+1, strings.TrimSpace(l))
+			}
+		}
+	}
+	if n < 5 {
+		t.Fatalf("проверено файлов %d — сторож ничего не видит", n)
 	}
 }

@@ -258,7 +258,7 @@ func Run(e *Env) ([]Result, error) {
 		e.RaceRounds = 20
 	}
 	if ferr := e.init(); ferr != nil {
-		add(Result{"П3", "контейнер семейства WG", NotChecked, ferr.Error()})
+		add(stepR("П3", NotChecked, ferr.Error()))
 		return rs, fmt.Errorf("%w: %v", ErrStop, ferr)
 	}
 
@@ -303,25 +303,25 @@ func Run(e *Env) ([]Result, error) {
 	lockBefore, _ := e.Remote("ls -ld /run/lock")
 
 	writes := []struct {
-		id, name string
-		fn       func() Result
+		id string
+		fn func() Result
 	}{
-		{"К3", "обычная работа новой версии", e.k3},
-		{"PR4.4", "права 0600 после записи", e.perms},
-		{"PR4.1", "откат через подмену wg-quick", e.rollback},
-		{"PR4.2", "sudo в обоих порядках", e.sudoOrders},
-		{"К4", "гонка: новая версия без потерь, прежняя запись без замка — с потерей", e.race},
-		{"К5", "обрыв: замок не зависает, файлы целиком", e.breakWrite},
-		{"К6", "приложение Amnezia: «изменён другим»", e.amneziaApp},
-		{"К7", "v0.2.0 после всего работает", func() Result { return e.oldWorks(lockBefore) }},
+		{"К3", e.k3},
+		{"PR4.4", e.perms},
+		{"PR4.1", e.rollback},
+		{"PR4.2", e.sudoOrders},
+		{"К4", e.race},
+		{"К5", e.breakWrite},
+		{"К6", e.amneziaApp},
+		{"К7", func() Result { return e.oldWorks(lockBefore) }},
 	}
 	for _, w := range writes {
 		if !gateOK {
-			add(Result{w.id, w.name, NotChecked, "запись не выполнялась: предусловие К2 не подтверждено"})
+			add(stepR(w.id, NotChecked, "запись не выполнялась: предусловие К2 не подтверждено"))
 			continue
 		}
 		r := w.fn()
-		r.ID, r.Name = w.id, w.name
+		r.ID, r.Name = w.id, stepName(w.id)
 		add(r)
 	}
 	// PR-W3: К8 — amnezia-awg2 (AWG2/AWG3); на другом контейнере — одна
@@ -334,7 +334,7 @@ func Run(e *Env) ([]Result, error) {
 	}
 	// Раунд 4 (AU-LOGIC L2): неубранные canary-* — не строка в журнале, а
 	// шаг итога.
-	u := Result{ID: "У", Name: "уборка canary-*"}
+	u := step("У")
 	if !gateOK {
 		u.Detail = "записей не было — убирать нечего проверять"
 	} else if err := e.cleanup(); err != nil {
@@ -347,7 +347,7 @@ func Run(e *Env) ([]Result, error) {
 	}
 	add(u)
 	if e.sudoUndo != nil {
-		su := Result{ID: "У2", Name: "временный пользователь " + TempUser + " удалён"}
+		su := step("У2")
 		if err := e.dropSudoUser(); err != nil {
 			su.Status, su.Detail = Fail, err.Error()
 		} else {
@@ -408,7 +408,7 @@ func (e *Env) dropSudoUser() error {
 // сумма «запуск до конца `true`» против запаса. su добавляет своё время —
 // замер с запасом в осторожную сторону. Не измерено — НЕ ПРОВЕРЕНО (шлюз).
 func (e *Env) sudoTiming() Result {
-	r := Result{ID: "К2.10", Name: "запуск sudo + docker exec < 10 с (sudo-пользователь)"}
+	r := step("К2.10")
 	if e.MakeSudoKey == nil {
 		if e.docker == "sudo -n docker" {
 			r.Status, r.Detail = Pass, "ключ не root: К2.9 уже мерил запуск через sudo -n docker exec"
@@ -485,7 +485,7 @@ func vcsOf(bi *debug.BuildInfo) (rev, modified string) {
 
 // judgeBuild — чистая часть П2 (таблица в тестах).
 func judgeBuild(ni *debug.BuildInfo, nerr error, si *debug.BuildInfo, sok bool, bin []byte, script string) Result {
-	r := Result{ID: "П2", Name: "сборка -new: ревизия и текст команды записи"}
+	r := step("П2")
 	hsum := FingerprintLine()
 	if ni == nil {
 		r.Detail = fmt.Sprintf("сведения о сборке -new не прочитаны: %v; канарейка: %s", nerr, hsum)
@@ -568,7 +568,7 @@ func (e *Env) dexec(cmd string) (string, error) {
 
 // lockDir — ОТЧЁТ PR1, п. 6: /run/lock — каталог root, drwxrwxrwt.
 func (e *Env) lockDir() Result {
-	r := Result{ID: "К2.1", Name: "/run/lock — каталог root 1777"}
+	r := step("К2.1")
 	out, err := e.Remote("ls -ld /run/lock")
 	if err != nil {
 		r.Detail = "не выполнилось: " + err.Error()
@@ -593,7 +593,7 @@ var reBusybox = regexp.MustCompile(`v(\d+)\.(\d+)`)
 
 // busybox — РЕВЬЮ PR2 SEC, п. 3: версия < 1.30 — СТОП до решения ядра.
 func (e *Env) busybox() Result {
-	r := Result{ID: "К2.2", Name: "busybox в контейнере ≥ 1.30"}
+	r := step("К2.2")
 	out, err := e.dexec(`command -v busybox >/dev/null 2>&1 || { echo NO-BUSYBOX; exit 0; }; busybox | head -1`)
 	if err != nil {
 		r.Detail = "не выполнилось: " + err.Error()
@@ -624,7 +624,7 @@ func (e *Env) busybox() Result {
 // timeoutSyntax — ОТЧЁТ PR1, п. 5, и SEC PR2: `timeout 50 sh -c true` в
 // контейнере даёт 0; `timeout --help` — в подробности.
 func (e *Env) timeoutSyntax() Result {
-	r := Result{ID: "К2.3", Name: "синтаксис timeout в контейнере"}
+	r := step("К2.3")
 	help, _ := e.dexec(`timeout --help 2>&1 | head -3`)
 	out, err := e.dexec(`timeout 50 sh -c true; echo "rc=$?"`)
 	if err != nil {
@@ -642,7 +642,7 @@ func (e *Env) timeoutSyntax() Result {
 
 // lslocks — ОТЧЁТ PR1, п. 7: посторонний держатель замка на /run/lock.
 func (e *Env) lslocks() Result {
-	r := Result{ID: "К2.4", Name: "никто не держит замок /run/lock до прогона"}
+	r := step("К2.4")
 	holders, known, why := e.lockHolders()
 	switch {
 	case !known:
@@ -705,7 +705,7 @@ func lockHoldersFrom(out string) (holders []string, known bool, why string) {
 // serverEmpty — П0: нет записей в clientsTable, нет [Peer] в wg0.conf и нет
 // peer'ов в работающем сервере. Любое непрочитанное — НЕ ПРОВЕРЕНО (СТОП).
 func (e *Env) serverEmpty() Result {
-	r := Result{ID: "П0", Name: "на сервере нет клиентов"}
+	r := step("П0")
 	clients, err := e.Sess.LoadClients(e.Ctr)
 	if err != nil {
 		r.Detail = "clientsTable не прочитана: " + err.Error() + " — СТОП"
@@ -735,7 +735,7 @@ func (e *Env) serverEmpty() Result {
 // пользователь, его sudoers, подменённый wg-quick. Есть — запись не идёт,
 // пользователя «до нас» НЕ удаляем.
 func (e *Env) traces() Result {
-	r := Result{ID: "П1", Name: "следов прошлого прогона нет"}
+	r := step("П1")
 	host, err := e.Remote(`id ` + TempUser + ` >/dev/null 2>&1 && echo USER; test -e /etc/sudoers.d/` + TempUser + ` && echo SUDOERS; echo DONE`)
 	if err != nil || !strings.Contains(host, "DONE") {
 		r.Detail = "хост не проверен: " + fmt.Sprint(err)
@@ -813,7 +813,7 @@ func (e *Env) RunCleanups() []error {
 // k2Info — сведения, которые записываются дословно (К2, ОТЧЁТ PR1 п. 2).
 func (e *Env) k2Tools() []Result {
 	var rs []Result
-	tools := func(id, name, cmd string, inCtr bool) {
+	tools := func(id, cmd string, inCtr bool) {
 		var out string
 		var err error
 		if inCtr {
@@ -821,7 +821,7 @@ func (e *Env) k2Tools() []Result {
 		} else {
 			out, err = e.Remote(cmd)
 		}
-		r := Result{ID: id, Name: name}
+		r := step(id)
 		switch {
 		case err != nil:
 			r.Detail = "не выполнилось: " + err.Error()
@@ -834,15 +834,15 @@ func (e *Env) k2Tools() []Result {
 		}
 		rs = append(rs, r)
 	}
-	tools("К2.5", "flock и timeout на хосте", `for t in flock timeout; do command -v $t || echo "MISSING $t"; done; echo DONE`, false)
-	tools("К2.6", "утилиты в контейнере", `for t in sha256sum base64 mv rm sh; do command -v $t || echo "MISSING $t"; done; echo DONE`, true)
+	tools("К2.5", `for t in flock timeout; do command -v $t || echo "MISSING $t"; done; echo DONE`, false)
+	tools("К2.6", `for t in sha256sum base64 mv rm sh; do command -v $t || echo "MISSING $t"; done; echo DONE`, true)
 	return rs
 }
 
 // k2Info — сведения, не входящие в шлюз записи (К2, ОТЧЁТ PR1 п. 2).
 func (e *Env) k2Info() []Result {
 	var rs []Result
-	r := Result{ID: "К2.7", Name: "sysctl fs.protected_regular (сведение)"}
+	r := step("К2.7")
 	if out, err := e.Remote(`sysctl fs.protected_regular`); err == nil && strings.Contains(out, "fs.protected_regular =") {
 		r.Status, r.Detail = Pass, oneLine(out)
 	} else {
@@ -850,7 +850,7 @@ func (e *Env) k2Info() []Result {
 		r.Detail = "не прочитано: " + oneLine(out) + " " + fmt.Sprint(err)
 	}
 	rs = append(rs, r)
-	dk := Result{ID: "К2.8", Name: "docker без sudo (сведение)", Detail: "docker ps не выполнился: " + fmt.Sprint(e.dockerErr)}
+	dk := stepR("К2.8", NotChecked, "docker ps не выполнился: "+fmt.Sprint(e.dockerErr))
 	if e.dockerErr == nil {
 		dk.Status, dk.Detail = Pass, "используется: "+e.docker
 	}
@@ -860,7 +860,7 @@ func (e *Env) k2Info() []Result {
 
 // execTiming — ОТЧЁТ PR1, п. 3: запуск docker exec против запаса 10 с.
 func (e *Env) execTiming() Result {
-	r := Result{ID: "К2.9", Name: "запуск docker exec < 10 с (запас casOuterMargin)"}
+	r := step("К2.9")
 	var times []string
 	for _, which := range []string{"холодный", "тёплый"} {
 		out, err := e.Remote(`s=$(date +%s%N); ` + e.docker + ` exec ` + e.Ctr.Name + ` timeout 50 sh -c true; e=$(date +%s%N); echo $((e-s))`)

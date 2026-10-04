@@ -336,7 +336,12 @@ var (
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
 	// Замок flock здесь — мьютекс s.mu; настоящую строку замка исполняет
 	// TestCASLockLineRealFlock (Linux).
-	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf|server\.json)$`)
+	reCASWrite = regexp.MustCompile(`^timeout 75 flock -w 15 -E 4 /run/lock/ (?:env LC_ALL=C sudo -n )?docker exec -i (\S+) timeout 50 sh -c '([^']*)' (amnezia-admin-apply|amnezia-admin-rollback) (\S+) ([0-9a-f]{64}) ([0-9a-f]{64}|absent) (wg0\.conf|awg0\.conf|server\.json)((?: (?:xray_(?:uuid|short_id|public|private)|wireguard_(?:server_public_key|psk))\.key (?:[0-9a-f]{64}|absent))*)$`)
+	// reBackupExtra — Р-4: резервная копия дополнительного файла записи
+	// (ключ XRay) перед записью.
+	reBackupExtra = regexp.MustCompile(`^docker exec (\S+) sh -c 'umask 077 && mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
+		`cp (\S+)/((?:xray_(?:uuid|short_id|public|private)|wireguard_(?:server_public_key|psk))\.key) (\S+)/backup/(\S+)\.\$ts && ` +
+		`\(ls -1t (\S+)/backup/(\S+)\.\* 2>/dev/null \| tail -n \+21 \| while read f; do rm -f "\$f"; done\)'$`)
 	reTestFile = regexp.MustCompile(`^docker exec (\S+) sh -c 'test -f (\S+)/clientsTable && echo yes \|\| echo no'$`)
 	reBackup   = regexp.MustCompile(`^docker exec (\S+) sh -c 'mkdir -p (\S+)/backup && ts=\$\(date \+%Y%m%d-%H%M%S\) && ` +
 		`cp (\S+)/(wg0\.conf|awg0\.conf|server\.json) (\S+)/backup/(wg0\.conf|awg0\.conf|server\.json)\.\$ts && ` +
@@ -620,6 +625,22 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		}
 		return "no\n", nil
 
+	case reBackupExtra.MatchString(cmd):
+		if s.FailBackup != nil {
+			return "", s.FailBackup
+		}
+		m := reBackupExtra.FindStringSubmatch(cmd)
+		dir, file := m[2], m[4]
+		if m[3] != dir || m[5] != dir || m[7] != dir || m[6] != file || m[8] != file {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		data, ok := s.files[dir+"/"+file]
+		if !ok {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: cp: %s/%s: No such file or directory", cmd, dir, file)
+		}
+		s.files[dir+"/backup/"+file+"."+time.Now().Format("20060102-150405")] = append([]byte(nil), data...)
+		return "", nil
+
 	case reBackup.MatchString(cmd):
 		if s.FailBackup != nil {
 			return "", s.FailBackup
@@ -774,7 +795,7 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 		return fail(fault.Code, "имитированный отказ записи")
 	}
 
-	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, file, stdin)
+	code, stderr, err := s.execScript(m[2], m[3], dir, wantWg, wantTbl, file, stdin, strings.Fields(m[8])...)
 	if err != nil {
 		return "", err
 	}
@@ -795,8 +816,11 @@ func (s *Server) casWrite(cmd string, m []string, stdin []byte) (string, error) 
 // sh на временном каталоге с копией двух файлов, затем забирает результат
 // обратно в память. Замок flock моделирует s.mu: весь Run идёт под ним.
 // Нет sh — громкий отказ с причиной, а не тихая подмена моделью.
-func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, stdin []byte) (int, string, error) {
+func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, stdin []byte, extra ...string) (int, string, error) {
 	casFiles := []string{file, "clientsTable"}
+	for i := 0; i+1 < len(extra); i += 2 {
+		casFiles = append(casFiles, extra[i])
+	}
 	sh, err := FindSh()
 	if err != nil {
 		return 0, "", err
@@ -825,7 +849,7 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, st
 		}
 		env = append(env, "PATH="+shim)
 	}
-	cmd := exec.Command(sh, "-c", script, label, filepath.ToSlash(work), wantWg, wantTbl, file)
+	cmd := exec.Command(sh, append([]string{"-c", script, label, filepath.ToSlash(work), wantWg, wantTbl, file}, extra...)...)
 	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(stdin)
 	var errb bytes.Buffer

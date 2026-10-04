@@ -22,8 +22,8 @@ func TestCASFingerprintTracksTemplate(t *testing.T) {
 		}
 	}
 	// изменение шаблона (любой формы) и скрипта меняет сумму
-	changed := func(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error) {
-		c, err := casWriteCommand(label, container, dir, file, wantWg, wantTbl, sudo)
+	changed := func(label, container, dir, file, wantWg, wantTbl string, sudo bool, xs ...CASExtra) (string, error) {
+		c, err := casWriteCommand(label, container, dir, file, wantWg, wantTbl, sudo, xs...)
 		return strings.Replace(c, "-w 15", "-w 16", 1), err
 	}
 	s3, c3, u3 := casFingerprintWith(changed, CASWriteScript)

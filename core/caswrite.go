@@ -89,24 +89,43 @@ const CASOuterTimeout = casOuterTimeout
 // Строка wg0.conf "-" — «не менять wg0.conf» (rename и т.п.): сверка идёт,
 // файл не переписывается. "-" не входит в алфавит base64.
 //
+// Дополнительные файлы (Р-4, перенос XRay): после $4 — пары «имя сумма»
+// из закрытого списка casExtraFiles (только при $4 = server.json); stdin —
+// по строке base64 на каждый в том же порядке, "-" — не менять (только
+// сверка). Сверяются под тем же замком, что и оба основных файла; порядок
+// замены: файл конфигурации, дополнительные, clientsTable. Код 6 — после
+// первой удачной замены очередная не удалась (частичная запись), метка
+// «not moved: <имя>» называет первый не заменённый файл. Без пар скрипт
+// ведёт себя как прежде.
+//
+// В функции cl переменная цикла — c, не n: переменные sh глобальны, и
+// цикл в cl затирал n цикла замены — «not moved:» называл не тот файл
+// (CI linux PR #37, сценарий «первая замена падает»).
+//
 // read, а не head -c: head на канале читает с запасом и съел бы начало
 // второй строки; read в POSIX sh читает по байту.
 const CASWriteScript = `umask 077
-d=$1; ww=$2; wt=$3; cf=$4
+d=$1; ww=$2; wt=$3; cf=$4; shift 4; x="$*"
 for t in sha256sum base64 mv rm; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 5; }; done
 nw="$d/$cf` + CASTempInfix + `$$"; nt="$d/clientsTable` + CASTempInfix + `$$"
+xn=""; set -- $x; while [ $# -gt 1 ]; do xn="$xn $1"; shift 2; done; [ $# -eq 0 ] || exit 1
+cl() { rm -f "$nw" "$nt"; for c in $xn; do rm -f "$d/$c` + CASTempInfix + `$$"; done; }
 rm -f "$d/$cf"` + CASTempInfix + `* "$d"/clientsTable` + CASTempInfix + `* || exit 1
+for n in $xn; do rm -f "$d/$n"` + CASTempInfix + `* || exit 1; done
 IFS= read -r W || exit 1
 IFS= read -r T || exit 1
-if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { rm -f "$nw"; exit 1; }; fi
-printf %s "$T" | base64 -d > "$nt" || { rm -f "$nw" "$nt"; exit 1; }
+xw=""; for n in $xn; do IFS= read -r X || { cl; exit 1; }; if [ "$X" != "-" ]; then printf %s "$X" | base64 -d > "$d/$n` + CASTempInfix + `$$" || { cl; exit 1; }; xw="$xw $n"; fi; done
+if [ "$W" != "-" ]; then printf %s "$W" | base64 -d > "$nw" || { cl; exit 1; }; fi
+printf %s "$T" | base64 -d > "$nt" || { cl; exit 1; }
 hsum() { if [ -e "$1" ]; then s=$(sha256sum < "$1") || return 1; echo "${s%% *}"; else echo absent; fi; }
-hw=$(hsum "$d/$cf") || { rm -f "$nw" "$nt"; exit 1; }
-ht=$(hsum "$d/clientsTable") || { rm -f "$nw" "$nt"; exit 1; }
-if [ "$hw" != "$ww" ]; then rm -f "$nw" "$nt"; echo "changed: $cf" >&2; exit 3; fi
-if [ "$ht" != "$wt" ]; then rm -f "$nw" "$nt"; echo "changed: clientsTable" >&2; exit 3; fi
-if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { rm -f "$nw" "$nt"; echo "not moved: $cf: $e" >&2; exit 1; }; fi
-e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { rm -f "$nt"; echo "not moved: clientsTable: $e" >&2; [ "$W" = "-" ] && exit 1; exit 6; }
+hw=$(hsum "$d/$cf") || { cl; exit 1; }
+ht=$(hsum "$d/clientsTable") || { cl; exit 1; }
+if [ "$hw" != "$ww" ]; then cl; echo "changed: $cf" >&2; exit 3; fi
+if [ "$ht" != "$wt" ]; then cl; echo "changed: clientsTable" >&2; exit 3; fi
+set -- $x; while [ $# -gt 1 ]; do h=$(hsum "$d/$1") || { cl; exit 1; }; if [ "$h" != "$2" ]; then cl; echo "changed: $1" >&2; exit 3; fi; shift 2; done
+m=0; if [ "$W" != "-" ]; then e=$(mv -f "$nw" "$d/$cf" 2>&1) || { cl; echo "not moved: $cf: $e" >&2; exit 1; }; m=1; fi
+for n in $xw; do e=$(mv -f "$d/$n` + CASTempInfix + `$$" "$d/$n" 2>&1) || { cl; echo "not moved: $n: $e" >&2; [ $m = 1 ] && exit 6; exit 1; }; m=1; done
+e=$(mv -f "$nt" "$d/clientsTable" 2>&1) || { cl; echo "not moved: clientsTable: $e" >&2; [ $m = 1 ] && exit 6; exit 1; }
 exit 0`
 
 var (
@@ -122,8 +141,77 @@ var (
 //
 // file — имя файла конфигурации сервера (аргумент $4 скрипта) из закрытого
 // списка casConfFiles: wg0.conf | awg0.conf (PR-W1).
-func CASWriteCommand(label, container, dir, file, wantWg, wantTbl string) (string, error) {
-	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, false)
+func CASWriteCommand(label, container, dir, file, wantWg, wantTbl string, extras ...CASExtra) (string, error) {
+	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, false, extras...)
+}
+
+// CASExtra — дополнительный файл записи: имя из закрытого списка
+// casExtraFiles и ожидаемая сумма (hex sha256 или CASAbsent).
+type CASExtra struct {
+	Name string
+	Want string
+}
+
+// casExtraFiles — ЗАКРЫТЫЙ список дополнительных файлов записи и файлы
+// конфигурации, при которых каждый допустим (amnezia-client 94b51df):
+//   - ключи XRay (protocolConstants.h:52-55) — только с server.json;
+//   - открытый ключ сервера и общий PSK WG/AWG (protocolConstants.h:161-162,
+//     183-184): приложение Amnezia читает их с сервера при КАЖДОЙ выдаче
+//     клиента (wireguardConfigurator.cpp:168-176), поэтому при переносе
+//     ключа сервера они обязаны переехать вместе с ним.
+//
+// Больше ничего команда записи не принимает.
+var casExtraFiles = map[string]map[string]bool{
+	"xray_uuid.key":                   {xrayConfFile: true},
+	"xray_short_id.key":               {xrayConfFile: true},
+	"xray_public.key":                 {xrayConfFile: true},
+	"xray_private.key":                {xrayConfFile: true},
+	"wireguard_server_public_key.key": {"wg0.conf": true, "awg0.conf": true},
+	"wireguard_psk.key":               {"wg0.conf": true, "awg0.conf": true},
+}
+
+// CASExtraOrder — ЕДИНСТВЕННЫЙ порядок дополнительных файлов: в хвосте
+// команды, в замене (скрипт идёт по хвосту), в тексте частичной записи и в
+// планах. Не из обхода map: команда с другим порядком отвергается
+// (сторож TestCASExtrasOrderFixed).
+var CASExtraOrder = []string{
+	"xray_uuid.key", "xray_short_id.key", "xray_public.key", "xray_private.key",
+	"wireguard_server_public_key.key", "wireguard_psk.key",
+}
+
+func casExtraRank(name string) int {
+	for i, n := range CASExtraOrder {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// casExtraArgs — проверенный хвост команды « имя сумма …».
+func casExtraArgs(file string, extras []CASExtra) (string, error) {
+	var b strings.Builder
+	seen := map[string]bool{}
+	last := -1
+	for _, x := range extras {
+		if !casExtraFiles[x.Name][file] {
+			return "", fmt.Errorf("недопустимый дополнительный файл записи %q при %s", x.Name, file)
+		}
+		if seen[x.Name] {
+			return "", fmt.Errorf("дополнительный файл записи %q указан дважды", x.Name)
+		}
+		seen[x.Name] = true
+		if r := casExtraRank(x.Name); r <= last {
+			return "", fmt.Errorf("дополнительные файлы записи не в порядке CASExtraOrder (%s)", x.Name)
+		} else {
+			last = r
+		}
+		if !reCASSum.MatchString(x.Want) {
+			return "", fmt.Errorf("недопустимая контрольная сумма")
+		}
+		b.WriteString(" " + x.Name + " " + x.Want)
+	}
+	return b.String(), nil
 }
 
 // CASWriteCommandSudo — та же команда для повтора под sudo (AU-LOGIC PR-4,
@@ -134,11 +222,11 @@ func CASWriteCommand(label, container, dir, file, wantWg, wantTbl string) (strin
 // (`sudo docker exec …`) писать позволял. timeout и flock идут от
 // пользователя: замок на каталоге открывается без прав. `-n` — sudo не ждёт
 // пароль внутри замка, а сразу отказывает.
-func CASWriteCommandSudo(label, container, dir, file, wantWg, wantTbl string) (string, error) {
-	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, true)
+func CASWriteCommandSudo(label, container, dir, file, wantWg, wantTbl string, extras ...CASExtra) (string, error) {
+	return casWriteCommand(label, container, dir, file, wantWg, wantTbl, true, extras...)
 }
 
-func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo bool) (string, error) {
+func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo bool, extras ...CASExtra) (string, error) {
 	if !casConfFiles[file] {
 		return "", fmt.Errorf("недопустимое имя файла конфигурации %q (допустимы: wg0.conf, awg0.conf, server.json)", file)
 	}
@@ -154,6 +242,10 @@ func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo b
 	if !reCASSum.MatchString(wantWg) || !reCASSum.MatchString(wantTbl) {
 		return "", fmt.Errorf("недопустимая контрольная сумма")
 	}
+	tail, err := casExtraArgs(file, extras)
+	if err != nil {
+		return "", err
+	}
 	docker := "docker"
 	if sudo {
 		// env LC_ALL=C (SEC-01 R2): sudo переводит свои сообщения по локали
@@ -163,18 +255,26 @@ func casWriteCommand(label, container, dir, file, wantWg, wantTbl string, sudo b
 		// себя — по-прежнему docker.
 		docker = "env LC_ALL=C sudo -n docker"
 	}
-	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s %s",
-		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl, file), nil
+	return fmt.Sprintf("timeout %d flock -w %d -E 4 %s %s exec -i %s timeout %d sh -c '%s' %s %s %s %s %s%s",
+		casOuterTimeout, casLockWait, CASLockDir, docker, container, casInnerTimeout, CASWriteScript, label, dir, wantWg, wantTbl, file, tail), nil
 }
 
 // CASWriteStdin — stdin команды: две строки base64; wg == nil — "-", то есть
 // wg0.conf не переписывать.
-func CASWriteStdin(wg, tbl []byte) []byte {
+func CASWriteStdin(wg, tbl []byte, extras ...[]byte) []byte {
 	w := "-"
 	if wg != nil {
 		w = base64.StdEncoding.EncodeToString(wg)
 	}
-	return []byte(w + "\n" + base64.StdEncoding.EncodeToString(tbl) + "\n")
+	out := w + "\n" + base64.StdEncoding.EncodeToString(tbl) + "\n"
+	for _, x := range extras {
+		v := "-"
+		if x != nil {
+			v = base64.StdEncoding.EncodeToString(x)
+		}
+		out += v + "\n"
+	}
+	return []byte(out)
 }
 
 // ErrServerBusy — замок на сервере держит другая копия программы; ничего не
@@ -296,8 +396,9 @@ func (e *casWriteError) Is(target error) bool {
 }
 
 var (
-	reCASChanged = regexp.MustCompile(`changed: (wg0\.conf|server\.json|clientsTable)`)
-	reCASMissing = regexp.MustCompile(`missing tool: (\S+)`)
+	reCASChanged  = regexp.MustCompile(`changed: (wg0\.conf|awg0\.conf|server\.json|clientsTable|xray_(?:uuid|short_id|public|private)\.key|wireguard_(?:server_public_key|psk)\.key)`)
+	reCASNotMoved = regexp.MustCompile(`not moved: (wg0\.conf|awg0\.conf|server\.json|clientsTable|xray_(?:uuid|short_id|public|private)\.key|wireguard_(?:server_public_key|psk)\.key):`)
+	reCASMissing  = regexp.MustCompile(`missing tool: (\S+)`)
 )
 
 // casDeniedBeforeWrite — отказ docker в доступе к своему сокету: docker exec
@@ -376,16 +477,21 @@ func stderrTail(err error) string {
 
 // casWrite заменяет оба файла, только если их текущие суммы равны
 // wantWg/wantTbl. nil — записано; иначе *casWriteError с исходом.
-func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl []byte) error {
+func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl []byte, extras ...casExtraWrite) error {
 	confFile, err := confFileOf(c)
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", err)
 	}
-	cmd, err := CASWriteCommand(label, c.Name, c.Dir, confFile, wantWg, wantTbl)
+	xs := make([]CASExtra, len(extras))
+	xd := make([][]byte, len(extras))
+	for i, x := range extras {
+		xs[i], xd[i] = CASExtra{x.name, x.want}, x.data
+	}
+	cmd, err := CASWriteCommand(label, c.Name, c.Dir, confFile, wantWg, wantTbl, xs...)
 	if err != nil {
 		return fmt.Errorf("запись не выполнена: %w", notStarted{err})
 	}
-	stdin := CASWriteStdin(wg, tbl)
+	stdin := CASWriteStdin(wg, tbl, xd...)
 	// Не через s.docker (SEC F1): общий фолбэк повторяет под sudo любую
 	// команду со словом «denied», в том числе после частичной записи, и
 	// повтор отвечал «изменил другой». Здесь под sudo повторяем, только если
@@ -393,7 +499,7 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 	_, runErr := s.run(cmd, stdin)
 	sudoRefused := false
 	if casDeniedBeforeWrite(runErr) {
-		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, confFile, wantWg, wantTbl)
+		sudoCmd, err := CASWriteCommandSudo(label, c.Name, c.Dir, confFile, wantWg, wantTbl, xs...)
 		if err != nil {
 			return fmt.Errorf("запись не выполнена: %w", err)
 		}
@@ -415,8 +521,12 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 		return &casWriteError{outcome: outcome, cause: runErr,
 			msg: fmt.Sprintf("файл %s/%s изменился с момента чтения — обновите список и повторите", c.Dir, file)}
 	case casPartial:
+		what := confFile + " заменён, clientsTable — нет"
+		if len(extras) > 0 {
+			what = partialWhat(confFile, wg != nil, extras, stderrTail(runErr))
+		}
 		return &casWriteError{outcome: outcome, cause: runErr,
-			msg: fmt.Sprintf("записано частично: %s заменён, clientsTable — нет (%s)%s; обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", confFile, stderrTail(runErr), xrayNotRestarted(c), c.Dir)}
+			msg: fmt.Sprintf("записано частично: %s (%s)%s; обновите список, прежде чем повторять; резервные копии на сервере: %s/backup/", what, stderrTail(runErr), xrayNotRestarted(c), c.Dir)}
 	case casBusy:
 		// A3б PR-3 (Low аудита PR-1): замок может держать и посторонняя
 		// программа, не только наша копия.
@@ -448,4 +558,39 @@ func (s *Session) casWrite(c *Container, label, wantWg, wantTbl string, wg, tbl 
 func isCASPartial(err error) bool {
 	var ce *casWriteError
 	return errors.As(err, &ce) && ce.outcome == casPartial
+}
+
+// casExtraWrite — дополнительный файл для casWrite: ожидаемая сумма и
+// байты (nil — не менять, только сверить).
+type casExtraWrite struct {
+	name, want string
+	data       []byte
+}
+
+// partialWhat — что заменено и что нет при частичной записи с
+// дополнительными файлами: порядок замены — файл конфигурации (если
+// менялся), дополнительные (если менялись), clientsTable; метка
+// «not moved: <имя>» называет первый не заменённый. Метки нет — что именно
+// заменено, неизвестно, и так и сказано.
+func partialWhat(confFile string, confChanged bool, extras []casExtraWrite, stderr string) string {
+	var order []string
+	if confChanged {
+		order = append(order, confFile)
+	}
+	for _, x := range extras {
+		if x.data != nil {
+			order = append(order, x.name)
+		}
+	}
+	order = append(order, "clientsTable")
+	m := reCASNotMoved.FindStringSubmatch(stderr)
+	if m == nil {
+		return "какие из файлов " + strings.Join(order, ", ") + " заменены — неизвестно"
+	}
+	for i, n := range order {
+		if n == m[1] {
+			return "заменены: " + strings.Join(order[:i], ", ") + "; НЕ заменены: " + strings.Join(order[i:], ", ")
+		}
+	}
+	return "какие из файлов " + strings.Join(order, ", ") + " заменены — неизвестно"
 }

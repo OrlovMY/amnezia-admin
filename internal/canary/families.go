@@ -54,8 +54,8 @@ func FamilyPlan(selected []string, skip []string) (rows []Result, skipped, notes
 		case sk[r]:
 			skipped = append(skipped, r)
 		default:
-			rows = append(rows, Result{ID: "С", Name: "семейство " + r, Status: NotChecked,
-				Detail: "нет на сервере (или не выбрано -container) — живой проверки нет; пропустить осознанно: -skip-family " + r})
+			rows = append(rows, stepR("С", NotChecked,
+				"семейство "+r+": нет на сервере (или не выбрано -container) — живой проверки нет; пропустить осознанно: -skip-family "+r))
 		}
 	}
 	for _, f := range core.WGFamilies() {
@@ -101,7 +101,7 @@ type mount struct {
 // или неразобранный ответ — НЕ ПРОВЕРЕНО (шлюз: запись не выполняется).
 // Один из двух контейнеров — НЕ ПРИМЕНИМО.
 func MountsCheck(remote func(string) (string, error), names []string) Result {
-	r := Result{ID: "П4", Name: "каталог данных awg и awg2 не общий (docker inspect mounts)"}
+	r := step("П4")
 	has := map[string]bool{}
 	for _, n := range names {
 		has[n] = true
