@@ -99,9 +99,12 @@ func TestXRayRestartMeasuredNotByCode(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "не перезапускался") || srv.XRayRestarts() != 2 {
 		t.Fatalf("перезапусков %d: %v", srv.XRayRestarts(), err)
 	}
+	// AU-LOGIC р4 Medium-2: до записи время запуска ПРОЧИТАНО (вызовы 1–2),
+	// при откате — нет (вызов 3); перезапуски оба отказали. Ошибка чтения не
+	// должна превратиться ни в «не перезапускался», ни в «восстановлено».
 	srv2 := fakesrv.NewXRay("master")
 	srv2.XRay.FailRestart = errors.New("boom")
-	srv2.XRay.FailInspect = errors.New("inspect: timeout")
+	srv2.XRay.FailInspectFrom = 3
 	sess2, x2 := xraySession(t, srv2)
 	_, err = xrayApply(sess2.PlanAddUser(x2, "Carol"))
 	if !errors.Is(err, core.ErrRollbackUnverified) || strings.Contains(err.Error(), "не перезапускался") {
@@ -170,5 +173,65 @@ func TestXRayCreationDateLikeApp(t *testing.T) {
 	core.SortClientsMultiKey(l, nil, core.SortByCreated, core.Asc, core.SortNone, core.Asc)
 	if l[0].Created() != a.Created() {
 		t.Errorf("сортировка по дате — строкой: %v", l)
+	}
+}
+
+// TestCreatedSortMixed — QA-01 р4 Н3, AU-LOGIC р4 Medium-3: смешанная
+// таблица (формат приложения, RFC3339, непарсимые с цифры и с латиницы):
+// разобранные — по времени, непарсимые — в конце при любом направлении,
+// между собой по строке; все перестановки дают один порядок.
+func TestCreatedSortMixed(t *testing.T) {
+	mk := func(name, d string) core.ClientEntry {
+		return core.ClientEntry{ClientID: name, UserData: map[string]any{"clientName": name, "creationDate": d}}
+	}
+	base := []core.ClientEntry{
+		mk("A", "Thu Oct 1 23:18:48 2026"),   // приложение, 1 октября
+		mk("B", "2026-09-15T10:00:00+07:00"), // RFC3339, раньше A
+		mk("C", "Mon Oct 5 10:00:00 2026"),   // приложение, позже A
+		mk("U1", "1 октября"),                // непарсимая, с цифры
+		mk("U2", "Sat, someday"),             // непарсимая, с латиницы A–S
+	}
+	want := map[core.SortDir]string{core.Asc: "B,A,C,U1,U2", core.Desc: "C,A,B,U2,U1"}
+	perm := func(a []core.ClientEntry) [][]core.ClientEntry {
+		var out [][]core.ClientEntry
+		var rec func(int)
+		rec = func(k int) {
+			if k == len(a) {
+				out = append(out, append([]core.ClientEntry(nil), a...))
+				return
+			}
+			for i := k; i < len(a); i++ {
+				a[k], a[i] = a[i], a[k]
+				rec(k + 1)
+				a[k], a[i] = a[i], a[k]
+			}
+		}
+		rec(0)
+		return out
+	}
+	for dir, w := range want {
+		for _, p := range perm(append([]core.ClientEntry(nil), base...)) {
+			core.SortClientsMultiKey(p, nil, core.SortByCreated, dir, core.SortNone, core.Asc)
+			var names []string
+			for _, c := range p {
+				names = append(names, c.Name())
+			}
+			if got := strings.Join(names, ","); got != w {
+				t.Fatalf("направление %v: %s, ждали %s", dir, got, w)
+			}
+		}
+	}
+}
+
+// TestCreatedTextHasYear — QA-01 р4 Н2: дата приложения в показе — с годом.
+func TestCreatedTextHasYear(t *testing.T) {
+	for in, want := range map[string]string{
+		"Thu Oct 1 23:18:48 2026":   "2026-10-01 23:18",
+		"2026-09-15T10:00:00+07:00": "2026-09-15 10:00",
+		"когда-то давно в 2025":     "когда-то давно в 2025",
+	} {
+		if got := core.CreatedText(in); got != want {
+			t.Errorf("%q → %q, ждали %q", in, got, want)
+		}
 	}
 }

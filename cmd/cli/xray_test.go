@@ -5,10 +5,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -248,5 +250,32 @@ func TestXRayCLIInstallShowConfig(t *testing.T) {
 	}
 	if exec.XRayRestarts() != 0 || !strings.Contains(out.String(), ".json") {
 		t.Fatalf("%s", out.String())
+	}
+}
+
+// TestXRayCLIDateHasYear — QA-01 р4 Н2: дата формата приложения в list и в
+// карточке — с годом.
+func TestXRayCLIDateHasYear(t *testing.T) {
+	key, kh, _ := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"add", "-key", key, "-name", "Carol", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	out.Reset()
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	year := fmt.Sprint(time.Now().Year())
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "Carol") && !strings.Contains(l, year+"-") {
+			t.Errorf("list без года: %q", l)
+		}
+	}
+	out.Reset()
+	if code := run([]string{"del", "-key", key, "-name", "Carol"}, strings.NewReader(""), &out, &errOut, kh); code != 2 {
+		t.Fatalf("код %d", code)
+	}
+	if !strings.Contains(out.String(), "Создан:                 "+year+"-") {
+		t.Errorf("карточка без года:\n%s", out.String())
 	}
 }

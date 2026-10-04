@@ -39,10 +39,7 @@ func listXRay(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEnt
 	fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Доступ", accW)+pad("Трафик ↓/↑", 12)+"UUID"))
 	fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+accW+12+10)))
 	for i, cl := range v.Clients {
-		created := cl.Created()
-		if r := []rune(created); len(r) > 19 {
-			created = string(r[:19])
-		}
+		created := core.CreatedText(cl.Created())
 		acc := v.Access[cl.ClientID]
 		name := pad(cl.Name(), 34)
 		accText := pad(core.XRayAccessText(acc), accW)

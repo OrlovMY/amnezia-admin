@@ -47,6 +47,10 @@ type XRayHooks struct {
 	RestartThenFailFrom int
 	// FailInspect — `docker inspect` (время запуска) возвращает эту ошибку.
 	FailInspect error
+	// FailInspectFrom — если > 0, `docker inspect` падает начиная с N-го
+	// вызова (до записи время прочитано, при откате — нет).
+	FailInspectFrom int
+	inspectCalls    int
 	// DeadOnRestart — номер перезапуска (с 1) → xray после него не поднялся.
 	DeadOnRestart map[int]bool
 	// NoPidof — в контейнере нет pidof (проверка отвечает notool).
@@ -233,6 +237,10 @@ func (s *Server) dispatchXRay(cmd string) (out string, err error, ok bool) {
 		}
 		if s.XRay.FailInspect != nil {
 			return "", s.XRay.FailInspect, true
+		}
+		s.XRay.inspectCalls++
+		if s.XRay.FailInspectFrom > 0 && s.XRay.inspectCalls >= s.XRay.FailInspectFrom {
+			return "", fmt.Errorf("команда %q: exit status 1; stderr: Error response from daemon: имитированный отказ inspect", cmd), true
 		}
 		return fmt.Sprintf("2026-10-04T10:00:%02d.000000000Z\n", s.xray.restarts), nil, true
 	}

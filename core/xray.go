@@ -96,6 +96,17 @@ func CreatedTime(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// CreatedText — дата создания для показа (CLI list, карточка, GUI таблица):
+// разобранная (формат приложения или RFC3339) — «2006-01-02 15:04», с годом;
+// не разобранная — исходной строкой целиком (QA-01 р4 Н2: срез до 19 знаков
+// терял год у формата приложения).
+func CreatedText(s string) string {
+	if t, ok := CreatedTime(s); ok {
+		return t.Format("2006-01-02 15:04")
+	}
+	return s
+}
+
 // MaskText — граница маскировки текста ошибки перед показом человеку (CLI
 // errText, GUI showError): та же maskFreeText, что у ответов сервера, — в
 // том числе UUID клиентов XRay (их учётные данные) целиком.

@@ -108,10 +108,9 @@ func CellText(r Row, col int) string {
 	case 1:
 		return r.Name
 	case 2:
-		if rs := []rune(r.Created); len(rs) > CreatedCellRunes {
-			return string(rs[:CreatedCellRunes])
-		}
-		return r.Created
+		// QA-01 р4 Н2: нормализованная дата с годом (core.CreatedText);
+		// в буфер — исходная строка целиком (CopyValue)
+		return core.CreatedText(r.Created)
 	case 3:
 		if r.XRay {
 			return xrayActivity(r)

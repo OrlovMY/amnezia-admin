@@ -145,7 +145,7 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 			Host:      sess.Creds.Host,
 			Container: cur.Name,
 			Name:      cl.Name(),
-			Created:   trunc19(cl.Created()),
+			Created:   core.CreatedText(cl.Created()),
 			Seen:      core.LastSeen{State: core.SeenNotSupported},
 			Key:       core.UUIDPrint(cl.ClientID),
 			KeyLabel:  "UUID (отпечаток):",
@@ -157,7 +157,7 @@ func buildCard(sess *core.Session, cur *core.Container, cl core.ClientEntry, act
 		Host:      sess.Creds.Host,
 		Container: cur.Name,
 		Name:      cl.Name(),
-		Created:   trunc19(cl.Created()),
+		Created:   core.CreatedText(cl.Created()),
 		Seen:      core.ClassifyLastSeen(hs, err, cl.ClientID, cl.Disabled()),
 		Key:       cl.ClientID,
 	}

@@ -233,10 +233,7 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		absent := 0                 // включённые клиенты, которых нет в ответе `wg show`
 		var unknownEnabled []string // включён ли — неизвестно (У1)
 		for i, cl := range clients {
-			created := cl.Created()
-			if r := []rune(created); len(r) > 19 {
-				created = string(r[:19])
-			}
+			created := core.CreatedText(cl.Created())
 			r := core.ReadPeer(stats, statsFailed, cl.ClientID)
 			switch cl.EnabledState() {
 			case core.EnabledActive:
