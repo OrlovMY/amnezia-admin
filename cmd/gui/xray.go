@@ -37,7 +37,13 @@ func (u *ui) xrayServiceRow(cl core.ClientEntry) bool {
 	if !u.xrayView.IsInstall(cl) {
 		return false
 	}
-	dialog.ShowInformation(core.XRayServiceName, guiview.XRayServiceInfo, u.win)
+	// AU-UX Р3-2: заголовок — имя клиента из clientsTable; синтетическое —
+	// только если имени нет
+	title := cl.Name()
+	if title == "" {
+		title = core.XRayServiceName
+	}
+	dialog.ShowInformation(title, guiview.XRayServiceInfo, u.win)
 	return true
 }
 
@@ -303,7 +309,10 @@ func (u *ui) refreshXRay(cur *core.Container) {
 // showXRayConfig — QR и файл конфига существующего клиента XRay, собранные
 // с сервера (меню строки «Показать QR» / «Сохранить конфигурацию…»).
 func (u *ui) showXRayConfig(cl core.ClientEntry) {
-	if u.xrayServiceRow(cl) {
+	// AU-UX Р3-1 (решение ядра): клиенту установки разрешены действия
+	// только чтения — показать QR и сохранить конфиг; отказ — только у
+	// синтетической строки (записи в clientsTable нет — конфиг не собрать)
+	if cl.ClientID == core.XRayServiceRowID && u.xrayServiceRow(cl) {
 		return
 	}
 	cur := u.cur

@@ -184,8 +184,20 @@ func TestXRayGUIDeleteCard(t *testing.T) {
 	if !strings.Contains(info, guiview.XRayServiceInfo) || xrayWritesGUI(srv) != before {
 		t.Errorf("служебная строка: %s", info)
 	}
-	if m := u.cellMenu(widget.TableCellID{Row: inst, Col: 1}); m == nil || len(m.Items) != 1 {
-		t.Errorf("меню служебной строки: %+v", m)
+	// AU-UX Р3-2: заголовок — имя клиента из clientsTable
+	if !strings.Contains(info, "Admin [Android  (16.0)]") {
+		t.Errorf("заголовок окна клиента установки: %s", info)
+	}
+	// AU-UX Р3-1: меню — с «Показать QR» и «Сохранить конфигурацию»
+	m := u.cellMenu(widget.TableCellID{Row: inst, Col: 1})
+	if m == nil || len(m.Items) != 4 {
+		t.Fatalf("меню строки установки: %+v", m)
+	}
+	m.Items[2].Action() // «Показать QR»
+	waitGUIGoroutines(t)
+	qr := strings.Join(visibleTexts(u.win.Canvas().Overlays().Top()), " | ")
+	if !strings.Contains(qr, "Admin [Android  (16.0)]") || !strings.Contains(qr, "vless://") || xrayWritesGUI(srv) != before || srv.XRayRestarts() != 0 {
+		t.Errorf("QR клиента установки: %s; записей %d→%d", qr, before, xrayWritesGUI(srv))
 	}
 }
 
@@ -397,5 +409,37 @@ func deliverKey(c fyne.Canvas, k fyne.KeyName) {
 	}
 	if h := c.OnTypedKey(); h != nil {
 		h(ev)
+	}
+}
+
+// TestXRayGUINoSyntheticWhenUnlisted — AU-LOGIC р3 Low-1: UUID ключа
+// установки нет ни в server.json, ни в clientsTable — синтетической строки
+// «клиент установки XRay» нет.
+func TestXRayGUINoSyntheticWhenUnlisted(t *testing.T) {
+	u, srv := xrayUI(t)
+	key, _ := srv.File("/opt/amnezia/xray/xray_uuid.key")
+	inst := strings.TrimSpace(string(key))
+	conf, _ := srv.File("/opt/amnezia/xray/server.json")
+	var keep []string
+	for _, id := range fakesrv.XRayIDs(conf) {
+		if id != inst {
+			keep = append(keep, id)
+		}
+	}
+	srv.SetFile("/opt/amnezia/xray/server.json", []byte(fakesrv.XRayWithClients(string(conf), keep...)))
+	var list []core.ClientEntry
+	b, _ := srv.File("/opt/amnezia/xray/clientsTable")
+	_ = json.Unmarshal(b, &list)
+	out, _ := json.MarshalIndent(list[1:], "", "    ")
+	srv.SetFile("/opt/amnezia/xray/clientsTable", out)
+	u.refresh()
+	waitGUIGoroutines(t)
+	for _, cl := range u.clients {
+		if cl.ClientID == core.XRayServiceRowID {
+			t.Fatal("синтетическая строка при отсутствии ключа установки в server.json")
+		}
+	}
+	if len(u.clients) != 2 {
+		t.Fatalf("строк %d", len(u.clients))
 	}
 }

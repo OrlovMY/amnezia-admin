@@ -76,6 +76,26 @@ func confFileOf(c *Container) (string, error) {
 	return f.File, nil
 }
 
+// AmneziaDateLayout — формат creationDate, который пишет приложение Amnezia:
+// QDateTime::currentDateTime().toString() — Qt::TextDate, «Thu Oct 1
+// 23:18:48 2026» (amnezia-client 94b51df usersController.cpp:437,
+// appendClient). Живая проверка 04.10: приложение пишет именно так.
+const AmneziaDateLayout = "Mon Jan 2 15:04:05 2006"
+
+// AmneziaDateNow — текущее время в формате приложения Amnezia.
+func AmneziaDateNow() string { return time.Now().Format(AmneziaDateLayout) }
+
+// CreatedTime — creationDate как время: формат приложения или прежний
+// RFC3339 этой программы; ok == false — не разобрать.
+func CreatedTime(s string) (time.Time, bool) {
+	for _, l := range []string{AmneziaDateLayout, time.RFC3339} {
+		if t, err := time.ParseInLocation(l, s, time.Local); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // MaskText — граница маскировки текста ошибки перед показом человеку (CLI
 // errText, GUI showError): та же maskFreeText, что у ответов сервера, — в
 // том числе UUID клиентов XRay (их учётные данные) целиком.
@@ -886,7 +906,7 @@ func (s *Session) planXRayAdd(c *Container, name string) (*Plan, error) {
 	}
 	clients := append(append([]ClientEntry{}, st.clients...), ClientEntry{
 		ClientID: id,
-		UserData: map[string]any{"clientName": name, "creationDate": time.Now().Format(time.RFC3339)},
+		UserData: map[string]any{"clientName": name, "creationDate": AmneziaDateNow()},
 	})
 	p, err := s.xrayPlan(c, st, "add", name, append(append([]string{}, st.srv.ids...), id), clients,
 		xrayLine("+", name, id, ": новый клиент"))

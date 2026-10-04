@@ -3,7 +3,9 @@ package core_test
 // AL-01, ревью раунд 1: AU-LOGIC High-1/High-2, QA Н1.
 
 import (
+	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -128,5 +130,45 @@ func TestXRayWrappersRefuse(t *testing.T) {
 	}
 	if err := sess.RenameUser(x, alice, "A"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestXRayCreationDateLikeApp — живая проверка 2bf470c: creationDate — как
+// пишет приложение Amnezia (QDateTime::toString(), Qt::TextDate:
+// «Thu Oct 1 23:18:48 2026», usersController.cpp:437) — и для XRay, и для
+// семейства WG; сортировка по дате — по времени, а не по строке.
+func TestXRayCreationDateLikeApp(t *testing.T) {
+	reApp := regexp.MustCompile(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [1-9][0-9]? [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}$`)
+	if !reApp.MatchString("Thu Oct 1 23:18:48 2026") {
+		t.Fatal("образец приложения не проходит — проверка ничего не значит")
+	}
+	srv := fakesrv.NewXRay("dev")
+	sess, x := xraySession(t, srv)
+	if _, err := xrayApply(sess.PlanAddUser(x, "Carol")); err != nil {
+		t.Fatal(err)
+	}
+	var list []core.ClientEntry
+	_ = json.Unmarshal(fileOf(t, srv, xrayTbl), &list)
+	if got := list[len(list)-1].Created(); !reApp.MatchString(got) {
+		t.Errorf("XRay creationDate %q — не формат приложения", got)
+	}
+	wg := fakesrv.New()
+	ws := core.NewSessionWithRunner(wg, raceCreds())
+	c := &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
+	if _, err := ws.AddUser(c, "Carol"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := wg.File("/opt/amnezia/awg/clientsTable")
+	_ = json.Unmarshal(b, &list)
+	if got := list[len(list)-1].Created(); !reApp.MatchString(got) {
+		t.Errorf("WG creationDate %q — не формат приложения", got)
+	}
+	// сортировка: «Thu Oct 1 … 2026» раньше «Mon Oct 5 … 2026», хотя строка больше
+	a := core.ClientEntry{UserData: map[string]any{"creationDate": "Thu Oct 1 23:18:48 2026"}}
+	z := core.ClientEntry{UserData: map[string]any{"creationDate": "Mon Oct 5 10:00:00 2026"}}
+	l := []core.ClientEntry{z, a}
+	core.SortClientsMultiKey(l, nil, core.SortByCreated, core.Asc, core.SortNone, core.Asc)
+	if l[0].Created() != a.Created() {
+		t.Errorf("сортировка по дате — строкой: %v", l)
 	}
 }

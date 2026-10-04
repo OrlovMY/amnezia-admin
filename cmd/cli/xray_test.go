@@ -209,3 +209,44 @@ func TestXRayCLIInstallRowRefused(t *testing.T) {
 		t.Fatalf("код %d, записей %d→%d: %s", code, before, xrayWrites(exec), errOut.String())
 	}
 }
+
+// TestXRayCLIListAligned — живая проверка 2bf470c: пометка клиента
+// установки — сноской; колонка UUID у всех строк начинается в одной позиции.
+func TestXRayCLIListAligned(t *testing.T) {
+	key, kh, _ := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	col := -1
+	rows := 0
+	for _, l := range strings.Split(out.String(), "\n") {
+		i := strings.Index(l, "…")
+		if i < 0 || !strings.Contains(l, "—") {
+			continue
+		}
+		rows++
+		pos := len([]rune(l[:i]))
+		if col < 0 {
+			col = pos
+		} else if pos != col {
+			t.Errorf("колонка UUID съехала (%d ≠ %d): %q", pos, col, l)
+		}
+	}
+	if rows != 3 || !strings.Contains(out.String(), "* "+core.XRayInstallNote) {
+		t.Fatalf("строк %d, сноски нет:\n%s", rows, out.String())
+	}
+}
+
+// TestXRayCLIInstallShowConfig — AU-UX Р3-1: show-config для клиента
+// установки разрешён (только чтение), изменения — нет.
+func TestXRayCLIInstallShowConfig(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"show-config", "-key", key, "-name", "Admin [Android  (16.0)]"}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
+	if exec.XRayRestarts() != 0 || !strings.Contains(out.String(), ".json") {
+		t.Fatalf("%s", out.String())
+	}
+}

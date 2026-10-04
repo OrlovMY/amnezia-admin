@@ -1076,7 +1076,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		ClientID: pub,
 		UserData: map[string]any{
 			"clientName":   name,
-			"creationDate": time.Now().Format(time.RFC3339),
+			"creationDate": AmneziaDateNow(),
 		},
 	})
 	tblAfter, err := json.MarshalIndent(clients, "", "    ")

@@ -33,7 +33,8 @@ func listXRay(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEnt
 	if accW < len([]rune("Доступ")) {
 		accW = len([]rune("Доступ"))
 	}
-	accW += 2
+	accW += 4 // запас под « *»
+	footnote := false
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, cHead(pad("#", 4)+pad("Имя", 34)+pad("Создан", 21)+pad("Доступ", accW)+pad("Трафик ↓/↑", 12)+"UUID"))
 	fmt.Fprintln(w, cDim(strings.Repeat("─", 4+34+21+accW+12+10)))
@@ -47,8 +48,10 @@ func listXRay(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEnt
 		accText := pad(core.XRayAccessText(acc), accW)
 		switch {
 		case v.IsInstall(cl):
-			// клиент установки: обычная строка, действия недоступны
-			accText = cDim(core.XRayAccessText(acc) + "; " + core.XRayInstallNote)
+			// клиент установки: обычная строка, действия недоступны; пометка —
+			// сноской под таблицей (ячейка той же ширины, что у остальных)
+			accText = cDim(pad(core.XRayAccessText(acc)+" *", accW))
+			footnote = true
 		case acc == core.XRayActive:
 			accText = cOK(accText)
 		case acc == core.XRayDisabled:
@@ -65,6 +68,9 @@ func listXRay(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEnt
 	}
 	if len(v.Clients) == 0 {
 		fmt.Fprintln(w, "В clientsTable записей нет.")
+	}
+	if footnote {
+		fmt.Fprintln(w, cDim("* "+core.XRayInstallNote+"; показать и сохранить конфиг можно (show-config)."))
 	}
 	fmt.Fprintln(w, cDim(core.XRayStatsNote))
 	for _, n := range core.XRayNotes(v) {

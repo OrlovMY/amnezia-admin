@@ -2125,7 +2125,8 @@ func (u *ui) cellMenu(id widget.TableCellID) *fyne.Menu {
 		return nil
 	}
 	col, row := id.Col, id.Row
-	if r.XRayService {
+	if r.XRayService && r.ClientID == "" {
+		// синтетическая строка клиента установки: только копирование
 		return fyne.NewMenu("",
 			fyne.NewMenuItem(guiview.MenuCopyValue, func() {
 				u.copyToClipboard(guiview.CopyValue(r, col), guiview.StatusCopiedOne)

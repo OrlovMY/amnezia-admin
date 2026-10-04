@@ -41,6 +41,19 @@ func compareByColumn(a, b ClientEntry, stats map[string]PeerStat, col SortColumn
 		}
 	case SortByCreated:
 		ac, bc := a.Created(), b.Created()
+		// формат приложения («Thu Oct 1 …») лексикографически не
+		// хронологичен — сравниваем время, если обе даты разобраны
+		if ta, oka := CreatedTime(ac); oka {
+			if tb, okb := CreatedTime(bc); okb {
+				switch {
+				case ta.Before(tb):
+					return -1
+				case ta.After(tb):
+					return 1
+				}
+				return 0
+			}
+		}
 		switch {
 		case ac < bc: // RFC3339 сравнивается лексикографически = хронологически
 			return -1
