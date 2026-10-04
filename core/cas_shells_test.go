@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const shellsMarker = "ОБОЛОЧКИ-ВЕРДИКТ:"
@@ -429,7 +430,12 @@ func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 	if err != nil || strings.TrimSpace(string(out)) != name {
 		bad = append(bad, fmt.Sprintf("printf не встроенный: command -v %s = %q (%v)", name, out, err))
 	}
-	marker := []byte("SECRETMARKER-A3B-PR2")
+	// Маркер уникален для процесса (CI linux PR #37 @ 8805261): посадки идут
+	// параллельными процессами, и /proc/*/cmdline виден всем — посадка
+	// extprintf с ОБЩИМ маркером выставляла свой внешний printf, и сценарий
+	// соседней посадки (drop) находил ЧУЖУЮ утечку. Свой маркер (и образец
+	// base64, покрывающий его целиком) — только своя утечка.
+	marker := []byte(fmt.Sprintf("SECRETMARKER-A3B-PR2-%d-%d", os.Getpid(), time.Now().UnixNano()))
 	// Размер подобран с двух сторон (измерено в WSL, посадка extprintf):
 	// строка base64 БОЛЬШЕ буфера канала (64 КБ) — внешний printf, будь он в
 	// скрипте, блокировался бы на записи и был бы жив в момент просмотра
@@ -444,7 +450,7 @@ func secretNotInCmdline(t *testing.T, rs realShell, script string) []string {
 	report := filepath.Join(work, "found")
 	// Образцы — в файле, а не в argv grep: иначе grep нашёл бы сам себя.
 	pats := filepath.Join(work, "patterns")
-	if err := os.WriteFile(pats, []byte(string(marker)+"\n"+encLine[:40]+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(pats, []byte(string(marker)+"\n"+encLine[:96]+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// обёртка base64: при каждом вызове ищет образцы в cmdline всех процессов
@@ -756,7 +762,8 @@ func TestCASScriptRealShellsCanary(t *testing.T) {
 	// общей метки мало, ею помечен любой провал.
 	plants := []struct{ name, want string }{
 		{"nocheck", "код 0, ждали 3"},
-		{"drop", "исполнено сценариев 12, ждали ровно 13"},
+		// Ожидание — от числа сценариев, не литералом: drop убирает ровно один.
+		{"drop", fmt.Sprintf("исполнено сценариев %d, ждали ровно %d", shellsWantScenarios-1, shellsWantScenarios)},
 		{"extprintf", "данные видны в /proc/*/cmdline"},
 		{"notbuiltin", "printf не встроенный"},
 	}
