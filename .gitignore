@@ -5,6 +5,9 @@
 /Конфигурации/
 *.conf
 *.avlt
+# копии пользователей (ключ сервера, PSK, UUID XRay)
+*.aabk
+!core/testdata/*.aabk
 # исключение: golden-фикстуры для тестов (внутри фейковый vpn://golden-fixture-key)
 !core/testdata/v1.avlt
 !core/testdata/v2.avlt
