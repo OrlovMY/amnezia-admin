@@ -210,7 +210,7 @@ func (u *ui) xrayAct(title string, op guiview.Op, card []string, build func(*cor
 }
 
 func xrayCard(cl core.ClientEntry) []string {
-	return []string{fmt.Sprintf("Имя: %s\nСоздан: %s\nUUID (отпечаток): %s", cl.Name(), cl.Created(), core.UUIDPrint(cl.ClientID)),
+	return []string{fmt.Sprintf("Имя: %s\nСоздан: %s\nUUID (отпечаток): %s", cl.Name(), core.CreatedText(cl.Created()), core.UUIDPrint(cl.ClientID)),
 		guiview.XRayDeleteActivity}
 }
 

@@ -3294,7 +3294,7 @@ func (u *ui) deleteSelected() {
 	// Снимок контейнера, как в refresh(): всё, что летит в goroutine,
 	// берёт cur, а не читает u.cur из другого потока.
 	cur := u.cur
-	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s", victim.Name(), victim.Created(), core.KeyText(cur, victim.ClientID))
+	msg := fmt.Sprintf("Имя: %s\nСоздан: %s\nКлюч: %s", victim.Name(), core.CreatedText(victim.Created()), core.KeyText(cur, victim.ClientID))
 
 	var d dialog.Dialog
 	onDeleted := func() {
