@@ -41,7 +41,7 @@ const shellsPlantBroken = "ПОСАДКА-НЕ-ЛЕГЛА:"
 const shellsPlantEnv = "AMNEZIA_SHELLS_PLANT"
 
 // shellsWantScenarios — ТОЧНОЕ число сценариев на каждую оболочку.
-const shellsWantScenarios = 13
+const shellsWantScenarios = 16
 
 type realShell struct {
 	name  string
@@ -330,7 +330,79 @@ func shellScenarios() []scenario {
 		{"два писателя × 50 под flock: ни потерь, ни смеси", func(t *testing.T, rs realShell, script string) []string {
 			return parallelWriters(t, rs, script)
 		}},
+		// Р-4: дополнительные файлы (ключи XRay) — только при server.json.
+		{"ключи XRay: записаны изменённые, «-» не тронут, absent не создан", func(t *testing.T, rs realShell, script string) []string {
+			d, r := extrasRun(t, rs, script, "", false)
+			bad := expectExtras(d, r, 0, "", "PUB-NEW", "PRIV-NEW", tblNew)
+			if fi, err := os.Stat(filepath.Join(d, "xray_public.key")); err == nil && fi.Mode().Perm()&0o077 != 0 {
+				bad = append(bad, fmt.Sprintf("xray_public.key: права %v", fi.Mode().Perm()))
+			}
+			if _, ok := readOpt(d, "xray_short_id.key"); ok {
+				bad = append(bad, "xray_short_id.key (absent, «-») создан")
+			}
+			if b, _ := readOpt(d, "xray_uuid.key"); string(b) != "UUID" {
+				bad = append(bad, "xray_uuid.key («-») изменён")
+			}
+			return bad
+		}},
+		{"ключи XRay: устаревшая сумма ключа — код 3, ничего не записано", func(t *testing.T, rs realShell, script string) []string {
+			d, r := extrasRun(t, rs, script, "", true)
+			return expectExtras(d, r, 3, "changed: xray_public.key", "PUB-OLD", "PRIV-OLD", tblOld)
+		}},
+		{"ключи XRay: mv ключа падает после замены соседнего — код 6", func(t *testing.T, rs realShell, script string) []string {
+			d, r := extrasRun(t, rs, script, "xray_private.key", false)
+			return expectExtras(d, r, 6, "not moved: xray_private.key", "PUB-NEW", "PRIV-OLD", tblOld)
+		}},
 	}
+}
+
+// extrasRun — каталог XRay: server.json, clientsTable, xray_uuid.key (не
+// меняется, «-»), xray_public.key и xray_private.key (меняются),
+// xray_short_id.key — absent. stale — сумма xray_public.key устарела.
+func extrasRun(t *testing.T, rs realShell, script, failMv string, stale bool) (string, shellRun) {
+	t.Helper()
+	d := asciiTemp(t)
+	for n, v := range map[string]string{"server.json": "{}", "clientsTable": string(tblOld), "xray_uuid.key": "UUID", "xray_public.key": "PUB-OLD", "xray_private.key": "PRIV-OLD"} {
+		if err := os.WriteFile(filepath.Join(d, n), []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pub := sum64([]byte("PUB-OLD"), true)
+	if stale {
+		pub = sum64([]byte("PUB-OTHER"), true)
+	}
+	xs := []CASExtra{{"xray_uuid.key", sum64([]byte("UUID"), true)}, {"xray_short_id.key", CASAbsent},
+		{"xray_public.key", pub}, {"xray_private.key", sum64([]byte("PRIV-OLD"), true)}}
+	cmd, err := CASWriteCommand(CASLabelApply, "c", d, "server.json", sum64([]byte("{}"), true), sum64(tblOld, true), xs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cut = " docker exec -i c "
+	tail := cmd[strings.Index(cmd, cut)+len(cut):]
+	if script != CASWriteScript {
+		tail = strings.Replace(tail, CASWriteScript, script, 1)
+	}
+	stdin := CASWriteStdin(nil, tblNew, nil, nil, []byte("PUB-NEW"), []byte("PRIV-NEW"))
+	return d, rs.runTail(t, tail, rs.shimDir(t, "", "", failMv), stdin)
+}
+
+func expectExtras(d string, r shellRun, code int, stderrHas, pub, priv string, tbl []byte) []string {
+	var bad []string
+	if r.code != code {
+		bad = append(bad, fmt.Sprintf("код %d, ждали %d (stderr %q)", r.code, code, r.stderr))
+	}
+	if stderrHas != "" && !strings.Contains(r.stderr, stderrHas) {
+		bad = append(bad, fmt.Sprintf("stderr %q не содержит %q", r.stderr, stderrHas))
+	}
+	for n, want := range map[string]string{"xray_public.key": pub, "xray_private.key": priv, "clientsTable": string(tbl), "server.json": "{}"} {
+		if b, _ := readOpt(d, n); string(b) != want {
+			bad = append(bad, fmt.Sprintf("%s = %q, ждали %q", n, b, want))
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(d, "*"+CASTempInfix+"*")); len(left) != 0 {
+		bad = append(bad, fmt.Sprintf("остались временные файлы: %v", left))
+	}
+	return bad
 }
 
 // secretNotInCmdline — (1) printf в этой оболочке встроенный: `command -v

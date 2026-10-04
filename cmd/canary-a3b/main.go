@@ -175,7 +175,21 @@ func run() int {
 	for _, c := range sel {
 		selNames = append(selNames, c.Name)
 	}
-	famRows, skipped, famNotes, ferr := canary.FamilyPlan(selNames, skipFam)
+	// Р-4: amnezia-xray (К9) пропускается тем же флагом, но в таблицу
+	// семейств WG не входит.
+	var skipWG []string
+	skipXRay := false
+	for _, f := range skipFam {
+		if f == canary.XRayFamily {
+			skipXRay = true
+			continue
+		}
+		skipWG = append(skipWG, f)
+	}
+	famRows, skipped, famNotes, ferr := canary.FamilyPlan(selNames, skipWG)
+	if skipXRay {
+		skipped = append(skipped, canary.XRayFamily)
+	}
 	if ferr != nil {
 		fmt.Fprintln(errOut, "ОТКАЗ:", ferr)
 		return 2

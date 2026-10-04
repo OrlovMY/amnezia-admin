@@ -49,6 +49,83 @@ type Plan struct {
 	// построчный diff JSON показал бы переформатирование файла, UUID и
 	// privateKey (проект БК, 1.2).
 	xraySummary string
+
+	// extra — дополнительные файлы записи (Р-4: ключи XRay при переносе) в
+	// порядке закрытого списка casExtraFiles; пусто у всех прежних планов.
+	extra []planExtra
+}
+
+// planExtra — дополнительный файл плана: прочитанные байты и новые.
+// Менять можно только файл, который на сервере есть (existed): вернуть
+// отсутствие откат не умеет — такой план отвергается до записи.
+type planExtra struct {
+	name          string
+	before, after []byte
+	existed       bool
+}
+
+func (x planExtra) changed() bool { return !bytes.Equal(x.before, x.after) }
+
+// extraApply — дополнительные файлы для записи: сверка с прочитанным,
+// байты — только изменившихся.
+func (p *Plan) extraApply() []casExtraWrite {
+	var out []casExtraWrite
+	for _, x := range p.extra {
+		w := casExtraWrite{name: x.name, want: CASAbsent}
+		if x.existed {
+			w.want = sha256Hex(x.before)
+		}
+		if x.changed() {
+			w.data = append([]byte{}, x.after...)
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// extraRollback — для отката: сверка с НАШИМИ записанными байтами, назад —
+// прежние байты изменившихся.
+func (p *Plan) extraRollback() []casExtraWrite {
+	var out []casExtraWrite
+	for _, x := range p.extra {
+		w := casExtraWrite{name: x.name, want: CASAbsent}
+		switch {
+		case x.changed():
+			w.want = sha256Hex(x.after)
+			w.data = append([]byte{}, x.before...)
+		case x.existed:
+			w.want = sha256Hex(x.before)
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// checkExtras — план с дополнительными файлами допустим: имена из
+// закрытого списка при файле конфигурации контейнера, без повторов, менять
+// — только существующий файл.
+func (p *Plan) checkExtras() error {
+	if len(p.extra) == 0 {
+		return nil
+	}
+	cf, err := confFileOf(p.Container)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, x := range p.extra {
+		if !casExtraFiles[x.name][cf] {
+			return fmt.Errorf("недопустимый дополнительный файл записи %q для %s", x.name, p.Container.Name)
+		}
+		if seen[x.name] {
+			return fmt.Errorf("дополнительный файл записи %q указан дважды", x.name)
+		}
+		seen[x.name] = true
+		if x.changed() && !x.existed {
+			return fmt.Errorf("файла %s/%s на сервере нет — создавать его программа не будет (откат не сможет вернуть отсутствие)", p.Container.Dir, x.name)
+		}
+	}
+	return nil
 }
 
 // ConfPath — путь файла конфигурации сервера плана (подпись предпросмотра).
@@ -1561,7 +1638,13 @@ func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 
 	// 1. backup — существующая команда, без изменений. Стоит ДО записи и
 	// потому до сверки: сверка теперь внутри команды записи (A3б).
+	if err := p.checkExtras(); err != nil {
+		return nil, fmt.Errorf("запись не выполнена: %w", notStarted{err})
+	}
 	if err := s.backup(c); err != nil {
+		return nil, err
+	}
+	if err := s.backupExtras(c, p.extra); err != nil {
 		return nil, err
 	}
 
@@ -1578,7 +1661,7 @@ func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 		}
 		s.xrayStart0, _ = s.xrayStartedAt(c) // не прочитано — "" (неизвестно)
 	}
-	if err := s.casWrite(c, CASLabelApply, p.wgSHA, p.tblWant(), wgBytesIf(wgChanged, p.wgAfter), p.tblAfter); err != nil {
+	if err := s.casWrite(c, CASLabelApply, p.wgSHA, p.tblWant(), wgBytesIf(wgChanged, p.wgAfter), p.tblAfter, p.extraApply()...); err != nil {
 		return nil, err
 	}
 
@@ -1674,6 +1757,12 @@ func (s *Session) verify(c *Container, p *Plan, checkPeers bool) error {
 	if tblNow != string(p.tblAfter) {
 		return fmt.Errorf("проверка не пройдена: clientsTable на сервере не совпадает с ожидаемым")
 	}
+	switch st, why := s.measureExtras(c, p.extra, true); st {
+	case checkUnknown:
+		return fmt.Errorf("проверка: %s", why)
+	case checkDiffer:
+		return fmt.Errorf("проверка не пройдена: %s", why)
+	}
 	if !checkPeers {
 		return nil
 	}
@@ -1729,7 +1818,7 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	// Откат — та же команда записи, но сверка с НАШИМИ записанными байтами
 	// (A3б, окно 2): если после нас файлы изменил другой, откат стёр бы его
 	// запись, которой уже сказано «готово». Оба файла — одной командой.
-	if werr := s.casWrite(c, CASLabelRollback, sha256Hex(p.wgAfter), sha256Hex(p.tblAfter), wgBytesIf(wgChanged, p.wgBefore), tblBefore); werr != nil {
+	if werr := s.casWrite(c, CASLabelRollback, sha256Hex(p.wgAfter), sha256Hex(p.tblAfter), wgBytesIf(wgChanged, p.wgBefore), tblBefore, p.extraRollback()...); werr != nil {
 		cf := ConfFileName(c)
 		backups := fmt.Sprintf("резервные копии на сервере: %s/backup/%s.* и %s/backup/clientsTable.* (самые свежие)", c.Dir, cf, c.Dir)
 		// A3б PR-3, раунд 4 (AU-LOGIC Н-1): исход отката — ТИПОМ, а не
@@ -1744,6 +1833,9 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		switch {
 		case errors.Is(werr, ErrCASMismatch):
 			return &rollbackForeignError{msg: fmt.Sprintf("ВНИМАНИЕ: откат не выполнен: после нашей записи файлы на сервере изменил другой — откат стёр бы его изменения. Обновите список; %s; исходная причина: %v", backups, cause)}
+		case isCASPartial(werr) && len(p.extra) > 0:
+			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
+				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, откат выполнен частично — %v; %s и резервные копии ключей %s/backup/*.key.*; исходная причина: %v", werr, backups, c.Dir, cause)}
 		case isCASPartial(werr):
 			return &restoreError{kind: ErrRollbackUnknown, cause: cause, rollback: werr,
 				msg: fmt.Sprintf("ВНИМАНИЕ: изменения записаны, откат выполнен частично — %s вернулся к прежнему, clientsTable — нет (осталась записанная нами); %s; исходная причина: %v", cf, backups, cause)}
@@ -1764,6 +1856,9 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 	}
 
 	files, filesWhy := s.measureFilesAfterRollback(c, p.wgBefore, tblBefore)
+	if files == checkSame {
+		files, filesWhy = s.measureExtras(c, p.extra, false)
+	}
 	runtime, runtimeWhy := s.measureRuntimeAfterRollback(c, p.wgBefore, wgChanged, syncErr)
 
 	// A3б PR-3, раунд 6 (AU-LOGIC Н-5 — третья находка порядка ветвей в этой
@@ -2013,3 +2108,48 @@ type rollbackForeignError struct{ msg string }
 
 func (e *rollbackForeignError) Error() string        { return e.msg }
 func (e *rollbackForeignError) Is(target error) bool { return target == ErrRollbackForeign }
+
+// measureExtras — дополнительные файлы на сервере против ожидаемых байтов
+// (after — после записи, иначе прежние). Три состояния: совпали / прочитаны
+// и не совпали / не прочитаны. Пустой список — совпали (сверять нечего).
+func (s *Session) measureExtras(c *Container, xs []planExtra, after bool) (checkState, string) {
+	for _, x := range xs {
+		want := x.before
+		if after {
+			want = x.after
+		}
+		if !x.existed && !x.changed() {
+			continue // файла не было и нет — нечего читать
+		}
+		now, err := s.catIn(c, c.Dir+"/"+x.name)
+		if err != nil {
+			return checkUnknown, fmt.Sprintf("%s не прочитан: %v", x.name, err)
+		}
+		if now != string(want) {
+			return checkDiffer, x.name + " на сервере не совпадает с ожидаемым"
+		}
+	}
+	return checkSame, "файлы совпали с прежними"
+}
+
+// backupExtras — резервная копия дополнительных файлов плана (Р-4) в
+// <каталог>/backup/<имя>.<время>, по 20 последних на имя, как у backup.
+// Только существующие файлы; не удалось — запись не начиналась.
+func (s *Session) backupExtras(c *Container, xs []planExtra) error {
+	for _, x := range xs {
+		if !x.existed || !x.changed() {
+			continue
+		}
+		if _, ok := casExtraFiles[x.name]; !ok {
+			return fmt.Errorf("не удалось создать резервную копию — запись не начиналась: %w", notStarted{fmt.Errorf("недопустимое имя %q", x.name)})
+		}
+		cmd := fmt.Sprintf("docker exec %s sh -c 'mkdir -p %s/backup && ts=$(date +%%Y%%m%%d-%%H%%M%%S) && "+
+			"cp %s/%s %s/backup/%s.$ts && "+
+			"(ls -1t %s/backup/%s.* 2>/dev/null | tail -n +21 | while read f; do rm -f \"$f\"; done)'",
+			c.Name, c.Dir, c.Dir, x.name, c.Dir, x.name, c.Dir, x.name)
+		if _, err := s.docker(cmd, nil); err != nil {
+			return fmt.Errorf("не удалось создать резервную копию %s — запись не начиналась: %w", x.name, notStarted{err})
+		}
+	}
+	return nil
+}
