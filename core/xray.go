@@ -424,25 +424,46 @@ type xrayState struct {
 // readXRayServer — server.json и служебный UUID. Ошибка — FormatUnreadable
 // или незнакомый формат (*xrayUnknown).
 func (s *Session) readXRayServer(c *Container) (raw []byte, srv *xrayServer, service string, err error) {
-	out, err := s.catIn(c, c.Dir+"/"+xrayConfFile)
-	if err != nil {
-		return nil, nil, "", &xrayUnreadable{what: "server.json", err: err}
-	}
-	srv, err = parseXRayServer([]byte(out))
+	raw, srv, err = s.readXRayConf(c)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	// Служебный UUID — без него не отличить клиента, созданного при
-	// установке, от «есть в server.json, нет в списке» (решение владельца 2).
+	service, err = s.readXRayInstallID(c)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return raw, srv, service, nil
+}
+
+// readXRayConf — server.json по закрытому списку формы.
+func (s *Session) readXRayConf(c *Container) ([]byte, *xrayServer, error) {
+	out, err := s.catIn(c, c.Dir+"/"+xrayConfFile)
+	if err != nil {
+		return nil, nil, &xrayUnreadable{what: "server.json", err: err}
+	}
+	srv, err := parseXRayServer([]byte(out))
+	if err != nil {
+		return nil, nil, err
+	}
+	return []byte(out), srv, nil
+}
+
+// readXRayInstallID — UUID из xray_uuid.key: клиент, созданный при установке
+// XRay (живая проверка 04.10: в приложении Amnezia это ПЕРВЫЙ клиент —
+// устройство администратора, — он штатно есть и в server.json, и в
+// clientsTable; amnezia-client 94b51df xrayConfigurator.cpp:393-394,
+// 430-438, 462-470; exportController.cpp:166-170; usersController.cpp:409).
+// Без него не отличить этого клиента — управление недоступно.
+func (s *Session) readXRayInstallID(c *Container) (string, error) {
 	key, err := s.catIn(c, c.Dir+"/"+xrayUUIDFile)
 	if err != nil {
-		return nil, nil, "", &xrayUnreadable{what: xrayUUIDFile + " (служебный UUID — без него не отличить служебного клиента)", err: err}
+		return "", &xrayUnreadable{what: xrayUUIDFile + " (ключ установки XRay — без него не отличить клиента установки)", err: err}
 	}
-	service = strings.TrimSpace(key)
-	if !reUUID.MatchString(service) {
-		return nil, nil, "", unknownf("в %s не UUID", xrayUUIDFile)
+	id := strings.TrimSpace(key)
+	if !reUUID.MatchString(id) {
+		return "", unknownf("в %s не UUID", xrayUUIDFile)
 	}
-	return []byte(out), srv, service, nil
+	return id, nil
 }
 
 // XRayFormatOf — формат XRay контейнера c (для FindContainers).
@@ -494,11 +515,9 @@ func (s *Session) readXRay(c *Container) (*xrayState, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, cl := range clients {
-		if cl.ClientID == service {
-			return nil, fmt.Errorf("XRay — только просмотр: служебный UUID (%s) записан в clientsTable как клиент %q", xrayUUIDFile, cl.Name())
-		}
-	}
+	// Клиент установки (UUID из xray_uuid.key) в clientsTable — НОРМА: это
+	// первый клиент приложения Amnezia. Он показывается обычной строкой,
+	// действия над ним отказывают (xrayFind).
 	return &xrayState{raw: raw, srv: srv, service: service, tbl: tbl, tblExisted: existed, clients: clients}, nil
 }
 
@@ -525,59 +544,91 @@ const (
 	XRayEnabledUnknown
 )
 
-// XRayServiceRowID — ClientID строки служебного UUID в списке (синтетический:
-// настоящий UUID в интерфейс не уходит). Ядро отказывает любому действию над
-// ним (planX* не найдёт такого клиента и скажет, что он служебный).
+// XRayServiceRowID — ClientID синтетической строки клиента установки, когда
+// его UUID есть в server.json, а записи в clientsTable нет (настоящий UUID в
+// интерфейс не уходит). Ядро отказывает любому действию над ним.
 const XRayServiceRowID = "xray-service"
 
-// XRayServiceName — имя строки служебного UUID (решение владельца 2).
-const XRayServiceName = "служебный (создан при установке)"
+// XRayServiceName — имя клиента установки без записи в clientsTable.
+const XRayServiceName = "клиент установки XRay"
+
+// XRayInstallNote — пометка строки клиента установки (решение владельца 2,
+// уточнено живой проверкой: строка обычная, без действий).
+const XRayInstallNote = "ключ установки XRay (xray_uuid.key) — изменение недоступно"
 
 // XRayView — список XRay для показа.
 type XRayView struct {
 	Clients []ClientEntry
-	Access  map[string]XRayAccess // ClientID → доступ
-	// ServicePrint — отпечаток служебного UUID; ServiceListed — есть ли он в
-	// server.json.
-	ServicePrint  string
-	ServiceListed bool
+	Access  map[string]XRayAccess // ClientID → доступ (ReadOnly — всё «неизвестно»)
+	// InstallID — UUID клиента установки (xray_uuid.key), "" — не прочитан.
+	// Наружу не печатается: только для сравнения со строками списка.
+	InstallID string
+	// InstallPrint — отпечаток; InstallListed — UUID есть в server.json;
+	// InstallInTable — есть запись в clientsTable (норма, первый клиент).
+	InstallPrint   string
+	InstallListed  bool
+	InstallInTable bool
 	// Orphans — отпечатки UUID, которые есть в server.json, но нет ни в
 	// clientsTable, ни в xray_uuid.key (приложение Amnezia само дописало бы
 	// их как «Client N» — мы только показываем).
 	Orphans []string
+	// ReadOnly — почему только просмотр ("" — управление): формат server.json
+	// не знаком или не прочитан, xray_uuid.key не прочитан. Список при этом
+	// показывается (только просмотр ≠ ошибка).
+	ReadOnly string
 }
 
-// LoadXRayView — список клиентов XRay. Ошибка — только просмотр (формат не
-// знаком или не прочитан), текст — причина.
+// IsInstall — строка cl — клиент установки XRay (действия недоступны).
+func (v XRayView) IsInstall(cl ClientEntry) bool {
+	return cl.ClientID == XRayServiceRowID || (v.InstallID != "" && cl.ClientID == v.InstallID)
+}
+
+// LoadXRayView — список клиентов XRay. Ошибка — только если не прочитана
+// clientsTable; незнакомый или не прочитанный server.json / xray_uuid.key —
+// список с ReadOnly (причина).
 func (s *Session) LoadXRayView(c *Container) (XRayView, error) {
 	if !IsXRay(c) {
 		return XRayView{}, fmt.Errorf("контейнер %s — не XRay", c.Name)
 	}
-	st, err := s.readXRay(c)
+	_, srv, confErr := s.readXRayConf(c)
+	install, idErr := s.readXRayInstallID(c)
+	tbl, _, err := s.readClientsTableRaw(c)
 	if err != nil {
 		return XRayView{}, err
 	}
-	return xrayViewOf(st), nil
-}
-
-func xrayViewOf(st *xrayState) XRayView {
-	v := XRayView{
-		Clients:       st.clients,
-		Access:        map[string]XRayAccess{},
-		ServicePrint:  UUIDPrint(st.service),
-		ServiceListed: st.srv.has(st.service),
+	clients, err := parseClientsTable(tbl)
+	if err != nil {
+		return XRayView{}, err
+	}
+	v := XRayView{Clients: clients, Access: map[string]XRayAccess{}}
+	if idErr == nil {
+		v.InstallID, v.InstallPrint = install, UUIDPrint(install)
+	}
+	switch {
+	case confErr != nil:
+		v.ReadOnly = xrayFormatOf(confErr).Reason
+	case idErr != nil:
+		v.ReadOnly = xrayFormatOf(idErr).Reason
 	}
 	inTable := map[string]bool{}
-	for _, cl := range st.clients {
+	for _, cl := range clients {
 		inTable[cl.ClientID] = true
-		v.Access[cl.ClientID] = xrayAccessOf(cl, st.srv.has(cl.ClientID))
+		if srv == nil {
+			v.Access[cl.ClientID] = XRayAccessUnknown
+			continue
+		}
+		v.Access[cl.ClientID] = xrayAccessOf(cl, srv.has(cl.ClientID))
 	}
-	for _, id := range st.srv.ids {
-		if !inTable[id] && id != st.service {
-			v.Orphans = append(v.Orphans, UUIDPrint(id))
+	v.InstallInTable = v.InstallID != "" && inTable[v.InstallID]
+	if srv != nil {
+		v.InstallListed = v.InstallID != "" && srv.has(v.InstallID)
+		for _, id := range srv.ids {
+			if !inTable[id] && id != v.InstallID {
+				v.Orphans = append(v.Orphans, UUIDPrint(id))
+			}
 		}
 	}
-	return v
+	return v, nil
 }
 
 func xrayAccessOf(cl ClientEntry, listed bool) XRayAccess {
@@ -622,8 +673,11 @@ const XRayStatsNote = "XRay не отдаёт статистику: трафик
 // XRayNotes — строки под списком: служебный UUID, сироты.
 func XRayNotes(v XRayView) []string {
 	var out []string
-	if !v.ServiceListed {
-		out = append(out, fmt.Sprintf("Служебного UUID (%s) в server.json нет.", v.ServicePrint))
+	if v.ReadOnly != "" {
+		out = append(out, "Только просмотр: "+v.ReadOnly+".")
+	}
+	if v.InstallID != "" && v.ReadOnly == "" && !v.InstallListed {
+		out = append(out, fmt.Sprintf("Ключа установки XRay (%s) в server.json нет.", v.InstallPrint))
 	}
 	if len(v.Orphans) > 0 {
 		out = append(out, fmt.Sprintf("В server.json есть UUID без записи в clientsTable (%d): %s. Программа их не меняет; имена им можно дать в приложении Amnezia.",
@@ -740,7 +794,7 @@ func (s *Session) XRayClientConfig(c *Container, clientID string) (*NewUser, err
 // владельца 1; AU-LOGIC High-2). Ничего не записано.
 var ErrXRayNeedsConfirm = errors.New("изменение XRay перезапускает его и рвёт подключения: нужен план и подтверждение перезапуска — ничего не записано")
 
-var errXRayService = errors.New("служебный UUID XRay (создан при установке) программа не меняет: его нельзя удалить, отключить или перевыпустить")
+var errXRayService = errors.New("клиент установки XRay (ключ xray_uuid.key) программа не меняет: его нельзя удалить, отключить, перевыпустить или переименовать — управляйте им в приложении Amnezia")
 
 // xrayPlan — план XRay из прочитанного состояния и нового списка UUID и записей.
 func (s *Session) xrayPlan(c *Container, st *xrayState, action, subject string, ids []string, clients []ClientEntry, summary string) (*Plan, error) {
@@ -1062,13 +1116,26 @@ func (s *Session) waitXRay(c *Container) (xrayLive, string) {
 	return s.xrayLiveness(c)
 }
 
+// xrayStartedAt — время запуска контейнера XRay (docker inspect StartedAt):
+// измерение «перезапускался ли». Пустой ответ — ошибка, а не «не менялся».
+func (s *Session) xrayStartedAt(c *Container) (string, error) {
+	out, err := s.docker("docker inspect -f '{{.State.StartedAt}}' "+c.Name, nil)
+	if err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(out)
+	if v == "" {
+		return "", errors.New("пустой ответ docker inspect")
+	}
+	return v, nil
+}
+
 // restartXRay — `docker restart`, как в amnezia-client (с sudo при отказе
 // прав — s.docker).
 func (s *Session) restartXRay(c *Container) error {
 	if _, err := s.docker("docker restart "+c.Name, nil); err != nil {
 		return fmt.Errorf("перезапуск XRay: %w", err)
 	}
-	s.xrayRestarts++
 	return nil
 }
 

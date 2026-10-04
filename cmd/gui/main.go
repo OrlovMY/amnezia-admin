@@ -2073,9 +2073,14 @@ func (u *ui) rowFor(row int) (guiview.Row, bool) {
 		return guiview.Row{}, false
 	}
 	cl := u.clients[row]
-	if u.cur != nil && core.IsXRay(u.cur) && u.canManage {
+	if u.cur != nil && core.IsXRay(u.cur) && u.xrayLoadedFor == u.cur {
 		if cl.ClientID == core.XRayServiceRowID {
 			return guiview.XRayServiceRow(row+1, u.xrayView), true
+		}
+		if u.xrayView.IsInstall(cl) {
+			r := guiview.XRayServiceRow(row+1, u.xrayView)
+			r.Name, r.Created, r.ClientID = cl.Name(), cl.Created(), cl.ClientID
+			return r, true
 		}
 		return guiview.Row{
 			Num:        row + 1,
@@ -2333,7 +2338,7 @@ func (u *ui) refresh() {
 	cur := u.cur
 	u.setBusy(true)
 	u.status.SetText("Загружаю список пользователей...")
-	if core.IsXRay(cur) && cur.Managed() {
+	if core.IsXRay(cur) && cur.Dir != "" {
 		u.refreshXRay(cur)
 		return
 	}

@@ -134,10 +134,15 @@ type Session struct {
 	// реентерабелен, повторный Lock из-под уже взятого — deadlock.
 	mu sync.Mutex
 
-	// xrayRestarts — сколько перезапусков XRay удалось за текущий Apply
-	// (AL-01, AU-LOGIC High-1): откат без единого удачного перезапуска —
-	// «не перезапускался», а не «перезапущен».
-	xrayRestarts int
+	// xrayStart0, xrayStartApply — время запуска контейнера XRay (docker
+	// inspect StartedAt) до записи и после перезапуска при применении; "" —
+	// не прочитано. Перезапускался ли XRay, доказывается ИЗМЕРЕНИЕМ, а не
+	// кодом выхода docker restart (AU-LOGIC р2 Medium-1). xrayActs — число
+	// попыток применения за Apply; xrayNoRestart — измерено «не
+	// перезапускался».
+	xrayStart0, xrayStartApply string
+	xrayActs                   int
+	xrayNoRestart              bool
 }
 
 func (s *Session) Close() {

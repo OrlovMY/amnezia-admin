@@ -229,8 +229,12 @@ func TestXRayUnknownNotEmpty(t *testing.T) {
 	if x2.Managed() {
 		t.Fatal("vmess управляется")
 	}
-	if _, err := sess2.LoadXRayView(x2); err == nil || !strings.Contains(err.Error(), "только просмотр") {
-		t.Fatalf("LoadXRayView: %v", err)
+	// живая проверка 04.10: только просмотр — список с причиной, не ошибка
+	if v2, err := sess2.LoadXRayView(x2); err != nil || !strings.Contains(v2.ReadOnly, "формат не знаком") || len(v2.Clients) != 3 {
+		t.Fatalf("LoadXRayView: %+v %v", v2, err)
+	}
+	if _, err := sess2.PlanAddUser(x2, "Carol"); err == nil {
+		t.Fatal("план при незнакомом формате")
 	}
 }
 
@@ -349,11 +353,17 @@ func TestXRayDisableEnableDeleteRekey(t *testing.T) {
 	}
 }
 
-// TestXRayServiceUntouchable — служебный UUID: ни одно действие над ним
-// не строит план (ни по строке списка, ни по самому UUID).
+// TestXRayServiceUntouchable — клиент установки (xray_uuid.key) в реальной
+// форме (живая проверка 04.10): есть в server.json и в clientsTable — это
+// НОРМА. Список показывает его обычной строкой; ни одно действие над ним не
+// строит план (ни по записи, ни по синтетической строке); остальные клиенты
+// управляются.
 func TestXRayServiceUntouchable(t *testing.T) {
 	srv := fakesrv.NewXRay("master")
 	sess, x := xraySession(t, srv)
+	if !x.Managed() {
+		t.Fatalf("реальная форма — только просмотр: %q", x.Reason)
+	}
 	key, _ := srv.File("/opt/amnezia/xray/xray_uuid.key")
 	service := strings.TrimSpace(string(key))
 	for _, id := range []string{core.XRayServiceRowID, service} {
@@ -364,20 +374,76 @@ func TestXRayServiceUntouchable(t *testing.T) {
 			"rename":  func() error { _, err := sess.PlanRename(x, id, "X"); return err },
 		} {
 			err := f()
-			if err == nil || !strings.Contains(err.Error(), "служебный") || strings.Contains(err.Error(), service) {
+			if err == nil || !strings.Contains(err.Error(), "клиент установки XRay") || strings.Contains(err.Error(), service) {
 				t.Errorf("%s(%s): %v", name, core.UUIDPrint(id), err)
 			}
 		}
 	}
 	v, err := sess.LoadXRayView(x)
-	if err != nil || !v.ServiceListed || v.ServicePrint != core.UUIDPrint(service) || len(v.Orphans) != 0 {
+	if err != nil || v.ReadOnly != "" || !v.InstallListed || !v.InstallInTable || v.InstallPrint != core.UUIDPrint(service) || len(v.Orphans) != 0 || len(v.Clients) != 3 {
 		t.Fatalf("%+v %v", v, err)
 	}
-	// служебный UUID, записанный в clientsTable как клиент, — только просмотр
-	tbl := fileOf(t, srv, xrayTbl)
-	srv.SetFile(xrayTbl, []byte(strings.Replace(string(tbl), clientsOf(t, srv)["Alice"]["id"].(string), service, 1)))
-	if _, err := sess.PlanAddUser(x, "Carol"); err == nil || !strings.Contains(err.Error(), "только просмотр") {
-		t.Errorf("служебный в clientsTable: %v", err)
+	admin := 0
+	for _, cl := range v.Clients {
+		if v.IsInstall(cl) {
+			admin++
+			if cl.Name() != "Admin [Android  (16.0)]" {
+				t.Errorf("имя строки установки: %q", cl.Name())
+			}
+		}
+	}
+	if admin != 1 {
+		t.Fatalf("строк установки %d", admin)
+	}
+	// остальные — управляются
+	if _, err := sess.PlanDelete(x, clientsOf(t, srv)["Alice"]["id"].(string)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestXRayInstallKeyUnreadableListShown — xray_uuid.key не прочитан: только
+// просмотр, но СПИСОК показан (только просмотр ≠ ошибка); то же при
+// незнакомом server.json.
+func TestXRayInstallKeyUnreadableListShown(t *testing.T) {
+	for name, mut := range map[string]func(*fakesrv.Server){
+		"нет xray_uuid.key": func(s *fakesrv.Server) { s.DeleteFile("/opt/amnezia/xray/xray_uuid.key") },
+		"server.json vmess": func(s *fakesrv.Server) {
+			b, _ := s.File(xrayConf)
+			s.SetFile(xrayConf, []byte(strings.Replace(string(b), `"vless"`, `"vmess"`, 1)))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := fakesrv.NewXRay("dev")
+			mut(srv)
+			sess, x := xraySession(t, srv)
+			if x.Managed() {
+				t.Fatal("управление при незнании")
+			}
+			v, err := sess.LoadXRayView(x)
+			if err != nil || v.ReadOnly == "" || len(v.Clients) != 3 {
+				t.Fatalf("%+v %v", v, err)
+			}
+			if !strings.Contains(strings.Join(core.XRayNotes(v), " "), "Только просмотр") {
+				t.Errorf("заметки: %v", core.XRayNotes(v))
+			}
+		})
+	}
+}
+
+// TestXRayInstallNotInTable — клиент установки есть в server.json, но не в
+// clientsTable: синтетическая строка (XRayServiceRowID), не сирота.
+func TestXRayInstallNotInTable(t *testing.T) {
+	srv := fakesrv.NewXRay("master")
+	key, _ := srv.File("/opt/amnezia/xray/xray_uuid.key")
+	service := strings.TrimSpace(string(key))
+	var list []core.ClientEntry
+	_ = json.Unmarshal(fileOf(t, srv, xrayTbl), &list)
+	out, _ := json.MarshalIndent(list[1:], "", "    ")
+	srv.SetFile(xrayTbl, out)
+	sess, x := xraySession(t, srv)
+	v, err := sess.LoadXRayView(x)
+	if err != nil || v.InstallInTable || !v.InstallListed || len(v.Orphans) != 0 || v.InstallID != service {
+		t.Fatalf("%+v %v", v, err)
 	}
 }
 

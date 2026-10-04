@@ -45,19 +45,24 @@ func listXRay(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEnt
 		acc := v.Access[cl.ClientID]
 		name := pad(cl.Name(), 34)
 		accText := pad(core.XRayAccessText(acc), accW)
-		switch acc {
-		case core.XRayActive:
+		switch {
+		case v.IsInstall(cl):
+			// клиент установки: обычная строка, действия недоступны
+			accText = cDim(core.XRayAccessText(acc) + "; " + core.XRayInstallNote)
+		case acc == core.XRayActive:
 			accText = cOK(accText)
-		case core.XRayDisabled:
+		case acc == core.XRayDisabled:
 			name = cDim(name)
 		default:
 			accText = cWarn(accText)
 		}
 		fmt.Fprintln(w, cNum(pad(strconv.Itoa(i+1), 4))+name+cDim(pad(created, 21))+accText+pad("—", 12)+cDim(core.UUIDPrint(cl.ClientID)))
 	}
-	// Служебный UUID — без номера: выбрать его для действия нельзя (решение
-	// владельца 2).
-	fmt.Fprintln(w, pad("", 4)+cDim(pad(core.XRayServiceName, 34)+pad("", 21)+pad("без действий", accW)+pad("—", 12)+v.ServicePrint))
+	// Клиент установки без записи в clientsTable — строкой без номера:
+	// выбрать его для действия нельзя (решение владельца 2).
+	if v.InstallID != "" && v.InstallListed && !v.InstallInTable {
+		fmt.Fprintln(w, pad("", 4)+cDim(pad(core.XRayServiceName, 34)+pad("", 21)+core.XRayInstallNote+"  "+v.InstallPrint))
+	}
 	if len(v.Clients) == 0 {
 		fmt.Fprintln(w, "В clientsTable записей нет.")
 	}

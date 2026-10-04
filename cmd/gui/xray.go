@@ -34,7 +34,7 @@ func configDoneText(nu *core.NewUser, verb string) string {
 // xrayServiceRow — выбрана служебная строка XRay: действий над ней нет
 // (решение владельца 2) — сказать это и не открывать диалог действия.
 func (u *ui) xrayServiceRow(cl core.ClientEntry) bool {
-	if cl.ClientID != core.XRayServiceRowID {
+	if !u.xrayView.IsInstall(cl) {
 		return false
 	}
 	dialog.ShowInformation(core.XRayServiceName, guiview.XRayServiceInfo, u.win)
@@ -55,19 +55,20 @@ func (u *ui) confirmWindow(title string, sections []fyne.CanvasObject, okText st
 			cv.SetOnTypedKey(prevKey)
 		}
 	}
-	cancelBtn := widget.NewButtonWithIcon(guiview.XRayRestartCancel(), theme.CancelIcon(), func() {
+	cancel := func() {
 		restoreKeys()
 		d.Hide()
-	})
+	}
+	cancelBtn := newEscButton(guiview.XRayRestartCancel(), theme.CancelIcon(), cancel, cancel)
 	okIcon := theme.ConfirmIcon()
 	if danger {
 		okIcon = theme.WarningIcon()
 	}
-	okBtn := widget.NewButtonWithIcon(okText, okIcon, func() {
+	okBtn := newEscButton(okText, okIcon, func() {
 		restoreKeys()
 		d.Hide()
 		onOK()
-	})
+	}, cancel)
 	okBtn.Importance = widget.HighImportance
 	if danger {
 		okBtn.Importance = widget.DangerImportance
@@ -91,6 +92,31 @@ func (u *ui) confirmWindow(title string, sections []fyne.CanvasObject, okText st
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
 	return d
+}
+
+// escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В
+// Fyne v2.7.4 клавиша идёт ФОКУСУ, а обработчику окна — только без фокуса
+// (internal/driver/glfw/window.go:716-721); фокус стоит на «Отмена», поэтому
+// Esc обязана понимать сама кнопка (AU-UX р2, Р2-1).
+type escButton struct {
+	widget.Button
+	onEsc func()
+}
+
+func newEscButton(text string, icon fyne.Resource, tapped, onEsc func()) *escButton {
+	b := &escButton{onEsc: onEsc}
+	b.Text, b.Icon, b.OnTapped = text, icon, tapped
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// TypedKey — Esc отменяет окно; прочее — как у кнопки.
+func (b *escButton) TypedKey(e *fyne.KeyEvent) {
+	if e.Name == fyne.KeyEscape && b.onEsc != nil {
+		b.onEsc()
+		return
+	}
+	b.Button.TypedKey(e)
 }
 
 // wrapLabel — подпись с переносом по словам.
@@ -131,6 +157,11 @@ func (u *ui) xrayAct(title string, op guiview.Op, card []string, build func(*cor
 				return
 			}
 			var secs []fyne.CanvasObject
+			restarts := plan.RestartsXRay()
+			if restarts {
+				// AU-UX р2: раздел о перезапуске — ПЕРВЫМ, виден без прокрутки
+				secs = append(secs, restartSections()...)
+			}
 			for _, c := range card {
 				secs = append(secs, wrapLabel(c, false))
 			}
@@ -139,10 +170,6 @@ func (u *ui) xrayAct(title string, op guiview.Op, card []string, build func(*cor
 			}
 			if n := plan.Note(); n != "" {
 				secs = append(secs, wrapLabel(n, false))
-			}
-			restarts := plan.RestartsXRay()
-			if restarts {
-				secs = append(secs, restartSections()...)
 			}
 			server := u.warnServerID()
 			race := guiview.WarnDecision(op, u.warnFreq, u.warnSess, server)
@@ -241,6 +268,7 @@ func (u *ui) refreshXRay(cur *core.Container) {
 				return
 			}
 			if err != nil {
+				// clientsTable не прочитана — списка нет вовсе
 				u.canManage = false
 				if u.xrayLoadedFor != cur {
 					u.clients = nil
@@ -249,7 +277,9 @@ func (u *ui) refreshXRay(cur *core.Container) {
 				u.status.SetText(guiview.ErrorStatus(err, guiview.XRayStaleSuffix(u.xrayLoadedFor == cur)))
 				return
 			}
-			u.canManage = true
+			// «только просмотр» (формат, ключ установки) — список есть,
+			// управления нет; причина — в статусе (XRayNotes)
+			u.canManage = v.ReadOnly == ""
 			u.xrayView = v
 			u.xrayLoadedFor = cur
 			clients := append([]core.ClientEntry{}, v.Clients...)
@@ -257,9 +287,11 @@ func (u *ui) refreshXRay(cur *core.Container) {
 			u.statsFailed = false
 			u.clients = clients
 			u.applySort()
-			// служебная строка — всегда последней, вне сортировки
-			u.clients = append(u.clients, core.ClientEntry{ClientID: core.XRayServiceRowID,
-				UserData: map[string]any{"clientName": core.XRayServiceName}})
+			// клиент установки без записи в clientsTable — строкой последней
+			if v.InstallID != "" && v.InstallListed && !v.InstallInTable {
+				u.clients = append(u.clients, core.ClientEntry{ClientID: core.XRayServiceRowID,
+					UserData: map[string]any{"clientName": core.XRayServiceName}})
+			}
 			u.applyKeyColumnWidth()
 			u.table.Refresh()
 			u.table.ScrollToTop()
@@ -271,8 +303,7 @@ func (u *ui) refreshXRay(cur *core.Container) {
 // showXRayConfig — QR и файл конфига существующего клиента XRay, собранные
 // с сервера (меню строки «Показать QR» / «Сохранить конфигурацию…»).
 func (u *ui) showXRayConfig(cl core.ClientEntry) {
-	if cl.ClientID == core.XRayServiceRowID {
-		u.xrayServiceRow(cl)
+	if u.xrayServiceRow(cl) {
 		return
 	}
 	cur := u.cur
@@ -294,7 +325,7 @@ func (u *ui) showXRayConfig(cl core.ClientEntry) {
 
 // headerText — подпись колонки: у XRay «Активность» — «Доступ» (AU-UX Low).
 func (u *ui) headerText(col int) string {
-	if col == 3 && u.cur != nil && core.IsXRay(u.cur) && u.canManage {
+	if col == 3 && u.cur != nil && core.IsXRay(u.cur) && u.xrayLoadedFor == u.cur {
 		return guiview.XRayAccessHeader
 	}
 	return tableHeaders[col]

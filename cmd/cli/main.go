@@ -185,6 +185,11 @@ func listUsers(w io.Writer, s *core.Session, c *core.Container) ([]core.ClientEn
 		// QA раунд 1: незнакомый — не «протокол»
 		return nil, fmt.Errorf("незнакомый контейнер %s: программа не знает, что это за протокол, поэтому ничего в нём не читает и не меняет", c.Name)
 	}
+	if core.IsXRay(c) && c.Dir != "" {
+		// XRay: и при «только просмотр» — список с причиной, а не ошибка
+		// (живая проверка 04.10).
+		return listXRay(w, s, c)
+	}
 	if !c.Managed() && c.Reason != "" {
 		// AL-01: причина экземпляра (XRay с незнакомым server.json, AWG2) —
 		// подпись та же, что в списке протоколов и в GUI.

@@ -22,7 +22,7 @@ func XRayStatus(v core.XRayView) string {
 const XRayDeleteActivity = "Подключался ли клиент — неизвестно: XRay не отдаёт статистику."
 
 // XRayServiceInfo — ответ на попытку действия над служебной строкой.
-const XRayServiceInfo = "Служебный UUID XRay создан при установке протокола. Программа его не удаляет, не отключает и не перевыпускает."
+const XRayServiceInfo = "Это клиент установки XRay (ключ xray_uuid.key) — обычно устройство администратора, созданное вместе с протоколом. Программа его не удаляет, не отключает, не перевыпускает и не переименовывает; управляйте им в приложении Amnezia."
 
 // XRayRestartTitle, XRayRestartBody, XRayRestartConfirm, XRayRestartCancel —
 // диалог перед действием, перезапускающим XRay (решение владельца 1).
@@ -33,14 +33,14 @@ func XRayRestartCancel() string  { return "Отмена" }
 
 // XRayServiceRow — строка таблицы для служебного UUID.
 func XRayServiceRow(num int, v core.XRayView) Row {
-	return Row{Num: num, Name: core.XRayServiceName, XRay: true, XRayService: true, KeyShown: v.ServicePrint, CanManage: true}
+	return Row{Num: num, Name: core.XRayServiceName, XRay: true, XRayService: true, KeyShown: v.InstallPrint, CanManage: true}
 }
 
 // xrayActivity — колонка «Активность» у XRay: состояние доступа там, где
 // у WG «(откл.)», и «—» у включённого — статистики нет.
 func xrayActivity(r Row) string {
 	if r.XRayService {
-		return "без действий"
+		return core.XRayInstallNote
 	}
 	if r.XRayAccess == core.XRayActive {
 		return "—"

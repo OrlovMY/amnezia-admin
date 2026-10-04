@@ -85,6 +85,28 @@ func TestXRayLinkFormat(t *testing.T) {
 	}
 }
 
+// TestXRayRestartMeasuredNotByCode — AU-LOGIC р2 Medium-1: «перезапускался
+// ли» решает время запуска контейнера, а не код выхода docker restart.
+// Доезд: restart ВЫПОЛНИЛСЯ, но команда вернула ошибку (обрыв SSH после) —
+// не «не перезапускался»; время запуска не прочитано — «неизвестно».
+func TestXRayRestartMeasuredNotByCode(t *testing.T) {
+	srv := fakesrv.NewXRay("master")
+	srv.XRay.RestartThenFailFrom = 1
+	sess, x := xraySession(t, srv)
+	_, err := xrayApply(sess.PlanAddUser(x, "Carol"))
+	if err == nil || strings.Contains(err.Error(), "не перезапускался") || srv.XRayRestarts() != 2 {
+		t.Fatalf("перезапусков %d: %v", srv.XRayRestarts(), err)
+	}
+	srv2 := fakesrv.NewXRay("master")
+	srv2.XRay.FailRestart = errors.New("boom")
+	srv2.XRay.FailInspect = errors.New("inspect: timeout")
+	sess2, x2 := xraySession(t, srv2)
+	_, err = xrayApply(sess2.PlanAddUser(x2, "Carol"))
+	if !errors.Is(err, core.ErrRollbackUnverified) || strings.Contains(err.Error(), "не перезапускался") {
+		t.Fatalf("время запуска не прочитано: %v", err)
+	}
+}
+
 // TestXRayWrappersRefuse — AU-LOGIC High-2: обёртки «план и сразу запись»
 // для XRay с перезапуском отказывают; переименование — работает.
 func TestXRayWrappersRefuse(t *testing.T) {

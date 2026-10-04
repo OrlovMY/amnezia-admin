@@ -30,6 +30,7 @@ const XRayDir = "/opt/amnezia/xray"
 
 var (
 	reXRayRestart  = regexp.MustCompile(`^docker restart (\S+)$`)
+	reXRayInspect  = regexp.MustCompile(`^docker inspect -f '\{\{\.State\.StartedAt\}\}' (\S+)$`)
 	reXRayLiveness = regexp.MustCompile(`^docker exec (\S+) sh -c 'command -v pidof >/dev/null 2>&1 \|\| \{ echo notool; exit 0; \}; pidof xray >/dev/null && echo alive \|\| echo dead'$`)
 )
 
@@ -41,6 +42,11 @@ type XRayHooks struct {
 	// вызова (счёт с 1); до этого — как обычно (AU-LOGIC High-1).
 	FailRestartFrom int
 	restartCalls    int
+	// RestartThenFailFrom — если > 0, начиная с N-го вызова `docker restart`
+	// ВЫПОЛНЯЕТСЯ, но команда возвращает ошибку (обрыв SSH после перезапуска).
+	RestartThenFailFrom int
+	// FailInspect — `docker inspect` (время запуска) возвращает эту ошибку.
+	FailInspect error
 	// DeadOnRestart — номер перезапуска (с 1) → xray после него не поднялся.
 	DeadOnRestart map[int]bool
 	// NoPidof — в контейнере нет pidof (проверка отвечает notool).
@@ -60,8 +66,9 @@ type xrayRuntime struct {
 }
 
 // NewXRay — сервер с контейнером amnezia-xray. variant — "master" или
-// "dev" (форма server.json). В server.json — служебный UUID (xray_uuid.key)
-// и два клиента Alice и Bob, они же в clientsTable.
+// "dev" (форма server.json). В server.json — клиент установки (xray_uuid.key)
+// и два клиента Alice и Bob; в clientsTable — все трое (клиент установки —
+// «Admin [Android  (16.0)]», как на живом сервере).
 func NewXRay(variant string) *Server {
 	tpl := xrayMasterTemplate
 	if variant == "dev" {
@@ -86,7 +93,11 @@ func NewXRay(variant string) *Server {
 	alice, bob := RandUUID(), RandUUID()
 	conf = XRayWithClients(conf, service, alice, bob)
 	now := time.Now().Format(time.RFC3339)
+	// Реальная форма (живая проверка 04.10): клиент установки (xray_uuid.key)
+	// — первый клиент приложения, устройство администратора; он есть и в
+	// server.json, и в clientsTable.
 	tbl, err := json.MarshalIndent([]clientEntry{
+		{ClientID: service, UserData: map[string]any{"clientName": "Admin [Android  (16.0)]", "creationDate": now}},
 		{ClientID: alice, UserData: map[string]any{"clientName": "Alice", "creationDate": now}},
 		{ClientID: bob, UserData: map[string]any{"clientName": "Bob", "creationDate": now}},
 	}, "", "    ")
@@ -211,7 +222,19 @@ func (s *Server) dispatchXRay(cmd string) (out string, err error, ok bool) {
 		} else {
 			s.xray.ids = nil
 		}
+		if s.XRay.RestartThenFailFrom > 0 && s.XRay.restartCalls >= s.XRay.RestartThenFailFrom {
+			return "", fmt.Errorf("команда %q: wait: remote command exited without exit status or exit signal", cmd), true
+		}
 		return "amnezia-xray\n", nil, true
+	}
+	if m := reXRayInspect.FindStringSubmatch(cmd); m != nil {
+		if m[1] != "amnezia-xray" || s.xray == nil {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd), true
+		}
+		if s.XRay.FailInspect != nil {
+			return "", s.XRay.FailInspect, true
+		}
+		return fmt.Sprintf("2026-10-04T10:00:%02d.000000000Z\n", s.xray.restarts), nil, true
 	}
 	if m := reXRayLiveness.FindStringSubmatch(cmd); m != nil {
 		if m[1] != "amnezia-xray" || s.xray == nil {

@@ -1557,7 +1557,7 @@ func (s *Session) Apply(p *Plan) (*NewUser, error) {
 
 func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 	c := p.Container
-	s.xrayRestarts = 0
+	s.xrayActs, s.xrayNoRestart, s.xrayStart0, s.xrayStartApply = 0, false, "", ""
 
 	// 1. backup — существующая команда, без изменений. Стоит ДО записи и
 	// потому до сверки: сверка теперь внутри команды записи (A3б).
@@ -1576,6 +1576,7 @@ func (s *Session) applyLocked(p *Plan) (*NewUser, error) {
 		if err := s.xrayPrecheck(c); err != nil {
 			return nil, err
 		}
+		s.xrayStart0, _ = s.xrayStartedAt(c) // не прочитано — "" (неизвестно)
 	}
 	if err := s.casWrite(c, CASLabelApply, p.wgSHA, p.tblWant(), wgBytesIf(wgChanged, p.wgAfter), p.tblAfter); err != nil {
 		return nil, err
@@ -1624,7 +1625,12 @@ func (s *Session) applySteps(c *Container, p *Plan, wgChanged bool) error {
 // перезапуск у XRay.
 func (s *Session) activate(c *Container) error {
 	if IsXRay(c) {
-		return s.restartXRay(c)
+		err := s.restartXRay(c)
+		s.xrayActs++
+		if s.xrayActs == 1 {
+			s.xrayStartApply, _ = s.xrayStartedAt(c)
+		}
+		return err
 	}
 	if err := s.syncWg(c); err != nil {
 		return fmt.Errorf("wg syncconf: %w", err)
@@ -1776,7 +1782,7 @@ func (s *Session) restore(c *Container, p *Plan, wgChanged bool, cause error) er
 		if IsXRay(c) && runtime != checkNotNeeded {
 			scope = "\nПроверено: содержимое обоих файлов байт в байт; XRay перезапущен с прежним server.json и его процесс работает." +
 				"\nПринят ли каждый клиент — проверить нечем (у XRay нет списка подключённых)."
-			if s.xrayRestarts == 0 {
+			if s.xrayNoRestart {
 				scope = "\nПроверено: содержимое обоих файлов байт в байт; XRay не перезапускался — работает с прежним server.json, его процесс жив."
 			}
 		}
@@ -1874,19 +1880,28 @@ func (s *Session) measureRuntimeAfterRollback(c *Container, wgBefore []byte, wgC
 		// состояния: жив — совпал (работает с прежним файлом); мёртв — не
 		// совпал; проверить нечем — неизвестно.
 		if syncErr != nil {
-			// AU-LOGIC High-1: ошибка повторного перезапуска не отбрасывается.
-			if s.xrayRestarts == 0 {
-				// Ни одного удачного перезапуска: XRay работает прежним
-				// процессом, то есть с прежним server.json, — если жив.
+			// AU-LOGIC High-1 и р2 Medium-1: ошибка повторного перезапуска
+			// не отбрасывается, а был ли перезапуск — решает ИЗМЕРЕНИЕ
+			// времени запуска контейнера, не код выхода (обрыв SSH после
+			// выполненного restart тоже даёт ошибку).
+			now, err := s.xrayStartedAt(c)
+			switch {
+			case err != nil:
+				return checkUnknown, fmt.Sprintf("повторный перезапуск XRay вернул ошибку (%v), а время запуска контейнера не прочитано (%v) — с каким server.json он работает, неизвестно", syncErr, err)
+			case s.xrayStart0 != "" && now == s.xrayStart0:
+				// не перезапускался ни разу: прежний процесс — прежний файл
+				s.xrayNoRestart = true
 				st, why := s.xrayLiveness(c)
 				if st == xrayAlive {
-					return checkSame, "XRay не перезапускался ни разу — работает с прежним server.json (" + why + ")"
+					return checkSame, "XRay не перезапускался ни разу (время запуска контейнера прежнее) — работает с прежним server.json (" + why + ")"
 				}
 				return checkUnknown, fmt.Sprintf("XRay не перезапускался (%v), %s", syncErr, why)
+			case s.xrayStartApply != "" && now != s.xrayStartApply:
+				// перезапуск при откате выполнился, хотя команда вернула
+				// ошибку — дальше обычная проверка живости
+			default:
+				return checkUnknown, fmt.Sprintf("повторный перезапуск XRay не удался (%v) — с каким server.json он работает, неизвестно", syncErr)
 			}
-			// Новый файл уже применялся, а вернуть прежний перезапуском не
-			// удалось — с каким файлом работает XRay, неизвестно.
-			return checkUnknown, fmt.Sprintf("повторный перезапуск XRay не удался (%v) — с каким server.json он работает, неизвестно", syncErr)
 		}
 		st, why := s.waitXRay(c)
 		switch st {

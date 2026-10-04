@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -87,9 +88,11 @@ func TestXRayGUITable(t *testing.T) {
 	if reUUIDGUI.MatchString(s) || strings.Contains(s, "0 B") || strings.Contains(s, "?") {
 		t.Errorf("UUID, ложный ноль или «?» в таблице XRay: %s", s)
 	}
-	last, _ := u.rowFor(len(u.clients) - 1)
-	if !last.XRayService || guiview.CellText(last, 1) != core.XRayServiceName || guiview.CellText(last, 3) != "без действий" {
-		t.Errorf("служебная строка: %+v", last)
+	// живая проверка 04.10: клиент установки — ОБЫЧНАЯ строка со своим
+	// именем из clientsTable и пометкой, без действий
+	inst, _ := u.rowFor(xrayRowOf(t, u, "Admin [Android  (16.0)]"))
+	if !inst.XRayService || guiview.CellText(inst, 1) != "Admin [Android  (16.0)]" || guiview.CellText(inst, 3) != core.XRayInstallNote {
+		t.Errorf("строка установки: %+v", inst)
 	}
 	alice, _ := u.rowFor(xrayRowOf(t, u, "Alice"))
 	if guiview.CellText(alice, 3) != "—" || guiview.CellText(alice, 4) != "—" || len([]rune(guiview.CellText(alice, 5))) != 9 {
@@ -123,17 +126,17 @@ func TestXRayGUIRestartWarning(t *testing.T) {
 	if !strings.Contains(wt, core.XRayRestartTitle) || !strings.Contains(wt, "узнать нельзя") {
 		t.Fatalf("нет предупреждения о перезапуске: %s", wt)
 	}
-	ok := buttonByText(t, warn, core.XRayRestartConfirm)
+	ok := xrayButton(t, warn, core.XRayRestartConfirm)
 	if ok.Importance != widget.DangerImportance {
 		t.Error("кнопка перезапуска — не опасного вида")
 	}
-	test.Tap(buttonByText(t, warn, "Отмена"))
+	test.Tap(xrayButton(t, warn, "Отмена"))
 	waitGUIGoroutines(t)
 	if xrayWritesGUI(srv) != before || srv.XRayRestarts() != 0 {
 		t.Fatalf("отказ записал: %d→%d, перезапусков %d", before, xrayWritesGUI(srv), srv.XRayRestarts())
 	}
 	test.Tap(buttonByText(t, diff, "Применить"))
-	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), core.XRayRestartConfirm))
+	test.Tap(xrayButton(t, topPopup(t, u.win.Canvas()), core.XRayRestartConfirm))
 	waitGUIGoroutines(t)
 	if srv.XRayRestarts() != 1 {
 		t.Fatalf("перезапусков %d, ждали 1", srv.XRayRestarts())
@@ -154,7 +157,7 @@ func TestXRayGUIRestartWarning(t *testing.T) {
 	var list []core.ClientEntry
 	b, _ := srv.File("/opt/amnezia/xray/clientsTable")
 	_ = json.Unmarshal(b, &list)
-	if len(list) != 1 || list[0].Name() != "Боб" {
+	if len(list) != 2 || list[1].Name() != "Боб" {
 		t.Fatalf("clientsTable: %+v", list)
 	}
 }
@@ -172,28 +175,59 @@ func TestXRayGUIDeleteCard(t *testing.T) {
 		!strings.Contains(card, "соединения ВСЕХ пользователей XRay") || !strings.Contains(card, "Что изменится") {
 		t.Errorf("карточка: %s", card)
 	}
-	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Отмена"))
-	u.selectedRow = len(u.clients) - 1
+	test.Tap(xrayButton(t, topPopup(t, u.win.Canvas()), "Отмена"))
+	inst := xrayRowOf(t, u, "Admin [Android  (16.0)]")
+	u.selectedRow = inst
 	before := xrayWritesGUI(srv)
 	u.deleteSelected()
 	info := strings.Join(visibleTexts(u.win.Canvas().Overlays().Top()), " | ")
 	if !strings.Contains(info, guiview.XRayServiceInfo) || xrayWritesGUI(srv) != before {
 		t.Errorf("служебная строка: %s", info)
 	}
-	if m := u.cellMenu(widget.TableCellID{Row: len(u.clients) - 1, Col: 1}); m == nil || len(m.Items) != 1 {
+	if m := u.cellMenu(widget.TableCellID{Row: inst, Col: 1}); m == nil || len(m.Items) != 1 {
 		t.Errorf("меню служебной строки: %+v", m)
 	}
 }
 
-// TestXRayGUIReadFailStale — AU-UX M3: сбой чтения XRay — прежний список
-// этого XRay с пометкой «данные прошлого чтения», кнопки изменения выключены.
+// TestXRayGUIReadFailStale — AU-UX M3: clientsTable не прочитана —
+// прежний список этого XRay с пометкой «данные прошлого чтения», кнопки
+// изменения выключены.
 func TestXRayGUIReadFailStale(t *testing.T) {
 	u, srv := xrayUI(t)
-	srv.FailRead = map[string]error{"/opt/amnezia/xray/server.json": errors.New("i/o timeout")}
+	srv.FailRead = map[string]error{"/opt/amnezia/xray/clientsTable": errors.New("i/o timeout")}
 	u.refresh()
 	waitGUIGoroutines(t)
-	if len(u.clients) != 3 || u.canManage || !strings.Contains(u.status.Text, "данные прошлого чтения") || !strings.Contains(u.status.Text, "server.json") {
+	if len(u.clients) != 3 || u.canManage || !strings.Contains(u.status.Text, "данные прошлого чтения") {
 		t.Fatalf("строк %d, canManage %v, статус %q", len(u.clients), u.canManage, u.status.Text)
+	}
+}
+
+// TestXRayGUIReadOnlyListShown — живая проверка 04.10: «только просмотр»
+// (server.json не прочитан, xray_uuid.key нет) — СПИСОК показан, кнопки
+// выключены, причина в статусе; не ошибка без списка.
+func TestXRayGUIReadOnlyListShown(t *testing.T) {
+	for name, mut := range map[string]func(*fakesrv.Server){
+		"server.json не прочитан": func(s *fakesrv.Server) {
+			s.FailRead = map[string]error{"/opt/amnezia/xray/server.json": errors.New("i/o timeout")}
+		},
+		"нет xray_uuid.key": func(s *fakesrv.Server) { s.DeleteFile("/opt/amnezia/xray/xray_uuid.key") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			u, srv := xrayUI(t)
+			mut(srv)
+			// боевой путь: протоколы найдены заново — XRay «только просмотр»
+			cs, err := u.sess.FindContainers()
+			if err != nil || cs[0].Managed() {
+				t.Fatalf("стенд: %+v %v", cs, err)
+			}
+			u.containers = cs
+			u.cur = &u.containers[0]
+			u.refresh()
+			waitGUIGoroutines(t)
+			if len(u.clients) != 3 || u.canManage || !strings.Contains(u.status.Text, "Только просмотр") || strings.Contains(u.status.Text, "Ошибка") {
+				t.Fatalf("строк %d, canManage %v, статус %q", len(u.clients), u.canManage, u.status.Text)
+			}
+		})
 	}
 }
 
@@ -228,7 +262,7 @@ func TestXRayGUIStaleViewStillWarns(t *testing.T) {
 	if !strings.Contains(top, core.XRayRestartTitle) {
 		t.Fatalf("нет предупреждения о перезапуске: %s", top)
 	}
-	test.Tap(buttonByText(t, topPopup(t, u.win.Canvas()), "Отмена"))
+	test.Tap(xrayButton(t, topPopup(t, u.win.Canvas()), "Отмена"))
 	waitGUIGoroutines(t)
 	if srv.XRayRestarts() != restarts || xrayWritesGUI(srv) != writes {
 		t.Fatalf("записано без подтверждения: перезапусков %d→%d", restarts, srv.XRayRestarts())
@@ -250,8 +284,8 @@ func TestXRayGUIConfirmFocusEsc(t *testing.T) {
 			waitGUIGoroutines(t)
 			pop := topPopup(t, u.win.Canvas())
 			osmotrFrame(pop, nil)
-			cancel := buttonByText(t, pop, "Отмена")
-			ok := buttonByText(t, pop, core.XRayRestartConfirm)
+			cancel := xrayButton(t, pop, "Отмена")
+			ok := xrayButton(t, pop, core.XRayRestartConfirm)
 			if ok.Importance != widget.DangerImportance {
 				t.Error("кнопка перезапуска — не опасного вида")
 			}
@@ -259,7 +293,7 @@ func TestXRayGUIConfirmFocusEsc(t *testing.T) {
 				t.Errorf("фокус не на «Отмена»: %T", u.win.Canvas().Focused())
 			}
 			win := u.win.Canvas().Size()
-			for _, b := range []*widget.Button{cancel, ok} {
+			for _, b := range []*escButton{cancel, ok} {
 				p := fyne.CurrentApp().Driver().AbsolutePositionForObject(b)
 				if p.X < 0 || p.Y < 0 || p.X+b.Size().Width > win.Width+0.5 || p.Y+b.Size().Height > win.Height+0.5 || b.Size().Height < 1 {
 					t.Errorf("кнопка %q не видна целиком: %v %v в окне %v", b.Text, p, b.Size(), win)
@@ -270,8 +304,16 @@ func TestXRayGUIConfirmFocusEsc(t *testing.T) {
 			if pc.Y != po.Y || po.X <= pc.X {
 				t.Errorf("кнопки не рядом в одном ряду: %v %v", pc, po)
 			}
+			// AU-UX р2: раздел о перезапуске виден целиком при открытии
+			body := labelByText(t, pop, guiview.XRayRestartBody())
+			scroll := scrollOf(t, pop)
+			bp := fyne.CurrentApp().Driver().AbsolutePositionForObject(body)
+			sp := fyne.CurrentApp().Driver().AbsolutePositionForObject(scroll)
+			if bp.Y < sp.Y-0.5 || bp.Y+body.Size().Height > sp.Y+scroll.Size().Height+0.5 {
+				t.Errorf("раздел о перезапуске не виден целиком: %v+%v в прокрутке %v+%v", bp, body.Size(), sp, scroll.Size())
+			}
 			before := xrayWritesGUI(srv)
-			u.win.Canvas().OnTypedKey()(&fyne.KeyEvent{Name: fyne.KeyEscape})
+			deliverKey(u.win.Canvas(), fyne.KeyEscape)
 			waitGUIGoroutines(t)
 			if u.win.Canvas().Overlays().Top() != nil || xrayWritesGUI(srv) != before || srv.XRayRestarts() != 0 {
 				t.Fatalf("Esc не отменил: оверлей %v, записей %d→%d", u.win.Canvas().Overlays().Top(), before, xrayWritesGUI(srv))
@@ -293,9 +335,67 @@ func TestXRayGUIOneWindowWithRace(t *testing.T) {
 	if !strings.Contains(texts, guiview.WarningTitle()) || !strings.Contains(texts, core.XRayRestartTitle) {
 		t.Fatalf("не одно окно: %s", texts)
 	}
-	test.Tap(buttonByText(t, pop, core.XRayRestartConfirm))
+	test.Tap(xrayButton(t, pop, core.XRayRestartConfirm))
 	waitGUIGoroutines(t)
 	if srv.XRayRestarts() != 1 {
 		t.Fatalf("перезапусков %d", srv.XRayRestarts())
+	}
+}
+
+// xrayButton — кнопка окна подтверждения XRay с такой подписью.
+func xrayButton(t *testing.T, root fyne.CanvasObject, text string) *escButton {
+	t.Helper()
+	var found *escButton
+	walkObjects(root, func(o fyne.CanvasObject) {
+		if b, ok := o.(*escButton); ok && b.Text == text {
+			found = b
+		}
+	})
+	if found == nil {
+		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: нет кнопки %q", text)
+	}
+	return found
+}
+
+// labelByText — подпись с таким текстом.
+func labelByText(t *testing.T, root fyne.CanvasObject, text string) *widget.Label {
+	t.Helper()
+	var found *widget.Label
+	walkObjects(root, func(o fyne.CanvasObject) {
+		if l, ok := o.(*widget.Label); ok && l.Text == text {
+			found = l
+		}
+	})
+	if found == nil {
+		t.Fatalf("нет подписи %q", text)
+	}
+	return found
+}
+
+// scrollOf — первая прокрутка в дереве.
+func scrollOf(t *testing.T, root fyne.CanvasObject) *container.Scroll {
+	t.Helper()
+	var found *container.Scroll
+	walkObjects(root, func(o fyne.CanvasObject) {
+		if s, ok := o.(*container.Scroll); ok && found == nil {
+			found = s
+		}
+	})
+	if found == nil {
+		t.Fatal("нет прокрутки")
+	}
+	return found
+}
+
+// deliverKey — клавиша так, как её доставляет Fyne v2.7.4 (glfw window.go
+// 716-721): сначала фокусу; обработчику окна — только без фокуса.
+func deliverKey(c fyne.Canvas, k fyne.KeyName) {
+	ev := &fyne.KeyEvent{Name: k}
+	if f := c.Focused(); f != nil {
+		f.TypedKey(ev)
+		return
+	}
+	if h := c.OnTypedKey(); h != nil {
+		h(ev)
 	}
 }

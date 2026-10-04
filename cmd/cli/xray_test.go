@@ -73,7 +73,7 @@ func TestXRayCLIList(t *testing.T) {
 		t.Fatalf("%d %s", code, errOut.String())
 	}
 	s := out.String()
-	for _, want := range []string{"Alice", "Bob", core.XRayServiceName, core.XRayStatsNote, "включён"} {
+	for _, want := range []string{"Alice", "Bob", "Admin [Android  (16.0)]", core.XRayInstallNote, core.XRayStatsNote, "включён"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("нет %q в\n%s", want, s)
 		}
@@ -176,5 +176,36 @@ func TestXRayCLIShowConfig(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "vless://"+xrayIDOf(t, exec, "Bob")+"@") || exec.XRayRestarts() != 0 {
 		t.Fatalf("-print:\n%s", out.String())
+	}
+}
+
+// TestXRayCLIListReadOnly — живая проверка 04.10: «только просмотр»
+// (xray_uuid.key не прочитан) — список с причиной и код 0, а не ошибка; и
+// действие отказывает без записи.
+func TestXRayCLIListReadOnly(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	exec.DeleteFile("/opt/amnezia/xray/xray_uuid.key")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"list", "-key", key}, strings.NewReader(""), &out, &errOut, kh); code != 0 {
+		t.Fatalf("код %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Alice") || !strings.Contains(out.String(), "Только просмотр") {
+		t.Fatalf("список: %s", out.String())
+	}
+	before := xrayWrites(exec)
+	out.Reset()
+	if code := run([]string{"del", "-key", key, "-name", "Alice", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code == 0 || xrayWrites(exec) != before {
+		t.Fatalf("действие при только просмотре: код %d, записей %d→%d", code, before, xrayWrites(exec))
+	}
+}
+
+// TestXRayCLIInstallRowRefused — строка клиента установки: удалить нельзя.
+func TestXRayCLIInstallRowRefused(t *testing.T) {
+	key, kh, exec := setupXRayRun(t)
+	before := xrayWrites(exec)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"del", "-key", key, "-name", "Admin [Android  (16.0)]", "-yes"}, strings.NewReader(""), &out, &errOut, kh); code == 0 || xrayWrites(exec) != before ||
+		!strings.Contains(errOut.String(), "клиент установки XRay") {
+		t.Fatalf("код %d, записей %d→%d: %s", code, before, xrayWrites(exec), errOut.String())
 	}
 }
