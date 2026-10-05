@@ -76,6 +76,10 @@ func TestBackupWindowsVisible(t *testing.T) {
 				{"сохранение с паролем", func() { u.backupDialog().mode.SetSelected(backupWithPassword) }},
 				{"сохранение без пароля", func() { u.backupDialog().mode.SetSelected(backupNoPassword) }},
 				{"пароль зашифрованной копии", func() { u.passwordPrompt(func(core.Secret) {}) }},
+				{"прогресс", func() {
+					v := u.progressWindow("Сохранение копии сервера", func() {})
+					v.apply(core.Progress{Stage: core.StageRead, Done: 5, Total: 16, Text: "прочитано файлов 5 из 16 — amnezia-awg (проход 1 из 2)"})
+				}},
 				{"итог копии", func() {
 					dir, _ := core.UserBackupsDir()
 					path, b, err := u.runBackupTo(dir, time.Now(), core.PlainLayer{})

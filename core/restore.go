@@ -11,6 +11,7 @@ package core
 // Режим «добавить недостающих» не делается (Р-6, бэклог).
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -223,6 +224,12 @@ type RestoreOptions struct {
 	Now         time.Time
 	Resolve     Resolver
 	Layer       BackupLayer
+	// Ctx — отмена: действует ДО первой записи на сервер (после автокопии);
+	// с началом записи не проверяется — прерывать A3б посередине опаснее.
+	// nil — без отмены.
+	Ctx context.Context
+	// Progress — этапы: автокопия (чтение, запись), контейнер N из M.
+	Progress ProgressFunc
 	// ConfirmXRay — подтверждение перезапуска XRay (вызывается, только если
 	// его часть что-то меняет). nil — «нет».
 	ConfirmXRay func() bool
@@ -285,7 +292,21 @@ func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string,
 	if opt.AutoCopyDir == "" || opt.Layer == nil {
 		return "", nil, stopped("не задан каталог или слой автокопии")
 	}
-	cur, err := s.CollectBackup(opt.ToolVersion, opt.Now, opt.Resolve)
+	ctx := opt.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sub := func(p Progress) {
+		p.Text = "автокопия нового сервера: " + p.Text
+		if p.Stage == StageRead {
+			p.Stage = StageAutoCopy
+		}
+		report(opt.Progress, p)
+	}
+	cur, err := s.CollectBackupCtx(ctx, opt.ToolVersion, opt.Now, opt.Resolve, sub)
+	if errors.Is(err, ErrCanceled) {
+		return "", nil, fmt.Errorf("%w — ничего не записано", err)
+	}
 	if err != nil {
 		return "", nil, stopped("автокопия нового сервера не снята (%v) — замена запрещена", err)
 	}
@@ -296,12 +317,23 @@ func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string,
 	if s.Creds != nil {
 		host = s.Creds.Host
 	}
-	autoCopy, err = WriteBackupFileUnique(filepath.Join(opt.AutoCopyDir, AutoCopyName(host, opt.Now)), cur, opt.Layer)
+	autoCopy, err = WriteBackupFileUniqueCtx(ctx, filepath.Join(opt.AutoCopyDir, AutoCopyName(host, opt.Now)), cur, opt.Layer, sub)
+	if errors.Is(err, ErrCanceled) {
+		return "", nil, fmt.Errorf("%w — ничего не записано", err)
+	}
 	if err != nil {
 		return "", nil, stopped("автокопия нового сервера не записана (%v) — замена запрещена", err)
 	}
+	report(opt.Progress, Progress{Stage: StageAutoCopy, Text: "автокопия нового сервера сохранена: " + autoCopy})
+	// последняя точка отмены — до первой записи на сервер
+	if err := canceled(ctx); err != nil {
+		return autoCopy, nil, fmt.Errorf("%w — на сервер ничего не записано (автокопия сохранена: %s)", err, autoCopy)
+	}
 	failed := false
-	for _, it := range rp.Items {
+	m := len(rp.Items)
+	for i, it := range rp.Items {
+		report(opt.Progress, Progress{Stage: StageContainer, Done: i, Total: m, Writing: true,
+			Text: fmt.Sprintf("контейнер %d из %d: запись и проверка — %s", i+1, m, it.Container)})
 		o := RestoreOutcome{Container: it.Container}
 		switch {
 		case failed:
@@ -321,6 +353,7 @@ func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string,
 		}
 		outs = append(outs, o)
 	}
+	report(opt.Progress, Progress{Stage: StageContainer, Done: m, Total: m, Writing: true, Text: "запись завершена — итог"})
 	return autoCopy, outs, nil
 }
 

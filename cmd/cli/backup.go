@@ -9,6 +9,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,13 +40,19 @@ func printLines(w io.Writer, lines []string) {
 func printBackupSummary(w io.Writer, b *core.Backup) { printLines(w, core.BackupSummaryLines(b)) }
 
 // runBackup — backup [-o файл] [-password-file F | -no-password].
-func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, out, pwFile string, noPw bool, now time.Time) int {
+func runBackup(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, out, pwFile string, noPw bool, now time.Time) int {
 	in = bufio.NewReader(in)
 	layer, warning, code := backupLayerChoice(in, w, errOut, isTTY, pwFile, noPw)
 	if code != 0 {
 		return code
 	}
-	b, err := sess.CollectBackup(version.String(), now, net.LookupIP)
+	progress := cliProgress(errOut, isTTY)
+	b, err := sess.CollectBackupCtx(ctx, version.String(), now, net.LookupIP, progress)
+	if errors.Is(err, core.ErrCanceled) {
+		endProgress(errOut, isTTY)
+		fmt.Fprintln(w, "Отменено — копия не сохранена.")
+		return 2
+	}
 	if err != nil {
 		backupErr(errOut, "Копия не снята: ", err)
 		return 1
@@ -74,9 +82,14 @@ func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session
 	fmt.Fprintln(w)
 	// имя по умолчанию — уникальное («(2)»…); явное -o занятым не затирается
 	if defaultName {
-		abs, err = core.WriteBackupFileUnique(abs, b, layer)
+		abs, err = core.WriteBackupFileUniqueCtx(ctx, abs, b, layer, progress)
 	} else {
-		err = core.WriteBackupFile(abs, b, layer)
+		err = core.WriteBackupFileCtx(ctx, abs, b, layer, progress)
+	}
+	endProgress(errOut, isTTY)
+	if errors.Is(err, core.ErrCanceled) {
+		fmt.Fprintln(w, "Отменено — копия не сохранена.")
+		return 2
 	}
 	if err != nil {
 		backupErr(errOut, "Копия не записана: ", err)
@@ -121,7 +134,7 @@ func backupErr(errOut io.Writer, prefix string, err error) {
 }
 
 // runRestore — restore -file X [-apply] [-address-changes] [-skip-xray] [-yes].
-func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, yes bool, now time.Time) int {
+func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, yes bool, now time.Time) int {
 	if file == "" {
 		fmt.Fprintln(errOut, "Не задан файл копии: -file <файл.aabk>")
 		return 1
@@ -215,7 +228,16 @@ func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Sessio
 	}
 	opt.AutoCopyDir = dir
 	opt.ConfirmXRay = func() bool { return xrayOK }
+	opt.Ctx, opt.Progress = ctx, cliProgress(errOut, isTTY)
 	auto, outs, err := sess.Restore(rp, opt)
+	endProgress(errOut, isTTY)
+	if errors.Is(err, core.ErrCanceled) {
+		fmt.Fprintln(w, "Отменено — на сервер ничего не записано.")
+		if auto != "" {
+			fmt.Fprintln(w, "Автокопия нового сервера уже сохранена: "+auto)
+		}
+		return 2
+	}
 	if err != nil {
 		backupErr(errOut, "", err)
 		return 1
@@ -228,4 +250,33 @@ func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Sessio
 		}
 	}
 	return code
+}
+
+// cliProgress — прогресс строкой в stderr, только при терминале (без
+// терминала вывод прежний). С началом записи на сервер — предупреждение,
+// что прервать нельзя.
+func cliProgress(errOut io.Writer, isTTY bool) core.ProgressFunc {
+	if !isTTY {
+		return nil
+	}
+	warned := false
+	return func(p core.Progress) {
+		if p.Writing && !warned {
+			warned = true
+			fmt.Fprint(errOut, "\r\033[K")
+			fmt.Fprintln(errOut, "Идёт запись на сервер — прервать нельзя (Ctrl+C не действует), дождитесь итога.")
+		}
+		line := p.Text
+		if p.Total > 0 {
+			line = fmt.Sprintf("[%3d%%] %s", p.Done*100/p.Total, p.Text)
+		}
+		fmt.Fprint(errOut, "\r\033[K"+line)
+	}
+}
+
+// endProgress — закончить строку прогресса.
+func endProgress(errOut io.Writer, isTTY bool) {
+	if isTTY {
+		fmt.Fprint(errOut, "\r\033[K")
+	}
 }

@@ -46,12 +46,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1061,9 +1063,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 
 	switch cmd {
 	case "backup":
-		return runBackup(stdin, stdout, stderr, isTTY, sess, *outFile, *pwFile, *noPw, time.Now())
+		// Ctrl+C — то же, что «Отмена»: копия не сохраняется, временный
+		// файл удаляется
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return runBackup(ctx, stdin, stdout, stderr, isTTY, sess, *outFile, *pwFile, *noPw, time.Now())
 	case "restore":
-		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return runRestore(ctx, stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
 	case "add":

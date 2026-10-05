@@ -94,6 +94,8 @@ type ui struct {
 	// restoreLayer — слой копии-источника восстановления (автокопия его
 	// наследует; nil — без пароля).
 	restoreLayer core.BackupLayer
+	// lastProgress — последнее окно прогресса копии (тесты).
+	lastProgress *progressView
 	// busy — идёт серверная операция (setBusy).
 	busy bool
 
