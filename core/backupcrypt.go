@@ -85,8 +85,9 @@ func (l PasswordLayer) Seal(plain []byte) ([]byte, error) {
 	if pr == (ArgonParams{}) {
 		pr = ProdArgonParams
 	}
-	if err := validateArgonParams(pr.MemoryKiB, pr.Time, pr.Threads); err != nil {
-		return nil, err
+	if err := validateArgonParams(pr.MemoryKiB, pr.Time, pr.Threads); err != nil || pr.Time > backupMaxArgonTime {
+		// та же граница t, что при чтении: копию, которую не прочитать, не пишем
+		return nil, ErrBackupParams
 	}
 	hdr := make([]byte, pwHdrLen)
 	copy(hdr, pwMagic)

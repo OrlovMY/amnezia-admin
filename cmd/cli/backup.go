@@ -49,6 +49,7 @@ func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session
 		backupErr(errOut, "Копия не снята: ", err)
 		return 1
 	}
+	defaultName := false
 	if out == "" {
 		dir, err := userBackupsDir()
 		if err != nil {
@@ -60,6 +61,7 @@ func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session
 			return 1
 		}
 		out = filepath.Join(dir, core.BackupFileName(b.Server.Host, now))
+		defaultName = true
 	}
 	abs, err := filepath.Abs(out)
 	if err != nil {
@@ -70,7 +72,13 @@ func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, warning)
 	fmt.Fprintln(w)
-	if err := core.WriteBackupFile(abs, b, layer); err != nil {
+	// имя по умолчанию — уникальное («(2)»…); явное -o занятым не затирается
+	if defaultName {
+		abs, err = core.WriteBackupFileUnique(abs, b, layer)
+	} else {
+		err = core.WriteBackupFile(abs, b, layer)
+	}
+	if err != nil {
 		backupErr(errOut, "Копия не записана: ", err)
 		return 1
 	}

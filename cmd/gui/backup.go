@@ -177,8 +177,8 @@ func (u *ui) runBackupTo(dir string, now time.Time, layer core.BackupLayer) (str
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", b, err
 	}
-	p := filepath.Join(dir, core.BackupFileName(b.Server.Host, now))
-	if err := core.WriteBackupFile(p, b, layer); err != nil {
+	p, err := core.WriteBackupFileUnique(filepath.Join(dir, core.BackupFileName(b.Server.Host, now)), b, layer)
+	if err != nil {
 		return "", b, err
 	}
 	return p, b, nil

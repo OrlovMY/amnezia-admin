@@ -414,11 +414,33 @@ func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 	}
 	if err := os.Link(name, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("файл %s уже есть — копия не перезаписывается", path)
+			return fmt.Errorf("файл %s уже есть — копия не перезаписывается: %w", path, ErrBackupExists)
 		}
 		return fmt.Errorf("копия не записана под именем %s: %v", path, err)
 	}
 	return nil
+}
+
+// ErrBackupExists — файл с этим именем уже есть (копия не перезаписана).
+var ErrBackupExists = errors.New("файл уже есть")
+
+// WriteBackupFileUnique — запись под именем path, а если оно занято —
+// «<имя> (2).aabk», «(3)»… (CI PR #38: две копии в одну секунду получали
+// одно имя по времени). Занятое имя никогда не затирается. Возвращает
+// путь, под которым копия записана.
+func WriteBackupFileUnique(path string, b *Backup, layer BackupLayer) (string, error) {
+	base := strings.TrimSuffix(path, ".aabk")
+	p := path
+	for n := 2; ; n++ {
+		err := WriteBackupFile(p, b, layer)
+		if err == nil {
+			return p, nil
+		}
+		if !errors.Is(err, ErrBackupExists) || n > 99 {
+			return "", err
+		}
+		p = fmt.Sprintf("%s (%d).aabk", base, n)
+	}
 }
 
 // beforeBackupLink — шов теста: «имя появилось между записью временного

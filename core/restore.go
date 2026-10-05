@@ -296,8 +296,8 @@ func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string,
 	if s.Creds != nil {
 		host = s.Creds.Host
 	}
-	autoCopy = filepath.Join(opt.AutoCopyDir, AutoCopyName(host, opt.Now))
-	if err := WriteBackupFile(autoCopy, cur, opt.Layer); err != nil {
+	autoCopy, err = WriteBackupFileUnique(filepath.Join(opt.AutoCopyDir, AutoCopyName(host, opt.Now)), cur, opt.Layer)
+	if err != nil {
 		return "", nil, stopped("автокопия нового сервера не записана (%v) — замена запрещена", err)
 	}
 	failed := false
