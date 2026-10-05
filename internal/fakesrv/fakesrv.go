@@ -30,6 +30,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/curve25519"
 )
 
 // clientEntry — форма записи clientsTable (json-теги должны совпадать с
@@ -97,6 +99,16 @@ type Server struct {
 	// FailDockerPS — `docker ps` возвращает эту ошибку (контейнеры не
 	// перечислить).
 	FailDockerPS error
+
+	// BusyboxCat — cat отвечает об отсутствии файла как busybox (контейнеры
+	// Amnezia — Alpine): «cat: can't open '<путь>': No such file or directory».
+	BusyboxCat bool
+
+	// SyncKeepsIface — syncconf применяет peer'ы, но НЕ ключ и порт
+	// [Interface] (Р-5: модель «не применено»).
+	SyncKeepsIface bool
+	ifacePub       string
+	ifacePort      string
 
 	// AllowLegacyWrite — принимать прежнюю запись v0.2.0 (см. reLegacyWrite).
 	AllowLegacyWrite bool
@@ -359,6 +371,8 @@ var (
 	// старой версии в К4 (PR-W1).
 	reLegacyWrite = regexp.MustCompile(`^docker exec -i (\S+) (?:env LC_ALL=C )?sh -c 'cat > (\S+)\.tmp && mv (\S+)\.tmp (\S+)'$`)
 	reWgShow      = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) dump$`)
+	// reWgShowField — открытый ключ и порт интерфейса (без приватного ключа).
+	reWgShowField = regexp.MustCompile(`^docker exec (\S+) (wg|awg) show (wg0|awg0) (public-key|listen-port)$`)
 )
 
 // Run — реализация core.Runner. Каждая полученная команда логируется в
@@ -599,6 +613,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		}
 		data, ok := s.files[path]
 		if !ok {
+			if s.BusyboxCat {
+				return "", fmt.Errorf("команда %q: exit status 1; stderr: cat: can't open '%s': No such file or directory", cmd, path)
+			}
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: cat: %s: No such file or directory", cmd, path)
 		}
 		return string(data), nil
@@ -691,7 +708,26 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			delete(peers, s.DropPeerOnSync)
 		}
 		s.peers = peers
+		// Р-5: работающий интерфейс берёт ключ и порт из файла — если не
+		// задан SyncKeepsIface (модель «syncconf не применил [Interface]»).
+		if !s.SyncKeepsIface {
+			s.ifacePub, s.ifacePort = ifaceRuntime(string(wg0))
+		}
 		return "", nil
+
+	case reWgShowField.MatchString(cmd):
+		m := reWgShowField.FindStringSubmatch(cmd)
+		if !wgTriple(m[2], m[3], "") {
+			return "", fmt.Errorf("fakesrv: неизвестная команда %q", cmd)
+		}
+		pub, port := "serverpub", "51820"
+		if s.ifacePub != "" {
+			pub, port = s.ifacePub, s.ifacePort
+		}
+		if m[4] == "public-key" {
+			return pub + "\n", nil
+		}
+		return port + "\n", nil
 
 	case reWgShow.MatchString(cmd):
 		if m := reWgShow.FindStringSubmatch(cmd); !wgTriple(m[2], m[3], "") {
@@ -702,7 +738,11 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 			return "", fmt.Errorf("fakesrv: имитированный отказ wg show (вызов №%d)", s.wgShowCalls)
 		}
 		var b strings.Builder
-		b.WriteString("serverpriv\tserverpub\t51820\toff\n") // строка интерфейса — parsePeerStats её пропускает
+		pub, port := "serverpub", "51820"
+		if s.ifacePub != "" {
+			pub, port = s.ifacePub, s.ifacePort
+		}
+		b.WriteString("serverpriv\t" + pub + "\t" + port + "\toff\n") // строка интерфейса — parsePeerStats её пропускает
 		for pub := range s.peers {
 			fmt.Fprintf(&b, "%s\t(none)\t(none)\t0.0.0.0/0\t0\t0\t0\toff\n", pub)
 		}
@@ -963,4 +1003,37 @@ func NewAWG2() *Server {
 		"ListenPort = 51820\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 20\nS2 = 30\nS3 = 15\nS4 = 25\nH1 = 100-200\nH2 = 300-400\nH3 = 500-600\nH4 = 700-800\n# I1 = <b 0xdeadbeef>\n", 1)
 	s.files["/opt/amnezia/awg/awg0.conf"] = []byte(awg)
 	return s
+}
+
+// ifaceRuntime — открытый ключ (из PrivateKey) и ListenPort секции
+// [Interface] текста конфигурации; не разобрано — пустые строки.
+func ifaceRuntime(text string) (pub, port string) {
+	in := false
+	var priv string
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.TrimSpace(line)
+		switch {
+		case strings.EqualFold(l, "[Interface]"):
+			in = true
+		case strings.HasPrefix(l, "["):
+			in = false
+		case in && strings.Contains(l, "="):
+			kv := strings.SplitN(l, "=", 2)
+			switch strings.TrimSpace(kv[0]) {
+			case "PrivateKey":
+				priv = strings.TrimSpace(kv[1])
+			case "ListenPort":
+				port = strings.TrimSpace(kv[1])
+			}
+		}
+	}
+	k, err := base64.StdEncoding.DecodeString(priv)
+	if err != nil || len(k) != 32 {
+		return "", port
+	}
+	p, err := curve25519.X25519(k, curve25519.Basepoint)
+	if err != nil {
+		return "", port
+	}
+	return base64.StdEncoding.EncodeToString(p), port
 }

@@ -13,6 +13,9 @@
 //	amnezia-admin toggle -key vpn://... -name Vasya
 //	amnezia-admin rekey  -key vpn://... -name Vasya
 //	amnezia-admin show-config -key vpn://... -name Vasya [-print]
+//	amnezia-admin backup -key vpn://... [-o файл.aabk] (-password-file файл | -no-password)
+//	amnezia-admin backup-info [-password-file файл] файл.aabk
+//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -52,6 +55,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/envcheck"
@@ -954,6 +958,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return 0
 	}
 
+	// backup-info — только файл копии: ни ключа, ни сети.
+	if cmd == "backup-info" {
+		return runBackupInfo(stdout, stderr, args[1:])
+	}
+
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
@@ -965,6 +974,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	printUnverified := fs.Bool("print-unverified", false, "show-config: напечатать содержимое, даже если ключ сервера не совпал или не сверен")
 	hostkey := fs.String("hostkey", "", "ожидаемый отпечаток ключа сервера SHA256:… (обязателен без терминала для нового сервера)")
 	container := fs.String("container", "", "контейнер протокола (например amnezia-awg2); по умолчанию — первый управляемый")
+	outFile := fs.String("o", "", "backup: файл копии (по умолчанию — каталог данных пользователя, «Резервные копии»)")
+	backupFile := fs.String("file", "", "restore: файл копии .aabk")
+	apply := fs.Bool("apply", false, "restore: выполнить замену (без флага — только предпросмотр)")
+	addrChanges := fs.Bool("address-changes", false, "restore: продолжить, хотя адрес выдачи другой или не проверен")
+	pwFile := fs.String("password-file", "", "backup/restore: файл с паролем копии (пароль аргументом не передаётся)")
+	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
+	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -1044,6 +1060,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	}
 
 	switch cmd {
+	case "backup":
+		return runBackup(stdin, stdout, stderr, isTTY, sess, *outFile, *pwFile, *noPw, time.Now())
+	case "restore":
+		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
 	case "add":
@@ -1205,7 +1225,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))

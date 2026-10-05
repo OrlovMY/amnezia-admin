@@ -89,6 +89,13 @@ type ui struct {
 	// данные, но без блокировки кнопок повторный клик — это уже вторая
 	// операция поверх ещё не завершившейся первой (BE-01, ревью, Е2).
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
+	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
+	copyBtn *widget.Button
+	// restoreLayer — слой копии-источника восстановления (автокопия его
+	// наследует; nil — без пароля).
+	restoreLayer core.BackupLayer
+	// busy — идёт серверная операция (setBusy).
+	busy bool
 
 	// сортировка таблицы пользователей по клику на заголовок колонки;
 	// primary — активная (со стрелкой в заголовке), secondary — tie-breaker
@@ -1444,6 +1451,10 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	}
 
 	server := widget.NewLabel(fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host))
+	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
+	// с подписью сервера.
+	copyBtn := widget.NewButtonWithIcon("Копия…", theme.DocumentSaveIcon(), func() { u.backupMenu() })
+	u.copyBtn = copyBtn
 
 	refreshBtn := widget.NewButtonWithIcon("Обновить", theme.ViewRefreshIcon(), func() { u.refresh() })
 	addBtn := widget.NewButtonWithIcon("Создать", theme.ContentAddIcon(), func() { u.addDialog() })
@@ -1462,6 +1473,9 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 		container.NewBorder(nil, nil, server,
 			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
 		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
+		// Отдельной строкой (как список протоколов): в первой строке кнопка
+		// сдвигала минимальную ширину окна (TestProtoLabelFits).
+		container.NewBorder(nil, nil, nil, copyBtn),
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
 }
@@ -2277,6 +2291,14 @@ func (u *ui) applySort() {
 // вторую операцию поверх ещё не завершившейся первой — со уже устаревшим
 // selectedRow.
 func (u *ui) setBusy(busy bool) {
+	u.busy = busy
+	if b := u.copyBtn; b != nil {
+		if busy {
+			b.Disable()
+		} else {
+			b.Enable()
+		}
+	}
 	if b := u.refreshBtn; b != nil {
 		if busy {
 			b.Disable()
