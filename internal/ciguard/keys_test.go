@@ -76,6 +76,51 @@ func sortedKeys(m map[string]interface{}) []string {
 	return ks
 }
 
+// ciJobTimeouts — явный предел каждого job ci.yml, минут (ревью З7). Job
+// без предела получает от GitHub шесть часов; новое значение — видимой
+// строкой здесь, а не молча в ci.yml.
+var ciJobTimeouts = map[string]int{
+	"checks": 45, // 05.10: 30 не хватило windows (сборка после тестов)
+	"lint":   15,
+}
+
+// TestCIJobTimeouts — у каждого job ci.yml timeout-minutes есть и равен
+// значению из ciJobTimeouts; job вне таблицы — красный.
+func TestCIJobTimeouts(t *testing.T) {
+	var raw struct {
+		Jobs map[string]map[string]interface{} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(readSource(t, ciYML), &raw); err != nil {
+		fatal(t, "не разобрать %s как YAML: %v", ciYML, err)
+	}
+	if len(raw.Jobs) == 0 {
+		fatal(t, "в %s не найдено ни одного job — тест перестал что-либо проверять", ciYML)
+	}
+	var names []string
+	for n := range raw.Jobs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		want, known := ciJobTimeouts[n]
+		v, has := raw.Jobs[n]["timeout-minutes"]
+		got, isInt := v.(int)
+		switch {
+		case !known:
+			fail(t, "в %s job %s нет в таблице ciJobTimeouts — внеси его предел строкой с обоснованием", ciYML, n)
+		case !has:
+			fail(t, "в %s у job %s нет timeout-minutes — GitHub даст шесть часов (ревью З7)", ciYML, n)
+		case !isInt || got != want:
+			fail(t, "в %s у job %s timeout-minutes «%v», в таблице ciJobTimeouts — %d", ciYML, n, v, want)
+		}
+	}
+	for n := range ciJobTimeouts {
+		if _, ok := raw.Jobs[n]; !ok {
+			fail(t, "job %s из ciJobTimeouts нет в %s — таблица отстала", n, ciYML)
+		}
+	}
+}
+
 // TestWorkflowKeysClosedList — незнакомый ключ на уровне workflow, job или
 // шага — красный; runs-on — из закрытого набора.
 func TestWorkflowKeysClosedList(t *testing.T) {
