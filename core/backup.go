@@ -292,6 +292,9 @@ func DecodeBackup(data []byte, layers ...BackupLayer) (*Backup, error) {
 		if errors.Is(err, ErrBackupWrongPassword) {
 			return nil, fmt.Errorf("%w: %w", ErrBackupNotRead, ErrBackupWrongPassword)
 		}
+		if errors.Is(err, ErrBackupParams) {
+			return nil, fmt.Errorf("%w: %w", ErrBackupNotRead, ErrBackupParams)
+		}
 		return nil, notRead("слой %s не открыт", layer.Name())
 	}
 	var b Backup

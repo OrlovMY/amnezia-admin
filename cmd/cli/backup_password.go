@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"golang.org/x/term"
@@ -33,8 +34,30 @@ func readPasswordFile(path string) (core.Secret, error) {
 	if err != nil {
 		return core.Secret{}, fmt.Errorf("файл пароля не прочитан: %w", err)
 	}
+	if m, err := fileModeOf(path); err == nil && passwordFileOpen(m) {
+		fmt.Fprintln(passwordWarnOut, "Предупреждение: файл пароля "+path+" доступен группе или прочим пользователям — закройте доступ: chmod 600 "+path)
+	}
 	b = bytes.TrimSuffix(bytes.TrimSuffix(b, []byte("\n")), []byte("\r"))
 	return core.NewSecret(b), nil
+}
+
+// fileModeOf — права файла (шов теста: тест не создаёт файлов, открытых
+// группе, — их запрещает сторож permguard).
+var fileModeOf = func(p string) (os.FileMode, error) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return 0, err
+	}
+	return fi.Mode(), nil
+}
+
+// passwordWarnOut — куда предупреждать о файле пароля (шов теста).
+var passwordWarnOut io.Writer = os.Stderr
+
+// passwordFileOpen — SEC-01 Н-5: на Linux/macOS файл пароля доступен группе
+// или прочим (на Windows права так не выражаются — не проверяется).
+func passwordFileOpen(m os.FileMode) bool {
+	return runtime.GOOS != "windows" && m.Perm()&0o077 != 0
 }
 
 var errNeedPasswordChoice = errors.New("без терминала укажите -password-file <файл> (копия с паролем) или -no-password (без пароля)")

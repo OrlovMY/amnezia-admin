@@ -125,6 +125,9 @@ func CompatLines(r *CompatReport) []string {
 	return out
 }
 
+// AutoCopyUnencryptedNote — автокопия из незашифрованного источника.
+const AutoCopyUnencryptedNote = "Автокопия НЕ зашифрована: в ней ключи нового сервера; удалите её, когда убедитесь, что переезд удался."
+
 // RemovedLines — AU-UX M2: кто пропадёт с нового сервера — первым разделом.
 func RemovedLines(rp *RestorePlan) []string {
 	var out []string
@@ -174,8 +177,13 @@ func RestorePlanLines(rp *RestorePlan) []string {
 // RestoreOutcomeLines — итог переезда: исход и граница проверки у каждого
 // контейнера; при частичном переносе — прямо, что уже заменено (и не
 // откатывается) и что делать с остальным.
-func RestoreOutcomeLines(autoCopy string, outs []RestoreOutcome) []string {
+func RestoreOutcomeLines(autoCopy string, autoEncrypted bool, outs []RestoreOutcome) []string {
 	out := []string{"Автокопия нового сервера до замены: " + autoCopy}
+	if autoEncrypted {
+		out = append(out, "  (зашифрована тем же паролем, что и копия-источник)")
+	} else {
+		out = append(out, "  "+AutoCopyUnencryptedNote)
+	}
 	var done, notDone []string
 	for _, o := range outs {
 		line := fmt.Sprintf("  %s: %s", o.Container, o.State)

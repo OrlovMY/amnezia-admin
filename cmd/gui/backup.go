@@ -291,6 +291,8 @@ func (u *ui) passwordPrompt(onOK func(core.Secret)) (*widget.Entry, *escButton) 
 }
 
 func (u *ui) restoreWith(path string, layers ...core.BackupLayer) {
+	// автокопия наследует режим копии-источника
+	u.restoreLayer = layers[len(layers)-1]
 	u.setBusy(true)
 	goSafe(func() {
 		b, compat, rp, planErr, err := u.restorePrepare(path, layers...)
@@ -387,8 +389,12 @@ func (u *ui) runRestore(rp *core.RestorePlan, xrayOK bool, now time.Time) (strin
 	if err != nil {
 		return "", nil, errors.New("каталог автокопии не определён — замена запрещена: " + err.Error())
 	}
+	layer := u.restoreLayer
+	if layer == nil {
+		layer = core.PlainLayer{}
+	}
 	return u.sess.Restore(rp, core.RestoreOptions{AutoCopyDir: dir, ToolVersion: version.String(), Now: now,
-		Resolve: backupResolve, Layer: core.PlainLayer{}, ConfirmXRay: func() bool { return xrayOK }})
+		Resolve: backupResolve, Layer: layer, ConfirmXRay: func() bool { return xrayOK }})
 }
 
 func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
@@ -410,7 +416,8 @@ func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) d
 	if err != nil {
 		text = "Ничего не записано: " + core.MaskText(err.Error())
 	} else {
-		text = strings.Join(core.RestoreOutcomeLines(auto, outs), "\n")
+		enc := u.restoreLayer != nil && u.restoreLayer.Name() == core.PasswordLayerName
+		text = strings.Join(core.RestoreOutcomeLines(auto, enc, outs), "\n")
 	}
 	d := dialog.NewCustom("Итог восстановления", "Закрыть", container.NewVScroll(wrapLabel(text, false)), u.win)
 	sizeDialog(d, fyne.NewSize(640, 420))

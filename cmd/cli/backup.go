@@ -194,7 +194,9 @@ func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Sessio
 			}
 		}
 	}
-	opt := core.RestoreOptions{ToolVersion: version.String(), Now: now, Resolve: net.LookupIP, Layer: core.PlainLayer{}}
+	// автокопия наследует режим копии-источника (тот же пароль, без
+	// повторного вопроса)
+	opt := core.RestoreOptions{ToolVersion: version.String(), Now: now, Resolve: net.LookupIP, Layer: layers[len(layers)-1]}
 	dir, err := userBackupsDir()
 	if err == nil {
 		err = os.MkdirAll(dir, 0o700)
@@ -210,7 +212,7 @@ func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Sessio
 		backupErr(errOut, "", err)
 		return 1
 	}
-	printLines(w, core.RestoreOutcomeLines(auto, outs))
+	printLines(w, core.RestoreOutcomeLines(auto, opt.Layer.Name() == core.PasswordLayerName, outs))
 	code = 0
 	for _, o := range outs {
 		if o.State != core.RestoreDone {

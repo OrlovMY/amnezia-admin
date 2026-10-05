@@ -91,6 +91,9 @@ type ui struct {
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
 	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
 	copyBtn *widget.Button
+	// restoreLayer — слой копии-источника восстановления (автокопия его
+	// наследует; nil — без пароля).
+	restoreLayer core.BackupLayer
 	// busy — идёт серверная операция (setBusy).
 	busy bool
 

@@ -86,11 +86,11 @@ func TestRestoreOutcomesViaFakesrv(t *testing.T) {
 // каждого восстановленного, своя у WG и XRay; нет восстановленных — нет
 // «проверено»; частичный перенос назван прямо.
 func TestRestoreOutcomeLinesChecked(t *testing.T) {
-	none := strings.Join(RestoreOutcomeLines("a", []RestoreOutcome{{Container: "amnezia-awg", State: RestoreNotWritten}}), "\n")
+	none := strings.Join(RestoreOutcomeLines("a", false, []RestoreOutcome{{Container: "amnezia-awg", State: RestoreNotWritten}}), "\n")
 	if strings.Contains(none, "проверено") || strings.Contains(none, "файрвол") {
 		t.Errorf("без восстановленных есть «проверено»:\n%s", none)
 	}
-	mixed := strings.Join(RestoreOutcomeLines("a", []RestoreOutcome{
+	mixed := strings.Join(RestoreOutcomeLines("a", false, []RestoreOutcome{
 		{Container: "amnezia-awg", State: RestoreDone, Checked: RestoreCheckedWG},
 		{Container: "amnezia-xray", State: RestoreDeclined},
 	}), "\n")

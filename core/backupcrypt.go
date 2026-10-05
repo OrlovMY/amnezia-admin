@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/text/unicode/norm"
 )
 
 // PasswordLayerName — имя слоя в заголовке файла копии.
@@ -36,9 +37,20 @@ const BackupPasswordWarning = `Копия будет зашифрована па
 // различаются).
 var ErrBackupWrongPassword = errors.New("неверный пароль или файл повреждён")
 
-// ValidateBackupPassword — пароль не короче BackupPasswordMin символов.
+// ErrBackupParams — параметры Argon2 в заголовке копии вне допустимого.
+var ErrBackupParams = errors.New("параметры копии вне допустимого")
+
+// backupMaxArgonTime — верхняя граница числа проходов Argon2 при ЧТЕНИИ
+// (SEC-01 Н-7): подменённое t не заставит считать часами.
+const backupMaxArgonTime = 16
+
+// normPassword — пароль в форме NFC (SEC-01 Н-6, решение ядра): «й» из
+// одного или из двух кодовых точек (разные клавиатуры/ОС) — один пароль.
+func normPassword(pw Secret) []byte { return norm.NFC.Bytes(pw.Bytes()) }
+
+// ValidateBackupPassword — пароль (в NFC) не короче BackupPasswordMin символов.
 func ValidateBackupPassword(pw Secret) error {
-	if n := utf8.RuneCount(pw.Bytes()); n < BackupPasswordMin {
+	if n := utf8.RuneCount(normPassword(pw)); n < BackupPasswordMin {
 		return fmt.Errorf("пароль короче %d символов (%d)", BackupPasswordMin, n)
 	}
 	return nil
@@ -61,7 +73,7 @@ const (
 )
 
 func (l PasswordLayer) key(salt []byte, m uint32, t, p uint8) []byte {
-	return argon2.IDKey(l.Password.Bytes(), salt, uint32(t), m, p, chacha20poly1305.KeySize)
+	return argon2.IDKey(normPassword(l.Password), salt, uint32(t), m, p, chacha20poly1305.KeySize)
 }
 
 // Seal — заголовок слоя (магия, версия, m, t, p, соль, nonce) + шифртекст.
@@ -88,6 +100,12 @@ func (l PasswordLayer) Seal(plain []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Связанные данные — весь заголовок слоя (SEC-01 Н-4, честно): соль,
+	// m/t/p и nonce и так защищены — от них зависят ключ и поток шифра, и
+	// их подмена ломает проверку сама по себе. AD добавляет защиту только
+	// магии и версии слоя (4+1 байта): без AD их можно было бы подменить,
+	// не сломав расшифровку. Внешняя сумма AABK покрывает всё тело, но она
+	// не секретна и пересчитывается кем угодно — защиты от подделки не даёт.
 	return aead.Seal(hdr, hdr[11+pwSaltLen:], plain, hdr), nil
 }
 
@@ -99,9 +117,10 @@ func (l PasswordLayer) Open(sealed []byte) ([]byte, error) {
 	hdr := sealed[:pwHdrLen]
 	m := binary.BigEndian.Uint32(hdr[5:9])
 	t, p := hdr[9], hdr[10]
-	// параметры — ДО вывода ключа: подмена «1 ТиБ памяти» не роняет машину
-	if validateArgonParams(m, t, p) != nil {
-		return nil, ErrBackupWrongPassword
+	// параметры — ДО вывода ключа: подмена «1 ТиБ памяти» или «t = 255»
+	// не роняет и не вешает машину
+	if validateArgonParams(m, t, p) != nil || t > backupMaxArgonTime {
+		return nil, ErrBackupParams
 	}
 	aead, err := chacha20poly1305.NewX(l.key(hdr[11:11+pwSaltLen], m, t, p))
 	if err != nil {

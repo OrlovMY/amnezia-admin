@@ -92,13 +92,15 @@ func TestPasswordLayerHeaderTamper(t *testing.T) {
 	for _, i := range []int{5, 9, 10, 11, 11 + pwSaltLen} {
 		bad := append([]byte(nil), sealed...)
 		bad[i] ^= 0x01
-		if _, err := l.Open(bad); !errors.Is(err, ErrBackupWrongPassword) {
+		// параметры вне границ — «вне допустимого» (Н-7), прочее — «неверный
+		// пароль или файл повреждён»; прочитанным не бывает ни то, ни другое
+		if _, err := l.Open(bad); !errors.Is(err, ErrBackupWrongPassword) && !errors.Is(err, ErrBackupParams) {
 			t.Errorf("байт заголовка слоя %d: %v", i, err)
 		}
 	}
 	bomb := append([]byte(nil), sealed...)
 	binary.BigEndian.PutUint32(bomb[5:9], 1<<31)
-	if _, err := l.Open(bomb); !errors.Is(err, ErrBackupWrongPassword) {
+	if _, err := l.Open(bomb); !errors.Is(err, ErrBackupParams) {
 		t.Errorf("параметры памяти вне границ: %v", err)
 	}
 }
