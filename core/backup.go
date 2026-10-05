@@ -281,10 +281,17 @@ func DecodeBackup(data []byte, layers ...BackupLayer) (*Backup, error) {
 	}
 	sum := sha256.Sum256(head)
 	if hex.EncodeToString(sum[:]) != sf[1] {
+		if layer.Name() == PasswordLayerName {
+			// зашифрованная копия: повреждение и неверный пароль не различаются
+			return nil, fmt.Errorf("%w: %w", ErrBackupNotRead, ErrBackupWrongPassword)
+		}
 		return nil, notRead("файл повреждён (сумма не сошлась)")
 	}
 	plain, err := layer.Open(head)
 	if err != nil {
+		if errors.Is(err, ErrBackupWrongPassword) {
+			return nil, fmt.Errorf("%w: %w", ErrBackupNotRead, ErrBackupWrongPassword)
+		}
 		return nil, notRead("слой %s не открыт", layer.Name())
 	}
 	var b Backup

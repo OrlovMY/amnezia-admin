@@ -73,9 +73,12 @@ func TestBackupWindowsVisible(t *testing.T) {
 			}{
 				{"меню «Копия…»", func() { u.backupMenu() }},
 				{"сохранение", func() { u.backupDialog() }},
+				{"сохранение с паролем", func() { u.backupDialog().mode.SetSelected(backupWithPassword) }},
+				{"сохранение без пароля", func() { u.backupDialog().mode.SetSelected(backupNoPassword) }},
+				{"пароль зашифрованной копии", func() { u.passwordPrompt(func(core.Secret) {}) }},
 				{"итог копии", func() {
 					dir, _ := core.UserBackupsDir()
-					path, b, err := u.runBackupTo(dir, time.Now())
+					path, b, err := u.runBackupTo(dir, time.Now(), core.PlainLayer{})
 					u.backupResult(path, b, err)
 				}},
 				{"восстановление", func() {

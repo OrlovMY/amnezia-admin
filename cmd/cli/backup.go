@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -36,8 +37,13 @@ func printLines(w io.Writer, lines []string) {
 
 func printBackupSummary(w io.Writer, b *core.Backup) { printLines(w, core.BackupSummaryLines(b)) }
 
-// runBackup — backup [-o файл].
-func runBackup(w, errOut io.Writer, sess *core.Session, out string, now time.Time) int {
+// runBackup — backup [-o файл] [-password-file F | -no-password].
+func runBackup(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, out, pwFile string, noPw bool, now time.Time) int {
+	in = bufio.NewReader(in)
+	layer, warning, code := backupLayerChoice(in, w, errOut, isTTY, pwFile, noPw)
+	if code != 0 {
+		return code
+	}
 	b, err := sess.CollectBackup(version.String(), now, net.LookupIP)
 	if err != nil {
 		backupErr(errOut, "Копия не снята: ", err)
@@ -62,9 +68,9 @@ func runBackup(w, errOut io.Writer, sess *core.Session, out string, now time.Tim
 	}
 	printBackupSummary(w, b)
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, core.BackupUnencryptedWarning)
+	fmt.Fprintln(w, warning)
 	fmt.Fprintln(w)
-	if err := core.WriteBackupFile(abs, b, core.PlainLayer{}); err != nil {
+	if err := core.WriteBackupFile(abs, b, layer); err != nil {
 		backupErr(errOut, "Копия не записана: ", err)
 		return 1
 	}
@@ -75,13 +81,20 @@ func runBackup(w, errOut io.Writer, sess *core.Session, out string, now time.Tim
 	return 0
 }
 
-// runBackupInfo — backup-info <файл>: без ключа и без сети.
+// runBackupInfo — backup-info [-password-file F] <файл>: без ключа и без сети.
 func runBackupInfo(w, errOut io.Writer, args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintln(errOut, "Использование: amnezia-admin backup-info <файл.aabk>")
+	fs := flag.NewFlagSet("backup-info", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	pwFile := fs.String("password-file", "", "файл с паролем зашифрованной копии")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
+		fmt.Fprintln(errOut, "Использование: amnezia-admin backup-info [-password-file <файл>] <файл.aabk>")
 		return 1
 	}
-	b, err := core.ReadBackupFile(args[0], core.PlainLayer{})
+	layers, code := readLayers(w, errOut, stdinIsTTY(), fs.Arg(0), *pwFile)
+	if code != 0 {
+		return code
+	}
+	b, err := core.ReadBackupFile(fs.Arg(0), layers...)
 	if err != nil {
 		backupErr(errOut, "", err)
 		return 1
@@ -100,13 +113,17 @@ func backupErr(errOut io.Writer, prefix string, err error) {
 }
 
 // runRestore — restore -file X [-apply] [-address-changes] [-skip-xray] [-yes].
-func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file string, apply, addrOK, skipXRay, yes bool, now time.Time) int {
+func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, yes bool, now time.Time) int {
 	if file == "" {
 		fmt.Fprintln(errOut, "Не задан файл копии: -file <файл.aabk>")
 		return 1
 	}
 	in = bufio.NewReader(in) // один буфер на все вопросы
-	b, err := core.ReadBackupFile(file, core.PlainLayer{})
+	layers, code := readLayers(w, errOut, isTTY, file, pwFile)
+	if code != 0 {
+		return code
+	}
+	b, err := core.ReadBackupFile(file, layers...)
 	if err != nil {
 		backupErr(errOut, "", err)
 		return 1
@@ -194,7 +211,7 @@ func runRestore(in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Sessio
 		return 1
 	}
 	printLines(w, core.RestoreOutcomeLines(auto, outs))
-	code := 0
+	code = 0
 	for _, o := range outs {
 		if o.State != core.RestoreDone {
 			code = 1

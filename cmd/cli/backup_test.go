@@ -48,7 +48,7 @@ func flocks(exec *fakesrv.Server) int {
 func TestCLIBackupWarnsBeforeWrite(t *testing.T) {
 	key, kh, exec := setupFakeSSHForRunWithExec(t)
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	code, out, errOut := cliRun(t, kh, "", "backup", "-key", key, "-o", p)
+	code, out, errOut := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-no-password")
 	if code != 0 {
 		t.Fatalf("код %d: %s", code, errOut)
 	}
@@ -81,7 +81,7 @@ func TestCLIBackupIncomplete(t *testing.T) {
 	key, kh, exec := setupFakeSSHForRunWithExec(t)
 	exec.FailRead = map[string]error{"/opt/amnezia/awg/clientsTable": errors.New("cat: Input/output error")}
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	code, out, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p)
+	code, out, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-no-password")
 	if code != exitBackupIncomplete || !strings.Contains(out, "НЕПОЛНАЯ") {
 		t.Fatalf("код %d:\n%s", code, out)
 	}
@@ -104,7 +104,7 @@ func TestCLIRestore(t *testing.T) {
 	keyA, khA, srcExec := setupFakeSSHForRunWithExec(t)
 	srcExec.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p); code != 0 {
+	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-no-password"); code != 0 {
 		t.Fatalf("backup: %d %s", code, e)
 	}
 	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)
@@ -163,7 +163,7 @@ func TestCLIBackupSummaryNotIncluded(t *testing.T) {
 	key, kh, exec := setupFakeSSHForRunWithExec(t)
 	exec.Names = append(exec.Names, "amnezia-openvpn")
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	_, out, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p)
+	_, out, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-no-password")
 	if strings.Contains(out, "Все протоколы сервера сохранены") || !strings.Contains(out, "Не входят в копию: amnezia-openvpn") {
 		t.Errorf("итог:\n%s", out)
 	}

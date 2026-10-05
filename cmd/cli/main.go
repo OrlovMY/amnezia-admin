@@ -13,9 +13,9 @@
 //	amnezia-admin toggle -key vpn://... -name Vasya
 //	amnezia-admin rekey  -key vpn://... -name Vasya
 //	amnezia-admin show-config -key vpn://... -name Vasya [-print]
-//	amnezia-admin backup -key vpn://... [-o файл.aabk]
-//	amnezia-admin backup-info файл.aabk
-//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-apply] [-address-changes] [-skip-xray] [-yes]
+//	amnezia-admin backup -key vpn://... [-o файл.aabk] (-password-file файл | -no-password)
+//	amnezia-admin backup-info [-password-file файл] файл.aabk
+//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -978,6 +978,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	backupFile := fs.String("file", "", "restore: файл копии .aabk")
 	apply := fs.Bool("apply", false, "restore: выполнить замену (без флага — только предпросмотр)")
 	addrChanges := fs.Bool("address-changes", false, "restore: продолжить, хотя адрес выдачи другой или не проверен")
+	pwFile := fs.String("password-file", "", "backup/restore: файл с паролем копии (пароль аргументом не передаётся)")
+	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
 	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1059,9 +1061,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 
 	switch cmd {
 	case "backup":
-		return runBackup(stdout, stderr, sess, *outFile, time.Now())
+		return runBackup(stdin, stdout, stderr, isTTY, sess, *outFile, *pwFile, *noPw, time.Now())
 	case "restore":
-		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
+		return runRestore(stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
 	case "add":

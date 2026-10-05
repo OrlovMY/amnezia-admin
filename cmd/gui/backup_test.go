@@ -78,15 +78,102 @@ func topOverlay(t *testing.T, u *ui) string {
 // предупреждение «НЕ ЗАШИФРОВАН» целиком и каталог записи.
 func TestGUIBackupWarningInSaveWindow(t *testing.T) {
 	u := backupUI(t, fakesrv.New(), "203.0.113.1")
-	u.backupDialog()
+	v := u.backupDialog()
+	// решение владельца по Р-1: выбора по умолчанию нет — «Сохранить» выключена
+	if v.mode.Selected != "" || !v.ok.Disabled() {
+		t.Fatalf("без выбора: выбрано %q, выключена=%v", v.mode.Selected, v.ok.Disabled())
+	}
+	v.mode.SetSelected(backupNoPassword)
 	got := topOverlay(t, u)
 	for _, l := range strings.Split(core.BackupUnencryptedWarning, "\n") {
 		if !strings.Contains(got, l) {
 			t.Errorf("в окне сохранения нет строки предупреждения: %q", l)
 		}
 	}
-	if !strings.Contains(got, "Резервные копии") || !strings.Contains(got, "["+backupSaveOK+"]") {
-		t.Errorf("окно сохранения:\n%s", got)
+	if !strings.Contains(got, "Резервные копии") || !strings.Contains(got, "["+backupSaveOK+"]") || v.ok.Disabled() {
+		t.Errorf("окно сохранения (без пароля):\n%s", got)
+	}
+}
+
+// TestGUIBackupPasswordMode — с паролем: «Сохранить» выключена, пока пароль
+// короче 12 символов или повтор не совпал; предупреждение «забудете пароль»;
+// копия зашифрована и читается этим паролем; пароля в окнах нет.
+func TestGUIBackupPasswordMode(t *testing.T) {
+	old := core.ProdArgonParams
+	core.ProdArgonParams = core.ArgonParams{MemoryKiB: 64, Time: 1, Threads: 1}
+	t.Cleanup(func() { core.ProdArgonParams = old })
+	u := backupUI(t, fakesrv.New(), "203.0.113.1")
+	v := u.backupDialog()
+	v.mode.SetSelected(backupWithPassword)
+	const pw = "пароль-копии-окна"
+	for _, c := range []struct{ a, b string }{{"", ""}, {"короткий", "короткий"}, {pw, pw + "x"}} {
+		v.pw.SetText(c.a)
+		v.pw2.SetText(c.b)
+		if !v.ok.Disabled() {
+			t.Errorf("пароль %q/%q — «Сохранить» включена", c.a, c.b)
+		}
+	}
+	v.pw.SetText(pw)
+	v.pw2.SetText(pw)
+	if v.ok.Disabled() || !strings.Contains(topOverlay(t, u), "Забудете пароль") {
+		t.Fatalf("верный пароль: выключена=%v", v.ok.Disabled())
+	}
+	dir, _ := core.UserBackupsDir()
+	p, b, err := u.runBackupTo(dir, time.Now(), v.layer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := core.BackupLayerOf(p); l != core.PasswordLayerName {
+		t.Fatalf("слой %q", l)
+	}
+	if _, err := core.ReadBackupFile(p, core.PasswordLayer{Password: core.NewSecret([]byte(pw))}); err != nil {
+		t.Fatalf("не читается своим паролем: %v", err)
+	}
+	u.backupResult(p, b, nil)
+	if strings.Contains(topOverlay(t, u), pw) {
+		t.Error("пароль в окне итога")
+	}
+	if _, _, err := u.runBackupTo(dir, time.Now(), nil); err == nil {
+		t.Error("без выбора режима копия снята")
+	}
+}
+
+// TestGUIEncryptedRestorePrompt — зашифрованная копия: окно пароля, «Открыть»
+// выключена при пустом пароле; неверный пароль — «неверный пароль или файл
+// повреждён»; верный — план построен.
+func TestGUIEncryptedRestorePrompt(t *testing.T) {
+	old := core.ProdArgonParams
+	core.ProdArgonParams = core.ArgonParams{MemoryKiB: 64, Time: 1, Threads: 1}
+	t.Cleanup(func() { core.ProdArgonParams = old })
+	u, _, _, plain := guiMigration(t, "203.0.113.1")
+	b, err := core.ReadBackupFile(plain, core.PlainLayer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plain + ".enc.aabk"
+	const pw = "пароль-копии-окна"
+	if err := core.WriteBackupFile(p, b, core.PasswordLayer{Password: core.NewSecret([]byte(pw))}); err != nil {
+		t.Fatal(err)
+	}
+	var got core.Secret
+	e, ok := u.passwordPrompt(func(s core.Secret) { got = s })
+	if !ok.Disabled() {
+		t.Error("пустой пароль — «Открыть» включена")
+	}
+	e.SetText(pw)
+	if ok.Disabled() {
+		t.Fatal("пароль введён — «Открыть» выключена")
+	}
+	ok.OnTapped()
+	if string(got.Bytes()) != pw {
+		t.Fatal("пароль не передан")
+	}
+	if _, _, _, _, err := u.restorePrepare(p, core.PlainLayer{}, core.PasswordLayer{Password: core.NewSecret([]byte("неверный-пароль!!"))}); err == nil ||
+		!strings.Contains(err.Error(), "неверный пароль или файл повреждён") {
+		t.Errorf("неверный пароль: %v", err)
+	}
+	if _, _, rp, planErr, err := u.restorePrepare(p, core.PlainLayer{}, core.PasswordLayer{Password: got}); err != nil || planErr != nil || rp == nil {
+		t.Errorf("верный пароль: %v %v", err, planErr)
 	}
 }
 
@@ -96,7 +183,7 @@ func TestGUIBackupSaves(t *testing.T) {
 	srv := fakesrv.New()
 	u := backupUI(t, srv, "203.0.113.1")
 	dir, _ := core.UserBackupsDir()
-	p, b, err := u.runBackupTo(dir, time.Now())
+	p, b, err := u.runBackupTo(dir, time.Now(), core.PlainLayer{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -73,21 +74,102 @@ func (u *ui) backupMenu() {
 }
 
 // backupDialog — окно сохранения: предупреждение SEC-01 до записи.
-func (u *ui) backupDialog() dialog.Dialog {
+// saveView — окно сохранения (поля — для тестов).
+type saveView struct {
+	d       dialog.Dialog
+	ok      *escButton
+	mode    *widget.RadioGroup // с паролем / без пароля — без выбора по умолчанию
+	pw, pw2 *widget.Entry
+	warn    *widget.Label
+	hint    *widget.Label
+}
+
+const (
+	backupWithPassword = "С паролем (файл зашифрован)"
+	backupNoPassword   = "Без пароля (файл НЕ зашифрован)"
+	backupModeHint     = "Выберите, защищать ли копию паролем:"
+)
+
+// backupDialog — окно сохранения: выбор «с паролем / без пароля» (решение
+// владельца по Р-1), поля пароля и повтора, предупреждение выбранного
+// режима — всё до записи. «Сохранить» включена только при выбранном режиме
+// и (с паролем) совпавшем пароле не короче 12 символов.
+func (u *ui) backupDialog() *saveView {
 	dir, err := core.UserBackupsDir()
 	where := "Файл будет записан в каталог: " + dir
 	if err != nil {
 		where = "Каталог копий не определён: " + err.Error()
 	}
-	return u.confirmWindow("Сохранить копию сервера", []fyne.CanvasObject{
-		wrapLabel(core.BackupUnencryptedWarning, true),
-		wrapLabel(where, false),
-	}, backupSaveOK, false, func() { u.doBackup(dir, err) })
+	v := &saveView{}
+	v.pw, v.pw2 = widget.NewPasswordEntry(), widget.NewPasswordEntry()
+	v.pw.SetPlaceHolder(fmt.Sprintf("Пароль (не короче %d символов)", core.BackupPasswordMin))
+	v.pw2.SetPlaceHolder("Повторите пароль")
+	v.warn = wrapLabel("", true)
+	v.hint = wrapLabel("", false)
+	var update func()
+	v.mode = widget.NewRadioGroup([]string{backupWithPassword, backupNoPassword}, func(string) { update() })
+	v.pw.OnChanged = func(string) { update() }
+	v.pw2.OnChanged = func(string) { update() }
+	cw := u.confirmWindowBtn("Сохранить копию сервера", []fyne.CanvasObject{
+		wrapLabel(backupModeHint, true), v.mode, v.pw, v.pw2, v.hint, v.warn, wrapLabel(where, false),
+	}, backupSaveOK, false, func() { u.doBackup(dir, err, v.layer()) })
+	v.d, v.ok = cw.d, cw.ok
+	update = func() {
+		can := false
+		switch v.mode.Selected {
+		case backupNoPassword:
+			v.pw.Hide()
+			v.pw2.Hide()
+			v.warn.SetText(core.BackupUnencryptedWarning)
+			v.hint.SetText("")
+			can = true
+		case backupWithPassword:
+			v.pw.Show()
+			v.pw2.Show()
+			v.warn.SetText(core.BackupPasswordWarning)
+			verr := core.ValidateBackupPassword(core.NewSecret([]byte(v.pw.Text)))
+			switch {
+			case verr != nil:
+				v.hint.SetText(fmt.Sprintf("Пароль — не короче %d символов.", core.BackupPasswordMin))
+			case v.pw.Text != v.pw2.Text:
+				v.hint.SetText("Пароли не совпадают.")
+			default:
+				v.hint.SetText("")
+				can = true
+			}
+		default:
+			v.pw.Hide()
+			v.pw2.Hide()
+			v.warn.SetText("")
+			v.hint.SetText("")
+		}
+		if can {
+			v.ok.Enable()
+		} else {
+			v.ok.Disable()
+		}
+	}
+	update()
+	return v
 }
 
-// runBackupTo — снять копию и записать в dir (синхронно; для теста и для
-// фоновой задачи).
-func (u *ui) runBackupTo(dir string, now time.Time) (string, *core.Backup, error) {
+// layer — слой выбранного режима (nil — не выбран).
+func (v *saveView) layer() core.BackupLayer {
+	switch v.mode.Selected {
+	case backupWithPassword:
+		return core.PasswordLayer{Password: core.NewSecret([]byte(v.pw.Text))}
+	case backupNoPassword:
+		return core.PlainLayer{}
+	}
+	return nil
+}
+
+// runBackupTo — снять копию и записать в dir слоем layer (синхронно; для
+// теста и для фоновой задачи).
+func (u *ui) runBackupTo(dir string, now time.Time, layer core.BackupLayer) (string, *core.Backup, error) {
+	if layer == nil {
+		return "", nil, errors.New("не выбрано, защищать ли копию паролем — копия не снята")
+	}
 	b, err := u.sess.CollectBackup(version.String(), now, backupResolve)
 	if err != nil {
 		return "", nil, err
@@ -96,20 +178,20 @@ func (u *ui) runBackupTo(dir string, now time.Time) (string, *core.Backup, error
 		return "", b, err
 	}
 	p := filepath.Join(dir, core.BackupFileName(b.Server.Host, now))
-	if err := core.WriteBackupFile(p, b, core.PlainLayer{}); err != nil {
+	if err := core.WriteBackupFile(p, b, layer); err != nil {
 		return "", b, err
 	}
 	return p, b, nil
 }
 
-func (u *ui) doBackup(dir string, dirErr error) {
+func (u *ui) doBackup(dir string, dirErr error, layer core.BackupLayer) {
 	if dirErr != nil {
 		u.showError(dirErr)
 		return
 	}
 	u.setBusy(true)
 	goSafe(func() {
-		p, b, err := u.runBackupTo(dir, time.Now())
+		p, b, err := u.runBackupTo(dir, time.Now(), layer)
 		fyne.Do(func() {
 			u.setBusy(false)
 			u.backupResult(p, b, err)
@@ -160,8 +242,11 @@ func (u *ui) restorePick() {
 // restorePrepare — чтение копии, проверка цели и план (синхронно, только
 // чтение). Ошибка плана возвращается отдельно: окно всё равно показывается
 // с её причиной, кнопка замены — выключена.
-func (u *ui) restorePrepare(path string) (*core.Backup, *core.CompatReport, *core.RestorePlan, error, error) {
-	b, err := core.ReadBackupFile(path, core.PlainLayer{})
+func (u *ui) restorePrepare(path string, layers ...core.BackupLayer) (*core.Backup, *core.CompatReport, *core.RestorePlan, error, error) {
+	if len(layers) == 0 {
+		layers = []core.BackupLayer{core.PlainLayer{}}
+	}
+	b, err := core.ReadBackupFile(path, layers...)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -173,10 +258,42 @@ func (u *ui) restorePrepare(path string) (*core.Backup, *core.CompatReport, *cor
 	return b, compat, rp, planErr, nil
 }
 
+// restoreFromFile — пароль спрашивается только у зашифрованной копии.
 func (u *ui) restoreFromFile(path string) {
+	name, err := core.BackupLayerOf(path)
+	if err != nil {
+		u.showError(err)
+		return
+	}
+	if name == core.PasswordLayerName {
+		u.passwordPrompt(func(pw core.Secret) {
+			u.restoreWith(path, core.PlainLayer{}, core.PasswordLayer{Password: pw})
+		})
+		return
+	}
+	u.restoreWith(path, core.PlainLayer{})
+}
+
+// passwordPrompt — пароль зашифрованной копии (окно подтверждения).
+func (u *ui) passwordPrompt(onOK func(core.Secret)) (*widget.Entry, *escButton) {
+	e := widget.NewPasswordEntry()
+	cw := u.confirmWindowBtn("Копия зашифрована", []fyne.CanvasObject{wrapLabel("Введите пароль копии:", true), e},
+		"Открыть", false, func() { onOK(core.NewSecret([]byte(e.Text))) })
+	cw.ok.Disable()
+	e.OnChanged = func(s string) {
+		if s == "" {
+			cw.ok.Disable()
+		} else {
+			cw.ok.Enable()
+		}
+	}
+	return e, cw.ok
+}
+
+func (u *ui) restoreWith(path string, layers ...core.BackupLayer) {
 	u.setBusy(true)
 	goSafe(func() {
-		b, compat, rp, planErr, err := u.restorePrepare(path)
+		b, compat, rp, planErr, err := u.restorePrepare(path, layers...)
 		fyne.Do(func() {
 			u.setBusy(false)
 			if err != nil {
