@@ -8,6 +8,7 @@ package main
 // решён). Тексты — из core (одни с CLI).
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -54,6 +55,10 @@ func sizeDialog(d dialog.Dialog, s fyne.Size) {
 	lastSizedDialog = d
 	d.Resize(s)
 }
+
+// beforeBackupWork — шов теста: фоновая работа сохранения ждёт, пока тест
+// осмотрит окно во время операции.
+var beforeBackupWork func()
 
 // backupResolve — разрешение имён (шов теста).
 var backupResolve core.Resolver = net.LookupIP
@@ -167,17 +172,22 @@ func (v *saveView) layer() core.BackupLayer {
 // runBackupTo — снять копию и записать в dir слоем layer (синхронно; для
 // теста и для фоновой задачи).
 func (u *ui) runBackupTo(dir string, now time.Time, layer core.BackupLayer) (string, *core.Backup, error) {
+	return u.runBackupCtx(context.Background(), dir, now, layer, nil)
+}
+
+// runBackupCtx — то же с отменой и прогрессом.
+func (u *ui) runBackupCtx(ctx context.Context, dir string, now time.Time, layer core.BackupLayer, progress core.ProgressFunc) (string, *core.Backup, error) {
 	if layer == nil {
 		return "", nil, errors.New("не выбрано, защищать ли копию паролем — копия не снята")
 	}
-	b, err := u.sess.CollectBackup(version.String(), now, backupResolve)
+	b, err := u.sess.CollectBackupCtx(ctx, version.String(), now, backupResolve, progress)
 	if err != nil {
 		return "", nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", b, err
 	}
-	p, err := core.WriteBackupFileUnique(filepath.Join(dir, core.BackupFileName(b.Server.Host, now)), b, layer)
+	p, err := core.WriteBackupFileUniqueCtx(ctx, filepath.Join(dir, core.BackupFileName(b.Server.Host, now)), b, layer, progress)
 	if err != nil {
 		return "", b, err
 	}
@@ -189,12 +199,23 @@ func (u *ui) doBackup(dir string, dirErr error, layer core.BackupLayer) {
 		u.showError(dirErr)
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	u.setBusy(true)
+	pv := u.progressWindow("Сохранение копии сервера", cancel)
+	u.lastProgress = pv
 	goSafe(func() {
-		p, b, err := u.runBackupTo(dir, time.Now(), layer)
+		defer cancel()
+		if beforeBackupWork != nil {
+			beforeBackupWork()
+		}
+		p, b, err := u.runBackupCtx(ctx, dir, time.Now(), layer, pv.report)
 		fyne.Do(func() {
 			u.setBusy(false)
+			if u.opFinished(err) {
+				return // отменено закрытием программы
+			}
 			u.backupResult(p, b, err)
+			u.closeNotDoneNote()
 		})
 	})
 }
@@ -205,9 +226,12 @@ func (u *ui) backupResult(path string, b *core.Backup, err error) dialog.Dialog 
 	if b != nil {
 		lines = core.BackupSummaryLines(b)
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, core.ErrCanceled):
+		lines = append(lines, "", "Отменено — копия не сохранена.")
+	case err != nil:
 		lines = append(lines, "", "Копия НЕ записана: "+core.MaskText(err.Error()))
-	} else {
+	default:
 		lines = append(lines, "", "Копия записана: "+path)
 	}
 	objs := []fyne.CanvasObject{wrapLabel(strings.Join(lines, "\n"), false)}
@@ -382,6 +406,11 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 
 // runRestore — замена (синхронно; для теста и для фоновой задачи).
 func (u *ui) runRestore(rp *core.RestorePlan, xrayOK bool, now time.Time) (string, []core.RestoreOutcome, error) {
+	return u.runRestoreCtx(context.Background(), rp, xrayOK, now, nil)
+}
+
+// runRestoreCtx — то же с отменой (до первой записи) и прогрессом.
+func (u *ui) runRestoreCtx(ctx context.Context, rp *core.RestorePlan, xrayOK bool, now time.Time, progress core.ProgressFunc) (string, []core.RestoreOutcome, error) {
 	dir, err := core.UserBackupsDir()
 	if err == nil {
 		err = os.MkdirAll(dir, 0o700)
@@ -394,28 +423,47 @@ func (u *ui) runRestore(rp *core.RestorePlan, xrayOK bool, now time.Time) (strin
 		layer = core.PlainLayer{}
 	}
 	return u.sess.Restore(rp, core.RestoreOptions{AutoCopyDir: dir, ToolVersion: version.String(), Now: now,
-		Resolve: backupResolve, Layer: layer, ConfirmXRay: func() bool { return xrayOK }})
+		Resolve: backupResolve, Layer: layer, ConfirmXRay: func() bool { return xrayOK }, Ctx: ctx, Progress: progress})
 }
 
 func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
 	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == restoreXRayCheck
 	v.d.Hide()
+	ctx, cancel := context.WithCancel(context.Background())
 	u.setBusy(true)
+	pv := u.progressWindow("Восстановление из копии", cancel)
+	u.lastProgress = pv
 	goSafe(func() {
-		auto, outs, err := u.runRestore(rp, xrayOK, time.Now())
+		defer cancel()
+		auto, outs, err := u.runRestoreCtx(ctx, rp, xrayOK, time.Now(), pv.report)
 		fyne.Do(func() {
 			u.setBusy(false)
-			u.restoreResult(auto, outs, err)
-			u.refresh()
+			u.restoreFinished(auto, outs, err)
 		})
 	})
 }
 
+// restoreFinished — конец восстановления (в потоке интерфейса).
+func (u *ui) restoreFinished(auto string, outs []core.RestoreOutcome, err error) {
+	if u.opFinished(err) {
+		return // отменено закрытием программы, на сервер ничего не записано
+	}
+	u.restoreResult(auto, outs, err)
+	u.closeNotDoneNote()
+	u.refresh()
+}
+
 func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) dialog.Dialog {
 	text := ""
-	if err != nil {
+	switch {
+	case errors.Is(err, core.ErrCanceled):
+		text = "Отменено — на сервер ничего не записано."
+		if auto != "" {
+			text += "\nАвтокопия нового сервера уже сохранена: " + auto
+		}
+	case err != nil:
 		text = "Ничего не записано: " + core.MaskText(err.Error())
-	} else {
+	default:
 		enc := u.restoreLayer != nil && u.restoreLayer.Name() == core.PasswordLayerName
 		text = strings.Join(core.RestoreOutcomeLines(auto, enc, outs), "\n")
 	}

@@ -22,6 +22,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -384,10 +385,42 @@ func validateBackup(b *Backup) error {
 // имя занято (SEC-01: Rename молча заменил бы файл, появившийся между
 // проверкой и записью). Копии не перезаписываются.
 func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
-	data, err := EncodeBackup(b, layer)
+	return WriteBackupFileCtx(context.Background(), path, b, layer, nil)
+}
+
+// WriteBackupFileCtx — то же с отменой и прогрессом: этап «шифрование»
+// (Argon2id не прерывается — отмена срабатывает сразу после него), этап
+// «запись файла». Отмена — до создания итогового имени: файла нет,
+// временный удалён.
+func WriteBackupFileCtx(ctx context.Context, path string, b *Backup, layer BackupLayer, progress ProgressFunc) error {
+	data, err := encodeCtx(ctx, b, layer, progress)
 	if err != nil {
 		return err
 	}
+	return writeEncoded(ctx, path, data, progress)
+}
+
+// encodeCtx — манифест и слой с отменой до и после (неделимого) шифрования.
+func encodeCtx(ctx context.Context, b *Backup, layer BackupLayer, progress ProgressFunc) ([]byte, error) {
+	if err := canceled(ctx); err != nil {
+		return nil, err
+	}
+	if layer != nil && layer.Name() == PasswordLayerName {
+		report(progress, Progress{Stage: StageEncrypt, Text: "шифрование паролем… обычно около секунды, на слабом компьютере дольше — программа не зависла (этап не прерывается; отмена сработает сразу после него)"})
+	}
+	data, err := EncodeBackup(b, layer)
+	if err != nil {
+		return nil, err
+	}
+	if err := canceled(ctx); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// writeEncoded — готовые байты копии под именем path (см. WriteBackupFile).
+func writeEncoded(ctx context.Context, path string, data []byte, progress ProgressFunc) error {
+	report(progress, Progress{Stage: StageWrite, Text: "запись файла копии…"})
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*.aabk")
 	if err != nil {
 		return err
@@ -412,6 +445,9 @@ func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 	if beforeBackupLink != nil {
 		beforeBackupLink()
 	}
+	if err := canceled(ctx); err != nil {
+		return err
+	}
 	if err := os.Link(name, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("файл %s уже есть — копия не перезаписывается: %w", path, ErrBackupExists)
@@ -421,6 +457,10 @@ func WriteBackupFile(path string, b *Backup, layer BackupLayer) error {
 	return nil
 }
 
+// beforeBackupLink — шов теста: «имя появилось между записью временного
+// файла и созданием итогового».
+var beforeBackupLink func()
+
 // ErrBackupExists — файл с этим именем уже есть (копия не перезаписана).
 var ErrBackupExists = errors.New("файл уже есть")
 
@@ -429,10 +469,20 @@ var ErrBackupExists = errors.New("файл уже есть")
 // одно имя по времени). Занятое имя никогда не затирается. Возвращает
 // путь, под которым копия записана.
 func WriteBackupFileUnique(path string, b *Backup, layer BackupLayer) (string, error) {
+	return WriteBackupFileUniqueCtx(context.Background(), path, b, layer, nil)
+}
+
+// WriteBackupFileUniqueCtx — то же с отменой и прогрессом; шифрование —
+// один раз на все попытки имени.
+func WriteBackupFileUniqueCtx(ctx context.Context, path string, b *Backup, layer BackupLayer, progress ProgressFunc) (string, error) {
+	data, err := encodeCtx(ctx, b, layer, progress)
+	if err != nil {
+		return "", err
+	}
 	base := strings.TrimSuffix(path, ".aabk")
 	p := path
 	for n := 2; ; n++ {
-		err := WriteBackupFile(p, b, layer)
+		err := writeEncoded(ctx, p, data, progress)
 		if err == nil {
 			return p, nil
 		}
@@ -442,10 +492,6 @@ func WriteBackupFileUnique(path string, b *Backup, layer BackupLayer) (string, e
 		p = fmt.Sprintf("%s (%d).aabk", base, n)
 	}
 }
-
-// beforeBackupLink — шов теста: «имя появилось между записью временного
-// файла и созданием итогового».
-var beforeBackupLink func()
 
 // BackupFileName — имя файла копии: «<хост>-<дата-время UTC>.aabk» (хост не
 // секрет).
@@ -516,10 +562,15 @@ const backupSnapshotTries = 3
 
 // snapshotContainer — файлы контейнера, прочитанные дважды подряд с
 // совпавшим результатом (чужая запись между чтениями — повтор).
-func (s *Session) snapshotContainer(c *Container, names []string) ([]BackupFile, bool) {
+func (s *Session) snapshotContainer(ctx context.Context, c *Container, names []string, pc *progressCounter) ([]BackupFile, bool, error) {
+	var cerr error
 	read := func() []BackupFile {
 		var fs []BackupFile
 		for _, n := range names {
+			if cerr = canceled(ctx); cerr != nil {
+				return nil
+			}
+			pc.step(c.Name)
 			d, st, why := s.readFileState(c, n)
 			f := BackupFile{Name: n, Status: st, Reason: why}
 			if st == FileSaved {
@@ -539,13 +590,22 @@ func (s *Session) snapshotContainer(c *Container, names []string) ([]BackupFile,
 		return true
 	}
 	for i := 0; i < backupSnapshotTries; i++ {
+		if i > 0 {
+			pc.retry(len(names)) // повторный снимок — честно увеличить итог
+		}
 		a := read()
+		if cerr != nil {
+			return nil, false, cerr
+		}
 		b := read()
+		if cerr != nil {
+			return nil, false, cerr
+		}
 		if same(a, b) {
-			return a, true
+			return a, true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // protoVersion — версия протокола контейнера по прочитанному файлу
@@ -620,10 +680,28 @@ func issuedAddress(host string, resolve Resolver) IssuedAddress {
 // Ошибка — только если не получен сам список контейнеров; всё прочее —
 // состояния внутри копии.
 func (s *Session) CollectBackup(toolVersion string, now time.Time, resolve Resolver) (*Backup, error) {
+	return s.CollectBackupCtx(context.Background(), toolVersion, now, resolve, nil)
+}
+
+// CollectBackupCtx — то же с отменой (до каждого чтения файла) и прогрессом
+// «чтений файлов X из Y — <контейнер>»: Y — число чтений (файлы × 2 —
+// согласованный снимок), известен заранее из закрытого списка; повторный
+// снимок увеличивает Y. X доходит до Y ровно по окончании чтения.
+func (s *Session) CollectBackupCtx(ctx context.Context, toolVersion string, now time.Time, resolve Resolver, progress ProgressFunc) (*Backup, error) {
+	if err := canceled(ctx); err != nil {
+		return nil, err
+	}
 	cs, err := s.FindContainers()
 	if err != nil {
 		return nil, fmt.Errorf("список контейнеров не получен: %w", err)
 	}
+	pc := &progressCounter{fn: progress}
+	for i := range cs {
+		if names, _, ok := backupFilesOf(&cs[i]); ok {
+			pc.total += 2 * len(names)
+		}
+	}
+	pc.emit("")
 	b := &Backup{FormatVersion: BackupFormat, CreatedAt: now.UTC().Format(time.RFC3339), ToolVersion: toolVersion, Complete: true}
 	if s.Creds != nil {
 		b.Server.Host = s.Creds.Host
@@ -639,7 +717,10 @@ func (s *Session) CollectBackup(toolVersion string, now time.Time, resolve Resol
 			b.Containers = append(b.Containers, bc)
 			continue
 		}
-		files, consistent := s.snapshotContainer(c, names)
+		files, consistent, cerr := s.snapshotContainer(ctx, c, names, pc)
+		if cerr != nil {
+			return nil, cerr
+		}
 		if !consistent {
 			bc.Status, bc.Reason = CtrInconsistent, "файлы менялись между чтениями — согласованный снимок не получен"
 			b.Complete = false
