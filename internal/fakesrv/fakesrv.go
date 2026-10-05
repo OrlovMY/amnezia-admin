@@ -100,6 +100,10 @@ type Server struct {
 	// перечислить).
 	FailDockerPS error
 
+	// BusyboxCat — cat отвечает об отсутствии файла как busybox (контейнеры
+	// Amnezia — Alpine): «cat: can't open '<путь>': No such file or directory».
+	BusyboxCat bool
+
 	// SyncKeepsIface — syncconf применяет peer'ы, но НЕ ключ и порт
 	// [Interface] (Р-5: модель «не применено»).
 	SyncKeepsIface bool
@@ -609,6 +613,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		}
 		data, ok := s.files[path]
 		if !ok {
+			if s.BusyboxCat {
+				return "", fmt.Errorf("команда %q: exit status 1; stderr: cat: can't open '%s': No such file or directory", cmd, path)
+			}
 			return "", fmt.Errorf("команда %q: exit status 1; stderr: cat: %s: No such file or directory", cmd, path)
 		}
 		return string(data), nil

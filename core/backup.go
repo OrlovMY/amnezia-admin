@@ -489,10 +489,26 @@ func (s *Session) readFileState(c *Container, name string) (data []byte, status,
 		return []byte(out), FileSaved, ""
 	}
 	// AU-LOGIC Low-1: «нет» — только если фраза относится к пути ЭТОГО файла.
-	if strings.Contains(stderrText(err), c.Dir+"/"+name+": No such file or directory") {
+	// Закрытый список форм (живая находка 05.10: контейнеры Amnezia — Alpine,
+	// cat там из busybox): GNU «cat: <путь>: No such…» и busybox
+	// «cat: can't open '<путь>': No such…».
+	if fileMissing(stderrText(err), c.Dir+"/"+name) {
 		return nil, FileAbsent, ""
 	}
 	return nil, FileUnreadable, "не прочитан: " + MaskText(stderrTail(err))
+}
+
+// missingForms — закрытый список ответов cat «файла нет» (GNU, busybox).
+var missingForms = []string{"%s: No such file or directory", "can't open '%s': No such file or directory"}
+
+// fileMissing — stderr говорит «нет файла» именно о пути path.
+func fileMissing(stderr, path string) bool {
+	for _, f := range missingForms {
+		if strings.Contains(stderr, fmt.Sprintf(f, path)) {
+			return true
+		}
+	}
+	return false
 }
 
 // backupSnapshotTries — сколько раз пытаться получить согласованный снимок.
