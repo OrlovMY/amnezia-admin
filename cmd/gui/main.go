@@ -99,6 +99,7 @@ type ui struct {
 	op           *progressView
 	closeAfterOp bool
 	closeWin     func() // шов теста для closeWindow
+	closeRefused bool   // закрытие просили, но операция дошла до конца
 	// lastProgress — последнее окно прогресса копии (тесты).
 	lastProgress *progressView
 	// busy — идёт серверная операция (setBusy).

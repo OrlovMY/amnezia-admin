@@ -7,6 +7,7 @@ package main
 // началом записи на сервер: прерывать запись A3б посередине опаснее.
 
 import (
+	"errors"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
@@ -95,16 +96,37 @@ func (u *ui) closeWindow() {
 	u.win.Close()
 }
 
-// opDone — операция закончилась (в потоке интерфейса): окно прогресса
-// убрано; если закрытие было отложено — закрыть программу.
-func (u *ui) opDone() {
+// closeNotDone — запрошенное закрытие не выполнено: операция дошла до
+// конца (AU-UX П-5).
+const closeNotDone = "Закрыть программу не удалось: запись уже шла и отменить её было нельзя. Вот итог — программа остаётся открытой."
+
+// opFinished — конец операции: окно прогресса убрано. Если программу
+// просили закрыть и операция завершилась ОТМЕНОЙ — закрыть (true). Если
+// она дошла до конца (ядро уже прошло последнюю точку отмены и записало) —
+// НЕ закрывать: итог обязан быть показан (AU-UX П-5), закрытие помечается
+// как невыполненное.
+func (u *ui) opFinished(err error) bool {
 	if u.op != nil {
 		u.op.d.Hide()
 	}
 	u.op = nil
-	if u.closeAfterOp {
-		u.closeAfterOp = false
+	if !u.closeAfterOp {
+		return false
+	}
+	u.closeAfterOp = false
+	if errors.Is(err, core.ErrCanceled) {
 		u.closeWindow()
+		return true
+	}
+	u.closeRefused = true
+	return false
+}
+
+// closeNotDoneNote — сказать, что закрытие не выполнено (после итога).
+func (u *ui) closeNotDoneNote() {
+	if u.closeRefused {
+		u.closeRefused = false
+		dialog.NewInformation("Программа не закрыта", closeNotDone, u.win).Show()
 	}
 }
 

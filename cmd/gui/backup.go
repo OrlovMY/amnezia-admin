@@ -211,12 +211,11 @@ func (u *ui) doBackup(dir string, dirErr error, layer core.BackupLayer) {
 		p, b, err := u.runBackupCtx(ctx, dir, time.Now(), layer, pv.report)
 		fyne.Do(func() {
 			u.setBusy(false)
-			if u.closeAfterOp {
-				u.opDone() // закрытие программы: итог не показываем
-				return
+			if u.opFinished(err) {
+				return // отменено закрытием программы
 			}
-			u.opDone()
 			u.backupResult(p, b, err)
+			u.closeNotDoneNote()
 		})
 	})
 }
@@ -439,15 +438,19 @@ func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
 		auto, outs, err := u.runRestoreCtx(ctx, rp, xrayOK, time.Now(), pv.report)
 		fyne.Do(func() {
 			u.setBusy(false)
-			if u.closeAfterOp {
-				u.opDone()
-				return
-			}
-			u.opDone()
-			u.restoreResult(auto, outs, err)
-			u.refresh()
+			u.restoreFinished(auto, outs, err)
 		})
 	})
+}
+
+// restoreFinished — конец восстановления (в потоке интерфейса).
+func (u *ui) restoreFinished(auto string, outs []core.RestoreOutcome, err error) {
+	if u.opFinished(err) {
+		return // отменено закрытием программы, на сервер ничего не записано
+	}
+	u.restoreResult(auto, outs, err)
+	u.closeNotDoneNote()
+	u.refresh()
 }
 
 func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) dialog.Dialog {
