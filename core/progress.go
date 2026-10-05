@@ -55,17 +55,20 @@ type progressCounter struct {
 
 func (p *progressCounter) emit(text string) {
 	if text == "" {
-		text = fmt.Sprintf("прочитано файлов %d из %d", p.done, p.total)
+		text = fmt.Sprintf("чтений файлов %d из %d", p.done, p.total)
 	}
 	report(p.fn, Progress{Stage: StageRead, Done: p.done, Total: p.total, Text: text})
 }
 
-func (p *progressCounter) step(ctr string, pass int) {
+// step — одно чтение файла. Y — число чтений: каждый файл читается дважды
+// (согласованный снимок), поэтому «X из Y» — чтения, без «проходов» (AU-UX
+// П-2).
+func (p *progressCounter) step(ctr string) {
 	p.done++
-	p.emit(fmt.Sprintf("прочитано файлов %d из %d — %s (проход %d из 2)", p.done, p.total, ctr, pass))
+	p.emit(fmt.Sprintf("чтений файлов %d из %d — %s", p.done, p.total, ctr))
 }
 
 func (p *progressCounter) retry(n int) {
 	p.total += 2 * n
-	p.emit(fmt.Sprintf("файлы менялись при чтении — повторное чтение; прочитано %d из %d", p.done, p.total))
+	p.emit(fmt.Sprintf("файлы менялись при чтении — повторное чтение; чтений файлов %d из %d", p.done, p.total))
 }

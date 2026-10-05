@@ -210,8 +210,12 @@ func (u *ui) doBackup(dir string, dirErr error, layer core.BackupLayer) {
 		}
 		p, b, err := u.runBackupCtx(ctx, dir, time.Now(), layer, pv.report)
 		fyne.Do(func() {
-			pv.d.Hide()
 			u.setBusy(false)
+			if u.closeAfterOp {
+				u.opDone() // закрытие программы: итог не показываем
+				return
+			}
+			u.opDone()
 			u.backupResult(p, b, err)
 		})
 	})
@@ -434,8 +438,12 @@ func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
 		defer cancel()
 		auto, outs, err := u.runRestoreCtx(ctx, rp, xrayOK, time.Now(), pv.report)
 		fyne.Do(func() {
-			pv.d.Hide()
 			u.setBusy(false)
+			if u.closeAfterOp {
+				u.opDone()
+				return
+			}
+			u.opDone()
 			u.restoreResult(auto, outs, err)
 			u.refresh()
 		})

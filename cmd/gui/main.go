@@ -94,6 +94,11 @@ type ui struct {
 	// restoreLayer — слой копии-источника восстановления (автокопия его
 	// наследует; nil — без пароля).
 	restoreLayer core.BackupLayer
+	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
+	// — закрыть программу по её завершении (AU-UX П-1).
+	op           *progressView
+	closeAfterOp bool
+	closeWin     func() // шов теста для closeWindow
 	// lastProgress — последнее окно прогресса копии (тесты).
 	lastProgress *progressView
 	// busy — идёт серверная операция (setBusy).
@@ -119,6 +124,8 @@ func main() {
 	// (сброс при смене сервера). Второй режим — guiview.WarnEveryTime.
 	u := &ui{win: w, selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
 	u.sortPrimary, u.sortPrimaryDir, u.sortSecondary, u.sortSecondaryDir = loadSortState()
+	// крестик и Alt+F4 во время операции копии (AU-UX П-1)
+	w.SetCloseIntercept(u.closeIntercept)
 	u.showConnectScreen("")
 	w.ShowAndRun()
 }

@@ -30,27 +30,82 @@ type progressView struct {
 	inf    *widget.ProgressBarInfinite
 	label  *widget.Label
 	note   *widget.Label
-	cancel *widget.Button
+	cancel *escButton
+	// writing — началась запись на сервер (отмена и закрытие программы
+	// недоступны)
+	writing bool
+	// onCancel — отмена операции
+	onCancel func()
 }
 
 // progressWindow — показать окно прогресса; onCancel — по «Отмена».
 func (u *ui) progressWindow(title string, onCancel func()) *progressView {
 	v := &progressView{bar: widget.NewProgressBar(), inf: widget.NewProgressBarInfinite(),
-		label: wrapLabel("подготовка…", false), note: wrapLabel("", false)}
+		label: wrapLabel("подготовка…", false), note: wrapLabel("", false), onCancel: onCancel}
 	v.inf.Hide()
-	v.cancel = widget.NewButtonWithIcon(progressCancelText, theme.CancelIcon(), func() {
-		if v.cancel.Disabled() {
-			return // запись на сервер уже идёт
-		}
-		v.cancel.Disable()
-		v.note.SetText(progressCancelingTxt)
-		onCancel()
-	})
+	// AU-UX П-4: Esc — «Отмена» (через фокус, как в остальных окнах)
+	v.cancel = newEscButton(progressCancelText, theme.CancelIcon(), v.doCancel, v.doCancel)
 	body := container.NewVBox(v.label, v.bar, v.inf, v.note)
 	v.d = dialog.NewCustomWithoutButtons(title, container.NewBorder(nil, container.NewCenter(v.cancel), nil, nil, body), u.win)
 	sizeDialog(v.d, fyne.NewSize(560, 240))
 	v.d.Show()
+	u.win.Canvas().Focus(v.cancel)
+	u.op = v
 	return v
+}
+
+// doCancel — «Отмена» (кнопка, Esc, закрытие программы до записи).
+func (v *progressView) doCancel() {
+	if v.cancel.Disabled() || v.writing {
+		return // запись на сервер уже идёт или отмена уже нажата
+	}
+	v.cancel.Disable()
+	v.note.SetText(progressCancelingTxt)
+	v.onCancel()
+}
+
+// закрытие программы во время операции (AU-UX П-1)
+const progressCloseWriting = "Идёт запись на сервер — закрыть программу сейчас нельзя, дождитесь итога."
+
+// closeIntercept — перехват закрытия главного окна (крестик, Alt+F4):
+// вне операции — закрыть; во время записи на сервер — не закрывать и
+// сказать почему; во время чтения/шифрования/записи файла — отменить
+// операцию и закрыть после её корректного завершения (временный файл
+// удалён).
+func (u *ui) closeIntercept() {
+	v := u.op
+	switch {
+	case v == nil:
+		u.closeWindow()
+	case v.writing:
+		dialog.NewInformation("Закрыть нельзя", progressCloseWriting, u.win).Show()
+	default:
+		u.closeAfterOp = true
+		v.doCancel()
+	}
+}
+
+// closeWindow — закрыть программу (шов теста: тестовое окно дважды не
+// закрывается).
+func (u *ui) closeWindow() {
+	if u.closeWin != nil {
+		u.closeWin()
+		return
+	}
+	u.win.Close()
+}
+
+// opDone — операция закончилась (в потоке интерфейса): окно прогресса
+// убрано; если закрытие было отложено — закрыть программу.
+func (u *ui) opDone() {
+	if u.op != nil {
+		u.op.d.Hide()
+	}
+	u.op = nil
+	if u.closeAfterOp {
+		u.closeAfterOp = false
+		u.closeWindow()
+	}
 }
 
 // apply — событие прогресса (в потоке интерфейса).
@@ -65,10 +120,9 @@ func (v *progressView) apply(p core.Progress) {
 		v.bar.Hide()
 		v.inf.Show()
 	}
-	if p.Writing && !v.cancel.Disabled() {
+	if p.Writing {
+		v.writing = true
 		v.cancel.Disable()
-		v.note.SetText(progressNoCancelTxt)
-	} else if p.Writing {
 		v.note.SetText(progressNoCancelTxt)
 	}
 }

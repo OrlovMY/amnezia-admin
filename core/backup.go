@@ -21,8 +21,8 @@ package core
 // N байт]»; в текст ошибок и в предпросмотр байты не попадают.
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -406,7 +406,7 @@ func encodeCtx(ctx context.Context, b *Backup, layer BackupLayer, progress Progr
 		return nil, err
 	}
 	if layer != nil && layer.Name() == PasswordLayerName {
-		report(progress, Progress{Stage: StageEncrypt, Text: "шифрование паролем… (этот этап не прерывается; отмена сработает сразу после него)"})
+		report(progress, Progress{Stage: StageEncrypt, Text: "шифрование паролем… обычно около секунды, на слабом компьютере дольше — программа не зависла (этап не прерывается; отмена сработает сразу после него)"})
 	}
 	data, err := EncodeBackup(b, layer)
 	if err != nil {
@@ -564,13 +564,13 @@ const backupSnapshotTries = 3
 // совпавшим результатом (чужая запись между чтениями — повтор).
 func (s *Session) snapshotContainer(ctx context.Context, c *Container, names []string, pc *progressCounter) ([]BackupFile, bool, error) {
 	var cerr error
-	read := func(pass int) []BackupFile {
+	read := func() []BackupFile {
 		var fs []BackupFile
 		for _, n := range names {
 			if cerr = canceled(ctx); cerr != nil {
 				return nil
 			}
-			pc.step(c.Name, pass)
+			pc.step(c.Name)
 			d, st, why := s.readFileState(c, n)
 			f := BackupFile{Name: n, Status: st, Reason: why}
 			if st == FileSaved {
@@ -593,11 +593,11 @@ func (s *Session) snapshotContainer(ctx context.Context, c *Container, names []s
 		if i > 0 {
 			pc.retry(len(names)) // повторный снимок — честно увеличить итог
 		}
-		a := read(1)
+		a := read()
 		if cerr != nil {
 			return nil, false, cerr
 		}
-		b := read(2)
+		b := read()
 		if cerr != nil {
 			return nil, false, cerr
 		}
@@ -684,8 +684,8 @@ func (s *Session) CollectBackup(toolVersion string, now time.Time, resolve Resol
 }
 
 // CollectBackupCtx — то же с отменой (до каждого чтения файла) и прогрессом
-// «прочитано X из Y — <контейнер> (проход k из 2)»: Y = файлы × 2 прохода
-// согласованного снимка, известен заранее из закрытого списка; повторный
+// «чтений файлов X из Y — <контейнер>»: Y — число чтений (файлы × 2 —
+// согласованный снимок), известен заранее из закрытого списка; повторный
 // снимок увеличивает Y. X доходит до Y ровно по окончании чтения.
 func (s *Session) CollectBackupCtx(ctx context.Context, toolVersion string, now time.Time, resolve Resolver, progress ProgressFunc) (*Backup, error) {
 	if err := canceled(ctx); err != nil {

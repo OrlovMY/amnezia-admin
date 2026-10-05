@@ -32,7 +32,7 @@ func TestCollectProgressMonotone(t *testing.T) {
 			t.Fatalf("100%% до конца: событие %d из %d", i, len(ev))
 		}
 	}
-	if last := ev[len(ev)-1]; last.Done != last.Total || !strings.Contains(last.Text, "проход 2 из 2") {
+	if last := ev[len(ev)-1]; last.Done != last.Total || strings.Contains(last.Text, "проход") {
 		t.Errorf("последнее: %+v", last)
 	}
 }
@@ -105,7 +105,9 @@ func TestRestoreCancel(t *testing.T) {
 	}{
 		{"чтение автокопии", func(p Progress) bool { return p.Stage == StageAutoCopy && p.Done == 2 }},
 		{"на записи автокопии", func(p Progress) bool { return p.Stage == StageWrite }},
-		{"после сохранения автокопии", func(p Progress) bool { return strings.Contains(p.Text, "автокопия нового сервера сохранена") }},
+		{"после сохранения автокопии", func(p Progress) bool {
+			return strings.Contains(p.Text, "автокопия нового сервера сохранена")
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src, tgt := migrationPair(t)
