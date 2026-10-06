@@ -61,6 +61,22 @@ func TestServerLabelLongName(t *testing.T) {
 			if sl.Truncation != fyne.TextTruncateEllipsis {
 				t.Error("обрезка многоточием выключена")
 			}
+			// AU-UX: видимый значок копирования — целиком в окне, не сжат,
+			// нажатие на значок — то же действие
+			ic := u.serverCopy
+			if ic == nil || !ic.Visible() {
+				t.Fatal("нет значка копирования адреса")
+			}
+			ai := absRect(ic)
+			if ai.pos.X < -0.5 || ai.pos.X+ai.size.Width > win.Width+0.5 || ai.size.Width+0.5 < ic.MinSize().Width {
+				t.Errorf("значок копирования не виден целиком: %v %v (мин %v) в окне %v", ai.pos, ai.size, ic.MinSize(), win)
+			}
+			fyne.CurrentApp().Clipboard().SetContent("")
+			test.Tap(ic)
+			if got := fyne.CurrentApp().Clipboard().Content(); got != "root@"+host {
+				t.Errorf("значок: в буфер %q", got)
+			}
+			fyne.CurrentApp().Clipboard().SetContent("")
 			test.Tap(sl)
 			if got := fyne.CurrentApp().Clipboard().Content(); got != "root@"+host {
 				t.Errorf("по нажатию в буфер: %q", got)

@@ -93,6 +93,8 @@ type ui struct {
 	protoRow *fyne.Container
 	// serverLabel — подпись сервера (обрезается многоточием; сторожа).
 	serverLabel *serverLabel
+	// serverCopy — значок «скопировать полный адрес сервера».
+	serverCopy *copyIcon
 	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
 	copyBtn *widget.Button
 	// restoreLayer — слой копии-источника восстановления (автокопия его
@@ -1471,10 +1473,18 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// список); полное «Сервер: user@host» — по нажатию (копируется, и
 	// показывается в строке состояния).
 	serverText := fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host)
-	server := newServerLabel(serverText, func() {
+	copyAddr := func() {
 		u.copyToClipboard(fmt.Sprintf("%s@%s", u.sess.Creds.User, u.sess.Creds.Host), serverText+" — скопировано в буфер обмена")
-	})
+	}
+	server := newServerLabel(serverText, copyAddr)
 	u.serverLabel = server
+	// видимый признак, что адрес копируется: значок рядом с подписью (то
+	// же действие); при наведении — подсказка в строке состояния
+	u.serverCopy = newCopyIcon(copyAddr, func() {
+		if u.status != nil {
+			u.status.SetText(serverCopyHint)
+		}
+	})
 	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
 	// с подписью сервера.
 	copyBtn := widget.NewButtonWithIcon("Копия", theme.DocumentSaveIcon(), func() { u.backupMenu() })
@@ -1499,7 +1509,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// так первая строка (кнопки) не раздвигает минимум окна.
 	u.protoRow = container.NewBorder(nil, nil,
 		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect)),
-		nil, server)
+		u.serverCopy, server)
 	top := container.NewVBox(
 		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
 		u.protoRow,
@@ -1525,6 +1535,30 @@ func newServerLabel(text string, onTap func()) *serverLabel {
 func (l *serverLabel) Tapped(*fyne.PointEvent) {
 	if l.onTap != nil {
 		l.onTap()
+	}
+}
+
+// serverCopyHint — подсказка значка копирования адреса.
+const serverCopyHint = "Скопировать полный адрес сервера (значок или нажатие на подпись)"
+
+// copyIcon — кнопка-значок «скопировать»; при наведении — onHover.
+type copyIcon struct {
+	widget.Button
+	onHover func()
+}
+
+func newCopyIcon(tapped, onHover func()) *copyIcon {
+	b := &copyIcon{onHover: onHover}
+	b.Icon, b.OnTapped, b.Importance = theme.ContentCopyIcon(), tapped, widget.LowImportance
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// MouseIn — подсказка в строке состояния (всплывающих в Fyne v2.7 нет).
+func (b *copyIcon) MouseIn(e *desktop.MouseEvent) {
+	b.Button.MouseIn(e)
+	if b.onHover != nil {
+		b.onHover()
 	}
 }
 

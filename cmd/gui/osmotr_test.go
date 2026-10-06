@@ -123,6 +123,8 @@ func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (k
 		return "подпись", firstLine(x.Text), true
 	case *serverLabel:
 		return "подпись", firstLine(x.Text), true
+	case *copyIcon:
+		return "кнопка", "значок копирования адреса", true
 	case *widget.Button:
 		return "кнопка", x.Text, true
 	case *widget.Entry:
@@ -827,7 +829,7 @@ var (
 	invMain = []string{
 		"подпись:Сервер: root@203.0.113.10", "подпись:Протокол:", "список:(Select one)",
 		"кнопка:Обновить", "кнопка:Создать", "кнопка:Переименовать", "кнопка:Вкл/Выкл",
-		"кнопка:Перевыпустить", "кнопка:Удалить", "кнопка:Копия", "таблица:", "подпись:",
+		"кнопка:Перевыпустить", "кнопка:Удалить", "кнопка:Копия", "кнопка:значок копирования адреса", "таблица:", "подпись:",
 	}
 )
 
