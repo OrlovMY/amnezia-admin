@@ -82,19 +82,40 @@ func TestProtoMenuMarksCurrent(t *testing.T) {
 		{Name: "amnezia-xray", Dir: "/opt/amnezia/xray", Proto: "XRay", Support: core.SupportYes},
 	}
 	u.cur = &u.containers[1]
-	u.sess = core.NewSessionWithRunner(osmotrNoServer{gate: make(chan struct{})}, u.sess.Creds)
+	// ворота держат чтение с сервера, чтобы увидеть блокировку списка; в
+	// конце — всегда открыты и фоновые goSafe дождались (иначе висят до конца
+	// процесса и роняют waitGUIGoroutines у следующих тестов)
+	var gates []chan struct{}
+	gated := func() {
+		g := make(chan struct{})
+		gates = append(gates, g)
+		u.sess = core.NewSessionWithRunner(osmotrNoServer{gate: g}, u.sess.Creds)
+	}
+	open := func() {
+		for _, g := range gates {
+			select {
+			case <-g:
+			default:
+				close(g)
+			}
+		}
+		waitGUIGoroutines(t)
+	}
+	t.Cleanup(open)
+	waitGUIGoroutines(t) // чтение из osmotrMain
+	gated()
 	u.showMainScreen()
 	sizeWindow(u, "стартовый")()
 
 	if got := u.protoSelect.SelectedIndex(); got != 1 {
 		t.Fatalf("выбран %d, ожидался 1", got)
 	}
-	// стартовое чтение с сервера держат ворота — разблокируем вручную
-	u.protoSelect.Enable()
+	open() // стартовое чтение завершилось — список разблокирован боевым путём
 	items, objs := openProtoMenu(t, u)
 	checkedOnly(t, items, 1)
 
 	// щелчок по пункту меню: выбор и закрытие меню
+	gated()
 	test.Tap(objs[2].(fyne.Tappable))
 	if topPopUpMenu(u) != nil {
 		t.Fatal("после выбора пункта меню не закрылось")
@@ -102,13 +123,15 @@ func TestProtoMenuMarksCurrent(t *testing.T) {
 	if got := u.protoSelect.SelectedIndex(); got != 2 {
 		t.Fatalf("после выбора пункта 2 выбран %d", got)
 	}
-	// смена протокола запускает чтение с сервера в фоне; ворота держат его
-	// (не закрываются — фоновая запись в виджеты гонялась бы с тестом), и
-	// список на это время заблокирован, как в бою. Разблокировка — вручную.
+	// смена протокола запускает чтение с сервера в фоне — список на это время
+	// заблокирован, как в бою
 	if !u.protoSelect.Disabled() {
 		t.Error("на время чтения с сервера список не заблокирован")
 	}
-	u.protoSelect.Enable()
+	open()
+	if u.protoSelect.Disabled() {
+		t.Fatal("после чтения с сервера список остался заблокирован")
+	}
 	items, _ = openProtoMenu(t, u)
 	checkedOnly(t, items, 2)
 }

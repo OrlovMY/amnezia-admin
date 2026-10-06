@@ -20,6 +20,7 @@ func newMarkSelect(options []string, changed func(string)) *markSelect {
 	s := &markSelect{}
 	s.Options = options
 	s.OnChanged = changed
+	s.PlaceHolder = "(Select one)" // как у widget.NewSelect
 	s.ExtendBaseWidget(s)
 	return s
 }
