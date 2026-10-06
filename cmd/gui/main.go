@@ -1480,10 +1480,25 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	u.serverLabel = server
 	// видимый признак, что адрес копируется: значок рядом с подписью (то
 	// же действие); при наведении — подсказка в строке состояния
-	u.serverCopy = newCopyIcon(copyAddr, func() {
-		if u.status != nil {
-			u.status.SetText(serverCopyHint)
+	// AU-UX р3 Р3-1: подсказка не стирает строку состояния — при уходе
+	// прежний текст возвращается, если строку за это время не меняли
+	var hoverPrev string
+	hovering := false
+	u.serverCopy = newCopyIcon(copyAddr, func(in bool) {
+		if u.status == nil {
+			return
 		}
+		if in {
+			if !hovering {
+				hoverPrev, hovering = u.status.Text, true
+			}
+			u.status.SetText(serverCopyHint)
+			return
+		}
+		if hovering && u.status.Text == serverCopyHint {
+			u.status.SetText(hoverPrev)
+		}
+		hovering = false
 	})
 	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
 	// с подписью сервера.
@@ -1544,10 +1559,10 @@ const serverCopyHint = "Скопировать полный адрес серв�
 // copyIcon — кнопка-значок «скопировать»; при наведении — onHover.
 type copyIcon struct {
 	widget.Button
-	onHover func()
+	onHover func(in bool)
 }
 
-func newCopyIcon(tapped, onHover func()) *copyIcon {
+func newCopyIcon(tapped func(), onHover func(in bool)) *copyIcon {
 	b := &copyIcon{onHover: onHover}
 	b.Icon, b.OnTapped, b.Importance = theme.ContentCopyIcon(), tapped, widget.LowImportance
 	b.ExtendBaseWidget(b)
@@ -1558,7 +1573,15 @@ func newCopyIcon(tapped, onHover func()) *copyIcon {
 func (b *copyIcon) MouseIn(e *desktop.MouseEvent) {
 	b.Button.MouseIn(e)
 	if b.onHover != nil {
-		b.onHover()
+		b.onHover(true)
+	}
+}
+
+// MouseOut — вернуть прежний текст строки состояния (см. onHover).
+func (b *copyIcon) MouseOut() {
+	b.Button.MouseOut()
+	if b.onHover != nil {
+		b.onHover(false)
 	}
 }
 
