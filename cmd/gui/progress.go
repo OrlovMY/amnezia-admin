@@ -48,7 +48,7 @@ func (u *ui) progressWindow(title string, onCancel func()) *progressView {
 	v.cancel = newEscButton(progressCancelText, theme.CancelIcon(), v.doCancel, v.doCancel)
 	body := container.NewVBox(v.label, v.bar, v.inf, v.note)
 	v.d = dialog.NewCustomWithoutButtons(title, container.NewBorder(nil, container.NewCenter(v.cancel), nil, nil, body), u.win)
-	sizeDialog(v.d, fyne.NewSize(560, 240))
+	u.fitDialog(v.d, body, nil, 560)
 	v.d.Show()
 	u.win.Canvas().Focus(v.cancel)
 	u.op = v

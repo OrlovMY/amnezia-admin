@@ -89,6 +89,12 @@ type ui struct {
 	// данные, но без блокировки кнопок повторный клик — это уже вторая
 	// операция поверх ещё не завершившейся первой (BE-01, ревью, Е2).
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
+	// protoRow — строка «Протокол: [список] … сервер» (сторож ширины списка).
+	protoRow *fyne.Container
+	// serverLabel — подпись сервера (обрезается многоточием; сторожа).
+	serverLabel *serverLabel
+	// serverCopy — значок «скопировать полный адрес сервера».
+	serverCopy *copyIcon
 	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
 	copyBtn *widget.Button
 	// restoreLayer — слой копии-источника восстановления (автокопия его
@@ -1441,7 +1447,9 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 
 	names := make([]string, len(u.containers))
 	for i, c := range u.containers {
-		names[i] = guiview.ProtoLabel(c) // единственное место этой подписи (Д2, Э1)
+		// короткая подпись (имя и метка); полная, с причиной, — в строке
+		// состояния при выборе (ViewState.Status)
+		names[i] = guiview.ProtoShortLabel(c)
 	}
 	u.protoSelect = widget.NewSelect(names, func(_ string) {
 		i := u.protoSelect.SelectedIndex()
@@ -1460,10 +1468,41 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 		}
 	}
 
-	server := widget.NewLabel(fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host))
+	// Подпись сервера обрезается многоточием по доступной ширине (решение
+	// ядра: при длинном имени не вылезает и не перекрывает «Протокол:» и
+	// список); полное «Сервер: user@host» — по нажатию (копируется, и
+	// показывается в строке состояния).
+	serverText := fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host)
+	copyAddr := func() {
+		u.copyToClipboard(fmt.Sprintf("%s@%s", u.sess.Creds.User, u.sess.Creds.Host), serverText+" — скопировано в буфер обмена")
+	}
+	server := newServerLabel(serverText, copyAddr)
+	u.serverLabel = server
+	// видимый признак, что адрес копируется: значок рядом с подписью (то
+	// же действие); при наведении — подсказка в строке состояния
+	// AU-UX р3 Р3-1: подсказка не стирает строку состояния — при уходе
+	// прежний текст возвращается, если строку за это время не меняли
+	var hoverPrev string
+	hovering := false
+	u.serverCopy = newCopyIcon(copyAddr, func(in bool) {
+		if u.status == nil {
+			return
+		}
+		if in {
+			if !hovering {
+				hoverPrev, hovering = u.status.Text, true
+			}
+			u.status.SetText(serverCopyHint)
+			return
+		}
+		if hovering && u.status.Text == serverCopyHint {
+			u.status.SetText(hoverPrev)
+		}
+		hovering = false
+	})
 	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
 	// с подписью сервера.
-	copyBtn := widget.NewButtonWithIcon("Копия…", theme.DocumentSaveIcon(), func() { u.backupMenu() })
+	copyBtn := widget.NewButtonWithIcon("Копия", theme.DocumentSaveIcon(), func() { u.backupMenu() })
 	u.copyBtn = copyBtn
 
 	refreshBtn := widget.NewButtonWithIcon("Обновить", theme.ViewRefreshIcon(), func() { u.refresh() })
@@ -1479,15 +1518,99 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// ширину окна. В одной строке с кнопками поле было 127.9 т., а подписи
 	// W2 доходят до 505 т. — Select усекал их многоточием, и «— только
 	// просмотр» / «— не поддерживается» не было видно. Сторож — TestProtoLabelFits.
+	// Отзыв владельца на 32d66c4: «Копия» — в общем ряду кнопок; список
+	// протоколов — по ширине самого длинного (короткого) пункта, прижат
+	// влево, а не на всю строку. Подпись сервера — справа во второй строке:
+	// так первая строка (кнопки) не раздвигает минимум окна.
+	u.protoRow = container.NewBorder(nil, nil,
+		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect)),
+		u.serverCopy, server)
 	top := container.NewVBox(
-		container.NewBorder(nil, nil, server,
-			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
-		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
-		// Отдельной строкой (как список протоколов): в первой строке кнопка
-		// сдвигала минимальную ширину окна (TestProtoLabelFits).
-		container.NewBorder(nil, nil, nil, copyBtn),
+		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
+		u.protoRow,
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
+}
+
+// serverLabel — подпись сервера справа во второй строке: обрезается
+// многоточием по доступной ширине, по нажатию — onTap (полный адрес).
+type serverLabel struct {
+	widget.Label
+	onTap func()
+}
+
+func newServerLabel(text string, onTap func()) *serverLabel {
+	l := &serverLabel{onTap: onTap}
+	l.Text, l.Alignment, l.Truncation = text, fyne.TextAlignTrailing, fyne.TextTruncateEllipsis
+	l.ExtendBaseWidget(l)
+	return l
+}
+
+// Tapped — полный адрес (Fyne v2.7 без всплывающих подсказок).
+func (l *serverLabel) Tapped(*fyne.PointEvent) {
+	if l.onTap != nil {
+		l.onTap()
+	}
+}
+
+// serverCopyHint — подсказка значка копирования адреса.
+const serverCopyHint = "Скопировать полный адрес сервера (значок или нажатие на подпись)"
+
+// copyIcon — кнопка-значок «скопировать»; при наведении — onHover.
+type copyIcon struct {
+	widget.Button
+	onHover func(in bool)
+}
+
+func newCopyIcon(tapped func(), onHover func(in bool)) *copyIcon {
+	b := &copyIcon{onHover: onHover}
+	b.Icon, b.OnTapped, b.Importance = theme.ContentCopyIcon(), tapped, widget.LowImportance
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// MouseIn — подсказка в строке состояния (всплывающих в Fyne v2.7 нет).
+func (b *copyIcon) MouseIn(e *desktop.MouseEvent) {
+	b.Button.MouseIn(e)
+	if b.onHover != nil {
+		b.onHover(true)
+	}
+}
+
+// MouseOut — вернуть прежний текст строки состояния (см. onHover).
+func (b *copyIcon) MouseOut() {
+	b.Button.MouseOut()
+	if b.onHover != nil {
+		b.onHover(false)
+	}
+}
+
+// selectWidthLayout — ширина списка протоколов по самому длинному пункту
+// (у Fyne Select минимум от пунктов не зависит — подпись усекалась бы
+// многоточием), а не на всю строку.
+type selectWidthLayout struct{ sel *widget.Select }
+
+func (l *selectWidthLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	m := l.sel.MinSize()
+	w := float32(0)
+	for _, o := range l.sel.Options {
+		if tw := fyne.MeasureText(o, theme.TextSize(), fyne.TextStyle{}).Width; tw > w {
+			w = tw
+		}
+	}
+	// поля текста и значок раскрытия списка
+	w += 4*theme.InnerPadding() + theme.IconInlineSize()
+	if w < m.Width {
+		w = m.Width
+	}
+	return fyne.NewSize(w, m.Height)
+}
+
+func (l *selectWidthLayout) Layout(objs []fyne.CanvasObject, s fyne.Size) {
+	for _, o := range objs {
+		o.Move(fyne.NewPos(0, 0))
+		o.Resize(s)
+	}
 }
 
 // tableHeaders — колонки таблицы пользователей. columnSort[i] — сортируемый

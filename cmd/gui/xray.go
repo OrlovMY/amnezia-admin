@@ -58,11 +58,17 @@ func (u *ui) confirmWindow(title string, sections []fyne.CanvasObject, okText st
 type confirmWin struct {
 	d  dialog.Dialog
 	ok *escButton
+	// refit — пересчитать размер по содержимому (оно изменилось)
+	refit func()
 }
 
 // confirmWindowBtn — то же, и кнопка подтверждения (окно восстановления
 // включает её по галкам).
-func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText string, danger bool, onOK func()) confirmWin {
+func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText string, danger bool, onOK func(), width ...float32) confirmWin {
+	w := float32(560)
+	if len(width) > 0 {
+		w = width[0]
+	}
 	var d dialog.Dialog
 	cv := u.win.Canvas()
 	prevKey := cv.OnTypedKey()
@@ -91,11 +97,12 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	if danger {
 		okBtn.Importance = widget.DangerImportance
 	}
-	body := container.NewVScroll(container.NewVBox(sections...))
+	inner := container.NewVBox(sections...)
+	body := container.NewVScroll(inner)
 	content := container.NewBorder(nil, container.NewCenter(container.NewHBox(cancelBtn, okBtn)), nil, nil, body)
 	d = dialog.NewCustomWithoutButtons(title, content, u.win)
 	d.SetOnClosed(restoreKeys)
-	sizeDialog(d, fyne.NewSize(560, 380))
+	u.fitDialog(d, inner, body, w)
 	cv.SetOnTypedKey(func(e *fyne.KeyEvent) {
 		if e.Name == fyne.KeyEscape {
 			restoreKeys()
@@ -109,7 +116,7 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	d.Show()
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
-	return confirmWin{d, okBtn}
+	return confirmWin{d, okBtn, func() { u.fitDialog(d, inner, body, w) }}
 }
 
 // escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В

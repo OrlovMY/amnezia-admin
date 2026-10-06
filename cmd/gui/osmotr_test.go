@@ -121,6 +121,10 @@ func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (k
 	switch x := o.(type) {
 	case *widget.Label:
 		return "подпись", firstLine(x.Text), true
+	case *serverLabel:
+		return "подпись", firstLine(x.Text), true
+	case *copyIcon:
+		return "кнопка", "значок копирования адреса", true
 	case *widget.Button:
 		return "кнопка", x.Text, true
 	case *widget.Entry:
@@ -825,7 +829,7 @@ var (
 	invMain = []string{
 		"подпись:Сервер: root@203.0.113.10", "подпись:Протокол:", "список:(Select one)",
 		"кнопка:Обновить", "кнопка:Создать", "кнопка:Переименовать", "кнопка:Вкл/Выкл",
-		"кнопка:Перевыпустить", "кнопка:Удалить", "кнопка:Копия…", "таблица:", "подпись:",
+		"кнопка:Перевыпустить", "кнопка:Удалить", "кнопка:Копия", "кнопка:значок копирования адреса", "таблица:", "подпись:",
 	}
 )
 
@@ -1076,17 +1080,30 @@ func TestOsmotrCanaryAllowanceNotWider(t *testing.T) {
 // К2 — вылезание: в разметке главного окна очень длинное имя сервера.
 func TestOsmotrCanaryPushedOutOfWindow(t *testing.T) {
 	gateCanary(t, formByName(t, "(г) главное окно"), "стартовый", func(t *testing.T, s osmotrScene) {
-		var server *widget.Label
+		var server *serverLabel
 		walkVisible(s.root, func(o fyne.CanvasObject) {
-			if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Сервер: ") {
+			if l, ok := o.(*serverLabel); ok && strings.HasPrefix(l.Text, "Сервер: ") {
 				server = l
 			}
 		})
 		if server == nil {
 			t.Fatal("канарейка ничего не значит: нет подписи «Сервер: …»")
 		}
+		// подсадка ОТКЛЮЧАЕТ обрезку многоточием — иначе длинное имя
+		// законно помещается и прибору нечего ловить
+		server.Truncation = fyne.TextTruncateOff
 		server.SetText("Сервер: root@203.0.113.10" + strings.Repeat(" очень-длинное-имя", 12))
-	}, "вылезание: подпись «Сервер: root@203.0.113.10 очень-длинное-…»: справа") // W2 раунд 2: «Протокол:» теперь отдельной строкой
+	},
+		// Снято с подсадки (обрезка многоточием ОТКЛЮЧЕНА): подпись сервера
+		// теперь в центре Border второй строки (слева «Протокол:» и список).
+		// Border не даёт ей уехать за край — она получает остаток строки, и
+		// без обрезки её текст не помещается: прибор видит СЖАТИЕ с числами
+		// «мин 1895x35, дано 995x35». Вылезания «слева» при этой разметке
+		// больше не бывает (прежнее HBox + распорка убрано — оно и было
+		// дефектом: подпись перекрывала «Протокол:» и список). Вид находки
+		// в ожидании указан точно — «сжатие», не «вылезание»: gateCanary
+		// сравнивает подстрокой.
+		"сжатие: подпись «Сервер: root@203.0.113.10 очень-длинное-…»: мин")
 }
 
 // К3 — СЖАТИЕ (случай QA-01 «б»): резерв подсказки в диалоге пин-кода
@@ -1154,7 +1171,8 @@ func TestOsmotrCanaryStaleAllowance(t *testing.T) {
 func TestOsmotrCanaryStaleLayoutNotMasked(t *testing.T) {
 	gateCanary(t, formByName(t, "(г) главное окно"), "стартовый", func(t *testing.T, s osmotrScene) {
 		b := buttonByText(t, s.root, "Удалить")
-		b.Move(b.Position().AddXY(200, 0))
+		// ряд кнопок прижат влево (отзыв 32d66c4) — сдвиг заведомо за край
+		b.Move(b.Position().AddXY(1000, 0))
 	}, "вылезание: кнопка «Удалить»: справа")
 }
 

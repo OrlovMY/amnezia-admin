@@ -286,7 +286,7 @@ func TestGUIRestoreGates(t *testing.T) {
 // осмотра: «кнопка:Копия…» в формах главного окна).
 func TestGUICopyButtonBusy(t *testing.T) {
 	u := backupUI(t, fakesrv.New(), "203.0.113.1")
-	u.copyBtn = widget.NewButton("Копия…", nil)
+	u.copyBtn = widget.NewButton("Копия", nil)
 	u.setBusy(true)
 	if !u.copyBtn.Disabled() || !u.busy {
 		t.Error("во время операции «Копия…» не выключена")

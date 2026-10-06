@@ -62,7 +62,7 @@ func TestProtoLabelFits(t *testing.T) {
 	// Финальный раунд (AU-UX): и на минимальном окне 972, и на 1194.
 	for _, size := range []string{"минимальный", "972x517", "1194x517"} {
 		for _, c := range []core.Container{longest, unknown} {
-			label := guiview.ProtoLabel(c)
+			label := guiview.ProtoShortLabel(c)
 			u := focusTestUI(t)
 			osmotrMain(u)
 			u.containers = []core.Container{c}
