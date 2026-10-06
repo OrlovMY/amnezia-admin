@@ -79,6 +79,23 @@ func ProtoLabel(c core.Container) string {
 	return "незнакомый контейнер " + c.Name
 }
 
+// ProtoShortLabel — подпись пункта списка протоколов (отзыв владельца на
+// 32d66c4: «меню протокола зачем на всю длину?»): имя протокола и метка
+// («только просмотр», «не поддерживается»), без причины — причина
+// показывается строкой состояния при выборе (ViewState.Status начинается
+// с полной ProtoLabel), текст не теряется.
+func ProtoShortLabel(c core.Container) string {
+	switch {
+	case c.Support == core.SupportYes:
+		return c.Proto
+	case c.Support == core.SupportKnownNo && c.Dir != "":
+		return c.Proto + " — только просмотр"
+	case c.Support == core.SupportKnownNo:
+		return c.Proto + " — не поддерживается"
+	}
+	return "незнакомый контейнер " + c.Name
+}
+
 // ViewState решает состояние GUI для контейнера c по результату
 // c.LoadClientsView (clients, existed, err), см. таблицу дословных строк в
 // задании FIX-VIEW, Д2. LoadStats и CanManage равны c.Managed() — единственная

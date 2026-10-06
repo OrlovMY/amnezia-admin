@@ -49,7 +49,7 @@ func TestProgressViewStates(t *testing.T) {
 // файла нет, итог «Отменено — копия не сохранена».
 func TestGUIBackupCancelAndBusy(t *testing.T) {
 	u := backupUI(t, fakesrv.New(), "203.0.113.1")
-	u.copyBtn, u.refreshBtn, u.addBtn = widget.NewButton("Копия…", nil), widget.NewButton("Обновить", nil), widget.NewButton("Создать", nil)
+	u.copyBtn, u.refreshBtn, u.addBtn = widget.NewButton("Копия", nil), widget.NewButton("Обновить", nil), widget.NewButton("Создать", nil)
 	u.canManage = true
 	dir, _ := core.UserBackupsDir()
 	release := make(chan struct{})

@@ -30,16 +30,17 @@ import (
 
 // Тексты кнопок (сторожа тестов берут их отсюда).
 const (
-	backupMenuTitle    = "Копия пользователей"
-	backupSaveText     = "Сохранить копию сервера…"
-	backupRestoreText  = "Восстановить из копии…"
-	backupSaveOK       = "Сохранить"
-	restoreApplyText   = "Заменить данные сервера"
-	restoreAddrCheck   = "Понимаю: адрес другой или не проверен — выданные конфиги могут не работать"
-	restoreXRayCheck   = "Перезапустить XRay (все подключения XRay оборвутся)"
-	restoreSkipXRay    = "Перенести без XRay — XRay на новом сервере останется прежним"
-	restoreXRayHint    = "Выберите, что делать с XRay:"
-	backupCopyPathText = "Скопировать путь"
+	backupMenuTitle     = "Копия пользователей"
+	backupSaveText      = "Сохранить копию сервера…"
+	backupRestoreText   = "Восстановить из копии…"
+	backupSaveOK        = "Сохранить"
+	restoreApplyText    = "Заменить данные сервера"
+	restoreAddrCheck    = "Понимаю: адрес другой или не проверен — выданные конфиги могут не работать"
+	restoreXRayCheck    = "Перезапустить XRay (все подключения XRay оборвутся)"
+	restoreSkipXRay     = "Перенести без XRay — XRay на новом сервере останется прежним"
+	restoreXRayHint     = "Выберите, что делать с XRay:"
+	restoreDetailsTitle = "Подробнее о копии (состав по протоколам и файлам)"
+	backupCopyPathText  = "Скопировать путь"
 )
 
 // requestedSize — заданный размер окон копии (сторож AU-UX р2 Р2-1 сверяет
@@ -60,6 +61,38 @@ func sizeDialog(d dialog.Dialog, s fyne.Size) {
 // осмотрит окно во время операции.
 var beforeBackupWork func()
 
+// fitDialog — размер окна по содержимому (отзыв владельца на 32d66c4:
+// «почему окно со скролом, нельзя всё сразу отобразить?»): ширина width
+// (не больше окна программы), высота — по содержимому inner, уложенному в
+// эту ширину, плюс рамка окна; не больше окна программы — тогда и только
+// тогда работает прокрутка. scroll — прокрутка вокруг inner (nil — её нет).
+func (u *ui) fitDialog(d dialog.Dialog, inner, scroll fyne.CanvasObject, width float32) {
+	win := u.win.Canvas().Size()
+	margin := 4 * theme.Padding()
+	if win.Width < 1 || win.Height < 1 {
+		win = fyne.NewSize(width+2*margin, 600)
+	}
+	if width > win.Width-2*margin {
+		width = win.Width - 2*margin
+	}
+	// рамка окна: заголовок, кнопки, поля — разница минимумов окна и
+	// прокрутки (у прокрутки минимум мал и от содержимого не зависит)
+	chromeH := d.MinSize().Height
+	if scroll != nil {
+		chromeH -= scroll.MinSize().Height
+	} else {
+		chromeH -= inner.MinSize().Height
+	}
+	innerW := width - 6*theme.Padding()
+	inner.Resize(fyne.NewSize(innerW, inner.MinSize().Height)) // переносы по этой ширине
+	need := inner.MinSize().Height + chromeH
+	h := need
+	if h > win.Height-2*margin {
+		h = win.Height - 2*margin
+	}
+	sizeDialog(d, fyne.NewSize(width, h))
+}
+
 // backupResolve — разрешение имён (шов теста).
 var backupResolve core.Resolver = net.LookupIP
 
@@ -74,7 +107,7 @@ func (u *ui) backupMenu() {
 		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
 		save, restore)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
-	sizeDialog(d, fyne.NewSize(560, 300))
+	u.fitDialog(d, body, nil, 560)
 	d.Show()
 }
 
@@ -117,7 +150,7 @@ func (u *ui) backupDialog() *saveView {
 	v.pw2.OnChanged = func(string) { update() }
 	cw := u.confirmWindowBtn("Сохранить копию сервера", []fyne.CanvasObject{
 		wrapLabel(backupModeHint, true), v.mode, v.pw, v.pw2, v.hint, v.warn, wrapLabel(where, false),
-	}, backupSaveOK, false, func() { u.doBackup(dir, err, v.layer()) })
+	}, backupSaveOK, false, func() { u.doBackup(dir, err, v.layer()) }, 760)
 	v.d, v.ok = cw.d, cw.ok
 	update = func() {
 		can := false
@@ -153,6 +186,7 @@ func (u *ui) backupDialog() *saveView {
 		} else {
 			v.ok.Disable()
 		}
+		cw.refit() // содержимое поменялось — размер по нему
 	}
 	update()
 	return v
@@ -337,6 +371,7 @@ type restoreView struct {
 	apply     *escButton
 	addrCheck *widget.Check
 	xrayRadio *widget.RadioGroup // «одно из двух», без выбора по умолчанию
+	details   *widget.Accordion  // «Подробнее о копии» (свёрнуто)
 	text      string
 }
 
@@ -364,7 +399,17 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 	if planErr != nil && !compat.Stop {
 		addSection([]string{"План не построен: " + core.MaskText(planErr.Error())}, true)
 	}
-	addSection(core.BackupSummaryLines(b), false)
+	// Сводка копии (по файлам) — под «Подробнее о копии» (отзыв владельца
+	// на 32d66c4: окно до начала — без прокрутки); сверху — одна строка.
+	sum := core.BackupSummaryLines(b)
+	state := "полная"
+	if !b.Complete {
+		state = "НЕПОЛНАЯ (подробности — ниже)"
+	}
+	addSection([]string{fmt.Sprintf("Копия сервера %s от %s — %s.", b.Server.Host, b.CreatedAt, state)}, false)
+	all = append(all, sum...)
+	v.details = widget.NewAccordion(widget.NewAccordionItem(restoreDetailsTitle, wrapLabel(strings.Join(sum, "\n"), false)))
+	sections = append(sections, v.details)
 	addSection(core.CompatLines(compat), false)
 	if rp != nil {
 		addSection(core.RestorePlanLines(rp), false)
@@ -386,7 +431,7 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 		v.xrayRadio = widget.NewRadioGroup([]string{restoreXRayCheck, restoreSkipXRay}, func(string) { update() })
 		sections = append(sections, wrapLabel(restoreXRayHint, true), v.xrayRadio)
 	}
-	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() { u.doRestore(rp, v) })
+	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() { u.doRestore(rp, v) }, 900)
 	v.d, v.apply = cw.d, cw.ok
 	update = func() {
 		can := !compat.Stop && planErr == nil && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)

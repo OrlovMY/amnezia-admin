@@ -21,6 +21,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -89,6 +90,8 @@ type ui struct {
 	// данные, но без блокировки кнопок повторный клик — это уже вторая
 	// операция поверх ещё не завершившейся первой (BE-01, ревью, Е2).
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
+	// protoRow — строка «Протокол: [список] … сервер» (сторож ширины списка).
+	protoRow *fyne.Container
 	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
 	copyBtn *widget.Button
 	// restoreLayer — слой копии-источника восстановления (автокопия его
@@ -1441,7 +1444,9 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 
 	names := make([]string, len(u.containers))
 	for i, c := range u.containers {
-		names[i] = guiview.ProtoLabel(c) // единственное место этой подписи (Д2, Э1)
+		// короткая подпись (имя и метка); полная, с причиной, — в строке
+		// состояния при выборе (ViewState.Status)
+		names[i] = guiview.ProtoShortLabel(c)
 	}
 	u.protoSelect = widget.NewSelect(names, func(_ string) {
 		i := u.protoSelect.SelectedIndex()
@@ -1463,7 +1468,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	server := widget.NewLabel(fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host))
 	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
 	// с подписью сервера.
-	copyBtn := widget.NewButtonWithIcon("Копия…", theme.DocumentSaveIcon(), func() { u.backupMenu() })
+	copyBtn := widget.NewButtonWithIcon("Копия", theme.DocumentSaveIcon(), func() { u.backupMenu() })
 	u.copyBtn = copyBtn
 
 	refreshBtn := widget.NewButtonWithIcon("Обновить", theme.ViewRefreshIcon(), func() { u.refresh() })
@@ -1479,15 +1484,44 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// ширину окна. В одной строке с кнопками поле было 127.9 т., а подписи
 	// W2 доходят до 505 т. — Select усекал их многоточием, и «— только
 	// просмотр» / «— не поддерживается» не было видно. Сторож — TestProtoLabelFits.
+	// Отзыв владельца на 32d66c4: «Копия» — в общем ряду кнопок; список
+	// протоколов — по ширине самого длинного (короткого) пункта, прижат
+	// влево, а не на всю строку. Подпись сервера — справа во второй строке:
+	// так первая строка (кнопки) не раздвигает минимум окна.
+	u.protoRow = container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect), layout.NewSpacer(), server)
 	top := container.NewVBox(
-		container.NewBorder(nil, nil, server,
-			container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn)),
-		container.NewBorder(nil, nil, widget.NewLabel("Протокол:"), nil, u.protoSelect),
-		// Отдельной строкой (как список протоколов): в первой строке кнопка
-		// сдвигала минимальную ширину окна (TestProtoLabelFits).
-		container.NewBorder(nil, nil, nil, copyBtn),
+		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
+		u.protoRow,
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
+}
+
+// selectWidthLayout — ширина списка протоколов по самому длинному пункту
+// (у Fyne Select минимум от пунктов не зависит — подпись усекалась бы
+// многоточием), а не на всю строку.
+type selectWidthLayout struct{ sel *widget.Select }
+
+func (l *selectWidthLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	m := l.sel.MinSize()
+	w := float32(0)
+	for _, o := range l.sel.Options {
+		if tw := fyne.MeasureText(o, theme.TextSize(), fyne.TextStyle{}).Width; tw > w {
+			w = tw
+		}
+	}
+	// поля текста и значок раскрытия списка
+	w += 4*theme.InnerPadding() + theme.IconInlineSize()
+	if w < m.Width {
+		w = m.Width
+	}
+	return fyne.NewSize(w, m.Height)
+}
+
+func (l *selectWidthLayout) Layout(objs []fyne.CanvasObject, s fyne.Size) {
+	for _, o := range objs {
+		o.Move(fyne.NewPos(0, 0))
+		o.Resize(s)
+	}
 }
 
 // tableHeaders — колонки таблицы пользователей. columnSort[i] — сортируемый

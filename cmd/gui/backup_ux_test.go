@@ -92,6 +92,14 @@ func TestBackupWindowsVisible(t *testing.T) {
 					}
 					u.restoreWindow(b, compat, rp, planErr)
 				}},
+				{"восстановление, «Подробнее о копии» раскрыто", func() {
+					b, compat, rp, planErr, err := u.restorePrepare(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					v := u.restoreWindow(b, compat, rp, planErr)
+					v.details.Open(0) // свёрнутое доступно раскрытием — и тогда видно целиком
+				}},
 				{"итог восстановления", func() {
 					// длинный итог: текст заведомо выше окна — проверяется,
 					// что он в прокрутке, а не обрезан
