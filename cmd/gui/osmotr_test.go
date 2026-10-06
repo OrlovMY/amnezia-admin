@@ -136,6 +136,8 @@ func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (k
 		return "галка", firstLine(x.Text), true
 	case *widget.Select:
 		return "список", x.PlaceHolder, true
+	case *markSelect:
+		return "список", x.PlaceHolder, true
 	case *widget.Table:
 		return "таблица", "", true
 	case *clientTable:

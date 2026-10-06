@@ -55,7 +55,7 @@ type ui struct {
 
 	table       *clientTable
 	status      *widget.Label
-	protoSelect *widget.Select
+	protoSelect *markSelect
 	selectedRow int
 
 	// canManage — решение guiview.ViewState для ТЕКУЩЕГО протокола (u.cur),
@@ -1451,7 +1451,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 		// состояния при выборе (ViewState.Status)
 		names[i] = guiview.ProtoShortLabel(c)
 	}
-	u.protoSelect = widget.NewSelect(names, func(_ string) {
+	u.protoSelect = newMarkSelect(names, func(_ string) {
 		i := u.protoSelect.SelectedIndex()
 		if i >= 0 && i < len(u.containers) {
 			u.cur = &u.containers[i]
@@ -1523,7 +1523,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// влево, а не на всю строку. Подпись сервера — справа во второй строке:
 	// так первая строка (кнопки) не раздвигает минимум окна.
 	u.protoRow = container.NewBorder(nil, nil,
-		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect)),
+		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: &u.protoSelect.Select}, u.protoSelect)),
 		u.serverCopy, server)
 	top := container.NewVBox(
 		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
