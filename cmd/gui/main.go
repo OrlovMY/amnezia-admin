@@ -21,7 +21,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -92,6 +91,8 @@ type ui struct {
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
 	// protoRow — строка «Протокол: [список] … сервер» (сторож ширины списка).
 	protoRow *fyne.Container
+	// serverLabel — подпись сервера (обрезается многоточием; сторожа).
+	serverLabel *serverLabel
 	// copyBtn — «Копия…» (сохранить копию / восстановить из копии).
 	copyBtn *widget.Button
 	// restoreLayer — слой копии-источника восстановления (автокопия его
@@ -1465,7 +1466,15 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 		}
 	}
 
-	server := widget.NewLabel(fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host))
+	// Подпись сервера обрезается многоточием по доступной ширине (решение
+	// ядра: при длинном имени не вылезает и не перекрывает «Протокол:» и
+	// список); полное «Сервер: user@host» — по нажатию (копируется, и
+	// показывается в строке состояния).
+	serverText := fmt.Sprintf("Сервер: %s@%s", u.sess.Creds.User, u.sess.Creds.Host)
+	server := newServerLabel(serverText, func() {
+		u.copyToClipboard(fmt.Sprintf("%s@%s", u.sess.Creds.User, u.sess.Creds.Host), serverText+" — скопировано в буфер обмена")
+	})
+	u.serverLabel = server
 	// Копия пользователей и переезд (5/5) — действие уровня сервера, рядом
 	// с подписью сервера.
 	copyBtn := widget.NewButtonWithIcon("Копия", theme.DocumentSaveIcon(), func() { u.backupMenu() })
@@ -1488,12 +1497,35 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// протоколов — по ширине самого длинного (короткого) пункта, прижат
 	// влево, а не на всю строку. Подпись сервера — справа во второй строке:
 	// так первая строка (кнопки) не раздвигает минимум окна.
-	u.protoRow = container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect), layout.NewSpacer(), server)
+	u.protoRow = container.NewBorder(nil, nil,
+		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: u.protoSelect}, u.protoSelect)),
+		nil, server)
 	top := container.NewVBox(
 		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
 		u.protoRow,
 	)
 	return container.NewBorder(top, u.status, nil, nil, u.table)
+}
+
+// serverLabel — подпись сервера справа во второй строке: обрезается
+// многоточием по доступной ширине, по нажатию — onTap (полный адрес).
+type serverLabel struct {
+	widget.Label
+	onTap func()
+}
+
+func newServerLabel(text string, onTap func()) *serverLabel {
+	l := &serverLabel{onTap: onTap}
+	l.Text, l.Alignment, l.Truncation = text, fyne.TextAlignTrailing, fyne.TextTruncateEllipsis
+	l.ExtendBaseWidget(l)
+	return l
+}
+
+// Tapped — полный адрес (Fyne v2.7 без всплывающих подсказок).
+func (l *serverLabel) Tapped(*fyne.PointEvent) {
+	if l.onTap != nil {
+		l.onTap()
+	}
 }
 
 // selectWidthLayout — ширина списка протоколов по самому длинному пункту
