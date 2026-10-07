@@ -16,8 +16,14 @@
 //	amnezia-admin backup -key vpn://... [-o файл.aabk] (-password-file файл | -no-password)
 //	amnezia-admin backup-info [-password-file файл] файл.aabk
 //	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-yes]
+//	amnezia-admin diagnose -key vpn://... [-fix [-yes]]
 //	amnezia-admin version
 //	amnezia-admin check
+//
+// Подкоманда diagnose проверяет контейнеры WireGuard/AmneziaWG на две
+// неисправности окружения (профили AppArmor wg/wg-quick хоста; iptables
+// legacy без таблицы nat), печатает три исхода — есть / нет / не удалось
+// узнать — и команды для ручного исправления; -fix исправляет после «y».
 //
 // Подкоманда check печатает признаки окружения (ОС, архитектура, библиотека
 // C, библиотеки графики, графическая сессия) и говорит заранее, запустится
@@ -982,6 +988,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	addrChanges := fs.Bool("address-changes", false, "restore: продолжить, хотя адрес выдачи другой или не проверен")
 	pwFile := fs.String("password-file", "", "backup/restore: файл с паролем копии (пароль аргументом не передаётся)")
 	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
+	fixDiag := fs.Bool("fix", false, "diagnose: исправить найденную проблему (после подтверждения y/N или -yes)")
 	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1074,6 +1081,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return runRestore(ctx, stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
+		if err == nil {
+			if note := diagListNote(sess.Diagnose(containers)); note != "" {
+				fmt.Fprintln(stdout, cWarn(note))
+			}
+		}
+	case "diagnose":
+		return runDiagnose(stdin, stdout, stderr, isTTY, *yes, *fixDiag, sess, containers)
 	case "add":
 		if *dryRun {
 			err = runDryRun(stdout, sess, cur, cmd, *name, *newname)
@@ -1233,7 +1247,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | diagnose)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))

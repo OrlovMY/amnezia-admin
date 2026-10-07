@@ -32,6 +32,10 @@ import (
 )
 
 type ui struct {
+	// diagShown, diagResult — окна диагностики окружения (diagnose.go) — для тестов.
+	diagShown  *diagView
+	diagResult dialog.Dialog
+
 	win        fyne.Window
 	sess       *core.Session
 	containers []core.Container
@@ -1076,6 +1080,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			if vc == nil {
 				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
 			}
+			u.diagnoseAfterConnect(sess, containers)
 		})
 	})
 }
