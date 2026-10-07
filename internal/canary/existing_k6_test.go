@@ -140,6 +140,8 @@ func TestP0K6Window(t *testing.T) {
 	for _, c := range []struct {
 		name         string
 		inK6, atLock func(t *testing.T, f *fakeServer, id string)
+		// pre — правка до начального снимка П0 (состояние «было»)
+		pre func(t *testing.T, f *fakeServer, id string)
 		// afterK6 — правка сразу после чтения файла конфигурации снимком
 		// «после К6» (таблица им уже снята): отрезок «после К6 → конец».
 		afterK6   func(t *testing.T, f *fakeServer, id string)
@@ -195,6 +197,20 @@ func TestP0K6Window(t *testing.T) {
 				editAdmin(t, f, id, func(ud map[string]any) { ud["clientName"] = "ИСПОРЧЕНО" })
 			},
 			status: NotChecked, want: []string{"чья правка, не различить", `clientName: было "` + adminName + `", стало "ИСПОРЧЕНО"`}},
+		// AU DEBTS-1007 M-1: пропажа поля вместе со статистикой — не сведение.
+		{name: "в окне К6 статистика и пропал clientName — НЕ ПРОВЕРЕНО",
+			inK6: func(t *testing.T, f *fakeServer, id string) {
+				appStats(t, f, id)
+				addAppUser(t, f)
+				editAdmin(t, f, id, func(ud map[string]any) { delete(ud, "clientName") })
+			},
+			status: NotChecked, want: []string{"чья правка, не различить", "clientName"}},
+		// AU DEBTS-1007 Low: allowed_ips был до окна и сменился в окне (даже на
+		// AllowedIPs [Peer]) — не «появилось», не сведение.
+		{name: "в окне К6 сменился прежний allowed_ips — НЕ ПРОВЕРЕНО",
+			pre:    foreignAllowedIPs,
+			inK6:   appRewrite,
+			status: NotChecked, want: []string{"чья правка, не различить", "allowed_ips: было"}},
 		{name: "статистика вне окна — НЕ ПРОЙДЕН",
 			inK6:   func(t *testing.T, f *fakeServer, _ string) { addAppUser(t, f) },
 			atLock: appStats, status: Fail,
@@ -215,6 +231,9 @@ func TestP0K6Window(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f, id := withAdmin(t, true)
+			if c.pre != nil {
+				c.pre(t, f, id)
+			}
 			preflight(t, f)
 			real := f.env.Remote
 			locked, broke, asked, after := false, false, false, false
