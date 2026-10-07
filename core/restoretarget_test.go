@@ -131,13 +131,20 @@ func TestRestoreTargetXRay(t *testing.T) {
 		return s
 	}
 	const dir = "/opt/amnezia/xray"
-	onlyAdmin := func(s *fakesrv.Server) {
+	setClients := func(s *fakesrv.Server, tblN int, ids ...string) {
 		raw, _ := s.File(dir + "/clientsTable")
 		var l []ClientEntry
 		_ = json.Unmarshal(raw, &l)
-		j, _ := json.Marshal(l[:1])
+		j, _ := json.Marshal(l[:tblN])
 		s.SetFile(dir+"/clientsTable", j)
+		conf, _ := s.File(dir + "/server.json")
+		s.SetFile(dir+"/server.json", []byte(fakesrv.XRayWithClients(string(conf), ids...)))
 	}
+	svcID := func(s *fakesrv.Server) string {
+		k, _ := s.File(dir + "/xray_uuid.key")
+		return strings.TrimSpace(string(k))
+	}
+	onlyAdmin := func(s *fakesrv.Server) { setClients(s, 1, svcID(s)) }
 	cases := []struct {
 		name    string
 		prep    func(*fakesrv.Server)
@@ -147,6 +154,10 @@ func TestRestoreTargetXRay(t *testing.T) {
 	}{
 		{"только админ", onlyAdmin, 0, ServiceFound, false},
 		{"админ и пользователи", func(*fakesrv.Server) {}, 2, ServiceFound, true},
+		// AU-LOGIC З1: клиенты только в server.json — тоже пользователи
+		{"UUID в server.json, таблица пуста", func(s *fakesrv.Server) {
+			setClients(s, 0, svcID(s), fakesrv.RandUUID(), fakesrv.RandUUID())
+		}, 2, ServiceFound, true},
 		{"ключ установки не прочитан", func(s *fakesrv.Server) { onlyAdmin(s); s.SetFile(dir+"/xray_uuid.key", []byte("не uuid\n")) }, 1, ServiceUnknown, true},
 	}
 	for _, c := range cases {
@@ -168,12 +179,37 @@ func TestRestoreTargetXRay(t *testing.T) {
 			if len(it.Target.Users) != c.users || it.Target.Service != c.svc || rp.NeedsTargetConfirm() != c.confirm {
 				t.Fatalf("пользователи %v служебный %v «%s» подтверждение %v", it.Target.Users, it.Target.Service, it.Target.ServiceName, rp.NeedsTargetConfirm())
 			}
-			if c.svc == ServiceFound && !strings.HasPrefix(it.Target.ServiceName, "Admin") {
+			if c.svc == ServiceFound && it.Target.ServiceName == "" {
 				t.Errorf("служебный не назван: %q", it.Target.ServiceName)
 			}
 			if c.svc == ServiceUnknown && !strings.Contains(strings.Join(TargetWarnLines(rp, 0), "\n"), "не опознан") {
 				t.Error("не сказано, что служебный не опознан")
 			}
 		})
+	}
+}
+
+// TestRestoreTargetXRayConfUnparsed — AU-LOGIC З1, третье состояние:
+// server.json цели не разобран — кто там, неизвестно: СТОП, не «0».
+func TestRestoreTargetXRayConfUnparsed(t *testing.T) {
+	mk := func() *fakesrv.Server {
+		s := fakesrv.NewXRay("master")
+		for _, k := range []string{"xray_short_id.key", "xray_public.key", "xray_private.key"} {
+			s.SetFile("/opt/amnezia/xray/"+k, []byte(k+"-"+fakesrv.RandUUID()))
+		}
+		return s
+	}
+	src, tgt := mk(), mk()
+	b := sourceBackup(t, src, "203.0.113.1")
+	ts := NewSessionWithRunner(tgt, &ServerCreds{Host: "203.0.113.1"})
+	t.Cleanup(SetXRayWaits(0, 0))
+	compat, err := ts.CheckTarget(b, okResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgt.SetFile("/opt/amnezia/xray/server.json", []byte("{не json"))
+	rp, err := ts.PlanRestore(b, compat, true)
+	if !errors.Is(err, ErrRestoreStopped) || rp != nil || !strings.Contains(err.Error(), "не разобрана") {
+		t.Fatalf("ожидался СТОП: %v %+v", err, rp)
 	}
 }

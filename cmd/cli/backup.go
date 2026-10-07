@@ -145,6 +145,10 @@ const (
 // (число печатается всегда).
 const targetListMax = 50
 
+// bypassTargetGate — шов теста (AU-LOGIC З2): обойти проверку CLI выше
+// ядра, чтобы убедиться, что ядро без подтверждения само не пишет.
+var bypassTargetGate bool
+
 // runRestore — restore -file X [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes].
 func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, replaceUsers, yes bool, now time.Time) int {
 	if file == "" {
@@ -219,7 +223,10 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	// Пользователи на новом сервере: без терминала или с -yes — только с
 	// -replace-users; в терминале — отдельный вопрос с вводом слова.
 	askUsers := rp.NeedsTargetConfirm() && !replaceUsers
-	if askUsers && (yes || !isTTY) {
+	// подтверждение для ядра — только полученное (флаг или ввод слова);
+	// пользователей нет — подтверждать нечего (AU-LOGIC З2)
+	targetOK := !rp.NeedsTargetConfirm() || replaceUsers
+	if askUsers && (yes || !isTTY) && !bypassTargetGate {
 		fmt.Fprintln(w, replaceUsersRefuse)
 		return 2
 	}
@@ -239,6 +246,7 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 				fmt.Fprintln(w, "Отменено: ничего не записано.")
 				return 2
 			}
+			targetOK = true
 		}
 		if xrayOK {
 			fmt.Fprint(w, "Применение перезапустит XRay: все текущие подключения по XRay оборвутся. Перезапустить XRay? (y/n; чтобы перенести без XRay — отмените и повторите с -skip-xray): ")
@@ -261,7 +269,7 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	}
 	opt.AutoCopyDir = dir
 	opt.ConfirmXRay = func() bool { return xrayOK }
-	opt.TargetConfirmed = true // проверено выше: пользователей нет, флаг или ответ
+	opt.TargetConfirmed = targetOK
 	opt.Ctx, opt.Progress = ctx, cliProgress(errOut, isTTY)
 	auto, outs, err := sess.Restore(rp, opt)
 	endProgress(errOut, isTTY)

@@ -179,8 +179,11 @@ func (s *Session) planRestoreContainer(c *Container, bc BackupContainer) (Restor
 	}
 	it.Clients = len(after)
 	wg := !IsXRay(c)
-	tgtCl := clientsOf(before, p.wgBefore, wg)
-	srcCl := clientsOf(after, p.wgAfter, wg)
+	tgtCl, errT := clientsOf(before, p.wgBefore, wg)
+	srcCl, errS := clientsOf(after, p.wgAfter, wg)
+	if errT != nil || errS != nil {
+		return RestoreItem{}, stopped("%s: конфигурация клиентов не разобрана — кто есть на сервере и в копии, неизвестно", c.Name)
+	}
 	keep := map[string]bool{}
 	for _, e := range srcCl {
 		keep[e.id] = true

@@ -92,13 +92,27 @@ func displayName(n string) string {
 	return n
 }
 
-// clientsOf — клиенты по clientsTable и (WG) по [Peer] конфигурации: peer
-// без записи в таблице — тоже клиент («без имени»). Адреса — AllowedIPs.
-func clientsOf(tbl []ClientEntry, wgConf []byte, wg bool) []restoreClient {
+// clientsOf — клиенты: объединение clientsTable и конфигурации — [Peer]
+// у WG, clients из server.json у XRay (AU-LOGIC З1): клиент конфигурации
+// без записи в таблице — тоже клиент («без имени»). Адреса — AllowedIPs
+// (WG). server.json не разобран — ошибка: кто там, неизвестно.
+func clientsOf(tbl []ClientEntry, conf []byte, wg bool) ([]restoreClient, error) {
 	addrs := map[string][]string{}
 	var order []string
+	if !wg {
+		srv, err := parseXRayServer(conf)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range srv.ids {
+			if _, ok := addrs[id]; !ok {
+				order = append(order, id)
+				addrs[id] = nil
+			}
+		}
+	}
 	if wg {
-		for _, p := range parseWgConf(string(wgConf)).peers {
+		for _, p := range parseWgConf(string(conf)).peers {
 			pk := p["PublicKey"]
 			if pk == "" {
 				continue
@@ -125,7 +139,7 @@ func clientsOf(tbl []ClientEntry, wgConf []byte, wg bool) []restoreClient {
 			out = append(out, restoreClient{id: pk, addrs: addrs[pk]})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // compareTarget — пользователи цели и пересечения с копией. tgtSvc/srcSvc —
