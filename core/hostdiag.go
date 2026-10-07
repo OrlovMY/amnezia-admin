@@ -208,6 +208,7 @@ func parseProbe(out string, runErr error) probe {
 // единственное, что отвечает «нет» без журнала; все прочие «нет» требуют
 // прочитанных данных хоста.
 func classifyAppArmor(c probe, iface string, h probe) DiagFinding {
+	loaded, denied := wgProfiles(h.kv["LOADED"]), wgProfiles(h.kv["DENIED"])
 	switch {
 	case !c.ok:
 		return DiagFinding{DiagUnknown, "проверка контейнера не выполнилась: " + c.err}
@@ -219,12 +220,17 @@ func classifyAppArmor(c probe, iface string, h probe) DiagFinding {
 		return DiagFinding{DiagUnknown, "интерфейса " + iface + " нет, а проверка AppArmor на сервере не выполнилась: " + h.err}
 	case h.get("AA") == "none":
 		return DiagFinding{DiagNo, "AppArmor на сервере нет; интерфейса " + iface + " нет по другой причине"}
-	case len(h.kv["DENIED"]) > 0:
-		return DiagFinding{DiagYes, "интерфейса " + iface + " нет, в журнале ядра отказы AppArmor профилей " + strings.Join(h.kv["DENIED"], ", ")}
-	case h.get("PROF") == "readable" && len(h.kv["LOADED"]) == 0:
-		return DiagFinding{DiagNo, "профили wg/wg-quick не загружены; интерфейса " + iface + " нет по другой причине"}
+	// Б1 (QA-01): «профили прочитаны и не загружены» стоит ВЫШЕ отказов в
+	// журнале — журнал хранит отказы до перезагрузки, и после исправления
+	// старый DENIED перехватывал бы «нет» (признак 3 CLAUDE.md).
+	case h.get("PROF") == "readable" && len(loaded) == 0:
+		return DiagFinding{DiagNo, "профили wg/wg-quick не загружены (отказы в журнале, если есть, — прежние); интерфейса " + iface + " нет по другой причине"}
+	case len(denied) > 0 && h.get("PROF") == "readable":
+		return DiagFinding{DiagYes, "интерфейса " + iface + " нет, профили " + strings.Join(loaded, ", ") + " загружены, в журнале ядра их отказы (" + strings.Join(denied, ", ") + ")"}
+	case len(denied) > 0:
+		return DiagFinding{DiagYes, "интерфейса " + iface + " нет, в журнале ядра отказы AppArmor профилей " + strings.Join(denied, ", ") + " (список загруженных профилей прочитать не удалось — отказы могут быть прежними)"}
 	case h.get("PROF") == "readable":
-		return DiagFinding{DiagUnknown, "интерфейса " + iface + " нет, профили " + strings.Join(h.kv["LOADED"], ", ") + " включены, но отказов в журнале ядра не видно (журнал мог быть очищен или недоступен)"}
+		return DiagFinding{DiagUnknown, "интерфейса " + iface + " нет, профили " + strings.Join(loaded, ", ") + " включены, но отказов в журнале ядра не видно (журнал мог быть очищен или недоступен)"}
 	default:
 		return DiagFinding{DiagUnknown, "интерфейса " + iface + " нет, а журнал ядра и список профилей AppArmor прочитать не удалось (нужны права root)"}
 	}
@@ -338,6 +344,21 @@ func (s *Session) isRoot() bool { return s.Creds != nil && s.Creds.User == "root
 
 // ---------- исправление ----------
 
+// wgProfiles — имена профилей из вывода сервера, отфильтрованные по
+// ЗАКРЫТОМУ списку {wg-quick, wg} (SEC-01 З1): строка с сервера не попадает
+// в аргументы apparmor_parser без проверки в Go.
+func wgProfiles(xs []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, x := range xs {
+		if (x == "wg-quick" || x == "wg") && !seen[x] {
+			seen[x] = true
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 // FixPlan — что исправлять. Только проблемы с исходом DiagYes; iptables —
 // только где в образе есть xtables-nft-multi.
 type FixPlan struct {
@@ -368,7 +389,7 @@ func (r DiagReport) Plan(user string) FixPlan {
 	}
 	if len(p.AppArmor) > 0 {
 		if r.profKnown {
-			p.Profiles = append(p.Profiles, r.loaded...)
+			p.Profiles = append(p.Profiles, wgProfiles(r.loaded)...)
 		} else {
 			p.Profiles = []string{"wg-quick", "wg"}
 		}
@@ -459,6 +480,24 @@ func (o FixOutcome) Text() string {
 	default:
 		return o.Kind + " в " + o.Container + ": неизвестно — " + o.After.Reason
 	}
+}
+
+// Partial — если исправление прервалось: какие команды уже выполнены
+// (SEC-01 З3). Пусто — прерывания не было.
+func (r FixResult) Partial() []string {
+	if r.RunErr == nil {
+		return nil
+	}
+	done := r.Ran[:len(r.Ran)-1] // последняя — упавшая
+	out := []string{"Исправление прервано: " + r.RunErr.Error()}
+	if len(done) == 0 {
+		return append(out, "До ошибки на сервере ничего не изменено.")
+	}
+	out = append(out, "Уже выполнено (изменения остались на сервере):")
+	for _, c := range done {
+		out = append(out, "  "+c)
+	}
+	return out
 }
 
 // FixResult — итог ApplyFix.

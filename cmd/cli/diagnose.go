@@ -51,17 +51,42 @@ func printDiagReport(w io.Writer, sess *core.Session, rep core.DiagReport) core.
 	return plan
 }
 
+// Коды выхода diagnose (договор со скриптами; 1 и 2 — как у остальных
+// подкоманд):
+//
+//	0 — проверено, проблем нет (или всё исправлено);
+//	1 — проблема найдена (без -fix), исправлено не всё, или ошибка;
+//	2 — исправление не подтверждено (ответ не «y», без терминала нет -yes);
+//	3 — проблем не найдено, но часть проверок не удалась.
+const (
+	diagCodeOK      = 0
+	diagCodeProblem = 1
+	diagCodeUnknown = 3
+)
+
+// diagCode — код по отчёту (без исправления).
+func diagCode(rep core.DiagReport) int {
+	switch {
+	case rep.HasProblem():
+		return diagCodeProblem
+	case rep.HasUnknown():
+		return diagCodeUnknown
+	default:
+		return diagCodeOK
+	}
+}
+
 // runDiagnose — подкоманда diagnose [-fix [-yes]].
 func runDiagnose(in io.Reader, out, errOut io.Writer, isTTY, yes, fix bool, sess *core.Session, cs []core.Container) int {
 	rep := sess.Diagnose(cs)
 	plan := printDiagReport(out, sess, rep)
 	if plan.Empty() {
-		return 0
+		return diagCode(rep)
 	}
 	if !fix {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Исправить программой: amnezia-admin diagnose -fix")
-		return 0
+		return diagCodeProblem
 	}
 	if !yes {
 		if !isTTY {
@@ -85,8 +110,11 @@ func runDiagnose(in io.Reader, out, errOut io.Writer, isTTY, yes, fix bool, sess
 
 // printFixResult — честный итог по повторной проверке.
 func printFixResult(out, errOut io.Writer, res core.FixResult) int {
-	if res.RunErr != nil {
-		fmt.Fprintln(errOut, cWarn(res.RunErr.Error()))
+	// SEC-01 З3: прерванное исправление называет выполненные шаги. Итог
+	// (и код) — по повторной проверке: если она показала «исправлено»,
+	// код 0, хотя ошибка напечатана (QA-01 З2, решение).
+	for _, l := range res.Partial() {
+		fmt.Fprintln(errOut, cWarn(l))
 	}
 	fmt.Fprintln(out, "Повторная проверка:")
 	code := 0

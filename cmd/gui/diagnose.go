@@ -58,9 +58,70 @@ func (u *ui) diagnoseAfterConnect(sess *core.Session, cs []core.Container) {
 			if u.sess != sess {
 				return // уже другое подключение
 			}
-			u.showDiagDialog(rep)
+			u.onDiagReport(rep)
 		})
 	})
+}
+
+// Строки состояния диагностики.
+const (
+	diagNoteUnknown   = "Проверка окружения сервера (AppArmor/iptables) не удалась — подробно: amnezia-admin diagnose"
+	diagNoteDismissed = "На сервере найдена проблема окружения (AppArmor/iptables), окно скрыто по «Не сейчас» — подробно: amnezia-admin diagnose"
+)
+
+// onDiagReport — что показать по итогам проверки: окно проблемы (в очереди
+// за «Сохранить ключ?»), строку состояния при «не удалось узнать» (без
+// окна поверх работы) или при скрытом «Не сейчас» окне.
+func (u *ui) onDiagReport(rep core.DiagReport) {
+	switch {
+	case rep.HasProblem() && u.diagDismissed[u.sess.Creds.Host]:
+		u.setDiagNote(diagNoteDismissed)
+	case rep.HasProblem():
+		u.setDiagNote("")
+		if u.diagHold {
+			u.diagPending = &rep
+			return
+		}
+		u.showDiagDialog(rep)
+	case rep.HasUnknown():
+		u.setDiagNote(diagNoteUnknown)
+	default:
+		u.setDiagNote("")
+	}
+}
+
+// releaseDiagHold — окно «Сохранить ключ?» закрыто: показать отложенное.
+func (u *ui) releaseDiagHold() {
+	u.diagHold = false
+	if p := u.diagPending; p != nil {
+		u.diagPending = nil
+		u.showDiagDialog(*p)
+	}
+}
+
+// setDiagNote — строка о диагностике; refresh дописывает её к своему тексту.
+func (u *ui) setDiagNote(n string) {
+	old := u.diagNote
+	u.diagNote = n
+	if u.status == nil {
+		return
+	}
+	t := u.status.Text
+	if old != "" {
+		t = strings.TrimSuffix(t, " · "+old)
+	}
+	u.status.SetText(u.withDiagNote(t))
+}
+
+// withDiagNote — текст строки состояния с припиской диагностики.
+func (u *ui) withDiagNote(t string) string {
+	if u.diagNote == "" || strings.HasSuffix(t, u.diagNote) {
+		return t
+	}
+	if t == "" {
+		return u.diagNote
+	}
+	return t + " · " + u.diagNote
 }
 
 // diagShort — проблема коротко (полная причина — в CLI diagnose).
@@ -97,10 +158,10 @@ func diagLines(rep core.DiagReport) []string {
 	return out
 }
 
-// showDiagDialog — окно по итогам проверки; nil — показывать нечего
-// (проверено, проблем нет, или WG-контейнеров нет).
+// showDiagDialog — окно проблемы; nil — проблемы нет (окно «не удалось
+// узнать» не показывается — это строка состояния, onDiagReport).
 func (u *ui) showDiagDialog(rep core.DiagReport) *diagView {
-	if !rep.HasProblem() && !rep.HasUnknown() {
+	if !rep.HasProblem() {
 		return nil
 	}
 	v := &diagView{plan: rep.Plan(u.sess.Creds.User)}
@@ -132,6 +193,13 @@ func (u *ui) showDiagDialog(rep core.DiagReport) *diagView {
 		secs = append(secs, container.NewHBox(v.copy, v.copied))
 	}
 	hide := func() { v.d.Hide() }
+	later := func() {
+		if u.diagDismissed == nil {
+			u.diagDismissed = map[string]bool{}
+		}
+		u.diagDismissed[u.sess.Creds.Host] = true
+		v.d.Hide()
+	}
 	inner := container.NewVBox(secs...)
 	body := container.NewVScroll(inner)
 	var buttons fyne.CanvasObject
@@ -139,7 +207,7 @@ func (u *ui) showDiagDialog(rep core.DiagReport) *diagView {
 		v.later = newEscButton(diagCloseText, theme.CancelIcon(), hide, hide)
 		buttons = container.NewCenter(v.later)
 	} else {
-		v.later = newEscButton(diagLaterText, theme.CancelIcon(), hide, hide)
+		v.later = newEscButton(diagLaterText, theme.CancelIcon(), later, later)
 		v.fix = newEscButton(diagFixText, theme.WarningIcon(), func() {
 			v.d.Hide()
 			u.applyDiagFix(v.plan)
@@ -173,12 +241,10 @@ func (u *ui) applyDiagFix(plan core.FixPlan) {
 	})
 }
 
-// fixResultLines — итог словами: исправлено / НЕ исправлено / неизвестно.
+// fixResultLines — итог словами: исправлено / НЕ исправлено / неизвестно;
+// при прерывании — какие шаги уже выполнены (SEC-01 З3).
 func fixResultLines(res core.FixResult) []string {
-	var out []string
-	if res.RunErr != nil {
-		out = append(out, res.RunErr.Error())
-	}
+	out := append([]string(nil), res.Partial()...)
 	for _, o := range res.Outcomes {
 		out = append(out, o.Text())
 	}

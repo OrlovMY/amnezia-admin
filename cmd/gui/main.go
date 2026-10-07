@@ -35,6 +35,15 @@ type ui struct {
 	// diagShown, diagResult — окна диагностики окружения (diagnose.go) — для тестов.
 	diagShown  *diagView
 	diagResult dialog.Dialog
+	// diagDismissed — серверы (адрес), для которых нажато «Не сейчас»: до
+	// перезапуска программы окно проблемы при повторном подключении не
+	// показывается (решение ядра, круг 2 PR #44). Только в памяти.
+	diagDismissed map[string]bool
+	// diagNote — строка о диагностике в строке состояния ("" — нет);
+	// diagHold/diagPending — очередь за окном «Сохранить ключ?».
+	diagNote    string
+	diagHold    bool
+	diagPending *core.DiagReport
 
 	win        fyne.Window
 	sess       *core.Session
@@ -1436,6 +1445,10 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	)
 	d = dialog.NewCustom("Сохранить ключ?", "Не сохранять", content, u.win)
 	d.Resize(fyne.NewSize(460, 360))
+	// Окно диагностики ждёт, пока закроется это (QA-01 З3: очередь, а не
+	// окно поверх окна).
+	u.diagHold = true
+	d.SetOnClosed(u.releaseDiagHold)
 	d.Show()
 	// Первое поле формы; дальше Enter ведёт метка → пин → повтор → «Сохранить».
 	u.focusField(labelEntry)
@@ -2550,7 +2563,7 @@ func (u *ui) refresh() {
 				// файла — другое решение (Д3, П4: u.clients = nil, без
 				// числа в статусе) — это ветка ниже (err или !existed
 				// естественно даёт clients == nil от LoadClientsView).
-				u.status.SetText(view.Status)
+				u.status.SetText(u.withDiagNote(view.Status))
 				return
 			}
 			u.clients = clients
@@ -2574,7 +2587,7 @@ func (u *ui) refresh() {
 				// У7: причина «?» в таблице — в строке состояния, как в CLI
 				status = guiview.LoadedStatus(status, clients, stats, statsErr)
 			}
-			u.status.SetText(status)
+			u.status.SetText(u.withDiagNote(status))
 		})
 	})
 }

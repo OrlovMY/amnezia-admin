@@ -28,6 +28,15 @@ type DiagModel struct {
 	NoAppArmor bool
 	// Profiles — профили wg/wg-quick, загруженные в ядро (enforce).
 	Profiles []string
+	// StaleDenied — отказы в журнале от прошлого (профили уже сняты).
+	StaleDenied []string
+	// IfaceDown — интерфейса нет по причине, не связанной с AppArmor.
+	IfaceDown map[string]bool
+	// ProfNeedSudo — список профилей читается только под sudo -n (журнал —
+	// и без sudo).
+	ProfNeedSudo bool
+	// FakeLoaded — лишние строки LOADED= в выводе (подсунутое сервером).
+	FakeLoaded []string
 	// LogUnreadable, ProfUnreadable — журнал ядра / список профилей не
 	// читаются (и под sudo тоже).
 	LogUnreadable, ProfUnreadable bool
@@ -88,8 +97,9 @@ func (m *DiagModel) ensure(names []string) {
 			hit = true
 		}
 	}
+	m.denied = append(m.denied, m.StaleDenied...)
 	if hit {
-		m.denied = append([]string(nil), m.Profiles...)
+		m.denied = append(m.denied, m.Profiles...)
 		sort.Strings(m.denied)
 	}
 }
@@ -97,7 +107,7 @@ func (m *DiagModel) ensure(names []string) {
 // start — (пере)запуск контейнера: интерфейс поднимается, если профили не
 // мешают; MASQUERADE ставится, если iptables умеет nat.
 func (m *DiagModel) start(n string) {
-	m.ifaceUp[n] = !(wgQuickContainer(n) && !m.NoAppArmor && len(m.Profiles) > 0)
+	m.ifaceUp[n] = !(wgQuickContainer(n) && !m.NoAppArmor && len(m.Profiles) > 0) && !m.IfaceDown[n]
 	m.masq[n] = !m.Legacy[n] || m.linked[n]
 	if m.LegacyNoMasq[n] && !m.linked[n] {
 		m.masq[n] = false
@@ -229,11 +239,11 @@ func (m *DiagModel) hostProbe(sudo bool) string {
 		b.WriteString("AA=none\n")
 	} else {
 		b.WriteString("AA=yes\n")
-		if m.ProfUnreadable || !root {
+		if m.ProfUnreadable || !root || (m.ProfNeedSudo && !sudo) {
 			b.WriteString("PROF=unreadable\n")
 		} else {
 			b.WriteString("PROF=readable\n")
-			for _, p := range m.Profiles {
+			for _, p := range append(append([]string(nil), m.Profiles...), m.FakeLoaded...) {
 				b.WriteString("LOADED=" + p + "\n")
 			}
 		}

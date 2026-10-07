@@ -126,22 +126,18 @@ func TestDiagDialogThreeStates(t *testing.T) {
 	})
 	t.Run("не удалось узнать", func(t *testing.T) {
 		u, _ := diagUI(t, &fakesrv.DiagModel{Profiles: []string{"wg-quick"}, LogUnreadable: true, ProfUnreadable: true})
-		v := u.showDiagDialog(u.sess.Diagnose(u.containers))
-		if v == nil {
-			t.Fatal("«не удалось узнать» скрыто — окна нет")
+		u.diagnoseAfterConnect(u.sess, u.containers)
+		waitGUIGoroutines(t)
+		if u.diagShown != nil {
+			t.Fatal("«не удалось узнать» — модальное окно вместо строки состояния")
 		}
-		if v.fix != nil || v.copy != nil || v.later.Text != diagCloseText {
-			t.Fatalf("при «не удалось узнать» предложено исправление: %+v", v)
+		if !strings.Contains(u.status.Text, diagNoteUnknown) {
+			t.Fatalf("«не удалось узнать» скрыто: статус %q", u.status.Text)
 		}
-		var txt []string
-		walkObjects(topPopup(t, u.win.Canvas()), func(o fyne.CanvasObject) {
-			if l, ok := o.(*widget.Label); ok {
-				txt = append(txt, l.Text)
-			}
-		})
-		all := strings.Join(txt, "\n")
-		if !strings.Contains(all, "не удалось узнать") || !strings.Contains(all, diagTitleUnknown) {
-			t.Fatalf("%s", all)
+		u.refresh()
+		waitGUIGoroutines(t)
+		if !strings.Contains(u.status.Text, diagNoteUnknown) || strings.Count(u.status.Text, diagNoteUnknown) != 1 {
+			t.Fatalf("refresh стёр или удвоил строку: %q", u.status.Text)
 		}
 	})
 	t.Run("проблема", func(t *testing.T) {

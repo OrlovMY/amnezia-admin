@@ -43,7 +43,7 @@ func fixCmdsRan(exec *fakesrv.Server) []string {
 func TestRunDiagnosePrintsSameCommands(t *testing.T) {
 	m := &fakesrv.DiagModel{Profiles: []string{"wg-quick", "wg"}, Legacy: map[string]bool{"amnezia-awg": true}}
 	code, out, _, exec, _, _ := diagRun(t, m, "diagnose")
-	if code != 0 {
+	if code != 1 {
 		t.Fatalf("code=%d", code)
 	}
 	if ran := fixCmdsRan(exec); len(ran) != 0 {
@@ -105,7 +105,7 @@ func TestRunDiagnoseFixYes(t *testing.T) {
 func TestRunDiagnoseUnknownNoFix(t *testing.T) {
 	m := &fakesrv.DiagModel{Profiles: []string{"wg-quick"}, LogUnreadable: true, ProfUnreadable: true}
 	code, out, _, exec, _, _ := diagRun(t, m, "diagnose", "-fix", "-yes")
-	if code != 0 {
+	if code != 3 {
 		t.Fatalf("code=%d", code)
 	}
 	if !strings.Contains(out, "AppArmor: не удалось узнать") || !strings.Contains(out, "исправление не предлагается") {
