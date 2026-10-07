@@ -215,6 +215,10 @@ type Server struct {
 	// known_hosts, PR #31) — стенд перестаёт её воспроизводить.
 	CommandDelay time.Duration
 
+	// Diag — модель неисправностей для core.Diagnose/ApplyFix (diag.go);
+	// nil — исправный сервер.
+	Diag *DiagModel
+
 	// XRay — хуки контейнера amnezia-xray (AL-01, xray.go).
 	XRay XRayHooks
 	xray *xrayRuntime
@@ -749,6 +753,9 @@ func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 		return b.String(), nil
 
 	default:
+		if out, err, ok := s.dispatchDiag(cmd); ok {
+			return out, err
+		}
 		if out, err, ok := s.dispatchXRay(cmd); ok {
 			return out, err
 		}
