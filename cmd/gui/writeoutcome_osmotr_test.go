@@ -7,6 +7,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"amnezia-admin/core"
@@ -32,9 +33,21 @@ func pr3RealErr(t *testing.T, prep func(*fakesrv.Server)) error {
 	return err
 }
 
+// openWriteOutcome — ошибка записи добывается настоящим скриптом записи на
+// fakesrv (дочерний процесс оболочки, ~1-2 с на Windows) ОДИН раз на форму и
+// переиспользуется для всех размеров и тем: от размера и темы она не
+// зависит, а осматривается её показ. Прежде скрипт шёл 4 раза на форму —
+// больше половины времени TestOsmotrForms.
 func openWriteOutcome(prep func(*fakesrv.Server)) func(t *testing.T, u *ui, sized func()) osmotrScene {
+	var mu sync.Mutex
+	var cached error
 	return func(t *testing.T, u *ui, sized func()) osmotrScene {
-		err := pr3RealErr(t, prep)
+		mu.Lock()
+		if cached == nil {
+			cached = pr3RealErr(t, prep)
+		}
+		err := cached
+		mu.Unlock()
 		osmotrMain(u)
 		sized()
 		u.showError(err)
