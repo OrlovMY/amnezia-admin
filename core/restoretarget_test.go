@@ -62,7 +62,12 @@ func TestRestoreTargetUsersWG(t *testing.T) {
 		// адресом — ОДИН конфликт, не два
 		{"то же имя, другой ключ, тот же адрес", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.3/32"}} },
 			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
-			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32", []string{"Bob" + ReplacedNote}},
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32\n", []string{"Bob" + ReplacedNote}},
+		// QA Minor: повтор адреса в AllowedIPs — в строке конфликта один раз,
+		// порядок первого появления
+		{"адрес повторён в AllowedIPs", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.3/32, 10.8.1.9/32, 10.8.1.3/32"}} },
+			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32\n", []string{"Bob" + ReplacedNote}},
 		{"тот же ключ, другое имя", func(s map[string]string) []tc { return []tc{{s["Alice"], "Dave", "10.8.1.2/32"}} },
 			[]string{"Dave"}, 0, [][]ConflictKind{{ConflictKey}}, true, "КОНФЛИКТ: один и тот же ключ: на сервере — «Dave», в копии — «Alice»", nil},
 		{"тот же адрес у разных", func(map[string]string) []tc { return []tc{{other, "Erin", "10.8.1.3/32"}} },
