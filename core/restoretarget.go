@@ -19,6 +19,7 @@ package core
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -200,7 +201,9 @@ func compareTarget(tgt, src []restoreClient, svc ServiceState, tgtSvc, srcSvc st
 				cs[i].Kinds = append(cs[i].Kinds, k)
 				sort.Slice(cs[i].Kinds, func(a, b int) bool { return cs[i].Kinds[a] < cs[i].Kinds[b] })
 			}
-			if addr != "" {
+			// адрес — один раз (QA Minor: повтор в AllowedIPs печатался
+			// дважды); порядок — первого появления
+			if addr != "" && !slices.Contains(cs[i].Addrs, addr) {
 				cs[i].Addrs = append(cs[i].Addrs, addr)
 			}
 		}

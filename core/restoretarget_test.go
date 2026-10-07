@@ -49,30 +49,45 @@ func TestRestoreTargetUsersWG(t *testing.T) {
 		confirm  bool
 		text     string   // строка конфликта (круг 3)
 		removed  []string // удаляемые как в тексте (круг 3)
+		src      []tc     // nil — клиенты копии как у fakesrv (Alice, Bob)
 	}{
-		{"пусто", func(map[string]string) []tc { return nil }, nil, 0, nil, false, "", nil},
+		{"пусто", func(map[string]string) []tc { return nil }, nil, 0, nil, false, "", nil, nil},
 		{"есть пользователи без пересечений", func(map[string]string) []tc { return []tc{{other, "Carol", "10.8.1.9/32"}} },
-			[]string{"Carol"}, 0, nil, true, "", []string{"Carol"}},
+			[]string{"Carol"}, 0, nil, true, "", []string{"Carol"}, nil},
 		{"тот же клиент — совпадение", func(s map[string]string) []tc { return []tc{{s["Alice"], "Alice", "10.8.1.2/32"}} },
-			[]string{"Alice"}, 1, nil, true, "", nil},
+			[]string{"Alice"}, 1, nil, true, "", nil, nil},
 		{"то же имя, другой ключ", func(map[string]string) []tc { return []tc{{other, "Alice", "10.8.1.9/32"}} },
 			[]string{"Alice"}, 0, [][]ConflictKind{{ConflictName}}, true,
-			"КОНФЛИКТ: «Alice»: на сервере и в копии — разные клиенты (разные ключи)\n", []string{"Alice" + ReplacedNote}},
+			"КОНФЛИКТ: «Alice»: на сервере и в копии — разные клиенты (разные ключи)\n", []string{"Alice" + ReplacedNote}, nil},
 		// живая проверка: одноимённая пара с разными ключами и тем же
 		// адресом — ОДИН конфликт, не два
 		{"то же имя, другой ключ, тот же адрес", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.3/32"}} },
 			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
-			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32", []string{"Bob" + ReplacedNote}},
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32\n", []string{"Bob" + ReplacedNote}, nil},
+		// QA Minor: повтор адреса в AllowedIPs — в строке конфликта один раз,
+		// порядок первого появления
+		// QA: у пары ДВА разных общих адреса — оба, в порядке появления
+		// у клиента сервера
+		{"два общих адреса у пары", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.4/32, 10.8.1.3/32"}} },
+			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.4/32, 10.8.1.3/32\n", []string{"Bob" + ReplacedNote},
+			[]tc{{"SRCBOBKEYaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=", "Bob", "10.8.1.3/32, 10.8.1.4/32"}}},
+		{"адрес повторён в AllowedIPs", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.3/32, 10.8.1.9/32, 10.8.1.3/32"}} },
+			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32\n", []string{"Bob" + ReplacedNote}, nil},
 		{"тот же ключ, другое имя", func(s map[string]string) []tc { return []tc{{s["Alice"], "Dave", "10.8.1.2/32"}} },
-			[]string{"Dave"}, 0, [][]ConflictKind{{ConflictKey}}, true, "КОНФЛИКТ: один и тот же ключ: на сервере — «Dave», в копии — «Alice»", nil},
+			[]string{"Dave"}, 0, [][]ConflictKind{{ConflictKey}}, true, "КОНФЛИКТ: один и тот же ключ: на сервере — «Dave», в копии — «Alice»", nil, nil},
 		{"тот же адрес у разных", func(map[string]string) []tc { return []tc{{other, "Erin", "10.8.1.3/32"}} },
-			[]string{"Erin"}, 0, [][]ConflictKind{{ConflictAddress}}, true, "КОНФЛИКТ: адрес 10.8.1.3/32: на сервере у «Erin», в копии у «Bob»", []string{"Erin"}},
+			[]string{"Erin"}, 0, [][]ConflictKind{{ConflictAddress}}, true, "КОНФЛИКТ: адрес 10.8.1.3/32: на сервере у «Erin», в копии у «Bob»", []string{"Erin"}, nil},
 		{"peer без записи в таблице", func(map[string]string) []tc { return []tc{{other, "", "10.8.1.9/32"}} },
-			[]string{"(без имени)"}, 0, nil, true, "", []string{"(без имени)"}},
+			[]string{"(без имени)"}, 0, nil, true, "", []string{"(без имени)"}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			src, tgt := migrationPair(t)
+			if c.src != nil {
+				setWGClients(t, src, c.src)
+			}
 			b := sourceBackup(t, src, "203.0.113.1")
 			setWGClients(t, tgt, c.tgt(srcIDs(t, src, awgDir)))
 			ts := NewSessionWithRunner(tgt, &ServerCreds{Host: "203.0.113.1"})
