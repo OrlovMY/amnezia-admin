@@ -462,8 +462,8 @@ func windowDiff(ids map[string]string, a, b *existingSnap) (info, unknown, gone 
 		case got == was:
 			continue
 		}
-		if v, ok := addedAllowedIPs(was, got, b.peers[id]); ok {
-			info = append(info, "у записи "+short(id)+" появилось allowed_ips = "+v)
+		if what, ok := windowAllowed(was, got, b.peers[id]); ok {
+			info = append(info, "у записи "+short(id)+" "+what)
 			continue
 		}
 		unknown = append(unknown, "изменение в окне К6 — чья правка, не различить: запись "+short(id)+", поля: "+fieldDiff(was, got))
@@ -472,28 +472,72 @@ func windowDiff(ids map[string]string, a, b *existingSnap) (info, unknown, gone 
 	return info, unknown, gone
 }
 
-// addedAllowedIPs — got отличается от was ровно появившимся полем
-// allowed_ips (строка), равным AllowedIPs блока [Peer] peer.
-func addedAllowedIPs(was, got, peer string) (string, bool) {
+// statsFields — поля статистики, которые приложение Amnezia пишет в userData
+// существующих записей, когда показывает список пользователей (живой прогон
+// ФИНАЛ-2 03.10: dataReceived, dataSent, latestHandshake в окне К6). Наш код
+// их не пишет (поиск по core и cmd). Закрытый список: расширять только по
+// новому наблюдению приложения с записью в отчёте.
+var statsFields = map[string]bool{"dataReceived": true, "dataSent": true, "latestHandshake": true}
+
+// windowAllowed — got отличается от was только допустимыми в окне К6
+// изменениями (закрытый список, AU-LOGIC р8 High-5):
+//   - появилось allowed_ips (строка), равное AllowedIPs блока [Peer] peer;
+//   - появились или сменились строковые поля статистики statsFields
+//     (пропажа поля статистики — не из списка).
+//
+// Остальные поля userData обязаны совпасть по значению. Возвращает
+// сведение без значений статистики (они не наши и в итоге не нужны).
+func windowAllowed(was, got, peer string) (string, bool) {
 	var a, b core.ClientEntry
 	if json.Unmarshal([]byte(was), &a) != nil || json.Unmarshal([]byte(got), &b) != nil || a.ClientID != b.ClientID {
 		return "", false
 	}
-	if _, had := a.UserData["allowed_ips"]; had {
-		return "", false
+	var parts, stats []string
+	for k := range a.UserData {
+		if _, ok := b.UserData[k]; !ok {
+			return "", false // поле пропало — ни одно допустимое изменение этого не делает
+		}
 	}
-	v, ok := b.UserData["allowed_ips"].(string)
-	if !ok || len(b.UserData) != len(a.UserData)+1 {
-		return "", false
+	keys := make([]string, 0, len(b.UserData))
+	for k := range b.UserData {
+		keys = append(keys, k)
 	}
-	for k, x := range a.UserData {
-		y, ok := b.UserData[k]
+	sort.Strings(keys)
+	for _, k := range keys {
+		y := b.UserData[k]
+		x, had := a.UserData[k]
 		jx, _ := json.Marshal(x)
 		jy, _ := json.Marshal(y)
-		if !ok || string(jx) != string(jy) {
+		if had && string(jx) == string(jy) {
+			continue
+		}
+		switch {
+		case statsFields[k]:
+			if _, ok := y.(string); !ok {
+				return "", false
+			}
+			stats = append(stats, k)
+		case k == "allowed_ips" && !had:
+			v, ok := y.(string)
+			if !ok || !peerAllowedIPs(peer, v) {
+				return "", false
+			}
+			parts = append(parts, "появилось allowed_ips = "+v)
+		default:
 			return "", false
 		}
 	}
+	if len(stats) > 0 {
+		parts = append(parts, "обновлена статистика ("+strings.Join(stats, ", ")+")")
+	}
+	if len(parts) == 0 {
+		return "", false // запись переписана без изменения полей — не из списка
+	}
+	return strings.Join(parts, "; "), true
+}
+
+// peerAllowedIPs — v равно AllowedIPs блока [Peer] peer (пробелы не в счёт).
+func peerAllowedIPs(peer, v string) bool {
 	want := ""
 	for _, l := range strings.Split(peer, "\n") {
 		if kv := strings.SplitN(l, "=", 2); len(kv) == 2 && strings.TrimSpace(kv[0]) == "AllowedIPs" {
@@ -501,10 +545,7 @@ func addedAllowedIPs(was, got, peer string) (string, bool) {
 		}
 	}
 	norm := func(s string) string { return strings.ReplaceAll(s, " ", "") }
-	if want == "" || norm(v) != norm(want) {
-		return "", false
-	}
-	return v, true
+	return want != "" && norm(v) == norm(want)
 }
 
 // existingIntact — П0-итог: каждый клиент из снимка на месте и не изменён.
