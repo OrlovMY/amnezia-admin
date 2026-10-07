@@ -15,7 +15,7 @@
 //	amnezia-admin show-config -key vpn://... -name Vasya [-print]
 //	amnezia-admin backup -key vpn://... [-o файл.aabk] (-password-file файл | -no-password)
 //	amnezia-admin backup-info [-password-file файл] файл.aabk
-//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-yes]
+//	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -983,6 +983,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	pwFile := fs.String("password-file", "", "backup/restore: файл с паролем копии (пароль аргументом не передаётся)")
 	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
 	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
+	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -1071,7 +1072,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	case "restore":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		return runRestore(ctx, stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *yes, time.Now())
+		return runRestore(ctx, stdin, stdout, stderr, isTTY, sess, *backupFile, *pwFile, *apply, *addrChanges, *skipXRay, *replaceUsers, *yes, time.Now())
 	case "list":
 		_, err = listUsers(stdout, sess, cur)
 	case "add":

@@ -217,8 +217,10 @@ func TestRestoreWindowRemovedFirst(t *testing.T) {
 	u, _, tgt, p := guiMigration(t, "203.0.113.1")
 	b, compat, rp, planErr, _ := u.restorePrepare(p)
 	v := u.restoreWindow(b, compat, rp, planErr)
+	// задача владельца 07.10: первым — число пользователей нового
+	// сервера, сразу за ним — удаляемые, до сводки копии
 	rm := strings.Index(v.text, "Будут УДАЛЕНЫ клиенты нового сервера")
-	if rm != 0 {
+	if !strings.HasPrefix(v.text, "ВНИМАНИЕ: на этом сервере уже есть пользователи — 2") || rm < 0 || rm > strings.Index(v.text, "Копия сервера") {
 		t.Errorf("раздел удаляемых не первым (позиция %d):\n%s", rm, v.text)
 	}
 	wg, _ := tgt.File("/opt/amnezia/awg/wg0.conf")

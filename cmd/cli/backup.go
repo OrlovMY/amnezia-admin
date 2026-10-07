@@ -133,8 +133,24 @@ func backupErr(errOut io.Writer, prefix string, err error) {
 	fmt.Fprintln(errOut, prefix+errText(err, func(x string) string { return x }))
 }
 
-// runRestore — restore -file X [-apply] [-address-changes] [-skip-xray] [-yes].
-func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, yes bool, now time.Time) int {
+// replaceUsersText — вопрос отдельного подтверждения (на новом сервере
+// есть пользователи или конфликты с копией).
+const (
+	replaceUsersWord   = "записать"
+	replaceUsersPrompt = "На новом сервере есть пользователи (список выше) — после замены их не будет. Всё равно записать? Введите «" + replaceUsersWord + "» (иначе — отмена): "
+	replaceUsersRefuse = "ПЕРЕЕЗД ОСТАНОВЛЕН: на новом сервере есть пользователи или конфликты с копией (список выше). Если вы всё равно хотите их заменить — повторите с флагом -replace-users."
+)
+
+// targetListMax — сколько имён пользователей цели печатается в терминале
+// (число печатается всегда).
+const targetListMax = 50
+
+// bypassTargetGate — шов теста (AU-LOGIC З2): обойти проверку CLI выше
+// ядра, чтобы убедиться, что ядро без подтверждения само не пишет.
+var bypassTargetGate bool
+
+// runRestore — restore -file X [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes].
+func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, file, pwFile string, apply, addrOK, skipXRay, replaceUsers, yes bool, now time.Time) int {
 	if file == "" {
 		fmt.Fprintln(errOut, "Не задан файл копии: -file <файл.aabk>")
 		return 1
@@ -160,7 +176,14 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 			backupErr(errOut, "План не построен: ", err)
 			return exitRestoreStopped
 		}
-		// AU-UX M2: кто пропадёт — первым разделом.
+		// Задача владельца 07.10: пользователи нового сервера и конфликты
+		// с копией — первым разделом, с числом.
+		if rp.NeedsTargetConfirm() {
+			fmt.Fprintln(w, core.TargetWarnHead(rp))
+			printLines(w, core.TargetWarnLines(rp, targetListMax))
+			fmt.Fprintln(w)
+		}
+		// AU-UX M2: кто пропадёт.
 		if rm := core.RemovedLines(rp); rm != nil {
 			printLines(w, rm)
 			fmt.Fprintln(w)
@@ -197,6 +220,16 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	// AU-UX M1: XRay — только явным выбором: перезапуск (вопрос или -yes)
 	// или -skip-xray. Ответ «нет» — отмена всего, не молчаливый пропуск.
 	xrayOK := hasXRay && !skipXRay
+	// Пользователи на новом сервере: без терминала или с -yes — только с
+	// -replace-users; в терминале — отдельный вопрос с вводом слова.
+	askUsers := rp.NeedsTargetConfirm() && !replaceUsers
+	// подтверждение для ядра — только полученное (флаг или ввод слова);
+	// пользователей нет — подтверждать нечего (AU-LOGIC З2)
+	targetOK := !rp.NeedsTargetConfirm() || replaceUsers
+	if askUsers && (yes || !isTTY) && !bypassTargetGate {
+		fmt.Fprintln(w, replaceUsersRefuse)
+		return 2
+	}
 	if !yes {
 		if !isTTY {
 			fmt.Fprintln(errOut, "Действие не выполнено: без терминала требуется флаг -yes (для скриптов).")
@@ -206,6 +239,14 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 		if a := strings.ToLower(strings.TrimSpace(readLine(in))); a != "y" && a != "yes" {
 			fmt.Fprintln(w, "Отменено.")
 			return 2
+		}
+		if askUsers {
+			fmt.Fprint(w, replaceUsersPrompt)
+			if a := strings.ToLower(strings.TrimSpace(readLine(in))); a != replaceUsersWord {
+				fmt.Fprintln(w, "Отменено: ничего не записано.")
+				return 2
+			}
+			targetOK = true
 		}
 		if xrayOK {
 			fmt.Fprint(w, "Применение перезапустит XRay: все текущие подключения по XRay оборвутся. Перезапустить XRay? (y/n; чтобы перенести без XRay — отмените и повторите с -skip-xray): ")
@@ -228,6 +269,7 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	}
 	opt.AutoCopyDir = dir
 	opt.ConfirmXRay = func() bool { return xrayOK }
+	opt.TargetConfirmed = targetOK
 	opt.Ctx, opt.Progress = ctx, cliProgress(errOut, isTTY)
 	auto, outs, err := sess.Restore(rp, opt)
 	endProgress(errOut, isTTY)

@@ -68,7 +68,7 @@ func TestCLIAutoCopyInheritsLayer(t *testing.T) {
 
 	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)
 	tgt.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("NEW-PSK\n"))
-	code, out, e := cliRun(t, khB, "", "restore", "-key", keyB, "-file", enc, "-password-file", good, "-apply", "-yes")
+	code, out, e := cliRun(t, khB, "", "restore", "-key", keyB, "-file", enc, "-password-file", good, "-apply", "-yes", "-replace-users")
 	if code != 0 {
 		t.Fatalf("restore из зашифрованной: %d %s\n%s", code, e, out)
 	}
@@ -88,7 +88,7 @@ func TestCLIAutoCopyInheritsLayer(t *testing.T) {
 
 	keyC, khC, tgt2 := setupFakeSSHForRunWithExec(t)
 	tgt2.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("NEW-PSK\n"))
-	code, out, e = cliRun(t, khC, "", "restore", "-key", keyC, "-file", plain, "-apply", "-yes")
+	code, out, e = cliRun(t, khC, "", "restore", "-key", keyC, "-file", plain, "-apply", "-yes", "-replace-users")
 	if code != 0 || !strings.Contains(out, core.AutoCopyUnencryptedNote) {
 		t.Fatalf("restore из незашифрованной: %d %s\n%s", code, e, out)
 	}
