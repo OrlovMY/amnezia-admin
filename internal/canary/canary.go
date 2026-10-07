@@ -1504,22 +1504,24 @@ func (e *Env) breakWrite() Result {
 	third := e.cli(e.NewBin, e.KeyEnv, "add", "-name", "canary-k5c")
 	detail := fmt.Sprintf("%s; замок после обрыва: %s; вторая запись: код %d за %.1f с (%s); третья: код %d; файлы: %s; %s",
 		tries, release, second.code, second.dur.Seconds(), second.title, third.code, why, noWait)
-	st, outcome := judgeK5(second, cons, landed, third.code)
+	st, outcome := judgeK5(second, cons, landed, third)
 	return Result{Status: st, Detail: detail + " — " + outcome}
 }
 
 // judgeK5 — пункты 3 и 4 (пункты 1 и 2 подтверждены до вызова). Третья
-// запись не прошла — замок завис.
-func judgeK5(second cliRun, cons consState, landed landedState, thirdCode int) (Status, string) {
+// запись не прошла — замок завис. «Занято» узнаётся так же, как у второй
+// записи (isBusy: код 1 и заголовок Busy); кодом 4 CLI не выходит, и прежняя
+// ветка `код == 4` боевым путём была недостижима (AU Low-7).
+func judgeK5(second cliRun, cons consState, landed landedState, third cliRun) (Status, string) {
 	switch {
 	case cons == consUnknown:
 		return NotChecked, "пункт 4 не подтверждён: согласованность файлов не проверена (не прочитано)"
 	case cons == consNo:
 		return Fail, "файлы не согласованы"
-	case thirdCode == 4:
-		return Fail, "третья запись: код 4 (замок занят) — замок завис"
-	case thirdCode != 0:
-		return Fail, fmt.Sprintf("третья запись: код %d", thirdCode)
+	case isBusy(third):
+		return Fail, "третья запись: замок занят — замок завис"
+	case third.code != 0:
+		return Fail, fmt.Sprintf("третья запись: код %d", third.code)
 	}
 	st, outcome := judgeK5Second(second, landed)
 	if st != Pass {

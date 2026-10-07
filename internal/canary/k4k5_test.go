@@ -490,21 +490,22 @@ func TestJudgeK5(t *testing.T) {
 		r      cliRun
 		cons   consState
 		landed landedState
-		third  int
+		third  cliRun
 		want   Status
 		text   string
 	}{
-		{"код 0, исход известен", cliRun{}, consYes, landedNo, 0, Pass, "код 0"},
-		{"занято", cliRun{code: 1, title: bsy.Title}, consYes, landedNo, 0, Pass, "занято"},
-		{"CAS, оборванная завершилась", changed, consYes, landedYes, 0, Pass, "сверено по содержимому"},
-		{"CAS без изменения оборванной", changed, consYes, landedNo, 0, Fail, "необъясним"},
-		{"CAS, исход не узнать", changed, consYes, landedUnknown, 0, NotChecked, "пункт 3"},
-		{"пункт 4: код 0, исход оборванной не узнать", cliRun{}, consYes, landedUnknown, 0, NotChecked, "пункт 4"},
-		{"файлы не согласованы", cliRun{}, consNo, landedNo, 0, Fail, "не согласованы"},
-		{"третья: код 1 — без вывода о зависании", cliRun{}, consYes, landedNo, 1, Fail, "третья запись: код 1"},
-		{"третья: код 4 — замок завис", cliRun{}, consYes, landedNo, 4, Fail, "замок завис"},
-		{"не прочитано — не «не согласованы»", cliRun{}, consUnknown, landedNo, 0, NotChecked, "не проверена"},
-		{"иной отказ", cliRun{code: 1, title: "что-то"}, consYes, landedYes, 0, Fail, "не прошла"},
+		{"код 0, исход известен", cliRun{}, consYes, landedNo, cliRun{}, Pass, "код 0"},
+		{"занято", cliRun{code: 1, title: bsy.Title}, consYes, landedNo, cliRun{}, Pass, "занято"},
+		{"CAS, оборванная завершилась", changed, consYes, landedYes, cliRun{}, Pass, "сверено по содержимому"},
+		{"CAS без изменения оборванной", changed, consYes, landedNo, cliRun{}, Fail, "необъясним"},
+		{"CAS, исход не узнать", changed, consYes, landedUnknown, cliRun{}, NotChecked, "пункт 3"},
+		{"пункт 4: код 0, исход оборванной не узнать", cliRun{}, consYes, landedUnknown, cliRun{}, NotChecked, "пункт 4"},
+		{"файлы не согласованы", cliRun{}, consNo, landedNo, cliRun{}, Fail, "не согласованы"},
+		{"третья: код 1 — без вывода о зависании", cliRun{}, consYes, landedNo, cliRun{code: 1}, Fail, "третья запись: код 1"},
+		{"третья: «занято» (код 1 + заголовок Busy) — замок завис", cliRun{}, consYes, landedNo, cliRun{code: 1, title: bsy.Title}, Fail, "замок завис"},
+		{"третья: код 4 без заголовка — не «завис»", cliRun{}, consYes, landedNo, cliRun{code: 4}, Fail, "третья запись: код 4"},
+		{"не прочитано — не «не согласованы»", cliRun{}, consUnknown, landedNo, cliRun{}, NotChecked, "не проверена"},
+		{"иной отказ", cliRun{code: 1, title: "что-то"}, consYes, landedYes, cliRun{}, Fail, "не прошла"},
 	} {
 		got, why := judgeK5(c.r, c.cons, c.landed, c.third)
 		if got != c.want || !strings.Contains(why, c.text) {
