@@ -96,7 +96,7 @@ func TestGUIRestoreCancelResult(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	auto, outs, err := u.runRestoreCtx(ctx, rp, false, time.Now(), nil)
+	auto, outs, err := u.runRestoreCtx(ctx, rp, false, true, time.Now(), nil)
 	if !errors.Is(err, core.ErrCanceled) || outs != nil || writesGUI(tgt) != 0 {
 		t.Fatalf("отмена: %v %+v записей %d", err, outs, writesGUI(tgt))
 	}

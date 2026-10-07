@@ -41,6 +41,11 @@ const (
 	restoreXRayHint     = "Выберите, что делать с XRay:"
 	restoreDetailsTitle = "Подробнее о копии (состав по протоколам и файлам)"
 	backupCopyPathText  = "Скопировать путь"
+	restoreForceText    = "Всё равно записать"
+	restoreUsersTitle   = "На новом сервере уже есть пользователи"
+	// targetFoldLines — длиннее этого список пользователей и конфликтов
+	// сворачивается (число — в заголовке, видно всегда).
+	targetFoldLines = 12
 )
 
 // requestedSize — заданный размер окон копии (сторож AU-UX р2 Р2-1 сверяет
@@ -373,6 +378,43 @@ type restoreView struct {
 	xrayRadio *widget.RadioGroup // «одно из двух», без выбора по умолчанию
 	details   *widget.Accordion  // «Подробнее о копии» (свёрнуто)
 	text      string
+	// users — отдельное окно «Всё равно записать» (пользователи на новом
+	// сервере или конфликты), nil — не открывалось.
+	users *targetView
+}
+
+// targetView — окно подтверждения записи поверх пользователей нового
+// сервера (поля — для тестов).
+type targetView struct {
+	d     dialog.Dialog
+	force *escButton
+	list  *widget.Accordion // свёрнутый длинный список; nil — список короткий
+	text  string
+}
+
+// targetSections — заголовок с числом (всегда виден) и список: короткий —
+// как есть, длинный — свёрнут.
+func targetSections(rp *core.RestorePlan) ([]fyne.CanvasObject, *widget.Accordion, string) {
+	head := core.TargetWarnHead(rp)
+	lines := core.TargetWarnLines(rp, 0)
+	text := head + "\n" + strings.Join(lines, "\n")
+	secs := []fyne.CanvasObject{wrapLabel(head, true)}
+	body := wrapLabel(strings.Join(lines, "\n"), false)
+	if len(lines) <= targetFoldLines && rp.TargetUserCount() <= targetFoldLines {
+		return append(secs, body), nil, text
+	}
+	acc := widget.NewAccordion(widget.NewAccordionItem(
+		fmt.Sprintf("Список: пользователей %d, конфликтов %d", rp.TargetUserCount(), rp.TargetConflictCount()), body))
+	return append(secs, acc), acc, text
+}
+
+// targetConfirm — отдельное явное подтверждение: запись только кнопкой
+// «Всё равно записать» (опасный стиль), фокус на «Отмена».
+func (u *ui) targetConfirm(rp *core.RestorePlan, onOK func()) *targetView {
+	secs, acc, text := targetSections(rp)
+	secs = append(secs, wrapLabel("Перед записью будет снята автокопия этого сервера. Записать, только если эти пользователи вам не нужны или перенесены иначе.", false))
+	cw := u.confirmWindowBtn(restoreUsersTitle, secs, restoreForceText, true, onOK, 640)
+	return &targetView{d: cw.d, force: cw.ok, list: acc, text: text}
 }
 
 // restoreWindow — устройство окна подтверждения XRay (AU-UX H1): «Отмена» и
@@ -391,6 +433,12 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 		}
 		sections = append(sections, wrapLabel(strings.Join(lines, "\n"), bold))
 		all = append(all, lines...)
+	}
+	// пользователи нового сервера: здесь — число (заголовок), список и
+	// конфликты — в отдельном окне «Всё равно записать» (окно до начала —
+	// без прокрутки, отзыв владельца на 32d66c4)
+	if rp != nil && rp.NeedsTargetConfirm() {
+		addSection([]string{core.TargetWarnHead(rp) + " Список и конфликты — в следующем окне, перед записью."}, true)
 	}
 	if rp != nil {
 		addSection(core.RemovedLines(rp), true)
@@ -431,7 +479,13 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 		v.xrayRadio = widget.NewRadioGroup([]string{restoreXRayCheck, restoreSkipXRay}, func(string) { update() })
 		sections = append(sections, wrapLabel(restoreXRayHint, true), v.xrayRadio)
 	}
-	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() { u.doRestore(rp, v) }, 900)
+	cw := u.confirmWindowBtn("Восстановить из копии на этом сервере", sections, restoreApplyText, true, func() {
+		if rp.NeedsTargetConfirm() {
+			v.users = u.targetConfirm(rp, func() { u.doRestore(rp, v, true) })
+			return
+		}
+		u.doRestore(rp, v, false)
+	}, 900)
 	v.d, v.apply = cw.d, cw.ok
 	update = func() {
 		can := !compat.Stop && planErr == nil && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
@@ -450,12 +504,14 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 }
 
 // runRestore — замена (синхронно; для теста и для фоновой задачи).
-func (u *ui) runRestore(rp *core.RestorePlan, xrayOK bool, now time.Time) (string, []core.RestoreOutcome, error) {
-	return u.runRestoreCtx(context.Background(), rp, xrayOK, now, nil)
+// targetOK — отдельное подтверждение записи поверх пользователей нового
+// сервера («Всё равно записать»).
+func (u *ui) runRestore(rp *core.RestorePlan, xrayOK, targetOK bool, now time.Time) (string, []core.RestoreOutcome, error) {
+	return u.runRestoreCtx(context.Background(), rp, xrayOK, targetOK, now, nil)
 }
 
 // runRestoreCtx — то же с отменой (до первой записи) и прогрессом.
-func (u *ui) runRestoreCtx(ctx context.Context, rp *core.RestorePlan, xrayOK bool, now time.Time, progress core.ProgressFunc) (string, []core.RestoreOutcome, error) {
+func (u *ui) runRestoreCtx(ctx context.Context, rp *core.RestorePlan, xrayOK, targetOK bool, now time.Time, progress core.ProgressFunc) (string, []core.RestoreOutcome, error) {
 	dir, err := core.UserBackupsDir()
 	if err == nil {
 		err = os.MkdirAll(dir, 0o700)
@@ -468,10 +524,10 @@ func (u *ui) runRestoreCtx(ctx context.Context, rp *core.RestorePlan, xrayOK boo
 		layer = core.PlainLayer{}
 	}
 	return u.sess.Restore(rp, core.RestoreOptions{AutoCopyDir: dir, ToolVersion: version.String(), Now: now,
-		Resolve: backupResolve, Layer: layer, ConfirmXRay: func() bool { return xrayOK }, Ctx: ctx, Progress: progress})
+		Resolve: backupResolve, Layer: layer, ConfirmXRay: func() bool { return xrayOK }, TargetConfirmed: targetOK, Ctx: ctx, Progress: progress})
 }
 
-func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
+func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView, targetOK bool) {
 	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == restoreXRayCheck
 	v.d.Hide()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -480,7 +536,7 @@ func (u *ui) doRestore(rp *core.RestorePlan, v *restoreView) {
 	u.lastProgress = pv
 	goSafe(func() {
 		defer cancel()
-		auto, outs, err := u.runRestoreCtx(ctx, rp, xrayOK, time.Now(), pv.report)
+		auto, outs, err := u.runRestoreCtx(ctx, rp, xrayOK, targetOK, time.Now(), pv.report)
 		fyne.Do(func() {
 			u.setBusy(false)
 			u.restoreFinished(auto, outs, err)

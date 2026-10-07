@@ -29,7 +29,11 @@ type RestoreItem struct {
 	// их не будет (перечисляются поимённо).
 	Removed []string
 	// Clients — число клиентов в копии.
-	Clients      int
+	Clients int
+	// Target — пользователи нового сервера до записи; Conflicts — их
+	// пересечения с клиентами копии (restoretarget.go).
+	Target       TargetUsers
+	Conflicts    []RestoreConflict
 	RestartsXRay bool
 	plan         *Plan
 }
@@ -111,6 +115,16 @@ func (s *Session) PlanRestore(b *Backup, compat *CompatReport, addressConfirmed 
 	return rp, nil
 }
 
+// installIDOf — UUID клиента установки XRay из файла xray_uuid.key; false —
+// файла нет или в нём не UUID.
+func installIDOf(f BackupFile) (string, bool) {
+	if f.Status != FileSaved {
+		return "", false
+	}
+	id := strings.TrimSpace(string(f.Data.Bytes()))
+	return id, reUUID.MatchString(id)
+}
+
 func (s *Session) planRestoreContainer(c *Container, bc BackupContainer) (RestoreItem, error) {
 	names, _, ok := backupFilesOf(c)
 	if !ok || len(bc.Files) != len(names) {
@@ -164,19 +178,27 @@ func (s *Session) planRestoreContainer(c *Container, bc BackupContainer) (Restor
 		return RestoreItem{}, stopped("%s: clientsTable не разобрана — список удаляемых неизвестен", c.Name)
 	}
 	it.Clients = len(after)
+	wg := !IsXRay(c)
+	tgtCl := clientsOf(before, p.wgBefore, wg)
+	srcCl := clientsOf(after, p.wgAfter, wg)
 	keep := map[string]bool{}
-	for _, e := range after {
-		keep[e.ClientID] = true
+	for _, e := range srcCl {
+		keep[e.id] = true
 	}
-	for _, e := range before {
-		if !keep[e.ClientID] {
-			n := e.Name()
-			if n == "" {
-				n = "(без имени)"
-			}
-			it.Removed = append(it.Removed, n)
+	for _, e := range tgtCl {
+		if !keep[e.id] {
+			it.Removed = append(it.Removed, displayName(e.name))
 		}
 	}
+	svc, tgtSvc, srcSvc := ServiceNone, "", ""
+	if !wg {
+		svc = ServiceUnknown
+		if id, ok := installIDOf(tgt[xrayUUIDFile]); ok {
+			svc, tgtSvc = ServiceFound, id
+		}
+		srcSvc, _ = installIDOf(src[xrayUUIDFile])
+	}
+	it.Target, it.Conflicts = compareTarget(tgtCl, srcCl, svc, tgtSvc, srcSvc)
 	return it, nil
 }
 
@@ -233,6 +255,10 @@ type RestoreOptions struct {
 	// ConfirmXRay — подтверждение перезапуска XRay (вызывается, только если
 	// его часть что-то меняет). nil — «нет».
 	ConfirmXRay func() bool
+	// TargetConfirmed — отдельное подтверждение: на новом сервере есть
+	// пользователи или конфликты с копией (RestorePlan.NeedsTargetConfirm).
+	// Без него такой план не записывается.
+	TargetConfirmed bool
 }
 
 var reSafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -288,6 +314,9 @@ const (
 func (s *Session) Restore(rp *RestorePlan, opt RestoreOptions) (autoCopy string, outs []RestoreOutcome, err error) {
 	if rp == nil || len(rp.Items) == 0 {
 		return "", nil, stopped("план пуст")
+	}
+	if rp.NeedsTargetConfirm() && !opt.TargetConfirmed {
+		return "", nil, stopped("на новом сервере есть пользователи (%d) или конфликты с копией — запись без отдельного подтверждения запрещена", rp.TargetUserCount())
 	}
 	if opt.AutoCopyDir == "" || opt.Layer == nil {
 		return "", nil, stopped("не задан каталог или слой автокопии")

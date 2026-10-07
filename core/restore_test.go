@@ -30,7 +30,7 @@ func migrationPair(t *testing.T) (src, tgt *fakesrv.Server) {
 }
 
 func restoreOpts(t *testing.T) RestoreOptions {
-	return RestoreOptions{AutoCopyDir: t.TempDir(), ToolVersion: "t", Now: backupNow, Resolve: okResolver, Layer: PlainLayer{}}
+	return RestoreOptions{AutoCopyDir: t.TempDir(), ToolVersion: "t", Now: backupNow, Resolve: okResolver, Layer: PlainLayer{}, TargetConfirmed: true}
 }
 
 func planFor(t *testing.T, b *Backup, tgtSess *Session) *RestorePlan {
