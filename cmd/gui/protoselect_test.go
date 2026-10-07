@@ -7,6 +7,7 @@ import (
 	"amnezia-admin/core"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -69,6 +70,25 @@ func checkedOnly(t *testing.T, items []*fyne.MenuItem, want int) {
 	}
 }
 
+// litOnly — фон строки (первый объект отрисовщика пункта меню Fyne) виден
+// ровно у текущего пункта и залит цветом выделения темы (ColorNameFocus).
+// Читается с отрисовки, а не из нашего кода.
+func litOnly(t *testing.T, objs []fyne.CanvasObject, want int) {
+	t.Helper()
+	focus := theme.Current().Color(theme.ColorNameFocus, fyne.CurrentApp().Settings().ThemeVariant())
+	for i, o := range objs {
+		r := test.WidgetRenderer(o.(fyne.Widget))
+		bg, ok := r.Objects()[0].(*canvas.Rectangle)
+		if !ok {
+			t.Fatalf("пункт %d: первый объект отрисовки %T, а не фон-прямоугольник — проверка ничего не значит", i, r.Objects()[0])
+		}
+		lit := bg.Visible() && bg.FillColor == focus
+		if lit != (i == want) {
+			t.Errorf("пункт %d: подсвечен=%v (видим %v, цвет %v), ожидалось %v (выбран пункт %d)", i, lit, bg.Visible(), bg.FillColor, i == want, want)
+		}
+	}
+}
+
 // TestProtoMenuMarksCurrent — в раскрытом списке протоколов отмечен ровно
 // текущий пункт; после выбора другого пункта из меню отметка переезжает.
 // Подмены «не отмечать ничего» и «отмечать всегда первый» роняют тест.
@@ -113,6 +133,7 @@ func TestProtoMenuMarksCurrent(t *testing.T) {
 	open() // стартовое чтение завершилось — список разблокирован боевым путём
 	items, objs := openProtoMenu(t, u)
 	checkedOnly(t, items, 1)
+	litOnly(t, objs, 1)
 
 	// щелчок по пункту меню: выбор и закрытие меню
 	gated()
@@ -132,8 +153,9 @@ func TestProtoMenuMarksCurrent(t *testing.T) {
 	if u.protoSelect.Disabled() {
 		t.Fatal("после чтения с сервера список остался заблокирован")
 	}
-	items, _ = openProtoMenu(t, u)
+	items, objs = openProtoMenu(t, u)
 	checkedOnly(t, items, 2)
+	litOnly(t, objs, 2)
 }
 
 // TestProtoMenuDisabledDoesNotOpen — на время операции список заблокирован
