@@ -24,7 +24,7 @@ func TestCLIRestoreTargetUsersRefused(t *testing.T) {
 	if code != 2 || flocks(tgt) != 0 {
 		t.Fatalf("без -replace-users: код %d, записей %d\n%s", code, flocks(tgt), out)
 	}
-	for _, part := range []string{"уже есть пользователи — 2", "Alice, Bob", "КОНФЛИКТ: имя «Alice»", "-replace-users"} {
+	for _, part := range []string{"уже есть пользователи — 2", "Alice, Bob", "КОНФЛИКТ: «Alice»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.2/32", "Alice (будет заменён клиентом из копии с тем же именем)", "-replace-users"} {
 		if !strings.Contains(out, part) {
 			t.Errorf("в выводе нет «%s»:\n%s", part, out)
 		}

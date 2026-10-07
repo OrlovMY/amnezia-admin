@@ -48,22 +48,40 @@ const (
 	ConflictAddress
 )
 
-// RestoreConflict — одно пересечение (без ключей: только имена и адрес).
+// RestoreConflict — пересечение ОДНОЙ пары клиентов (сервер, копия) со
+// всеми её признаками (круг 3, живая проверка: счёт конфликтов — по парам
+// клиентов, не по признакам). Без ключей: только имена и адреса.
 type RestoreConflict struct {
-	Kind   ConflictKind
-	Target string // имя клиента нового сервера
-	Source string // имя клиента копии
-	Addr   string // для ConflictAddress
+	Kinds  []ConflictKind // по возрастанию, без повторов
+	Target string         // имя клиента нового сервера
+	Source string         // имя клиента копии
+	Addrs  []string       // общие адреса (ConflictAddress)
+}
+
+// Has — есть ли у пары признак k.
+func (c RestoreConflict) Has(k ConflictKind) bool {
+	for _, x := range c.Kinds {
+		if x == k {
+			return true
+		}
+	}
+	return false
 }
 
 func (c RestoreConflict) String() string {
-	switch c.Kind {
-	case ConflictName:
-		return fmt.Sprintf("имя «%s» есть и на сервере, и в копии, но это РАЗНЫЕ клиенты (разные ключи)", c.Target)
-	case ConflictKey:
+	addr := ""
+	if c.Has(ConflictAddress) {
+		addr = strings.Join(c.Addrs, ", ")
+	}
+	switch {
+	case c.Has(ConflictName) && addr != "":
+		return fmt.Sprintf("«%s»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — %s", c.Target, addr)
+	case c.Has(ConflictName):
+		return fmt.Sprintf("«%s»: на сервере и в копии — разные клиенты (разные ключи)", c.Target)
+	case c.Has(ConflictKey):
 		return fmt.Sprintf("один и тот же ключ: на сервере — «%s», в копии — «%s»", c.Target, c.Source)
-	case ConflictAddress:
-		return fmt.Sprintf("адрес %s: на сервере у «%s», в копии у «%s»", c.Addr, c.Target, c.Source)
+	case addr != "":
+		return fmt.Sprintf("адрес %s: на сервере у «%s», в копии у «%s» (разные клиенты)", addr, c.Target, c.Source)
 	}
 	return "пересечение неизвестного вида"
 }
@@ -165,34 +183,83 @@ func compareTarget(tgt, src []restoreClient, svc ServiceState, tgtSvc, srcSvc st
 	var cs []RestoreConflict
 	for _, t := range tgt {
 		if tgtSvc != "" && t.id == tgtSvc {
-			tu.ServiceName = displayName(t.name)
+			tu.ServiceName = XRayServiceName // одно имя везде, как в list
 			continue
 		}
 		tu.Users = append(tu.Users, displayName(t.name))
+		// пара (t, клиент копии) → одна запись со всеми признаками
+		pairs := map[string]int{}
+		add := func(s restoreClient, k ConflictKind, addr string) {
+			i, ok := pairs[s.id]
+			if !ok {
+				i = len(cs)
+				pairs[s.id] = i
+				cs = append(cs, RestoreConflict{Target: displayName(t.name), Source: displayName(s.name)})
+			}
+			if !cs[i].Has(k) {
+				cs[i].Kinds = append(cs[i].Kinds, k)
+				sort.Slice(cs[i].Kinds, func(a, b int) bool { return cs[i].Kinds[a] < cs[i].Kinds[b] })
+			}
+			if addr != "" {
+				cs[i].Addrs = append(cs[i].Addrs, addr)
+			}
+		}
 		if s, ok := srcByID[t.id]; ok {
 			if s.name == t.name {
 				tu.Matches = append(tu.Matches, displayName(t.name))
 			} else {
-				cs = append(cs, RestoreConflict{Kind: ConflictKey, Target: displayName(t.name), Source: displayName(s.name)})
+				add(s, ConflictKey, "")
 			}
 		}
 		if t.name != "" {
 			for _, s := range srcByName[t.name] {
 				if s.id != t.id {
-					cs = append(cs, RestoreConflict{Kind: ConflictName, Target: t.name, Source: s.name})
+					add(s, ConflictName, "")
 				}
 			}
 		}
 		for _, a := range t.addrs {
 			for _, s := range srcByAddr[a] {
 				if s.id != t.id {
-					cs = append(cs, RestoreConflict{Kind: ConflictAddress, Target: displayName(t.name), Source: displayName(s.name), Addr: a})
+					add(s, ConflictAddress, a)
 				}
 			}
 		}
 	}
-	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Kind < cs[j].Kind })
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Kinds[0] < cs[j].Kinds[0] })
 	return tu, cs
+}
+
+// ReplacedNote — пометка удаляемого клиента, которого заменит одноимённый
+// клиент копии (круг 3, живая проверка).
+const ReplacedNote = " (будет заменён клиентом из копии с тем же именем)"
+
+// removedOf — клиенты цели, которых нет в копии (по ключу); одноимённый
+// клиент копии — пометка ReplacedNote; служебный XRay — XRayServiceName.
+func removedOf(tgt, src []restoreClient, tgtSvc, srcSvc string) []string {
+	keep := map[string]bool{}
+	names := map[string]bool{}
+	for _, e := range src {
+		keep[e.id] = true
+		if e.name != "" && (srcSvc == "" || e.id != srcSvc) {
+			names[e.name] = true
+		}
+	}
+	var out []string
+	for _, e := range tgt {
+		if keep[e.id] {
+			continue
+		}
+		switch {
+		case tgtSvc != "" && e.id == tgtSvc:
+			out = append(out, XRayServiceName)
+		case e.name != "" && names[e.name]:
+			out = append(out, e.name+ReplacedNote)
+		default:
+			out = append(out, displayName(e.name))
+		}
+	}
+	return out
 }
 
 // NeedsTargetConfirm — нужно ли отдельное подтверждение записи: на новом
@@ -246,9 +313,9 @@ func TargetWarnLines(rp *RestorePlan, max int) []string {
 		line := fmt.Sprintf("  %s: пользователей на сервере %d, будет удалено %d", it.Container, len(tu.Users), len(it.Removed))
 		switch {
 		case tu.Service == ServiceFound && tu.ServiceName != "":
-			line += fmt.Sprintf("; служебный «%s» (устройство администратора) не считается", tu.ServiceName)
+			line += fmt.Sprintf("; служебный «%s» (ключ установки xray_uuid.key) не считается", tu.ServiceName)
 		case tu.Service == ServiceUnknown:
-			line += "; служебный клиент не опознан (ключ установки не прочитан) — посчитаны все"
+			line += "; " + XRayServiceName + " не опознан (ключ установки xray_uuid.key не прочитан) — посчитаны все"
 		}
 		out = append(out, line)
 		if len(tu.Users) > 0 {

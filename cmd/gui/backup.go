@@ -437,11 +437,14 @@ func (u *ui) restoreWindow(b *core.Backup, compat *core.CompatReport, rp *core.R
 	// пользователи нового сервера: здесь — число (заголовок), список и
 	// конфликты — в отдельном окне «Всё равно записать» (окно до начала —
 	// без прокрутки, отзыв владельца на 32d66c4)
-	if rp != nil && rp.NeedsTargetConfirm() {
-		addSection([]string{core.TargetWarnHead(rp) + " Список и конфликты — в следующем окне, перед записью."}, true)
-	}
+	// Один раздел с удаляемыми (круг 3: пометки «будет заменён…» длиннее —
+	// окно до начала остаётся без прокрутки).
 	if rp != nil {
-		addSection(core.RemovedLines(rp), true)
+		var head []string
+		if rp.NeedsTargetConfirm() {
+			head = []string{core.TargetWarnHead(rp) + " Список и конфликты — в следующем окне, перед записью."}
+		}
+		addSection(append(head, core.RemovedLines(rp)...), true)
 	}
 	addSection(core.CompatStopLines(compat), true)
 	if planErr != nil && !compat.Stop {
