@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -319,7 +320,9 @@ echo '[ 12.3] audit: type=1400 apparmor="ALLOWED" profile="wg-other"'
 `)
 		out := runSh(t, shim, core.DiagHostScriptForTest(filepath.ToSlash(mod), filepath.ToSlash(prof)))
 		h := core.ParseProbeForTest(out)
-		if got := core.ProbeAllForTest(h, "DENIED"); !reflect.DeepEqual(got, []string{"wg", "wg-quick"}) {
+		// Порядок DENIED задаёт sort -u хоста и зависит от локали (macOS: wg-quick
+		// раньше wg) — программа сравнивает множество, тест тоже.
+		if got := slices.Sorted(slices.Values(core.ProbeAllForTest(h, "DENIED"))); !reflect.DeepEqual(got, []string{"wg", "wg-quick"}) {
 			t.Errorf("DENIED %q\n%s", got, out)
 		}
 		if got := core.ProbeAllForTest(h, "LOADED"); !reflect.DeepEqual(got, []string{"wg-quick", "wg"}) {
