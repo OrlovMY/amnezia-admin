@@ -50,6 +50,13 @@ func (s *markSelect) showPopUp() {
 	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(s)
 	pop.ShowAtPosition(pos.Add(fyne.NewPos(0, s.Size().Height-theme.InputBorderSize())))
 	pop.Resize(fyne.NewSize(s.Size().Width, pop.MinSize().Height))
+	// Текущая строка подсвечена фоном выделения темы (ColorNameFocus), как
+	// у системных списков: одной галочки при беглом взгляде мало (AU-UX
+	// PROTO-MARK, замечание 2). Это активный пункт меню Fyne — стрелки
+	// вверх/вниз идут от текущего, наведение мыши переносит подсветку.
+	for i := 0; i <= s.SelectedIndex(); i++ {
+		pop.ActivateNext()
+	}
 	pop.OnDismiss = func() {
 		pop.Hide()
 		if s.popUp == pop {

@@ -51,3 +51,23 @@ func TestCLIRestoreCoreGate(t *testing.T) {
 		t.Fatalf("код %d записей %d\n%s\n%s", code, flocks(tgt), out, e)
 	}
 }
+
+// TestCLIRestoreTargetUsersYesTTY — QA Minor PR #43: терминал, -yes без
+// -replace-users, на цели есть пользователи — отказ своим текстом CLI и
+// кодом 2 до ядра (а не ошибкой ядра), без вопроса и без записи.
+func TestCLIRestoreTargetUsersYesTTY(t *testing.T) {
+	keyA, khA, srcExec := setupFakeSSHForRunWithExec(t)
+	srcExec.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
+	p := filepath.Join(t.TempDir(), "c.aabk")
+	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-no-password"); code != 0 {
+		t.Fatalf("backup: %d %s", code, e)
+	}
+	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)
+	tgt.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("NEW-PSK\n"))
+	sess := cliSession(t, keyB, khB)
+	var o, e bytes.Buffer
+	code := runRestore(context.Background(), strings.NewReader("Записать\n"), &o, &e, true, sess, p, "", true, false, false, false, true, time.Now())
+	if code != 2 || flocks(tgt) != 0 || !strings.Contains(o.String(), replaceUsersRefuse) || strings.Contains(o.String(), "Всё равно записать?") {
+		t.Fatalf("терминал, -yes без -replace-users: код %d записей %d\n%s\n%s", code, flocks(tgt), o.String(), e.String())
+	}
+}
