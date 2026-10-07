@@ -22,7 +22,7 @@ func TestCloseRequestedButWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	// настоящая запись дошла до конца
-	auto, outs, err := u.runRestore(rp, false, time.Now())
+	auto, outs, err := u.runRestore(rp, false, true, time.Now())
 	if err != nil || outs[0].State != core.RestoreDone {
 		t.Fatalf("замена: %v %+v", err, outs)
 	}

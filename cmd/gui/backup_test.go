@@ -260,7 +260,7 @@ func TestGUIRestoreGates(t *testing.T) {
 		if v.apply.Disabled() || v.apply.Importance != widget.DangerImportance {
 			t.Fatalf("кнопка: выключена=%v вид=%v", v.apply.Disabled(), v.apply.Importance)
 		}
-		auto, outs, err := u.runRestore(rp, false, time.Now())
+		auto, outs, err := u.runRestore(rp, false, true, time.Now())
 		if err != nil || len(outs) != 1 || outs[0].State != core.RestoreDone {
 			t.Fatalf("замена: %v %+v", err, outs)
 		}

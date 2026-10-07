@@ -126,7 +126,7 @@ func TestCLIRestore(t *testing.T) {
 		t.Fatalf("порт другой (расхождения списком): код %d\n%s", code, out)
 	}
 	tgt.SetFile("/opt/amnezia/awg/wg0.conf", wg)
-	code, out, e = cliRun(t, khB, "", "restore", "-key", keyB, "-file", p, "-apply", "-yes")
+	code, out, e = cliRun(t, khB, "", "restore", "-key", keyB, "-file", p, "-apply", "-yes", "-replace-users")
 	if rm := strings.Index(out, "Будут УДАЛЕНЫ клиенты нового сервера"); rm < 0 || rm > strings.Index(out, "Копия: формат") {
 		t.Errorf("раздел удаляемых не первым:\n%s", out)
 	}

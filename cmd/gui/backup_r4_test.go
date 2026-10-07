@@ -30,7 +30,7 @@ func TestGUIAutoCopyInheritsLayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auto, outs, err := u.runRestore(rp, false, time.Now())
+	auto, outs, err := u.runRestore(rp, false, true, time.Now())
 	if err != nil || outs[0].State != core.RestoreDone {
 		t.Fatalf("замена: %v %+v", err, outs)
 	}
@@ -49,7 +49,7 @@ func TestGUIAutoCopyInheritsLayer(t *testing.T) {
 	u2.restoreWith(plain2, core.PlainLayer{})
 	waitGUIGoroutines(t)
 	_, _, rp2, _, _ := u2.restorePrepare(plain2)
-	auto2, outs2, err := u2.runRestore(rp2, false, time.Now())
+	auto2, outs2, err := u2.runRestore(rp2, false, true, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

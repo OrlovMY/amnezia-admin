@@ -71,7 +71,7 @@ func TestCLICtrlC(t *testing.T) {
 		t.Fatalf("копия: %d %s", code, e)
 	}
 	out.Reset()
-	code = runRestore(ctx, strings.NewReader(""), &out, &errOut, false, sess, p, "", true, false, false, true, time.Now())
+	code = runRestore(ctx, strings.NewReader(""), &out, &errOut, false, sess, p, "", true, false, false, true, true, time.Now())
 	if code != 2 || !strings.Contains(out.String(), "на сервер ничего не записано") || flocks(srv) != 0 {
 		t.Fatalf("restore: код %d записей %d:\n%s", code, flocks(srv), out.String())
 	}
