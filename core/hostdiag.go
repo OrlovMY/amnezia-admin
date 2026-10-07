@@ -132,14 +132,16 @@ const (
 	DiagHostTag      = ": aa-diag-h1;"
 )
 
-// diagContainerScript — проба внутри контейнера. Печатает строки
+// diagContainerScript — проба внутри контейнера. NATERR — причина для
+// человека: первая строка ошибки, кроме «Perhaps…», и строка «Table does
+// not exist», если она не первая (вживую первой бывает строка modprobe). Печатает строки
 // КЛЮЧ=значение и последней — END: без END проба не считается выполненной.
 // Без одинарных кавычек — скрипт идёт в sh -c '…'.
 func diagContainerScript(iface, sbin string) string {
 	return DiagContainerTag +
 		` if ! command -v ip >/dev/null 2>&1; then echo IFACE=unknown; elif ip link show ` + iface + ` >/dev/null 2>&1; then echo IFACE=yes; else echo IFACE=no; fi;` +
 		` if command -v iptables >/dev/null 2>&1; then echo "IPTV=$(iptables -V 2>&1 | head -n 1)"; o=$(iptables -t nat -S POSTROUTING 2>&1); echo "NATRC=$?";` +
-		` echo "$o" | grep -q MASQUERADE && echo MASQ=yes; echo "$o" | grep -q "does not exist" && echo NOTABLE=yes; echo "NATERR=$(echo "$o" | head -n 1)"; else echo IPTV=; fi;` +
+		` echo "$o" | grep -q MASQUERADE && echo MASQ=yes; echo "$o" | grep -q "does not exist" && echo NOTABLE=yes; f=$(echo "$o" | grep -v "^Perhaps" | head -n 1); tb=$(echo "$o" | grep "does not exist" | head -n 1); if [ -n "$tb" ] && [ "$tb" != "$f" ]; then f="$f; $tb"; fi; echo "NATERR=$f"; else echo IPTV=; fi;` +
 		` if [ -x ` + sbin + `/xtables-nft-multi ]; then echo NFT=yes; else echo NFT=no; fi; echo END`
 }
 
