@@ -184,15 +184,6 @@ func (s *Session) planRestoreContainer(c *Container, bc BackupContainer) (Restor
 	if errT != nil || errS != nil {
 		return RestoreItem{}, stopped("%s: конфигурация клиентов не разобрана — кто есть на сервере и в копии, неизвестно", c.Name)
 	}
-	keep := map[string]bool{}
-	for _, e := range srcCl {
-		keep[e.id] = true
-	}
-	for _, e := range tgtCl {
-		if !keep[e.id] {
-			it.Removed = append(it.Removed, displayName(e.name))
-		}
-	}
 	svc, tgtSvc, srcSvc := ServiceNone, "", ""
 	if !wg {
 		svc = ServiceUnknown
@@ -201,6 +192,7 @@ func (s *Session) planRestoreContainer(c *Container, bc BackupContainer) (Restor
 		}
 		srcSvc, _ = installIDOf(src[xrayUUIDFile])
 	}
+	it.Removed = removedOf(tgtCl, srcCl, tgtSvc, srcSvc)
 	it.Target, it.Conflicts = compareTarget(tgtCl, srcCl, svc, tgtSvc, srcSvc)
 	return it, nil
 }

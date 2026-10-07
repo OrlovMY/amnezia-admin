@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
+	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
 )
 
@@ -78,6 +79,10 @@ func TestGUIRestoreTargetUsers(t *testing.T) {
 			if rp.NeedsTargetConfirm() != c.warn {
 				t.Fatalf("подтверждение нужно = %v", rp.NeedsTargetConfirm())
 			}
+			// круг 3: удаляемый, которого заменит одноимённый из копии, — с пометкой
+			if c.n < 0 && !strings.Contains(v.text, "Alice"+core.ReplacedNote) {
+				t.Errorf("нет пометки замены одноимённым:\n%s", v.text)
+			}
 			if !c.warn {
 				return // пустая цель: «Заменить» сразу пишет (TestGUIRestoreGates)
 			}
@@ -97,7 +102,7 @@ func TestGUIRestoreTargetUsers(t *testing.T) {
 					t.Errorf("длинный список: раскрыт=%v заголовок %q", v.users.list.Items[0].Open, v.users.list.Items[0].Title)
 				}
 			} else {
-				for _, part := range []string{"Alice, Bob", "КОНФЛИКТ: имя «Alice»", "КОНФЛИКТ: адрес 10.8.1.2/32"} {
+				for _, part := range []string{"Alice, Bob", "КОНФЛИКТ: «Alice»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.2/32", "Конфликтов с копией: 2."} {
 					if !strings.Contains(got, part) {
 						t.Errorf("нет «%s»:\n%s", part, got)
 					}

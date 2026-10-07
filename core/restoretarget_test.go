@@ -25,13 +25,15 @@ func srcIDs(t *testing.T, srv *fakesrv.Server, dir string) map[string]string {
 	return m
 }
 
-func kinds(cs []RestoreConflict) []ConflictKind {
-	var k []ConflictKind
+func kinds(cs []RestoreConflict) [][]ConflictKind {
+	var k [][]ConflictKind
 	for _, c := range cs {
-		k = append(k, c.Kind)
+		k = append(k, c.Kinds)
 	}
 	return k
 }
+
+type ck = []ConflictKind
 
 // TestRestoreTargetUsersWG — табличный: пусто / есть пользователи /
 // совпадение / конфликты имени, ключа, адреса / peer без записи — боевым
@@ -43,22 +45,30 @@ func TestRestoreTargetUsersWG(t *testing.T) {
 		tgt      func(src map[string]string) []tc
 		users    []string
 		matches  int
-		conflict []ConflictKind
+		conflict [][]ConflictKind // по паре клиентов — одна запись
 		confirm  bool
+		text     string   // строка конфликта (круг 3)
+		removed  []string // удаляемые как в тексте (круг 3)
 	}{
-		{"пусто", func(map[string]string) []tc { return nil }, nil, 0, nil, false},
+		{"пусто", func(map[string]string) []tc { return nil }, nil, 0, nil, false, "", nil},
 		{"есть пользователи без пересечений", func(map[string]string) []tc { return []tc{{other, "Carol", "10.8.1.9/32"}} },
-			[]string{"Carol"}, 0, nil, true},
+			[]string{"Carol"}, 0, nil, true, "", []string{"Carol"}},
 		{"тот же клиент — совпадение", func(s map[string]string) []tc { return []tc{{s["Alice"], "Alice", "10.8.1.2/32"}} },
-			[]string{"Alice"}, 1, nil, true},
+			[]string{"Alice"}, 1, nil, true, "", nil},
 		{"то же имя, другой ключ", func(map[string]string) []tc { return []tc{{other, "Alice", "10.8.1.9/32"}} },
-			[]string{"Alice"}, 0, []ConflictKind{ConflictName}, true},
+			[]string{"Alice"}, 0, [][]ConflictKind{{ConflictName}}, true,
+			"КОНФЛИКТ: «Alice»: на сервере и в копии — разные клиенты (разные ключи)\n", []string{"Alice" + ReplacedNote}},
+		// живая проверка: одноимённая пара с разными ключами и тем же
+		// адресом — ОДИН конфликт, не два
+		{"то же имя, другой ключ, тот же адрес", func(map[string]string) []tc { return []tc{{other, "Bob", "10.8.1.3/32"}} },
+			[]string{"Bob"}, 0, [][]ConflictKind{{ConflictName, ConflictAddress}}, true,
+			"КОНФЛИКТ: «Bob»: на сервере и в копии — разные клиенты (разные ключи), адрес тот же — 10.8.1.3/32", []string{"Bob" + ReplacedNote}},
 		{"тот же ключ, другое имя", func(s map[string]string) []tc { return []tc{{s["Alice"], "Dave", "10.8.1.2/32"}} },
-			[]string{"Dave"}, 0, []ConflictKind{ConflictKey}, true},
+			[]string{"Dave"}, 0, [][]ConflictKind{{ConflictKey}}, true, "КОНФЛИКТ: один и тот же ключ: на сервере — «Dave», в копии — «Alice»", nil},
 		{"тот же адрес у разных", func(map[string]string) []tc { return []tc{{other, "Erin", "10.8.1.3/32"}} },
-			[]string{"Erin"}, 0, []ConflictKind{ConflictAddress}, true},
+			[]string{"Erin"}, 0, [][]ConflictKind{{ConflictAddress}}, true, "КОНФЛИКТ: адрес 10.8.1.3/32: на сервере у «Erin», в копии у «Bob»", []string{"Erin"}},
 		{"peer без записи в таблице", func(map[string]string) []tc { return []tc{{other, "", "10.8.1.9/32"}} },
-			[]string{"(без имени)"}, 0, nil, true},
+			[]string{"(без имени)"}, 0, nil, true, "", []string{"(без имени)"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,8 +85,11 @@ func TestRestoreTargetUsersWG(t *testing.T) {
 			if rp.NeedsTargetConfirm() != c.confirm || rp.TargetUserCount() != len(c.users) {
 				t.Fatalf("подтверждение %v, число %d", rp.NeedsTargetConfirm(), rp.TargetUserCount())
 			}
-			if len(it.Removed) != len(c.users)-c.matches-countKind(it.Conflicts, ConflictKey) {
-				t.Errorf("удаляемые %v", it.Removed)
+			if fmt.Sprint(it.Removed) != fmt.Sprint(c.removed) {
+				t.Errorf("удаляемые %q, ожидались %q", it.Removed, c.removed)
+			}
+			if rp.TargetConflictCount() != len(c.conflict) {
+				t.Errorf("конфликтов %d, ожидалось %d (по парам клиентов)", rp.TargetConflictCount(), len(c.conflict))
 			}
 			if c.confirm {
 				head := TargetWarnHead(rp)
@@ -84,22 +97,12 @@ func TestRestoreTargetUsersWG(t *testing.T) {
 				if !strings.Contains(head, fmt.Sprintf("— %d", len(c.users))) || !strings.Contains(body, c.users[0]) {
 					t.Errorf("текст:\n%s\n%s", head, body)
 				}
-				if len(c.conflict) > 0 && !strings.Contains(body, "КОНФЛИКТ") {
-					t.Errorf("конфликт не назван:\n%s", body)
+				if n := strings.Count(body, "КОНФЛИКТ"); n != len(c.conflict) || (c.text != "" && !strings.Contains(body+"\n", c.text)) {
+					t.Errorf("конфликтов в тексте %d, ожидалась строка %q:\n%s", n, c.text, body)
 				}
 			}
 		})
 	}
-}
-
-func countKind(cs []RestoreConflict, k ConflictKind) int {
-	n := 0
-	for _, c := range cs {
-		if c.Kind == k {
-			n++
-		}
-	}
-	return n
 }
 
 // TestRestoreTargetUnparsed — третье состояние: clientsTable цели не
@@ -146,19 +149,20 @@ func TestRestoreTargetXRay(t *testing.T) {
 	}
 	onlyAdmin := func(s *fakesrv.Server) { setClients(s, 1, svcID(s)) }
 	cases := []struct {
-		name    string
-		prep    func(*fakesrv.Server)
-		users   int
-		svc     ServiceState
-		confirm bool
+		name         string
+		prep         func(*fakesrv.Server)
+		users        int
+		svc          ServiceState
+		confirm      bool
+		removedUsers []string
 	}{
-		{"только админ", onlyAdmin, 0, ServiceFound, false},
-		{"админ и пользователи", func(*fakesrv.Server) {}, 2, ServiceFound, true},
+		{"только админ", onlyAdmin, 0, ServiceFound, false, nil},
+		{"админ и пользователи", func(*fakesrv.Server) {}, 2, ServiceFound, true, []string{"Alice" + ReplacedNote, "Bob" + ReplacedNote}},
 		// AU-LOGIC З1: клиенты только в server.json — тоже пользователи
 		{"UUID в server.json, таблица пуста", func(s *fakesrv.Server) {
 			setClients(s, 0, svcID(s), fakesrv.RandUUID(), fakesrv.RandUUID())
-		}, 2, ServiceFound, true},
-		{"ключ установки не прочитан", func(s *fakesrv.Server) { onlyAdmin(s); s.SetFile(dir+"/xray_uuid.key", []byte("не uuid\n")) }, 1, ServiceUnknown, true},
+		}, 2, ServiceFound, true, []string{"(без имени)", "(без имени)"}},
+		{"ключ установки не прочитан", func(s *fakesrv.Server) { onlyAdmin(s); s.SetFile(dir+"/xray_uuid.key", []byte("не uuid\n")) }, 1, ServiceUnknown, true, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -179,8 +183,13 @@ func TestRestoreTargetXRay(t *testing.T) {
 			if len(it.Target.Users) != c.users || it.Target.Service != c.svc || rp.NeedsTargetConfirm() != c.confirm {
 				t.Fatalf("пользователи %v служебный %v «%s» подтверждение %v", it.Target.Users, it.Target.Service, it.Target.ServiceName, rp.NeedsTargetConfirm())
 			}
-			if c.svc == ServiceFound && it.Target.ServiceName == "" {
-				t.Errorf("служебный не назван: %q", it.Target.ServiceName)
+			// круг 3: одно имя служебного везде, как в list
+			body := strings.Join(TargetWarnLines(rp, 0), "\n")
+			if c.svc == ServiceFound && (it.Target.ServiceName != XRayServiceName || !strings.Contains(body, "служебный «"+XRayServiceName+"»") || strings.Contains(body, "(без имени)") && c.users == 0) {
+				t.Errorf("служебный назван не «%s»: %q\n%s", XRayServiceName, it.Target.ServiceName, body)
+			}
+			if c.svc == ServiceFound && fmt.Sprint(it.Removed) != fmt.Sprint(append([]string{XRayServiceName}, c.removedUsers...)) {
+				t.Errorf("удаляемые %q: служебный не назван «%s»", it.Removed, XRayServiceName)
 			}
 			if c.svc == ServiceUnknown && !strings.Contains(strings.Join(TargetWarnLines(rp, 0), "\n"), "не опознан") {
 				t.Error("не сказано, что служебный не опознан")
