@@ -20,7 +20,7 @@ func newMarkSelect(options []string, changed func(string)) *markSelect {
 	s := &markSelect{}
 	s.Options = options
 	s.OnChanged = changed
-	s.PlaceHolder = "(Select one)" // как у widget.NewSelect
+	s.PlaceHolder = "Выберите протокол" // русская заглушка вместо «(Select one)» Fyne
 	s.ExtendBaseWidget(s)
 	return s
 }

@@ -615,8 +615,10 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 
 // savedVaultsBlock строит блок «Или загрузить из сохранённых» под кнопкой
 // «Подключиться», если в каталоге "Настройки" есть сохранённые ключи (.avlt).
-// Настоящие метки серверов зашифрованы и неизвестны до ввода пина, поэтому
-// в списке показываются только порядковые "Сервер N" (порядок — по имени файла).
+// Метка внутри .avlt зашифрована, поэтому подпись берётся из открытого
+// файла-подписи рядом (core.VaultNames: имя, заданное человеком, или
+// описание из ключа vpn://, или адрес). «Сервер N» — только у файлов, для
+// которых подписи нет (сохранены до этой правки и ещё ни разу не открыты).
 func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyne.CanvasObject {
 	vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 	if listErr != nil {
@@ -630,23 +632,25 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 		return nil
 	}
 	label := widget.NewLabel("Или загрузить из сохранённых:")
-	names := make([]string, len(vaults))
-	for i := range vaults {
-		names[i] = fmt.Sprintf("Сервер %d", i+1)
+	vn := core.VaultNames(vaults)
+	names := make([]string, len(vn))
+	for i := range vn {
+		names[i] = vn[i].Short
 	}
 	if len(vaults) == 1 {
 		btn := widget.NewButton(names[0], func() {
-			u.showVaultPinDialog(vaults[0], names[0], connectBtn, info)
+			u.showVaultPinDialog(vaults[0], vn[0].Full, connectBtn, info)
 		})
 		return container.NewVBox(label, btn)
 	}
 	sel := widget.NewSelect(names, nil)
+	sel.PlaceHolder = vaultSelectPlaceholder
 	sel.OnChanged = func(_ string) {
 		i := sel.SelectedIndex()
 		if i < 0 || i >= len(vaults) {
 			return
 		}
-		path, lbl := vaults[i], names[i]
+		path, lbl := vaults[i], vn[i].Full
 		sel.ClearSelected()
 		u.showVaultPinDialog(path, lbl, connectBtn, info)
 	}
@@ -1070,6 +1074,17 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 				})
 			}
 		}
+		if vc != nil {
+			// Подпись для списка сохранённых: старые файлы получают её при
+			// первом входе, у новых обновляется, если сменился адрес.
+			if labelErr := refreshVaultLabel(vc, cfg, creds); labelErr != nil {
+				fyne.Do(func() {
+					if u.status != nil {
+						u.status.SetText("Не удалось сохранить подпись сервера для списка сохранённых: " + labelErr.Error())
+					}
+				})
+			}
+		}
 		if vc != nil && vc.pin != nil {
 			*vc.pin = "" // пин больше не нужен (SEC-01, В2 п.5)
 		}
@@ -1087,11 +1102,50 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			u.showMainScreen()
 			u.refresh()
 			if vc == nil {
-				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
+				defaultName := core.DefaultServerName(cfg)
+				if defaultName == "" {
+					defaultName = creds.Host
+				}
+				u.offerSaveKey(key, defaultName, sess.HostKeyFingerprint)
 			}
 			u.diagnoseAfterConnect(sess, containers)
 		})
 	})
+}
+
+// vaultSelectPlaceholder — заглушка списка сохранённых серверов (вместо
+// английской «(Select one)» Fyne).
+const vaultSelectPlaceholder = "Выберите сервер"
+
+// addrFromKey — адрес сервера для подписи; "" — если ключ не разобрать.
+// Ошибка разбора не нужна: подпись без адреса всё равно верна.
+func addrFromKey(key string) string {
+	cfg, err := core.DecodeVpnKey(key)
+	if err != nil {
+		return ""
+	}
+	creds, err := core.CredsFromConfig(cfg)
+	if err != nil {
+		return ""
+	}
+	return core.ServerAddr(creds.Host, creds.Port, creds.User)
+}
+
+// refreshVaultLabel пишет открытую подпись файла vc, если её нет или она
+// устарела. Имя — метка, заданная человеком (главнее), иначе описание из
+// ключа, иначе адрес (core.ChooseServerName).
+func refreshVaultLabel(vc *vaultCtx, cfg map[string]any, creds *core.ServerCreds) error {
+	want := core.VaultLabel{
+		Name: core.ChooseServerName(vc.payload.Label, creds.Host, cfg),
+		Addr: core.ServerAddr(creds.Host, creds.Port, creds.User),
+	}
+	if want.Name == "" {
+		want.Name = want.Addr
+	}
+	if cur, ok, err := core.ReadVaultLabel(vc.path); err == nil && ok && cur == want {
+		return nil
+	}
+	return core.WriteVaultLabel(vc.path, want)
 }
 
 // reseal перезапечатывает .avlt хранилища vc с только что принятым
@@ -1402,6 +1456,10 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 			if err == nil {
 				savedPath, err = core.SaveVault(core.DefaultVaultDir(), data)
 			}
+			var labelErr error
+			if err == nil {
+				labelErr = core.WriteVaultLabel(savedPath, core.VaultLabel{Name: label, Addr: addrFromKey(key)})
+			}
 			fyne.Do(func() {
 				busy = false
 				if err != nil {
@@ -1416,7 +1474,15 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 				// место списка.
 				vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 				if u.status != nil {
-					u.status.SetText(guiview.SavedKeyStatus(vaults, listErr, savedPath))
+					var shown []string
+					for _, n := range core.VaultNames(vaults) {
+						shown = append(shown, n.Short)
+					}
+					st := guiview.SavedKeyStatus(vaults, shown, listErr, savedPath)
+					if labelErr != nil {
+						st += " Подпись для списка сохранить не удалось (" + labelErr.Error() + ") — в списке он будет «Сервер N» до первого входа."
+					}
+					u.status.SetText(st)
 				}
 			})
 		})
