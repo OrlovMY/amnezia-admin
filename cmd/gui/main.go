@@ -45,6 +45,16 @@ type ui struct {
 	diagHold    bool
 	diagPending *core.DiagReport
 
+	// Адрес сервера для конфигов клиентов (clienthost.go): clientHostAsk —
+	// спросить перед первой выдачей; clientHostSet — выбор этого сеанса
+	// (идёт в хранилище при «Сохранить ключ»); vaultPath — .avlt, из
+	// которого открыт сеанс ("" — ключ введён вручную).
+	clientHostAsk      bool
+	clientHostSet      core.ClientHostSetting
+	vaultPath          string
+	clientHostShown    *clientHostView
+	clientHostPinShown dialog.Dialog
+
 	win        fyne.Window
 	sess       *core.Session
 	containers []core.Container
@@ -1076,6 +1086,11 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 
 		fyne.Do(func() {
 			u.sess = sess
+			u.vaultPath, u.clientHostSet = "", core.ClientHostSetting{}
+			if vc != nil {
+				u.vaultPath, u.clientHostSet = vc.path, vc.payload.ClientHostSetting()
+			}
+			u.applyClientHostSetting(sess, u.clientHostSet)
 			u.containers = containers
 			u.cur = &u.containers[0]
 			for i := range u.containers {
@@ -1387,6 +1402,7 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 			label = defaultLabel
 		}
 		machineBind := bindCheck.Checked
+		clientHostSet := u.clientHostSet
 		busy = true
 		saveBtn.Disable()
 		statusLabel.SetText("Шифрую...")
@@ -1396,6 +1412,8 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 				Key:                key,
 				Created:            time.Now().Format(time.RFC3339),
 				HostKeyFingerprint: hostKeyFingerprint,
+				ClientHost:         clientHostSet.Host,
+				ClientHostKeepIP:   clientHostSet.KeepIP,
 			}
 			data, err := core.SealVault(pin, payload, core.ProdArgonParams, machineBind)
 			var savedPath string
@@ -1410,6 +1428,7 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 					return
 				}
 				d.Hide()
+				u.vaultPath = savedPath
 				// Номер — позиция ИМЕННО ЭТОГО файла в списке, под которой он
 				// будет виден на экране подключения, а не число файлов (A1б,
 				// признак 2): имена случайные, и новый файл встаёт в любое
@@ -2870,6 +2889,11 @@ func (u *ui) addDialog() {
 			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
+	if u.clientHostAsk {
+		// в ключе IP, выбор не сделан — сначала адрес для клиентов
+		u.ensureClientHost(u.addDialog)
+		return
+	}
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Иванов Иван")
 	form := widget.NewForm(widget.NewFormItem("Имя", entry))
@@ -3368,6 +3392,10 @@ func (u *ui) regenerateSelected() {
 	if victim.EnabledState() == core.EnabledUnknown {
 		// У1: включён ли — неизвестно; до вопроса, а не после него
 		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
+		return
+	}
+	if u.clientHostAsk {
+		u.ensureClientHost(u.regenerateSelected)
 		return
 	}
 	if core.IsXRay(u.cur) {

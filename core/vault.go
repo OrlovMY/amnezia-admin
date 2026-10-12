@@ -103,6 +103,17 @@ type VaultPayload struct {
 	// здесь, а на уровне ConnectWithHostKey (пустой ExpectedFingerprint —
 	// обычный неизвестный сервер).
 	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
+
+	// ClientHost / ClientHostKeepIP — выбор адреса сервера для конфигов
+	// клиентов (core/clienthost.go). Оба пусты — выбор не сделан (у старых
+	// файлов тоже): программа спросит перед первой выдачей конфига.
+	ClientHost       string `json:"clientHost,omitempty"`
+	ClientHostKeepIP bool   `json:"clientHostKeepIP,omitempty"`
+}
+
+// ClientHostSetting — сохранённый выбор адреса для клиентов.
+func (p VaultPayload) ClientHostSetting() ClientHostSetting {
+	return ClientHostSetting{Host: p.ClientHost, KeepIP: p.ClientHostKeepIP}
 }
 
 // ErrVaultBadPinOrCorrupt — единый текст ошибки для неверного пина и любой

@@ -7,7 +7,7 @@
 //
 //	amnezia-admin decode -key vpn://...
 //	amnezia-admin list   -key vpn://...
-//	amnezia-admin add    -key vpn://... -name Vasya
+//	amnezia-admin add    -key vpn://... -name Vasya [-client-host vpn.example.com [-client-host-confirm]]
 //	amnezia-admin del    -key vpn://... -name Vasya
 //	amnezia-admin rename -key vpn://... -name Vasya -newname "Vasya Ivanov"
 //	amnezia-admin toggle -key vpn://... -name Vasya
@@ -644,6 +644,16 @@ func interactive() (code int) {
 		return
 	}
 	defer sess.Close()
+	// Адрес для клиентов: AMNEZIA_CLIENT_HOST — без вопроса; иначе меню
+	// спросит один раз перед первой выдачей конфига (если в ключе IP).
+	clientHostDecided := false
+	if h := os.Getenv("AMNEZIA_CLIENT_HOST"); h != "" {
+		if proceed, _, _ := applyClientHost(in, os.Stdout, os.Stderr, true, h, false, sess); !proceed {
+			fmt.Println(cWarn("Имя из AMNEZIA_CLIENT_HOST не принято — спрошу перед выдачей конфига."))
+		} else {
+			clientHostDecided = true
+		}
+	}
 
 	containers, err := sess.FindContainers()
 	if err != nil {
@@ -699,6 +709,7 @@ func interactive() (code int) {
 			}
 		case "2":
 			name := ask("Имя нового пользователя: ")
+			interactiveClientHost(ask, sess, &clientHostDecided)
 			if core.IsXRay(cur) {
 				if _, err := runXRayAdd(in, os.Stdout, os.Stderr, true, false, sess, cur, name); err != nil {
 					printErr(err)
@@ -857,6 +868,7 @@ func interactive() (code int) {
 				printErr(core.EnabledUnknownError(victim))
 				break
 			}
+			interactiveClientHost(ask, sess, &clientHostDecided)
 			if core.IsXRay(cur) {
 				if _, err := runXRayAction(in, os.Stdout, os.Stderr, true, false, sess, cur, "rekey", victim); err != nil {
 					printErr(err)
@@ -993,6 +1005,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
 	fixDiag := fs.Bool("fix", false, "diagnose: исправить найденную проблему (после подтверждения y/N или -yes); коды diagnose: 0 нет проблем, 1 проблема/не исправлено, 2 не подтверждено, 3 не удалось узнать")
 	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
+	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер)")
+	clientHostOK := fs.Bool("client-host-confirm", false, "add/rekey: выдать конфиг с -client-host, даже если имя указывает на другие адреса или проверить его не удалось")
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -1070,6 +1084,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			fmt.Fprintf(stderr, "Ошибка: контейнера %s на сервере нет (есть: %s)\n", *container, strings.Join(names, ", "))
 			return 1
 		}
+	}
+
+	ipWarn := ""
+	if (cmd == "add" || cmd == "rekey") && !*dryRun {
+		proceed, code, warn := applyClientHost(stdin, stdout, stderr, isTTY, *clientHost, *clientHostOK, sess)
+		if !proceed {
+			return code
+		}
+		ipWarn = warn
 	}
 
 	switch cmd {
@@ -1256,6 +1279,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))
 		return 1
+	}
+	if ipWarn != "" {
+		fmt.Fprintln(stderr, cWarn(ipWarn))
 	}
 	return 0
 }

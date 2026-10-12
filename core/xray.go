@@ -810,7 +810,7 @@ func (s *Session) XRayClientConfig(c *Container, clientID string) (*NewUser, err
 	if a := xrayAccessOf(cl, st.srv.has(clientID)); a != XRayActive {
 		return nil, fmt.Errorf("конфиг %q не выдан: %s", cl.Name(), XRayAccessText(a))
 	}
-	cfg, link, err := xrayClientConfig(st.srv, s.Creds.Host, clientID)
+	cfg, link, err := xrayClientConfig(st.srv, s.EndpointHost(), clientID)
 	if err != nil {
 		return nil, err
 	}
@@ -924,7 +924,7 @@ func (s *Session) planXRayAdd(c *Container, name string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, link, err := xrayClientConfig(st.srv, s.Creds.Host, id)
+	cfg, link, err := xrayClientConfig(st.srv, s.EndpointHost(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -1057,7 +1057,7 @@ func (s *Session) planXRayRekey(c *Container, clientID string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, link, err := xrayClientConfig(st.srv, s.Creds.Host, id)
+	cfg, link, err := xrayClientConfig(st.srv, s.EndpointHost(), id)
 	if err != nil {
 		return nil, err
 	}

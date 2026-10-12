@@ -128,6 +128,10 @@ type Session struct {
 	// NewSessionWithRunner в тестах).
 	HostKeyFingerprint string
 
+	// ClientHost — адрес сервера для конфигов клиентов (DNS-имя, см.
+	// core/clienthost.go). "" — как прежде, hostName ключа (Creds.Host).
+	ClientHost string
+
 	// mu — мьютекс мутаций (I5, core/txn.go). Экспортированные Plan*/Apply
 	// берут его сами; AddUser/DeleteByID/... держат его один раз на весь
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
