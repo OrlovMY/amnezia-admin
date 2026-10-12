@@ -1423,13 +1423,38 @@ func SanitizeName(s string) string {
 
 // ---------- QR ----------
 
+// QRMaxBytes — наибольший конфиг, который помещается в ОДИН QR-код
+// (версия 40, уровень коррекции L, байтовый режим): 2953 байта.
+const QRMaxBytes = 2953
+
+// QRTooLargeError — конфиг не помещается в один QR ни на каком уровне
+// коррекции. Это свойство конфига, а не сбой программы: путь — файл .conf.
+// Текст ошибки несёт только размеры, не содержимое конфига.
+type QRTooLargeError struct {
+	Len, Max int
+}
+
+func (e *QRTooLargeError) Error() string {
+	return fmt.Sprintf("конфиг слишком большой для одного QR-кода — %d байт при максимуме %d; используйте файл конфигурации", e.Len, e.Max)
+}
+
 // QRPNG кодирует text в QR-код и возвращает PNG-байты размером size×size px.
 // Используется в GUI, чтобы клиент мог отсканировать конфиг приложением
 // AmneziaWG на телефоне, не передавая файл.
+//
+// Уровень коррекции — M, а если конфиг в M не влезает (AmneziaWG 2: длинные
+// I1–I5 — 2331 байт предел M), — L (предел QRMaxBytes). Не влез и в L —
+// *QRTooLargeError с размерами, а не «сбой генерации».
 func QRPNG(text string, size int) ([]byte, error) {
-	png, err := qrcode.Encode(text, qrcode.Medium, size)
-	if err != nil {
-		return nil, fmt.Errorf("генерация QR-кода: %w", err)
+	if len(text) > QRMaxBytes {
+		return nil, &QRTooLargeError{Len: len(text), Max: QRMaxBytes}
 	}
-	return png, nil
+	var png []byte
+	var err error
+	for _, lvl := range []qrcode.RecoveryLevel{qrcode.Medium, qrcode.Low} {
+		if png, err = qrcode.Encode(text, lvl, size); err == nil {
+			return png, nil
+		}
+	}
+	return nil, fmt.Errorf("генерация QR-кода: %w", err)
 }
