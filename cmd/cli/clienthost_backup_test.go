@@ -41,6 +41,20 @@ func TestCLIBackupIssuedAddress(t *testing.T) {
 			if b.IssuedAddress.Kind != tc.kind || b.IssuedAddress.Value != tc.value {
 				t.Errorf("%+v", b.IssuedAddress)
 			}
+			// QA-01: при неизвестном адресе — прямая подсказка, как избежать
+			// -address-changes; при известном — её нет
+			if hint := strings.Contains(e.String(), "снимайте копию с -client-host <имя> или -client-host keep-ip"); hint != (tc.kind == core.AddressKindUnknown) {
+				t.Errorf("подсказка=%v при %s:\n%s", hint, tc.kind, e.String())
+			}
+			if tc.kind != core.AddressKindUnknown {
+				return
+			}
+			o.Reset()
+			e.Reset()
+			code := run([]string{"restore", "-key", key, "-file", p, "-apply", "-yes", "-replace-users"}, strings.NewReader(""), &o, &e, kh)
+			if code == 0 || !strings.Contains(o.String(), "-address-changes; следующие копии снимайте с -client-host <имя> или -client-host keep-ip") {
+				t.Errorf("restore: %d\n%s\n%s", code, o.String(), e.String())
+			}
 		})
 	}
 }
