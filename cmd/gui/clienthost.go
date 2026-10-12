@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -253,7 +257,7 @@ var saveClientHostToVault = func(path, pin string, set core.ClientHostSetting) e
 	if pin == "" {
 		return fmt.Errorf("пин не введён")
 	}
-	payload, info, err := vaultDecrypt(path, pin)
+	payload, info, err := throttledVaultDecrypt(path, pin)
 	if err != nil {
 		return err
 	}
@@ -264,3 +268,51 @@ var saveClientHostToVault = func(path, pin string, set core.ClientHostSetting) e
 	}
 	return core.WriteVaultFile(path, data)
 }
+
+// clientHostNow — онлайн-время для счётчика попыток (как в основном диалоге
+// пин-кода: перевод часов не сбрасывает блокировку). Шов для тестов.
+var clientHostNow = func() (time.Time, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return core.FetchNetworkTime(ctx)
+}
+
+// throttledVaultDecrypt — расшифровка под ТЕМ ЖЕ счётчиком неверных попыток
+// (throttle.json, per-vault), что и основной ввод пина (SEC-01 по PR #50):
+// второй диалог пина не должен давать неограниченный перебор. Fail-closed:
+// нет онлайн-времени или счётчик не читается/не пишется — расшифровки нет.
+func throttledVaultDecrypt(path, pin string) (core.VaultPayload, core.VaultInfo, error) {
+	dir, name := pinVaultDir(), filepath.Base(path)
+	now, err := clientHostNow()
+	if err != nil {
+		return core.VaultPayload{}, core.VaultInfo{}, fmt.Errorf("подключение к интернету не обнаружено — ввод пина закрыт")
+	}
+	cur, err := core.LoadThrottle(dir, name)
+	if err != nil {
+		return core.VaultPayload{}, core.VaultInfo{}, err
+	}
+	if blocked, rem := core.CheckThrottle(cur, now); blocked {
+		return core.VaultPayload{}, core.VaultInfo{}, fmt.Errorf("ввод пина заблокирован после неверных попыток, осталось %s", rem.Round(time.Second))
+	}
+	payload, info, derr := vaultDecrypt(path, pin)
+	if derr != nil {
+		st := core.RegisterFailure(cur, now)
+		if serr := core.SaveThrottle(dir, name, st); serr != nil {
+			return core.VaultPayload{}, core.VaultInfo{}, serr
+		}
+		msg := "неправильный пин-код или файл повреждён"
+		if !errors.Is(derr, core.ErrVaultBadPinOrCorrupt) {
+			msg = derr.Error()
+		}
+		if blocked, rem := core.CheckThrottle(st, now); blocked {
+			return core.VaultPayload{}, core.VaultInfo{}, fmt.Errorf("%s; ввод пина заблокирован на %s", msg, rem.Round(time.Second))
+		}
+		return core.VaultPayload{}, core.VaultInfo{}, fmt.Errorf("%s. Осталось попыток: %d", msg, pinThrottleAttempts-st.Fails)
+	}
+	_ = core.SaveThrottle(dir, name, core.RegisterSuccess())
+	return payload, info, nil
+}
+
+// pinThrottleAttempts — попыток до блокировки (как throttleAttempts в
+// showVaultPinDialog и core.throttleMaxFails).
+const pinThrottleAttempts = 10

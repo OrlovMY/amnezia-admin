@@ -140,10 +140,7 @@ func TestSaveClientHostToVault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "a.avlt")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := stubPinThrottle(t, data)
 	if err := saveClientHostToVault(path, "wrong-pin-1", core.ClientHostSetting{Host: "vpn.example.com"}); err == nil {
 		t.Fatal("неверный пин принят")
 	}
@@ -156,5 +153,62 @@ func TestSaveClientHostToVault(t *testing.T) {
 	p, _, err := vaultDecrypt(path, pin)
 	if err != nil || p.ClientHost != "vpn.example.com" || p.Key != "k" {
 		t.Errorf("%+v %v", p.ClientHostSetting(), err)
+	}
+}
+
+// stubPinThrottle — хранилище во временном каталоге pinVaultDir (там же
+// throttle.json) и фиксированное онлайн-время.
+func stubPinThrottle(t *testing.T, data []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	oldDir, oldNow := pinVaultDir, clientHostNow
+	t.Cleanup(func() { pinVaultDir, clientHostNow = oldDir, oldNow })
+	pinVaultDir = func() string { return dir }
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	clientHostNow = func() (time.Time, error) { return now, nil }
+	path := filepath.Join(dir, "a.avlt")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestSaveClientHostPinThrottled — SEC-01 по PR #50: второй диалог пина
+// (запомнить адрес для клиентов) идёт под тем же счётчиком, что основной:
+// после 10 неверных пинов ввод закрыт — даже ВЕРНЫЙ пин не расшифровывает
+// файл, и расшифровка не вызывается вовсе; счётчик — тот же throttle.json.
+func TestSaveClientHostPinThrottled(t *testing.T) {
+	const pin = "Kx7#mQ2v9Lp44"
+	data, err := core.SealVault(pin, core.VaultPayload{Label: "s", Key: "k"}, core.ArgonParams{MemoryKiB: 64, Time: 1, Threads: 1}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := stubPinThrottle(t, data)
+	calls := 0
+	old := vaultDecrypt
+	t.Cleanup(func() { vaultDecrypt = old })
+	vaultDecrypt = func(p, pn string) (core.VaultPayload, core.VaultInfo, error) {
+		calls++
+		return old(p, pn)
+	}
+	set := core.ClientHostSetting{Host: "vpn.example.com"}
+	for i := 1; i <= 10; i++ {
+		if err := saveClientHostToVault(path, "wrong-pin-1", set); err == nil {
+			t.Fatal("неверный пин принят")
+		} else if i == 9 && !strings.Contains(err.Error(), "Осталось попыток: 1") {
+			t.Errorf("попытка 9: %v", err)
+		}
+	}
+	st, err := core.LoadThrottle(pinVaultDir(), "a.avlt")
+	if err != nil || st.BlockedUntil.IsZero() {
+		t.Fatalf("счётчик основного ввода не увеличен: %+v %v", st, err)
+	}
+	before := calls
+	err = saveClientHostToVault(path, pin, set)
+	if err == nil || !strings.Contains(err.Error(), "заблокирован") || calls != before {
+		t.Fatalf("после 10 неверных верный пин прошёл: err=%v расшифровок=%d", err, calls-before)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(data) {
+		t.Fatal("файл изменён")
 	}
 }
