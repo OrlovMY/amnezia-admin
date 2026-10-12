@@ -3038,7 +3038,7 @@ func (u *ui) addDialog() {
 
 	var d dialog.Dialog
 	onCreated := func(nu *core.NewUser) {
-		u.status.SetText(u.withIPNote(configDoneText(nu, "создан")))
+		u.status.SetText(configDoneText(nu, "создан"))
 		u.showConfigDialog(nu, "создан")
 		u.refresh()
 	}
@@ -3244,7 +3244,9 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 			moveHint.Show()
 		}
 		if u.status != nil {
-			u.status.SetText(fmt.Sprintf("Конфиг сохранён: %s", abs))
+			// адрес в конфиге — здесь, в последней строке о выдаче: ранее
+			// поставленная строка затиралась бы этой (QA-01 по PR #50)
+			u.status.SetText(u.withEndpointNote(fmt.Sprintf("Конфиг сохранён: %s", abs)))
 		}
 	}
 
@@ -3544,7 +3546,7 @@ func (u *ui) regenerateSelected() {
 	var d dialog.Dialog
 	onRegenerated := func(nu *core.NewUser) {
 		u.selectedRow = -1
-		u.status.SetText(u.withIPNote(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name)))
+		u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
 		u.showConfigDialog(nu, "перевыпущен")
 		u.refresh()
 	}

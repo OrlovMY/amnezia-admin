@@ -54,11 +54,11 @@ func (u *ui) applyClientHostSetting(sess *core.Session, set core.ClientHostSetti
 // needClientHostGate — нужно ли пройти ворота перед выдачей конфига.
 func (u *ui) needClientHostGate() bool { return u.clientHostAsk || u.clientHostRecheck }
 
-// withIPNote — к строке о выдаче конфига дописывается предупреждение,
-// если конфиг выдан с IP (при каждой выдаче, а не раз за сеанс — QA-01).
-func (u *ui) withIPNote(st string) string {
-	if u.sess != nil && core.IsIPHost(u.sess.EndpointHost()) {
-		return st + " " + core.ClientHostIPWarning(u.sess.EndpointHost())
+// withEndpointNote — к строке о выдаче конфига дописывается, какой адрес в
+// нём: имя или предупреждение об IP (при КАЖДОЙ выдаче — QA-01).
+func (u *ui) withEndpointNote(st string) string {
+	if n := u.endpointNote(); n != "" {
+		return st + ". " + n
 	}
 	return st
 }
@@ -99,10 +99,10 @@ func (u *ui) ensureClientHost(next func()) {
 // сеанс. Совпало — строка в статусе и дальше; иначе — окно с исходом и
 // явным «Использовать» (как при первом выборе).
 func (u *ui) recheckSavedClientHost(next func()) {
-	name, serverIP := u.sess.ClientHost, u.sess.ServerIP()
+	name, serverIP, resolve := u.sess.ClientHost, u.sess.ServerIP(), guiClientHostResolver
 	u.status.SetText("Проверяю сохранённый адрес для клиентов " + name + "...")
 	goSafe(func() {
-		chk := core.CheckClientHost(name, serverIP, guiClientHostResolver)
+		chk := core.CheckClientHost(name, serverIP, resolve)
 		fyne.Do(func() {
 			if chk.Status == core.ClientHostMatch {
 				u.clientHostRecheck = false
@@ -150,9 +150,9 @@ func (u *ui) clientHostDialog(next func()) *clientHostView {
 		}
 		v.status.SetText("Проверяю имя...")
 		v.checkBt.Disable()
-		serverIP := u.sess.ServerIP()
+		serverIP, resolve := u.sess.ServerIP(), guiClientHostResolver
 		goSafe(func() {
-			chk := core.CheckClientHost(name, serverIP, guiClientHostResolver)
+			chk := core.CheckClientHost(name, serverIP, resolve)
 			fyne.Do(func() {
 				v.checkBt.Enable()
 				v.status.SetText(chk.Text())

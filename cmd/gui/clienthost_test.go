@@ -29,6 +29,9 @@ func clientHostUI(t *testing.T, host string, res core.Resolver) *ui {
 		sess: core.NewSessionWithRunner(fakesrv.New(), &core.ServerCreds{Host: host, User: "root"})}
 	u.cur = &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	u.applyClientHostSetting(u.sess, core.ClientHostSetting{})
+	// последним — значит, первым при очистке: ни одна фоновая операция не
+	// переживает тест (иначе её fyne.Do гоняется со следующим тестом)
+	t.Cleanup(func() { waitGUIGoroutines(t) })
 	return u
 }
 
@@ -42,14 +45,15 @@ func resolverOf(m map[string]string) core.Resolver {
 	}
 }
 
+// waitUntil — дождаться ВСЕХ фоновых операций goSafe (тестовый драйвер Fyne
+// исполняет fyne.Do прямо в фоновой goroutine, см. guiGoroutines), затем
+// проверить условие один раз. Опрос по времени давал гонку под -race.
 func waitUntil(t *testing.T, cond func() bool) {
 	t.Helper()
-	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		if cond() {
-			return
-		}
+	waitGUIGoroutines(t)
+	if !cond() {
+		t.Fatal("после завершения фоновых операций условие не выполнено")
 	}
-	t.Fatal("не дождались")
 }
 
 // TestGUIClientHostTable — окно выбора адреса перед созданием клиента:
@@ -70,6 +74,7 @@ func TestGUIClientHostTable(t *testing.T) {
 		u := clientHostUI(t, "203.0.113.5", res)
 		u.applyClientHostSetting(u.sess, core.ClientHostSetting{Host: "vpn.example.com"})
 		u.addDialog()
+		waitGUIGoroutines(t) // перепроверка сохранённого имени идёт в фоне (З3)
 		if u.clientHostShown != nil || u.sess.EndpointHost() != "vpn.example.com" {
 			t.Fatal("сохранённое имя не применено")
 		}

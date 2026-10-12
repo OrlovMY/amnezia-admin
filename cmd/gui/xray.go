@@ -273,7 +273,7 @@ func (u *ui) xrayRekey(cl core.ClientEntry) {
 		func(c *core.Container) (*core.Plan, error) { return u.sess.PlanRekey(c, cl.ClientID) },
 		func(_ *core.Plan, nu *core.NewUser) {
 			u.selectedRow = -1
-			u.status.SetText(u.withIPNote(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name)))
+			u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
 			u.showConfigDialog(nu, "перевыпущен")
 			u.refresh()
 		})
@@ -352,7 +352,6 @@ func (u *ui) showXRayConfig(cl core.ClientEntry) {
 				u.showError(err)
 				return
 			}
-			u.status.SetText(u.endpointNote())
 			u.showConfigDialog(nu, "— конфиг собран с сервера")
 		})
 	})

@@ -47,7 +47,10 @@ func TestGUIXRayShowConfigEndpointNote(t *testing.T) {
 			}
 			u := &ui{win: w, selectedRow: -1, status: widget.NewLabel(""), sess: sess, cur: cur}
 			u.showXRayConfig(cls[0])
-			waitUntil(t, func() bool { return strings.Contains(u.status.Text, tc.want) })
+			waitGUIGoroutines(t)
+			if !strings.Contains(u.status.Text, tc.want) {
+				t.Errorf("статус %q без %q", u.status.Text, tc.want)
+			}
 		})
 	}
 }
