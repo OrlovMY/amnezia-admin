@@ -632,6 +632,13 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 		return nil
 	}
 	label := widget.NewLabel("Или загрузить из сохранённых:")
+	// Подписи без своего .avlt (ключ удалили руками) — убрать: адрес
+	// сервера не должен лежать на диске без нужды. В список они и так не
+	// попадают (он строится по .avlt), поэтому сбой удаления — только в
+	// строку состояния.
+	if orphanErr := core.RemoveOrphanVaultLabels(core.DefaultVaultDir()); orphanErr != nil && u.status != nil {
+		u.status.SetText("Не удалось удалить подпись удалённого ключа: " + orphanErr.Error())
+	}
 	vn := core.VaultNames(vaults)
 	names := make([]string, len(vn))
 	for i := range vn {
@@ -1061,6 +1068,12 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			return
 		}
 
+		// Состояние подписи — ДО перезапечатывания: reseal меняет .avlt, и
+		// сравнивать подпись нужно с тем, что человек видел в списке.
+		var lblBefore labelBefore
+		if vc != nil {
+			lblBefore.l, lblBefore.st, lblBefore.err = core.ReadVaultLabel(vc.path)
+		}
 		if vc != nil && vc.payload.HostKeyFingerprint == "" {
 			// v1-хранилище (или v2, сохранённое ДО подтверждения ключа) — это
 			// первое подтверждённое подключение, отпечаток узнаём только
@@ -1074,10 +1087,13 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 				})
 			}
 		}
+		labelNotice := ""
 		if vc != nil {
 			// Подпись для списка сохранённых: старые файлы получают её при
 			// первом входе, у новых обновляется, если сменился адрес.
-			if labelErr := refreshVaultLabel(vc, cfg, creds); labelErr != nil {
+			notice, labelErr := refreshVaultLabel(vc, lblBefore, cfg, creds)
+			labelNotice = notice
+			if labelErr != nil {
 				fyne.Do(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить подпись сервера для списка сохранённых: " + labelErr.Error())
@@ -1109,8 +1125,23 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 				u.offerSaveKey(key, defaultName, sess.HostKeyFingerprint)
 			}
 			u.diagnoseAfterConnect(sess, containers)
+			if labelNotice != "" {
+				// Громко, а не тихой перезаписью: человек выбирал сервер по
+				// подписи, которая оказалась неверной.
+				if u.status != nil {
+					u.status.SetText(labelNotice)
+				}
+				dialog.ShowInformation("Подпись сервера исправлена", labelNotice, u.win)
+			}
 		})
 	})
+}
+
+// labelBefore — подпись файла ключа, какой она была ДО входа.
+type labelBefore struct {
+	l   core.VaultLabel
+	st  core.LabelState
+	err error
 }
 
 // vaultSelectPlaceholder — заглушка списка сохранённых серверов (вместо
@@ -1134,7 +1165,11 @@ func addrFromKey(key string) string {
 // refreshVaultLabel пишет открытую подпись файла vc, если её нет или она
 // устарела. Имя — метка, заданная человеком (главнее), иначе описание из
 // ключа, иначе адрес (core.ChooseServerName).
-func refreshVaultLabel(vc *vaultCtx, cfg map[string]any, creds *core.ServerCreds) error {
+//
+// Если подпись ДО входа была повреждена или не от этого файла (before),
+// возвращается notice — текст для человека: подпись была неверной и
+// обновлена. Тихо такую подпись не переписываем (CLAUDE.md, признак 4).
+func refreshVaultLabel(vc *vaultCtx, before labelBefore, cfg map[string]any, creds *core.ServerCreds) (notice string, err error) {
 	want := core.VaultLabel{
 		Name: core.ChooseServerName(vc.payload.Label, creds.Host, cfg),
 		Addr: core.ServerAddr(creds.Host, creds.Port, creds.User),
@@ -1142,10 +1177,28 @@ func refreshVaultLabel(vc *vaultCtx, cfg map[string]any, creds *core.ServerCreds
 	if want.Name == "" {
 		want.Name = want.Addr
 	}
-	if cur, ok, err := core.ReadVaultLabel(vc.path); err == nil && ok && cur == want {
-		return nil
+	switch before.st {
+	case core.LabelMismatch:
+		notice = fmt.Sprintf("Подпись в списке сохранённых не совпадала с файлом ключа (в ней было «%s», %s), "+
+			"а в файле ключа — «%s», %s. Подпись исправлена.", before.l.Name, before.l.Addr, want.Name, want.Addr)
+	case core.LabelBroken:
+		cause := core.LabelBrokenNote
+		if before.err != nil {
+			cause = before.err.Error()
+		}
+		notice = fmt.Sprintf("Подпись в списке сохранённых была повреждена (%s). Подпись исправлена: «%s», %s.", cause, want.Name, want.Addr)
 	}
-	return core.WriteVaultLabel(vc.path, want)
+	cur, st, rerr := core.ReadVaultLabel(vc.path)
+	if rerr == nil && st == core.LabelOK && cur.Name == want.Name && cur.Addr == want.Addr {
+		return notice, nil
+	}
+	if werr := core.WriteVaultLabel(vc.path, want); werr != nil {
+		if notice != "" {
+			notice += " (не удалось: " + werr.Error() + ")"
+		}
+		return notice, werr
+	}
+	return notice, nil
 }
 
 // reseal перезапечатывает .avlt хранилища vc с только что принятым

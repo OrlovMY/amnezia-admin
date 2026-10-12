@@ -38,6 +38,10 @@ func TestClassifyConnectError(t *testing.T) {
 		{"отказ соединения", refused, ConnectNetwork, ConnectNetworkText},
 		{"имя не разрешилось", dns, ConnectNetwork, ConnectNetworkText},
 		{"таймаут", fmt.Errorf("dial: %w", os.ErrDeadlineExceeded), ConnectNetwork, ConnectNetworkText},
+		{"обрыв при рукопожатии (сброс)", fmt.Errorf("ssh: handshake failed: %w",
+			&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("wsarecv", syscall.ECONNRESET)}), ConnectDropped, ConnectDroppedText},
+		{"обрыв при рукопожатии (таймаут чтения)", fmt.Errorf("ssh: handshake failed: %w",
+			&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}), ConnectDropped, ConnectDroppedText},
 		// Данных нет: EOF посреди рукопожатия может быть чем угодно
 		// (fail2ban, MaxStartups, не SSH на порту) — не угадываем.
 		{"неизвестно: EOF", fmt.Errorf("ssh: handshake failed: %w", io.EOF), ConnectUnknown, ConnectUnknownText + ": ssh: handshake failed: EOF"},
@@ -57,6 +61,9 @@ func TestClassifyConnectError(t *testing.T) {
 			}
 			if !errors.Is(ce, c.err) {
 				t.Errorf("Unwrap не ведёт к исходной ошибке")
+			}
+			if c.want != ConnectNetwork && strings.Contains(ce.Error(), "выключен") {
+				t.Errorf("утверждение «сервер выключен» без признака: %q", ce.Error())
 			}
 			if c.want != ConnectAuthRejected && strings.Contains(ce.Error(), "authorized_keys") {
 				t.Errorf("совет про ключ входа без признака отказа аутентификации: %q", ce.Error())
@@ -146,4 +153,38 @@ func TestConnectWrongPasswordSaysGetNewKey(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "получите новый ключ vpn://") {
 		t.Fatalf("нет понятного объяснения отказа входа: %v", err)
 	}
+}
+
+// Тест доезда обрыва: TCP принят и сброшен посреди рукопожатия — не
+// «сервер выключен или порт закрыт», а «оборвалось; причина неизвестна».
+func TestConnectResetReachesDropped(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 64)
+		c.Read(buf) // дождаться версии клиента
+		c.(*net.TCPConn).SetLinger(0)
+		c.Close() // RST
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	_, err = ConnectWithHostKey(&ServerCreds{Host: host, Port: port, User: "root", Password: "p"},
+		HostKeyPolicy{KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts")})
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("не ConnectError: %v", err)
+	}
+	if ce.Kind == ConnectNetwork {
+		t.Fatalf("обрыв после TCP выдан за недоступность сервера: %v", err)
+	}
+	if ce.Kind != ConnectDropped && ce.Kind != ConnectUnknown {
+		t.Fatalf("вид %d: %v", ce.Kind, err)
+	}
+	t.Logf("вид %d: %v", ce.Kind, err)
 }

@@ -19,7 +19,8 @@ import (
 // нет признака — ConnectUnknown с исходной причиной, без догадок. Порядок
 // проверок — от частного к общему так, чтобы частный НЕ перехватывал чужое:
 // ключ хоста (типизированная ошибка ядра) → отказ аутентификации (точная
-// фраза x/crypto/ssh) → сеть (типы net/syscall) → неизвестно.
+// фраза x/crypto/ssh) → обрыв после TCP (net.OpError не на dial) → сеть
+// (типы net/syscall) → неизвестно.
 //
 // Секретов в тексте нет: исходные ошибки x/crypto/ssh и net не содержат ни
 // пароля, ни ключа (в них — имена методов и адрес), а собственный текст
@@ -40,6 +41,10 @@ const (
 	// ConnectNetwork — до SSH дело не дошло: отказ соединения, таймаут,
 	// имя не разрешилось, сеть недоступна.
 	ConnectNetwork
+	// ConnectDropped — TCP-соединение было, но оборвалось во время
+	// установки SSH (сброс, обрыв, таймаут чтения). Почему — неизвестно:
+	// это не «сервер выключен» и не «порт закрыт».
+	ConnectDropped
 )
 
 // ConnectError — отказ ConnectWithHostKey. Error() — объяснение для человека
@@ -65,6 +70,7 @@ const (
 		"Если не переустанавливали — не подключайтесь"
 	ConnectNetworkText = "Не удалось установить соединение с сервером (сеть, адрес или порт): " +
 		"сервер выключен, недоступен по сети или порт SSH закрыт"
+	ConnectDroppedText = "Соединение с сервером оборвалось при установке; причина неизвестна"
 	ConnectUnknownText = "Не удалось подключиться"
 )
 
@@ -86,6 +92,8 @@ func (e *ConnectError) Error() string {
 		return ConnectHostKeyChangedText + ". Подробности: " + cause
 	case ConnectNetwork:
 		return ConnectNetworkText + ". Причина: " + cause
+	case ConnectDropped:
+		return ConnectDroppedText + ". Подробности: " + cause
 	default:
 		return ConnectUnknownText + ": " + cause
 	}
@@ -116,6 +124,11 @@ func classifyConnect(err error) ConnectErrKind {
 	var dnsErr *net.DNSError
 	var opErr *net.OpError
 	var netErr net.Error
+	if errors.As(err, &opErr) && opErr.Op != "dial" {
+		// read/write после установленного TCP — обрыв посреди рукопожатия:
+		// сервер был доступен, причина неизвестна.
+		return ConnectDropped
+	}
 	switch {
 	case errors.As(err, &dnsErr),
 		errors.As(err, &opErr),

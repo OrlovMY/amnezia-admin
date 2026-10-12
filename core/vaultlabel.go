@@ -1,12 +1,15 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
@@ -29,6 +32,8 @@ import (
 type VaultLabel struct {
 	Name string `json:"name"`
 	Addr string `json:"addr,omitempty"`
+	// Sum — SHA-256 содержимого .avlt, для которого записана подпись.
+	Sum string `json:"sha256"`
 }
 
 // VaultLabelMaxRunes — длина подписи в списке, дальше многоточие; полное
@@ -84,96 +89,209 @@ func ChooseServerName(label, host string, cfg map[string]any) string {
 	return label
 }
 
-// WriteVaultLabel пишет открытую подпись рядом с vaultPath (атомарно, 0600).
+// LabelState — состояние подписи сохранённого сервера.
+type LabelState int
+
+const (
+	// LabelAbsent — подписи нет (файл сохранён до появления подписей).
+	LabelAbsent LabelState = iota
+	// LabelOK — подпись есть и относится именно к этому .avlt.
+	LabelOK
+	// LabelBroken — подпись есть, но не читается или пуста.
+	LabelBroken
+	// LabelMismatch — подпись читается, но записана для другого содержимого
+	// .avlt (файл заменили, скопировали, восстановили; подпись осталась от
+	// прежнего). Её имя не показывается: оно может быть чужим.
+	LabelMismatch
+)
+
+// Пометки к «Сервер N» — различимо от «подписи нет».
+const (
+	LabelBrokenNote   = "подпись повреждена"
+	LabelMismatchNote = "подпись не совпадает с файлом ключа"
+)
+
+func vaultSum(vaultPath string) (string, error) {
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return "", err
+	}
+	s := sha256.Sum256(data)
+	return hex.EncodeToString(s[:]), nil
+}
+
+// WriteVaultLabel пишет открытую подпись рядом с vaultPath (атомарно, 0600),
+// привязывая её к ТЕКУЩЕМУ содержимому .avlt (SHA-256). Пустое имя
+// заменяется адресом; если неизвестно и то и другое — подпись не пишется
+// (пустая подпись была бы «повреждённой»).
 func WriteVaultLabel(vaultPath string, l VaultLabel) error {
+	l.Name = strings.TrimSpace(l.Name)
+	if l.Name == "" {
+		l.Name = l.Addr
+	}
+	if l.Name == "" {
+		return nil
+	}
+	sum, err := vaultSum(vaultPath)
+	if err != nil {
+		return err
+	}
+	l.Sum = sum
 	data, err := json.Marshal(l)
 	if err != nil {
 		return err
 	}
 	p := vaultLabelPath(vaultPath)
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, p); err != nil {
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0600)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, p)
+	}
+	if werr != nil {
 		os.Remove(tmp)
-		return err
+		return werr
 	}
 	return nil
 }
 
-// ReadVaultLabel читает подпись. ok=false, err=nil — подписи нет (старый
-// файл); err != nil — подпись есть, но прочитать её не удалось.
-func ReadVaultLabel(vaultPath string) (l VaultLabel, ok bool, err error) {
+// ReadVaultLabel читает подпись и проверяет её привязку к .avlt. err —
+// причина для LabelBroken (и сбоя чтения самого .avlt).
+func ReadVaultLabel(vaultPath string) (l VaultLabel, st LabelState, err error) {
 	data, err := os.ReadFile(vaultLabelPath(vaultPath))
 	if errors.Is(err, fs.ErrNotExist) {
-		return VaultLabel{}, false, nil
+		return VaultLabel{}, LabelAbsent, nil
 	}
 	if err != nil {
-		return VaultLabel{}, false, err
+		return VaultLabel{}, LabelBroken, err
 	}
 	if err := json.Unmarshal(data, &l); err != nil {
-		return VaultLabel{}, false, fmt.Errorf("подпись %s повреждена: %w", vaultLabelPath(vaultPath), err)
+		return VaultLabel{}, LabelBroken, fmt.Errorf("подпись %s повреждена: %w", vaultLabelPath(vaultPath), err)
 	}
 	l.Name = strings.TrimSpace(l.Name)
 	if l.Name == "" {
-		return VaultLabel{}, false, fmt.Errorf("подпись %s пуста", vaultLabelPath(vaultPath))
+		return VaultLabel{}, LabelBroken, fmt.Errorf("подпись %s пуста", vaultLabelPath(vaultPath))
 	}
-	return l, true, nil
+	sum, err := vaultSum(vaultPath)
+	if err != nil {
+		return l, LabelBroken, err
+	}
+	if l.Sum != sum {
+		return l, LabelMismatch, nil
+	}
+	return l, LabelOK, nil
 }
 
-// VaultNames — подписи для списка сохранённых серверов, в порядке vaults.
-// Неизвестная подпись — «Сервер N» (N — позиция в списке). Одинаковые
-// имена у разных серверов различаются адресом («AEZA test — 1.2.3.4»), а
-// если и адрес совпал или неизвестен — номером. Длинные имена обрезаются
-// многоточием до VaultLabelMaxRunes (Short); Full — полная подпись (для
-// заголовка диалога пин-кода).
+// keepLabelAfterRewrite — после перезаписи .avlt программой (WriteVaultFile)
+// подпись, бывшая верной ДО перезаписи (wasOK), перепривязывается к новому
+// содержимому. Неверная подпись не «узаконивается». Сбой записи не скрыт:
+// подпись останется несовпадающей и будет так и показана.
+func keepLabelAfterRewrite(vaultPath string, l VaultLabel, wasOK bool) {
+	if wasOK {
+		_ = WriteVaultLabel(vaultPath, l) // сбой виден в списке как «не совпадает»
+	}
+}
+
+// RemoveOrphanVaultLabels удаляет подписи, у которых нет своего .avlt
+// (ключ удалили руками) — адрес сервера не должен лежать на диске без нужды.
+// При показе такие подписи и так не участвуют (список строится по .avlt).
+func RemoveOrphanVaultLabels(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(n), ".avlt.label") {
+			continue
+		}
+		vault := filepath.Join(dir, n[:len(n)-len(".label")])
+		if _, err := os.Stat(vault); errors.Is(err, fs.ErrNotExist) {
+			if rerr := os.Remove(filepath.Join(dir, n)); rerr != nil && firstErr == nil {
+				firstErr = rerr
+			}
+		}
+	}
+	return firstErr
+}
+
+// VaultName — подпись для списка сохранённых серверов. Неизвестная подпись —
+// «Сервер N» (N — позиция в списке), с пометкой, если подпись повреждена
+// или не от этого файла. Одинаковые имена различаются адресом
+// («AEZA test — 1.2.3.4»), а если и адрес совпал или неизвестен — номером.
+// Short обрезается многоточием до VaultLabelMaxRunes, но обрезается только
+// имя: различитель сохраняется. Full — полная подпись (заголовок диалога
+// пин-кода).
 type VaultName struct{ Short, Full string }
 
 // VaultNames — см. VaultName.
 func VaultNames(vaults []string) []VaultName {
 	labels := make([]VaultLabel, len(vaults))
-	known := make([]bool, len(vaults))
+	states := make([]LabelState, len(vaults))
 	for i, p := range vaults {
-		l, ok, err := ReadVaultLabel(p)
-		known[i] = ok && err == nil
-		labels[i] = l
+		labels[i], states[i], _ = ReadVaultLabel(p) // причина сбоя — в состоянии LabelBroken
 	}
-	return vaultNamesFrom(labels, known)
+	return vaultNamesFrom(labels, states)
 }
 
-func vaultNamesFrom(labels []VaultLabel, known []bool) []VaultName {
+func vaultNamesFrom(labels []VaultLabel, states []LabelState) []VaultName {
 	n := len(labels)
-	full := make([]string, n)
+	base := make([]string, n)
+	suffix := make([]string, n)
 	count := map[string]int{}
 	for i := range labels {
-		if known[i] {
+		if states[i] == LabelOK {
 			count[labels[i].Name]++
 		}
 	}
 	for i := range labels {
-		switch {
-		case !known[i]:
-			full[i] = fmt.Sprintf("Сервер %d", i+1)
-		case count[labels[i].Name] > 1 && labels[i].Addr != "" && labels[i].Addr != labels[i].Name:
-			full[i] = labels[i].Name + " — " + labels[i].Addr
+		switch states[i] {
+		case LabelOK:
+			base[i] = labels[i].Name
+			if count[labels[i].Name] > 1 && labels[i].Addr != "" && labels[i].Addr != labels[i].Name {
+				suffix[i] = " — " + labels[i].Addr
+			}
+		case LabelBroken:
+			base[i] = fmt.Sprintf("Сервер %d", i+1)
+			suffix[i] = " (" + LabelBrokenNote + ")"
+		case LabelMismatch:
+			base[i] = fmt.Sprintf("Сервер %d", i+1)
+			suffix[i] = " (" + LabelMismatchNote + ")"
 		default:
-			full[i] = labels[i].Name
+			base[i] = fmt.Sprintf("Сервер %d", i+1)
 		}
 	}
 	// Второй круг: совпало и с адресом (или адреса нет) — номер.
 	seen := map[string]int{}
-	for _, f := range full {
-		seen[f]++
+	for i := range base {
+		seen[base[i]+suffix[i]]++
 	}
-	for i := range full {
-		if seen[full[i]] > 1 {
-			full[i] = fmt.Sprintf("%s (%d)", full[i], i+1)
+	for i := range base {
+		if seen[base[i]+suffix[i]] > 1 {
+			suffix[i] += fmt.Sprintf(" (%d)", i+1)
 		}
 	}
 	out := make([]VaultName, n)
-	for i, f := range full {
-		out[i] = VaultName{Short: TruncateRunes(f, VaultLabelMaxRunes), Full: f}
+	for i := range base {
+		budget := VaultLabelMaxRunes - utf8.RuneCountInString(suffix[i])
+		if budget < 8 {
+			budget = 8
+		}
+		out[i] = VaultName{Short: TruncateRunes(base[i], budget) + suffix[i], Full: base[i] + suffix[i]}
 	}
 	return out
 }
