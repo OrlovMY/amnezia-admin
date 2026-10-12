@@ -169,7 +169,9 @@ func ConnectWithHostKey(creds *ServerCreds, pol HostKeyPolicy) (*Session, error)
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(creds.Host, creds.Port), conf)
 	if err != nil {
-		return nil, err
+		// Вид отказа — для человека (connecterr.go); исходная ошибка
+		// доступна через Unwrap.
+		return nil, ClassifyConnectError(err)
 	}
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: acceptedFp}, nil
 }

@@ -1047,7 +1047,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			if vc != nil && errors.Is(err, core.ErrHostKeyMismatch) && errors.As(err, &hke) {
 				u.hostKeyChangedDialog(hke.Addr, hke.KnownFp, hke.PresentedFp, knownHostsPath, vc, connectBtn, info)
 			}
-			u.connectFail(connectBtn, info, "SSH не удался: "+err.Error())
+			u.connectFail(connectBtn, info, err.Error())
 			return
 		}
 		containers, err := sess.FindContainers()
