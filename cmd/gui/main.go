@@ -3221,7 +3221,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 			failDetail.SetText("Подробности: " + err.Error())
 			failDetail.Show()
 			if u.status != nil {
-				u.status.SetText("Конфиг НЕ сохранён")
+				u.status.SetText(u.withEndpointNote("Конфиг НЕ сохранён"))
 			}
 			return
 		}

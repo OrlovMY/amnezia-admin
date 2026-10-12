@@ -60,12 +60,12 @@ func TestGUIIPNoteEveryIssue(t *testing.T) {
 	u.addDialog()
 	test.Tap(u.clientHostShown.keepBt)
 	for i := 0; i < 2; i++ {
-		if st := u.withEndpointNote("Конфиг сохранён: x"); !strings.Contains(st, "придётся перевыпускать") {
+		if st := u.withEndpointNote("Конфиг сохранён: x"); !strings.HasPrefix(st, "Конфиг сохранён: x") || !strings.Contains(st, "придётся перевыпускать") {
 			t.Errorf("выдача %d: %q", i, st)
 		}
 	}
 	u.sess.ClientHost = "vpn.example.com"
-	if st := u.withEndpointNote("Конфиг сохранён: x"); !strings.Contains(st, "Адрес сервера в конфиге: vpn.example.com") || strings.Contains(st, "перевыпускать") {
+	if st := u.withEndpointNote("Конфиг сохранён: x"); !strings.HasPrefix(st, "Конфиг сохранён: x") || !strings.Contains(st, "Адрес сервера в конфиге: vpn.example.com") || strings.Contains(st, "перевыпускать") {
 		t.Errorf("%q", st)
 	}
 }
