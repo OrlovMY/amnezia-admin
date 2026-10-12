@@ -172,9 +172,14 @@ func TestRefreshVaultLabelLoud(t *testing.T) {
 		want   []string
 	}{
 		{"не совпадала", labelBefore{l: core.VaultLabel{Name: "Чужой", Addr: "10.0.0.9"}, st: core.LabelMismatch},
-			[]string{"не совпадала", "Чужой", "10.0.0.9", "AEZA test", "исправлена"}},
+			[]string{"исправлена", "не совпадала", "Чужой", "10.0.0.9", "AEZA test", "исправлена"}},
 		{"повреждена", labelBefore{st: core.LabelBroken}, []string{"повреждена", "AEZA test", "исправлена"}},
-		{"верна", labelBefore{st: core.LabelOK}, nil},
+		{"верна", labelBefore{l: core.VaultLabel{Name: "AEZA test", Addr: "89.22.229.78"}, st: core.LabelOK}, nil},
+		// Хэш пересчитан после умышленной правки: LabelOK, но адрес чужой.
+		{"хэш верен, адрес чужой", labelBefore{l: core.VaultLabel{Name: "AEZA test", Addr: "10.6.6.6"}, st: core.LabelOK},
+			[]string{"исправлена", "10.6.6.6", "89.22.229.78"}},
+		{"хэш верен, имя чужое", labelBefore{l: core.VaultLabel{Name: "Банк", Addr: "89.22.229.78"}, st: core.LabelOK},
+			[]string{"исправлена", "Банк", "AEZA test"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := withVaultFiles(t, "01.avlt")
@@ -192,5 +197,22 @@ func TestRefreshVaultLabelLoud(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Сбой записи: сообщение не говорит «исправлена», а говорит «неверна;
+// исправить не удалось» с причиной.
+func TestRefreshVaultLabelWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	vc := &vaultCtx{path: filepath.Join(dir, "нет.avlt")} // .avlt нет — хэш не посчитать
+	cfg := map[string]any{"description": "AEZA test", "hostName": "89.22.229.78"}
+	creds := &core.ServerCreds{Host: "89.22.229.78", Port: "22", User: "root"}
+	notice, err := refreshVaultLabel(vc, labelBefore{l: core.VaultLabel{Name: "Чужой", Addr: "10.6.6.6"}, st: core.LabelOK}, cfg, creds)
+	if err == nil {
+		t.Fatal("запись должна была упасть")
+	}
+	if strings.Contains(notice, "исправлена") || !strings.Contains(notice, "неверна") ||
+		!strings.Contains(notice, "исправить не удалось: "+err.Error()) || !strings.Contains(notice, "10.6.6.6") {
+		t.Errorf("сообщение: %q", notice)
 	}
 }

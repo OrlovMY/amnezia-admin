@@ -1177,26 +1177,40 @@ func refreshVaultLabel(vc *vaultCtx, before labelBefore, cfg map[string]any, cre
 	if want.Name == "" {
 		want.Name = want.Addr
 	}
+	// wrong — чем подпись была неверна (пусто — была верна или её не было).
+	wrong := ""
+	inKey := fmt.Sprintf("в ключе — «%s», %s", want.Name, want.Addr)
 	switch before.st {
+	case core.LabelOK:
+		// Хэш не защищает от умышленной правки (адрес вписан, хэш
+		// пересчитан): сверяем подпись с фактическим содержимым ключа.
+		if before.l.Name != want.Name || before.l.Addr != want.Addr {
+			wrong = fmt.Sprintf("было «%s», %s; %s", before.l.Name, before.l.Addr, inKey)
+		}
 	case core.LabelMismatch:
-		notice = fmt.Sprintf("Подпись в списке сохранённых не совпадала с файлом ключа (в ней было «%s», %s), "+
-			"а в файле ключа — «%s», %s. Подпись исправлена.", before.l.Name, before.l.Addr, want.Name, want.Addr)
+		wrong = fmt.Sprintf("не совпадала с файлом ключа: было «%s», %s; %s", before.l.Name, before.l.Addr, inKey)
 	case core.LabelBroken:
 		cause := core.LabelBrokenNote
 		if before.err != nil {
 			cause = before.err.Error()
 		}
-		notice = fmt.Sprintf("Подпись в списке сохранённых была повреждена (%s). Подпись исправлена: «%s», %s.", cause, want.Name, want.Addr)
+		wrong = fmt.Sprintf("была повреждена (%s); %s", cause, inKey)
 	}
 	cur, st, rerr := core.ReadVaultLabel(vc.path)
 	if rerr == nil && st == core.LabelOK && cur.Name == want.Name && cur.Addr == want.Addr {
+		if wrong != "" {
+			notice = "Подпись сервера исправлена (" + wrong + ")."
+		}
 		return notice, nil
 	}
 	if werr := core.WriteVaultLabel(vc.path, want); werr != nil {
-		if notice != "" {
-			notice += " (не удалось: " + werr.Error() + ")"
+		if wrong != "" {
+			notice = "Подпись сервера неверна (" + wrong + "); исправить не удалось: " + werr.Error()
 		}
 		return notice, werr
+	}
+	if wrong != "" {
+		notice = "Подпись сервера исправлена (" + wrong + ")."
 	}
 	return notice, nil
 }
