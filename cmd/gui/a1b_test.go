@@ -174,14 +174,14 @@ func saveKeyThroughDialog(t *testing.T, dir string) (status, saved string) {
 		t.Fatalf("каталог хранилищ после сохранения: %v", err)
 	}
 	for _, e := range es {
-		if !before[e.Name()] {
+		if !before[e.Name()] && strings.EqualFold(filepath.Ext(e.Name()), ".avlt") {
 			saved = filepath.Join(dir, e.Name())
 		}
 	}
 	if saved == "" {
 		t.Fatalf("тест перестал что-либо проверять: файл не сохранён (статус диалога неизвестен, главный — %q)", u.status.Text)
 	}
-	t.Cleanup(func() { os.Remove(saved) })
+	t.Cleanup(func() { os.Remove(saved); os.Remove(saved + ".label") })
 	return u.status.Text, saved
 }
 
@@ -223,6 +223,18 @@ func shownNumber(t *testing.T, dir, path string) int {
 	return 0
 }
 
+// shownName — подпись, под которой файл path виден в списке сохранённых
+// (после правки подписей это имя из файла-подписи, а не «Сервер N»).
+func shownName(t *testing.T, dir, path string) string {
+	t.Helper()
+	vaults, err := core.ListVaults(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := core.VaultNames(vaults)
+	return names[shownNumber(t, dir, path)-1].Short
+}
+
 // TestA1bSavedKeyNumberReachesStatus — ТЕСТ ДОЕЗДА: новый файл встаёт
 // ПЕРВЫМ в списке (имена «ffffffff», «fffffffe» больше любого случайного), а
 // строка состояния на f0febbd называла «Сервер 3» — число файлов, то есть
@@ -230,7 +242,7 @@ func shownNumber(t *testing.T, dir, path string) int {
 func TestA1bSavedKeyNumberReachesStatus(t *testing.T) {
 	dir := withVaultFiles(t, "fffffffe.avlt", "ffffffff.avlt")
 	status, saved := saveKeyThroughDialog(t, dir)
-	want := fmt.Sprintf("Ключ сохранён (Сервер %d).", shownNumber(t, dir, saved))
+	want := fmt.Sprintf("Ключ сохранён (%s).", shownName(t, dir, saved))
 	if status != want {
 		t.Errorf("строка состояния %q, ожидалось %q — назван номер, под которым на экране "+
 			"подключения виден ДРУГОЙ сервер", status, want)
@@ -250,7 +262,7 @@ func TestA1bSavedKeyNumberIsPositionNotCount(t *testing.T) {
 	if status == "Ключ сохранён (Сервер 3)." {
 		t.Errorf("строка состояния называет число файлов (3), а файл виден как «Сервер %d»", pos)
 	}
-	if want := fmt.Sprintf("Ключ сохранён (Сервер %d).", pos); status != want {
+	if want := fmt.Sprintf("Ключ сохранён (%s).", shownName(t, dir, saved)); status != want {
 		t.Errorf("строка состояния %q, ожидалось %q", status, want)
 	}
 }

@@ -568,7 +568,19 @@ func LoadVault(path string) ([]byte, error) {
 // на месте (PR-4: ForgetHostKey и, в части Б, дописывание HostKeyFingerprint
 // после первого подтверждённого подключения). Путь не создаётся заново —
 // только каталог назначения, если его вдруг нет.
+//
+// Открытая подпись (vaultlabel.go), верная ДО перезаписи, перепривязывается
+// к новому содержимому; неверная так и остаётся неверной.
 func WriteVaultFile(path string, data []byte) error {
+	lbl, st, _ := ReadVaultLabel(path) // нужна только для перепривязки верной подписи
+	if err := writeVaultFileRaw(path, data); err != nil {
+		return err
+	}
+	keepLabelAfterRewrite(path, lbl, st == LabelOK)
+	return nil
+}
+
+func writeVaultFileRaw(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err

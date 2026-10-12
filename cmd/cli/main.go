@@ -639,7 +639,7 @@ func interactive() (code int) {
 		OnChanged:      cliHostKeyChanged(os.Stdout, knownHostsPath),
 	})
 	if err != nil {
-		fmt.Println(cErr("SSH не удался: ") + err.Error())
+		fmt.Println(cErr("SSH: ") + err.Error())
 		pause(in)
 		return
 	}

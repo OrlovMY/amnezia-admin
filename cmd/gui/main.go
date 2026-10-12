@@ -625,8 +625,10 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 
 // savedVaultsBlock строит блок «Или загрузить из сохранённых» под кнопкой
 // «Подключиться», если в каталоге "Настройки" есть сохранённые ключи (.avlt).
-// Настоящие метки серверов зашифрованы и неизвестны до ввода пина, поэтому
-// в списке показываются только порядковые "Сервер N" (порядок — по имени файла).
+// Метка внутри .avlt зашифрована, поэтому подпись берётся из открытого
+// файла-подписи рядом (core.VaultNames: имя, заданное человеком, или
+// описание из ключа vpn://, или адрес). «Сервер N» — только у файлов, для
+// которых подписи нет (сохранены до этой правки и ещё ни разу не открыты).
 func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyne.CanvasObject {
 	vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 	if listErr != nil {
@@ -640,23 +642,32 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 		return nil
 	}
 	label := widget.NewLabel("Или загрузить из сохранённых:")
-	names := make([]string, len(vaults))
-	for i := range vaults {
-		names[i] = fmt.Sprintf("Сервер %d", i+1)
+	// Подписи без своего .avlt (ключ удалили руками) — убрать: адрес
+	// сервера не должен лежать на диске без нужды. В список они и так не
+	// попадают (он строится по .avlt), поэтому сбой удаления — только в
+	// строку состояния.
+	if orphanErr := core.RemoveOrphanVaultLabels(core.DefaultVaultDir()); orphanErr != nil && u.status != nil {
+		u.status.SetText("Не удалось удалить подпись удалённого ключа: " + orphanErr.Error())
+	}
+	vn := core.VaultNames(vaults)
+	names := make([]string, len(vn))
+	for i := range vn {
+		names[i] = vn[i].Short
 	}
 	if len(vaults) == 1 {
 		btn := widget.NewButton(names[0], func() {
-			u.showVaultPinDialog(vaults[0], names[0], connectBtn, info)
+			u.showVaultPinDialog(vaults[0], vn[0].Full, connectBtn, info)
 		})
 		return container.NewVBox(label, btn)
 	}
 	sel := widget.NewSelect(names, nil)
+	sel.PlaceHolder = vaultSelectPlaceholder
 	sel.OnChanged = func(_ string) {
 		i := sel.SelectedIndex()
 		if i < 0 || i >= len(vaults) {
 			return
 		}
-		path, lbl := vaults[i], names[i]
+		path, lbl := vaults[i], vn[i].Full
 		sel.ClearSelected()
 		u.showVaultPinDialog(path, lbl, connectBtn, info)
 	}
@@ -1057,7 +1068,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			if vc != nil && errors.Is(err, core.ErrHostKeyMismatch) && errors.As(err, &hke) {
 				u.hostKeyChangedDialog(hke.Addr, hke.KnownFp, hke.PresentedFp, knownHostsPath, vc, connectBtn, info)
 			}
-			u.connectFail(connectBtn, info, "SSH не удался: "+err.Error())
+			u.connectFail(connectBtn, info, err.Error())
 			return
 		}
 		containers, err := sess.FindContainers()
@@ -1067,6 +1078,12 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			return
 		}
 
+		// Состояние подписи — ДО перезапечатывания: reseal меняет .avlt, и
+		// сравнивать подпись нужно с тем, что человек видел в списке.
+		var lblBefore labelBefore
+		if vc != nil {
+			lblBefore.l, lblBefore.st, lblBefore.err = core.ReadVaultLabel(vc.path)
+		}
 		if vc != nil && vc.payload.HostKeyFingerprint == "" {
 			// v1-хранилище (или v2, сохранённое ДО подтверждения ключа) — это
 			// первое подтверждённое подключение, отпечаток узнаём только
@@ -1076,6 +1093,20 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 				fyne.Do(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить отпечаток ключа в хранилище: " + resealErr.Error())
+					}
+				})
+			}
+		}
+		labelNotice := ""
+		if vc != nil {
+			// Подпись для списка сохранённых: старые файлы получают её при
+			// первом входе, у новых обновляется, если сменился адрес.
+			notice, labelErr := refreshVaultLabel(vc, lblBefore, cfg, creds)
+			labelNotice = notice
+			if labelErr != nil {
+				fyne.Do(func() {
+					if u.status != nil {
+						u.status.SetText("Не удалось сохранить подпись сервера для списка сохранённых: " + labelErr.Error())
 					}
 				})
 			}
@@ -1102,11 +1133,101 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			u.showMainScreen()
 			u.refresh()
 			if vc == nil {
-				u.offerSaveKey(key, creds.Host, sess.HostKeyFingerprint)
+				defaultName := core.DefaultServerName(cfg)
+				if defaultName == "" {
+					defaultName = creds.Host
+				}
+				u.offerSaveKey(key, defaultName, sess.HostKeyFingerprint)
 			}
 			u.diagnoseAfterConnect(sess, containers)
+			if labelNotice != "" {
+				// Громко, а не тихой перезаписью: человек выбирал сервер по
+				// подписи, которая оказалась неверной.
+				if u.status != nil {
+					u.status.SetText(labelNotice)
+				}
+				dialog.ShowInformation("Подпись сервера исправлена", labelNotice, u.win)
+			}
 		})
 	})
+}
+
+// labelBefore — подпись файла ключа, какой она была ДО входа.
+type labelBefore struct {
+	l   core.VaultLabel
+	st  core.LabelState
+	err error
+}
+
+// vaultSelectPlaceholder — заглушка списка сохранённых серверов (вместо
+// английской «(Select one)» Fyne).
+const vaultSelectPlaceholder = "Выберите сервер"
+
+// addrFromKey — адрес сервера для подписи; "" — если ключ не разобрать.
+// Ошибка разбора не нужна: подпись без адреса всё равно верна.
+func addrFromKey(key string) string {
+	cfg, err := core.DecodeVpnKey(key)
+	if err != nil {
+		return ""
+	}
+	creds, err := core.CredsFromConfig(cfg)
+	if err != nil {
+		return ""
+	}
+	return core.ServerAddr(creds.Host, creds.Port, creds.User)
+}
+
+// refreshVaultLabel пишет открытую подпись файла vc, если её нет или она
+// устарела. Имя — метка, заданная человеком (главнее), иначе описание из
+// ключа, иначе адрес (core.ChooseServerName).
+//
+// Если подпись ДО входа была повреждена или не от этого файла (before),
+// возвращается notice — текст для человека: подпись была неверной и
+// обновлена. Тихо такую подпись не переписываем (CLAUDE.md, признак 4).
+func refreshVaultLabel(vc *vaultCtx, before labelBefore, cfg map[string]any, creds *core.ServerCreds) (notice string, err error) {
+	want := core.VaultLabel{
+		Name: core.ChooseServerName(vc.payload.Label, creds.Host, cfg),
+		Addr: core.ServerAddr(creds.Host, creds.Port, creds.User),
+	}
+	if want.Name == "" {
+		want.Name = want.Addr
+	}
+	// wrong — чем подпись была неверна (пусто — была верна или её не было).
+	wrong := ""
+	inKey := fmt.Sprintf("в ключе — «%s», %s", want.Name, want.Addr)
+	switch before.st {
+	case core.LabelOK:
+		// Хэш не защищает от умышленной правки (адрес вписан, хэш
+		// пересчитан): сверяем подпись с фактическим содержимым ключа.
+		if before.l.Name != want.Name || before.l.Addr != want.Addr {
+			wrong = fmt.Sprintf("было «%s», %s; %s", before.l.Name, before.l.Addr, inKey)
+		}
+	case core.LabelMismatch:
+		wrong = fmt.Sprintf("не совпадала с файлом ключа: было «%s», %s; %s", before.l.Name, before.l.Addr, inKey)
+	case core.LabelBroken:
+		cause := core.LabelBrokenNote
+		if before.err != nil {
+			cause = before.err.Error()
+		}
+		wrong = fmt.Sprintf("была повреждена (%s); %s", cause, inKey)
+	}
+	cur, st, rerr := core.ReadVaultLabel(vc.path)
+	if rerr == nil && st == core.LabelOK && cur.Name == want.Name && cur.Addr == want.Addr {
+		if wrong != "" {
+			notice = "Подпись сервера исправлена (" + wrong + ")."
+		}
+		return notice, nil
+	}
+	if werr := core.WriteVaultLabel(vc.path, want); werr != nil {
+		if wrong != "" {
+			notice = "Подпись сервера неверна (" + wrong + "); исправить не удалось: " + werr.Error()
+		}
+		return notice, werr
+	}
+	if wrong != "" {
+		notice = "Подпись сервера исправлена (" + wrong + ")."
+	}
+	return notice, nil
 }
 
 // reseal перезапечатывает .avlt хранилища vc с только что принятым
@@ -1420,6 +1541,10 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 			if err == nil {
 				savedPath, err = core.SaveVault(core.DefaultVaultDir(), data)
 			}
+			var labelErr error
+			if err == nil {
+				labelErr = core.WriteVaultLabel(savedPath, core.VaultLabel{Name: label, Addr: addrFromKey(key)})
+			}
 			fyne.Do(func() {
 				busy = false
 				if err != nil {
@@ -1435,7 +1560,15 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 				// место списка.
 				vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 				if u.status != nil {
-					u.status.SetText(guiview.SavedKeyStatus(vaults, listErr, savedPath))
+					var shown []string
+					for _, n := range core.VaultNames(vaults) {
+						shown = append(shown, n.Short)
+					}
+					st := guiview.SavedKeyStatus(vaults, shown, listErr, savedPath)
+					if labelErr != nil {
+						st += " Подпись для списка сохранить не удалось (" + labelErr.Error() + ") — в списке он будет «Сервер N» до первого входа."
+					}
+					u.status.SetText(st)
 				}
 			})
 		})

@@ -16,20 +16,22 @@ func TestSavedKeyStatusTable(t *testing.T) {
 	cases := []struct {
 		name   string
 		vaults []string
+		names  []string
 		err    error
 		saved  string
 		want   string
 	}{
-		{"первый из трёх", []string{a, b, c}, nil, a, "Ключ сохранён (Сервер 1)."},
-		{"в середине — позиция, а не число файлов", []string{a, b, c}, nil, b, "Ключ сохранён (Сервер 2)."},
-		{"последний", []string{a, b, c}, nil, c, "Ключ сохранён (Сервер 3)."},
-		{"список не прочитан", nil, errors.New("отказ"), b, unknown},
-		{"файла в списке нет", []string{a, c}, nil, b, unknown},
-		{"путь неизвестен", []string{a, b, c}, nil, "", unknown},
+		{"первый из трёх", []string{a, b, c}, nil, nil, a, "Ключ сохранён (Сервер 1)."},
+		{"в середине — позиция, а не число файлов", []string{a, b, c}, nil, nil, b, "Ключ сохранён (Сервер 2)."},
+		{"последний", []string{a, b, c}, nil, nil, c, "Ключ сохранён (Сервер 3)."},
+		{"список не прочитан", nil, nil, errors.New("отказ"), b, unknown},
+		{"файла в списке нет", []string{a, c}, nil, nil, b, unknown},
+		{"подпись известна", []string{a, b, c}, []string{"Сервер 1", "AEZA test", "Сервер 3"}, nil, b, "Ключ сохранён (AEZA test)."},
+		{"путь неизвестен", []string{a, b, c}, nil, nil, "", unknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := SavedKeyStatus(tc.vaults, tc.err, tc.saved); got != tc.want {
+			if got := SavedKeyStatus(tc.vaults, tc.names, tc.err, tc.saved); got != tc.want {
 				t.Errorf("SavedKeyStatus = %q, want %q", got, tc.want)
 			}
 		})
