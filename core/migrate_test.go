@@ -9,9 +9,13 @@ import (
 	"amnezia-admin/internal/fakesrv"
 )
 
+// sourceBackup — копия с сервера, где адрес для клиентов выбран: это сам
+// host (при IP — «оставить IP»).
 func sourceBackup(t *testing.T, srv *fakesrv.Server, host string) *Backup {
 	t.Helper()
-	b, err := NewSessionWithRunner(srv, &ServerCreds{Host: host}).CollectBackup("t", backupNow, okResolver)
+	sess := NewSessionWithRunner(srv, &ServerCreds{Host: host})
+	sess.ClientHostDecided = true
+	b, err := sess.CollectBackup("t", backupNow, okResolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +175,37 @@ func TestAddressVerdicts(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			b := sourceBackup(t, fakesrv.New(), c.srcHost)
 			r, err := NewSessionWithRunner(fakesrv.New(), &ServerCreds{Host: c.tgtHost}).CheckTarget(b, c.resolve)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Address != c.want || r.NeedAddressConfirm != c.confirm || !strings.Contains(r.AddressText, c.textPart) {
+				t.Errorf("итог %v подтв=%v «%s», ждали %v подтв=%v «%s»", r.Address, r.NeedAddressConfirm, r.AddressText, c.want, c.confirm, c.textPart)
+			}
+		})
+	}
+	// QA-01 Major: адрес выдачи в копии — тот, с которым выдавались конфиги
+	// (EndpointHost), а не hostName ключа; выбор не сделан при IP в ключе —
+	// «неизвестен», и вердикт «не удалось» даже при совпадающем IP цели.
+	for _, c := range []struct {
+		name       string
+		clientHost string
+		decided    bool
+		want       AddressVerdict
+		textPart   string
+		confirm    bool
+	}{
+		{"IP в ключе, выбор не сделан", "", false, AddrUnknown, "адрес выдачи неизвестен", true},
+		{"IP в ключе, выбрано имя", "vpn.example.org", true, AddrDiffers, "по имени vpn.example.org", true}, // okResolver: имя → 203.0.113.7
+		{"IP в ключе, «оставить IP»", "", true, AddrSame, "Адрес тот же", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := NewSessionWithRunner(fakesrv.New(), &ServerCreds{Host: "203.0.113.1"})
+			src.ClientHost, src.ClientHostDecided = c.clientHost, c.decided
+			b, err := src.CollectBackup("t", backupNow, okResolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := NewSessionWithRunner(fakesrv.New(), &ServerCreds{Host: "203.0.113.1"}).CheckTarget(b, okResolver)
 			if err != nil {
 				t.Fatal(err)
 			}

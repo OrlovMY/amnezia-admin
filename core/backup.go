@@ -140,6 +140,10 @@ const (
 	AddressKindIP     = "ip"
 	AddressKindName   = "name"
 	AddressKindAbsent = "" // в копии нет адреса
+	// AddressKindUnknown — в ключе IP, выбор адреса для клиентов не сделан:
+	// конфиги могли выдаваться и по имени. Старые программы читают это как
+	// неизвестный вид — «проверить не удалось».
+	AddressKindUnknown = "unknown"
 )
 
 // BackupFile — файл контейнера в копии.
@@ -705,7 +709,11 @@ func (s *Session) CollectBackupCtx(ctx context.Context, toolVersion string, now 
 	b := &Backup{FormatVersion: BackupFormat, CreatedAt: now.UTC().Format(time.RFC3339), ToolVersion: toolVersion, Complete: true}
 	if s.Creds != nil {
 		b.Server.Host = s.Creds.Host
-		b.IssuedAddress = issuedAddress(s.Creds.Host, resolve)
+		if h, ok := s.IssuedHost(); ok {
+			b.IssuedAddress = issuedAddress(h, resolve)
+		} else {
+			b.IssuedAddress = IssuedAddress{Kind: AddressKindUnknown, ResolveStatus: ResolveFailed}
+		}
 	}
 	b.Server.HostKeySHA256 = s.HostKeyFingerprint
 	for i := range cs {

@@ -51,6 +51,7 @@ func TestCheckClientHostTable(t *testing.T) {
 		{"не резолвится", "vpn.example.com", "203.0.113.5", stubResolver(nil, errors.New("no such host")), core.ClientHostUnknown, "no such host"},
 		{"DNS недоступен (нет резолвера)", "vpn.example.com", "203.0.113.5", nil, core.ClientHostUnknown, "не удалось"},
 		{"адрес сервера неизвестен", "vpn.example.com", "", res, core.ClientHostUnknown, "неизвестен адрес"},
+		{"публичный IPv6 совпал", "v6only.example.com", "2001:db8::1", res, core.ClientHostMatch, "указывает на этот сервер"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,6 +61,9 @@ func TestCheckClientHostTable(t *testing.T) {
 			}
 			if !strings.Contains(c.Text(), tc.text) {
 				t.Errorf("текст %q без %q", c.Text(), tc.text)
+			}
+			if !strings.Contains(c.Text(), "подсказка, а не гарантия") {
+				t.Errorf("нет оговорки о DNS этого компьютера: %q", c.Text())
 			}
 			if tc.want == core.ClientHostUnknown && (strings.Contains(c.Text(), "указывает на этот") || strings.Contains(c.Text(), "НЕ на этот")) {
 				t.Errorf("«не удалось» выдано за ответ: %q", c.Text())
@@ -172,5 +176,29 @@ func TestSessionServerIP(t *testing.T) {
 	}
 	if ip := core.NewSessionWithRunner(nil, &core.ServerCreds{Host: "vpn.example.com"}).ServerIP(); ip != "" {
 		t.Errorf("%q", ip)
+	}
+}
+
+// TestCheckClientHostPrivateServerIP — З1 AU-LOGIC: адрес подключения не
+// публичный (туннель, проброс, частная сеть) — сравнивать не с чем:
+// «не удалось», а не «указывает на другие адреса».
+func TestCheckClientHostPrivateServerIP(t *testing.T) {
+	res := stubResolver(map[string][]string{"vpn.example.com": {"203.0.113.5", "2001:db8::5"}}, nil)
+	for _, srv := range []string{"127.0.0.1", "10.8.1.1", "172.16.5.5", "172.31.255.1", "192.168.1.1", "100.64.1.1", "100.127.0.1", "169.254.1.1", "::1", "fd00::1", "fc00::2", "fe80::1"} {
+		t.Run(srv, func(t *testing.T) {
+			c := core.CheckClientHost("vpn.example.com", srv, res)
+			if c.Status != core.ClientHostUnknown {
+				t.Errorf("статус %d: %s", c.Status, c.Text())
+			}
+			if !strings.Contains(c.Text(), "частный/туннельный адрес "+srv) || strings.Contains(c.Text(), "НЕ на этот") {
+				t.Errorf("текст %q", c.Text())
+			}
+		})
+	}
+	// граница: соседние публичные адреса сравниваются как обычно
+	for _, srv := range []string{"100.63.255.1", "100.128.0.1", "172.32.0.1"} {
+		if c := core.CheckClientHost("vpn.example.com", srv, res); c.Status != core.ClientHostMismatch {
+			t.Errorf("%s: статус %d (%s)", srv, c.Status, c.Text())
+		}
 	}
 }

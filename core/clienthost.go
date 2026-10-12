@@ -28,6 +28,29 @@ type ClientHostSetting struct {
 	KeepIP bool   // человек явно отказался от имени: «оставить IP»
 }
 
+// endpointAddr — host:port для Endpoint; IPv6 — в квадратных скобках
+// (иначе «2001:db8::1:51820» не разобрать).
+func endpointAddr(host, port string) string {
+	return net.JoinHostPort(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"), port)
+}
+
+// IssuedHost — адрес, с которым конфиги выдаются в этом сеансе, и известен
+// ли он. Неизвестен — в ключе IP, а выбор адреса для клиентов не сделан:
+// раньше конфиги могли выдаваться и по имени (копия не должна утверждать
+// IP, признаки 2 и 4).
+func (s *Session) IssuedHost() (string, bool) {
+	if s.ClientHost != "" {
+		return s.ClientHost, true
+	}
+	if s.Creds == nil {
+		return "", false
+	}
+	if s.ClientHostDecided || !IsIPHost(s.Creds.Host) {
+		return s.Creds.Host, true
+	}
+	return "", false
+}
+
 // IsIPHost — адрес является IP-литералом (v4 или v6, допускаются скобки).
 func IsIPHost(h string) bool {
 	h = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(h), "["), "]")
@@ -152,6 +175,10 @@ func CheckClientHost(name, serverIP string, resolve Resolver) ClientHostCheck {
 		c.Reason = "неизвестен адрес, к которому подключена программа"
 		return c
 	}
+	if !publicIP(srv) {
+		c.Reason = fmt.Sprintf("подключение идёт через частный/туннельный адрес %s — публичный адрес сервера программе неизвестен, сравнивать имя не с чем", serverIP)
+		return c
+	}
 	if resolve == nil {
 		c.Reason = "резолвер недоступен"
 		return c
@@ -193,8 +220,24 @@ func CheckClientHost(name, serverIP string, resolve Resolver) ClientHostCheck {
 	return c
 }
 
-// Text — человеческое описание исхода (одна-две фразы).
-func (c ClientHostCheck) Text() string {
+// cgnat — 100.64.0.0/10 (RFC 6598): net.IP.IsPrivate его не включает.
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// publicIP — адрес, с которым имеет смысл сравнивать DNS-ответ: не
+// loopback, не частный (10/8, 172.16/12, 192.168/16, fc00::/7), не
+// link-local, не CGNAT, не unspecified.
+func publicIP(ip net.IP) bool {
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() || cgnat.Contains(ip))
+}
+
+// dnsHint — оговорка ко всем исходам: проверка — ответ DNS этого компьютера.
+const dnsHint = " Это ответ DNS на этом компьютере — подсказка, а не гарантия того, что видят клиенты."
+
+// Text — человеческое описание исхода (одна-две фразы) с оговоркой dnsHint.
+func (c ClientHostCheck) Text() string { return c.text() + dnsHint }
+
+func (c ClientHostCheck) text() string {
 	got := strings.Join(c.Resolved, ", ")
 	switch c.Status {
 	case ClientHostMatch:
@@ -225,5 +268,5 @@ func (c ClientHostCheck) otherFamily() string {
 
 // ClientHostIPWarning — громкое предупреждение для конфига, выданного с IP.
 func ClientHostIPWarning(ip string) string {
-	return fmt.Sprintf("ВНИМАНИЕ: конфиг выдан с IP-адресом сервера %s, а не с DNS-именем. При переезде сервера такой конфиг придётся перевыпускать каждому клиенту. Укажите имя: -client-host vpn.example.com (имя должно указывать на этот сервер).", ip)
+	return fmt.Sprintf("ВНИМАНИЕ: в конфиге клиента IP-адрес сервера %s, а не DNS-имя. При переезде сервера такой конфиг придётся перевыпускать каждому клиенту. Укажите имя: -client-host vpn.example.com (имя должно указывать на этот сервер).", ip)
 }

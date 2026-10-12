@@ -273,7 +273,7 @@ func (u *ui) xrayRekey(cl core.ClientEntry) {
 		func(c *core.Container) (*core.Plan, error) { return u.sess.PlanRekey(c, cl.ClientID) },
 		func(_ *core.Plan, nu *core.NewUser) {
 			u.selectedRow = -1
-			u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
+			u.status.SetText(u.withIPNote(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name)))
 			u.showConfigDialog(nu, "перевыпущен")
 			u.refresh()
 		})
@@ -334,6 +334,12 @@ func (u *ui) showXRayConfig(cl core.ClientEntry) {
 	if cl.ClientID == core.XRayServiceRowID && u.xrayServiceRow(cl) {
 		return
 	}
+	if u.needClientHostGate() {
+		// конфиг собирается заново с текущим адресом — те же ворота, что у
+		// создания и перевыпуска (З4 AU-LOGIC)
+		u.ensureClientHost(func() { u.showXRayConfig(cl) })
+		return
+	}
 	cur := u.cur
 	u.setBusy(true)
 	u.status.SetText(fmt.Sprintf("Собираю конфиг %q с сервера...", cl.Name()))
@@ -346,6 +352,7 @@ func (u *ui) showXRayConfig(cl core.ClientEntry) {
 				u.showError(err)
 				return
 			}
+			u.status.SetText(u.endpointNote())
 			u.showConfigDialog(nu, "— конфиг собран с сервера")
 		})
 	})

@@ -49,11 +49,16 @@ type ui struct {
 	// спросить перед первой выдачей; clientHostSet — выбор этого сеанса
 	// (идёт в хранилище при «Сохранить ключ»); vaultPath — .avlt, из
 	// которого открыт сеанс ("" — ключ введён вручную).
-	clientHostAsk      bool
-	clientHostSet      core.ClientHostSetting
-	vaultPath          string
-	clientHostShown    *clientHostView
-	clientHostPinShown dialog.Dialog
+	clientHostAsk bool
+	// clientHostRecheck — имя взято из хранилища и в этом сеансе ещё не
+	// перепроверено (З3 AU-LOGIC): перед первой выдачей — один резолв.
+	clientHostRecheck   bool
+	clientHostRecheckDl dialog.Dialog
+	clientHostRecheckTx string
+	clientHostSet       core.ClientHostSetting
+	vaultPath           string
+	clientHostShown     *clientHostView
+	clientHostPinShown  dialog.Dialog
 
 	win        fyne.Window
 	sess       *core.Session
@@ -3022,7 +3027,7 @@ func (u *ui) addDialog() {
 			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
 		return
 	}
-	if u.clientHostAsk {
+	if u.needClientHostGate() {
 		// в ключе IP, выбор не сделан — сначала адрес для клиентов
 		u.ensureClientHost(u.addDialog)
 		return
@@ -3033,7 +3038,7 @@ func (u *ui) addDialog() {
 
 	var d dialog.Dialog
 	onCreated := func(nu *core.NewUser) {
-		u.status.SetText(configDoneText(nu, "создан"))
+		u.status.SetText(u.withIPNote(configDoneText(nu, "создан")))
 		u.showConfigDialog(nu, "создан")
 		u.refresh()
 	}
@@ -3527,7 +3532,7 @@ func (u *ui) regenerateSelected() {
 		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
 		return
 	}
-	if u.clientHostAsk {
+	if u.needClientHostGate() {
 		u.ensureClientHost(u.regenerateSelected)
 		return
 	}
@@ -3539,7 +3544,7 @@ func (u *ui) regenerateSelected() {
 	var d dialog.Dialog
 	onRegenerated := func(nu *core.NewUser) {
 		u.selectedRow = -1
-		u.status.SetText(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name))
+		u.status.SetText(u.withIPNote(fmt.Sprintf("Конфиг для %q перевыпущен.", nu.Name)))
 		u.showConfigDialog(nu, "перевыпущен")
 		u.refresh()
 	}

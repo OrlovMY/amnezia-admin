@@ -42,17 +42,83 @@ func (u *ui) applyClientHostSetting(sess *core.Session, set core.ClientHostSetti
 		sess.ClientHost = host
 	}
 	u.clientHostAsk = ask
+	sess.ClientHostDecided = !ask
+	// сохранённое имя не применяем молча: перепроверка перед первой выдачей
+	u.clientHostRecheck = set.Host != ""
+}
+
+// needClientHostGate — нужно ли пройти ворота перед выдачей конфига.
+func (u *ui) needClientHostGate() bool { return u.clientHostAsk || u.clientHostRecheck }
+
+// withIPNote — к строке о выдаче конфига дописывается предупреждение,
+// если конфиг выдан с IP (при каждой выдаче, а не раз за сеанс — QA-01).
+func (u *ui) withIPNote(st string) string {
+	if u.sess != nil && core.IsIPHost(u.sess.EndpointHost()) {
+		return st + " " + core.ClientHostIPWarning(u.sess.EndpointHost())
+	}
+	return st
+}
+
+// endpointNote — строка состояния об адресе в выданном конфиге: IP —
+// предупреждение; имя — какое.
+func (u *ui) endpointNote() string {
+	if u.sess == nil {
+		return ""
+	}
+	h := u.sess.EndpointHost()
+	if core.IsIPHost(h) {
+		return core.ClientHostIPWarning(h)
+	}
+	return "Адрес сервера в конфиге: " + h
 }
 
 // ensureClientHost — ворота перед выдачей конфига. Спрашивать не нужно —
 // next() сразу; иначе окно выбора, next() — после выбора, «Отмена» —
 // конфиг не выдаётся.
 func (u *ui) ensureClientHost(next func()) {
-	if !u.clientHostAsk || u.sess == nil {
+	if u.sess == nil {
 		next()
 		return
 	}
-	u.clientHostShown = u.clientHostDialog(next)
+	if u.clientHostAsk {
+		u.clientHostShown = u.clientHostDialog(next)
+		return
+	}
+	if u.clientHostRecheck {
+		u.recheckSavedClientHost(next)
+		return
+	}
+	next()
+}
+
+// recheckSavedClientHost — З3: имя из хранилища перепроверяется один раз за
+// сеанс. Совпало — строка в статусе и дальше; иначе — окно с исходом и
+// явным «Использовать» (как при первом выборе).
+func (u *ui) recheckSavedClientHost(next func()) {
+	name, serverIP := u.sess.ClientHost, u.sess.ServerIP()
+	u.status.SetText("Проверяю сохранённый адрес для клиентов " + name + "...")
+	goSafe(func() {
+		chk := core.CheckClientHost(name, serverIP, guiClientHostResolver)
+		fyne.Do(func() {
+			if chk.Status == core.ClientHostMatch {
+				u.clientHostRecheck = false
+				u.status.SetText("Адрес для клиентов " + name + " (сохранено ранее): " + chk.Text())
+				next()
+				return
+			}
+			u.clientHostRecheckTx = chk.Text()
+			lbl := widget.NewLabel("Адрес для клиентов " + name + " сохранён ранее.\n\n" + chk.Text() + "\n\nВсё равно выдать конфиг с этим именем?")
+			lbl.Wrapping = fyne.TextWrapWord
+			u.clientHostRecheckDl = dialog.NewCustomConfirm("Сохранённое имя не подтверждено", "Использовать", "Нет", lbl, func(ok bool) {
+				if ok {
+					u.clientHostRecheck = false
+					next()
+				}
+			}, u.win)
+			u.clientHostRecheckDl.Resize(fyne.NewSize(460, 240))
+			u.clientHostRecheckDl.Show()
+		})
+	})
 }
 
 func (u *ui) clientHostDialog(next func()) *clientHostView {
@@ -124,7 +190,9 @@ func (u *ui) clientHostDialog(next func()) *clientHostView {
 // хранилище (если сеанс открыт из него), затем next().
 func (u *ui) setClientHost(set core.ClientHostSetting, next func()) {
 	u.sess.ClientHost = set.Host
+	u.sess.ClientHostDecided = true
 	u.clientHostAsk = false
+	u.clientHostRecheck = false // только что проверено человеком
 	u.clientHostSet = set
 	if set.KeepIP && u.status != nil {
 		u.status.SetText(core.ClientHostIPWarning(u.sess.Creds.Host))

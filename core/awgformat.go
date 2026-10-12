@@ -331,7 +331,7 @@ func buildClientConfigAWG2(raw string, serverPub, host, listenPort, clientPriv, 
 			fmt.Fprintf(&b, "%s = %s\n", k, v)
 		}
 	}
-	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = %s\n",
-		serverPub, psk, host, listenPort, keepalive)
+	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s\nPersistentKeepalive = %s\n",
+		serverPub, psk, endpointAddr(host, listenPort), keepalive)
 	return b.String()
 }

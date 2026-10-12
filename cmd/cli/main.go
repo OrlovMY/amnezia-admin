@@ -1005,7 +1005,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
 	fixDiag := fs.Bool("fix", false, "diagnose: исправить найденную проблему (после подтверждения y/N или -yes); коды diagnose: 0 нет проблем, 1 проблема/не исправлено, 2 не подтверждено, 3 не удалось узнать")
 	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
-	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер)")
+	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey/show-config XRay/backup: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер); keep-ip — явно оставить IP")
 	clientHostOK := fs.Bool("client-host-confirm", false, "add/rekey: выдать конфиг с -client-host, даже если имя указывает на другие адреса или проверить его не удалось")
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -1086,13 +1086,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 	}
 
+	// Адрес для клиентов — везде, где конфиг выдаётся или показывается
+	// собранным заново (add/rekey, их -dry-run, show-config XRay). У
+	// show-config WG/AWG конфиг читается из файла как есть — там флаг не
+	// действует, и это говорится, а не молча игнорируется (З4 AU-LOGIC).
 	ipWarn := ""
-	if (cmd == "add" || cmd == "rekey") && !*dryRun {
+	xrayShow := cmd == "show-config" && core.IsXRay(cur) && cur.Managed()
+	if cmd == "add" || cmd == "rekey" || xrayShow || (cmd == "backup" && strings.TrimSpace(*clientHost) != "") {
 		proceed, code, warn := applyClientHost(stdin, stdout, stderr, isTTY, *clientHost, *clientHostOK, sess)
 		if !proceed {
 			return code
 		}
 		ipWarn = warn
+		if *dryRun {
+			fmt.Fprintln(stdout, "Адрес сервера в конфиге клиента будет: "+sess.EndpointHost())
+		}
+	} else if cmd == "show-config" && strings.TrimSpace(*clientHost) != "" {
+		fmt.Fprintln(stderr, "-client-host здесь не действует: show-config показывает сохранённый файл конфига как есть, с тем адресом, с которым он был выдан.")
 	}
 
 	switch cmd {
@@ -1282,6 +1292,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	}
 	if ipWarn != "" {
 		fmt.Fprintln(stderr, cWarn(ipWarn))
+	} else if sess.ClientHost != "" && !*dryRun && cmd != "backup" {
+		fmt.Fprintln(stdout, "Адрес сервера в конфиге: "+sess.ClientHost)
 	}
 	return 0
 }

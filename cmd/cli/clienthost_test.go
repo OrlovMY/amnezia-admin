@@ -8,16 +8,31 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"amnezia-admin/core"
 )
+
+// stubClientHost — адрес подключения стенда 127.0.0.1 непубличный (З1),
+// поэтому для сверки подставляется публичный 203.0.113.5.
+func stubClientHost(t *testing.T) {
+	r, ip := clientHostResolver, clientHostServerIP
+	t.Cleanup(func() { clientHostResolver, clientHostServerIP = r, ip })
+	clientHostServerIP = func(*core.Session) string { return "203.0.113.5" }
+	clientHostResolver = func(h string) ([]net.IP, error) {
+		if h == "vpn.example.com" {
+			return []net.IP{net.ParseIP("203.0.113.5")}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+}
 
 // TestCLIClientHostDoezd — тест доезда: add/rekey через настоящий SSH к
 // fakesrv (адрес в ключе — IP 127.0.0.1) с -client-host; конфиг в файле
 // содержит имя. На 2f84e37 флага не было, Endpoint был 127.0.0.1.
 func TestCLIClientHostDoezd(t *testing.T) {
-	saved := clientHostResolver
-	t.Cleanup(func() { clientHostResolver = saved })
+	stubClientHost(t)
 	recs := map[string][]string{
-		"vpn.example.com":   {"127.0.0.1"},
+		"vpn.example.com":   {"203.0.113.5"},
 		"other.example.com": {"192.0.2.9"},
 	}
 	clientHostResolver = func(h string) ([]net.IP, error) {
@@ -94,4 +109,59 @@ func TestCLIClientHostDoezd(t *testing.T) {
 			t.Errorf("%s", data)
 		}
 	})
+}
+
+// TestCLIClientHostPrivateConn — З1 доездом: настоящее SSH-подключение к
+// 127.0.0.1 (без подмены адреса) — «проверить не удалось», не «другие
+// адреса»; без подтверждения конфиг не выдаётся.
+func TestCLIClientHostPrivateConn(t *testing.T) {
+	r := clientHostResolver
+	t.Cleanup(func() { clientHostResolver = r })
+	clientHostResolver = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("203.0.113.5")}, nil }
+	t.Setenv("AMNEZIA_CLIENT_HOST", "")
+	cliConfigsEnv(t)
+	key, kh, _ := setupFakeSSHForRunWithExec(t)
+	var o, e bytes.Buffer
+	code := run([]string{"add", "-name", "Carol", "-key", key, "-client-host", "vpn.example.com"}, strings.NewReader(""), &o, &e, kh)
+	if code != 2 || !strings.Contains(e.String(), "частный/туннельный адрес 127.0.0.1") || strings.Contains(e.String(), "НЕ на этот") {
+		t.Errorf("%d\n%s", code, e.String())
+	}
+}
+
+// TestCLIClientHostSurfaces — З3/З4: строка об адресе после выдачи;
+// -dry-run говорит, какой адрес будет; show-config XRay учитывает
+// -client-host; show-config WG прямо говорит, что флаг не действует; без
+// имени show-config XRay предупреждает об IP.
+func TestCLIClientHostSurfaces(t *testing.T) {
+	stubClientHost(t)
+	t.Setenv("AMNEZIA_CLIENT_HOST", "")
+	cliConfigsEnv(t)
+	key, kh, _ := setupFakeSSHForRunWithExec(t)
+	runIt := func(k string, args ...string) (int, string, string) {
+		var o, e bytes.Buffer
+		c := run(append(args, "-key", k), strings.NewReader(""), &o, &e, kh)
+		return c, o.String(), e.String()
+	}
+	if c, o, e := runIt(key, "add", "-name", "Carol", "-client-host", "vpn.example.com"); c != 0 || !strings.Contains(o, "Адрес сервера в конфиге: vpn.example.com") {
+		t.Errorf("add: %d\n%s\n%s", c, o, e)
+	}
+	if c, o, e := runIt(key, "add", "-dry-run", "-name", "Dave", "-client-host", "vpn.example.com"); c != 0 || !strings.Contains(o, "будет: vpn.example.com") {
+		t.Errorf("dry-run: %d\n%s\n%s", c, o, e)
+	}
+	if c, o, e := runIt(key, "add", "-dry-run", "-name", "Dave"); c != 0 || !strings.Contains(o, "будет: 127.0.0.1") || !strings.Contains(e, "придётся перевыпускать") {
+		t.Errorf("dry-run без имени: %d\n%s\n%s", c, o, e)
+	}
+	if c, o, e := runIt(key, "show-config", "-name", "Carol", "-client-host", "vpn.example.com"); c != 0 || !strings.Contains(e, "здесь не действует") {
+		t.Errorf("show-config WG: %d\n%s\n%s", c, o, e)
+	}
+	xkey, xkh, _ := setupXRayRun(t)
+	var o, e bytes.Buffer
+	if c := run([]string{"show-config", "-key", xkey, "-name", "Bob", "-print", "-client-host", "vpn.example.com"}, strings.NewReader(""), &o, &e, xkh); c != 0 || !strings.Contains(o.String(), "@vpn.example.com:") {
+		t.Errorf("show-config XRay: %d\n%s\n%s", c, o.String(), e.String())
+	}
+	o.Reset()
+	e.Reset()
+	if c := run([]string{"show-config", "-key", xkey, "-name", "Bob", "-print"}, strings.NewReader(""), &o, &e, xkh); c != 0 || !strings.Contains(e.String(), "придётся перевыпускать") {
+		t.Errorf("show-config XRay без имени: %d\n%s", c, e.String())
+	}
 }
