@@ -7,7 +7,16 @@ import (
 	"fyne.io/fyne/v2/test"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/fakesrv"
 )
+
+// keepIPSession — источник копии, где выбрано «оставить IP» (конфиги
+// выдавались с IP): адрес выдачи в копии известен.
+func keepIPSession(srv *fakesrv.Server, host string) *core.Session {
+	s := core.NewSessionWithRunner(srv, &core.ServerCreds{Host: host})
+	s.ClientHostDecided = true
+	return s
+}
 
 // TestGUIClientHostRecheckSaved — З3 AU-LOGIC: имя из хранилища не
 // применяется молча — перепроверка перед первой выдачей; совпало —

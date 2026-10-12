@@ -204,7 +204,7 @@ func guiMigration(t *testing.T, tgtHost string) (*ui, *fakesrv.Server, *fakesrv.
 	src, tgt := fakesrv.New(), fakesrv.New()
 	src.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	tgt.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("NEW-PSK\n"))
-	b, err := core.NewSessionWithRunner(src, &core.ServerCreds{Host: "203.0.113.1"}).CollectBackup("t", time.Now(), nil)
+	b, err := keepIPSession(src, "203.0.113.1").CollectBackup("t", time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,8 +54,8 @@ func TestCLIAutoCopyInheritsLayer(t *testing.T) {
 	good := writePwFile(t, cliTestPassword)
 	enc := filepath.Join(t.TempDir(), "enc.aabk")
 	plain := filepath.Join(t.TempDir(), "plain.aabk")
-	cliRun(t, khA, "", "backup", "-key", keyA, "-o", enc, "-password-file", good)
-	cliRun(t, khA, "", "backup", "-key", keyA, "-o", plain, "-no-password")
+	cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", enc, "-password-file", good)
+	cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", plain, "-no-password")
 	auto := func(out string) string {
 		for _, l := range strings.Split(out, "\n") {
 			if i := strings.Index(l, "Автокопия нового сервера до замены: "); i >= 0 {
