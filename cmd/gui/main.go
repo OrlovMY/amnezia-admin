@@ -152,6 +152,7 @@ type ui struct {
 func main() {
 	defer logPanic()
 	a := app.New()
+	a.SetIcon(appIcon)
 	w := a.NewWindow("Amnezia Admin " + version.String())
 	w.Resize(startWindowSize())
 

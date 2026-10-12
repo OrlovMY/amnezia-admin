@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>amnezia-admin</title>
+  <rect width="256" height="256" rx="52" fill="#1C1D21"/>
+  <g fill="none" stroke="#FBB26A" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="36,204 82,56 128,204 174,56 220,204"/>
+    <line x1="62" y1="154" x2="194" y2="154"/>
+  </g>
+</svg>
