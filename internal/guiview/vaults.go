@@ -27,14 +27,20 @@ func VaultListUnreadable(err error) string {
 // списка, и названный номер указывал на ДРУГОЙ сервер — а при нечитаемом
 // каталоге получался «Сервер 0».
 //
-//	файл найден в списке       → «Ключ сохранён (Сервер N).»
+// names — подписи списка (core.VaultNames) в порядке vaults; если их нет
+// или длина не совпала — «Сервер N».
+//
+//	файл найден в списке       → «Ключ сохранён (<подпись в списке>).»
 //	список не прочитан / файла
 //	в нём нет                  → «Ключ сохранён.» и что номер неизвестен.
-func SavedKeyStatus(vaults []string, listErr error, savedPath string) string {
+func SavedKeyStatus(vaults, names []string, listErr error, savedPath string) string {
 	if listErr == nil && savedPath != "" {
 		want := filepath.Clean(savedPath)
 		for i, p := range vaults {
 			if filepath.Clean(p) == want {
+				if len(names) == len(vaults) {
+					return fmt.Sprintf("Ключ сохранён (%s).", names[i])
+				}
 				return fmt.Sprintf("Ключ сохранён (Сервер %d).", i+1)
 			}
 		}
