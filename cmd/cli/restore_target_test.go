@@ -15,7 +15,7 @@ func TestCLIRestoreTargetUsersAsk(t *testing.T) {
 	keyA, khA, srcExec := setupFakeSSHForRunWithExec(t)
 	srcExec.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-no-password"); code != 0 {
+	if code, _, e := cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", p, "-no-password"); code != 0 {
 		t.Fatalf("backup: %d %s", code, e)
 	}
 	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)
@@ -39,7 +39,7 @@ func TestCLIRestoreCoreGate(t *testing.T) {
 	keyA, khA, srcExec := setupFakeSSHForRunWithExec(t)
 	srcExec.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-no-password"); code != 0 {
+	if code, _, e := cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", p, "-no-password"); code != 0 {
 		t.Fatalf("backup: %d %s", code, e)
 	}
 	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)
@@ -59,7 +59,7 @@ func TestCLIRestoreTargetUsersYesTTY(t *testing.T) {
 	keyA, khA, srcExec := setupFakeSSHForRunWithExec(t)
 	srcExec.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	p := filepath.Join(t.TempDir(), "c.aabk")
-	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-no-password"); code != 0 {
+	if code, _, e := cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", p, "-no-password"); code != 0 {
 		t.Fatalf("backup: %d %s", code, e)
 	}
 	keyB, khB, tgt := setupFakeSSHForRunWithExec(t)

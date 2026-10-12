@@ -1161,12 +1161,12 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		return nil, fmt.Errorf("сборка clientsTable: %w", err)
 	}
 
-	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+	config := buildClientConfigText(conf, serverPub, s.EndpointHost(), listenPort, priv, psk, clientIP)
 	note := ""
 	if isAWG2(c) {
 		// amnezia-awg2: клиентский конфиг по template.conf (PR-W3, Р3-2) и
 		// строка честности — параметры взяты из файла сервера.
-		config = buildClientConfigAWG2(raw, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+		config = buildClientConfigAWG2(raw, serverPub, s.EndpointHost(), listenPort, priv, psk, clientIP)
 		note = AWG2ConfigNote
 	}
 
@@ -1346,12 +1346,12 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		return nil, fmt.Errorf("сборка clientsTable: %w", err)
 	}
 
-	config := buildClientConfigText(conf, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+	config := buildClientConfigText(conf, serverPub, s.EndpointHost(), listenPort, priv, psk, clientIP)
 	note := ""
 	if isAWG2(c) {
 		// amnezia-awg2: клиентский конфиг по template.conf (PR-W3, Р3-2) и
 		// строка честности — параметры взяты из файла сервера.
-		config = buildClientConfigAWG2(raw, serverPub, s.Creds.Host, listenPort, priv, psk, clientIP)
+		config = buildClientConfigAWG2(raw, serverPub, s.EndpointHost(), listenPort, priv, psk, clientIP)
 		note = AWG2ConfigNote
 	}
 

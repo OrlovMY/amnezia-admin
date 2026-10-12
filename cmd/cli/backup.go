@@ -40,6 +40,13 @@ func printLines(w io.Writer, lines []string) {
 func printBackupSummary(w io.Writer, b *core.Backup) { printLines(w, core.BackupSummaryLines(b)) }
 
 // runBackup — backup [-o файл] [-password-file F | -no-password].
+// Подсказки при неизвестном адресе выдачи (в ключе IP, выбор адреса для
+// клиентов не сделан) — QA-01 по PR #50.
+const (
+	backupUnknownAddrHint  = "Адрес выдачи в копии неизвестен (в ключе IP, адрес для клиентов не выбран). Чтобы при восстановлении не понадобился -address-changes, снимайте копию с -client-host <имя> или -client-host keep-ip."
+	restoreUnknownAddrHint = "Адрес выдачи в этой копии неизвестен: копия снята без выбора адреса для клиентов. Для неё нужен -address-changes; следующие копии снимайте с -client-host <имя> или -client-host keep-ip."
+)
+
 func runBackup(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bool, sess *core.Session, out, pwFile string, noPw bool, now time.Time) int {
 	in = bufio.NewReader(in)
 	layer, warning, code := backupLayerChoice(in, w, errOut, isTTY, pwFile, noPw)
@@ -96,6 +103,9 @@ func runBackup(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY boo
 		return 1
 	}
 	fmt.Fprintln(w, "Копия записана: "+abs)
+	if b.IssuedAddress.Kind == core.AddressKindUnknown {
+		fmt.Fprintln(errOut, cWarn(backupUnknownAddrHint))
+	}
 	if !b.Complete {
 		return exitBackupIncomplete
 	}
@@ -199,6 +209,9 @@ func runRestore(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	}
 	if compat.NeedAddressConfirm && apply && !addrOK {
 		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: адрес другой или не проверен. Если вы понимаете последствия (см. «Адрес» выше) — повторите с флагом -address-changes.")
+		if b.IssuedAddress.Kind == core.AddressKindUnknown {
+			fmt.Fprintln(w, restoreUnknownAddrHint)
+		}
 		return exitRestoreStopped
 	}
 	fmt.Fprintln(w)

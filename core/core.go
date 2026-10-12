@@ -128,6 +128,13 @@ type Session struct {
 	// NewSessionWithRunner в тестах).
 	HostKeyFingerprint string
 
+	// ClientHost — адрес сервера для конфигов клиентов (DNS-имя, см.
+	// core/clienthost.go). "" — как прежде, hostName ключа (Creds.Host).
+	ClientHost string
+	// ClientHostDecided — выбор адреса для клиентов сделан (в том числе
+	// «оставить IP»); нужен, чтобы копия знала адрес выдачи (IssuedHost).
+	ClientHostDecided bool
+
 	// mu — мьютекс мутаций (I5, core/txn.go). Экспортированные Plan*/Apply
 	// берут его сами; AddUser/DeleteByID/... держат его один раз на весь
 	// plan→apply и внутри вызывают только *Locked-варианты — sync.Mutex не
@@ -1226,8 +1233,8 @@ func buildClientConfigText(conf *wgConf, serverPub, host, listenPort, clientPriv
 	if len(junk) > 0 {
 		b.WriteString(strings.Join(junk, "\n") + "\n")
 	}
-	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n",
-		serverPub, psk, host, listenPort)
+	fmt.Fprintf(&b, "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s\nPersistentKeepalive = 25\n",
+		serverPub, psk, endpointAddr(host, listenPort))
 	return b.String()
 }
 

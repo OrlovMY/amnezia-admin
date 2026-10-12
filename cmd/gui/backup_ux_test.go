@@ -183,7 +183,7 @@ func TestRestoreWindowXRayChoice(t *testing.T) {
 		return s
 	}
 	src, tgt := mk(), mk()
-	b, _ := core.NewSessionWithRunner(src, &core.ServerCreds{Host: "203.0.113.1"}).CollectBackup("t", time.Now(), nil)
+	b, _ := keepIPSession(src, "203.0.113.1").CollectBackup("t", time.Now(), nil)
 	u := backupUI(t, tgt, "203.0.113.1")
 	compat, _ := u.sess.CheckTarget(b, backupResolve)
 	rp, err := u.sess.PlanRestore(b, compat, true)

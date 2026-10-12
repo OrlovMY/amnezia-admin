@@ -67,7 +67,7 @@ func TestCLICtrlC(t *testing.T) {
 	}
 
 	p := filepath.Join(t.TempDir(), "ok.aabk")
-	if code, _, e := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-no-password"); code != 0 {
+	if code, _, e := cliRun(t, kh, "", "backup", "-client-host", "keep-ip", "-key", key, "-o", p, "-no-password"); code != 0 {
 		t.Fatalf("копия: %d %s", code, e)
 	}
 	out.Reset()

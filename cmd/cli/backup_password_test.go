@@ -38,20 +38,20 @@ func TestCLIBackupPasswordChoice(t *testing.T) {
 	key, kh, _ := setupFakeSSHForRunWithExec(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.aabk")
-	code, _, errOut := cliRun(t, kh, "", "backup", "-key", key, "-o", p)
+	code, _, errOut := cliRun(t, kh, "", "backup", "-client-host", "keep-ip", "-key", key, "-o", p)
 	if code != 2 || !strings.Contains(errOut, "-password-file") {
 		t.Fatalf("без выбора: код %d %s", code, errOut)
 	}
 	if _, err := os.Stat(p); err == nil {
 		t.Fatal("без выбора файл записан")
 	}
-	if code, _, _ := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-no-password", "-password-file", writePwFile(t, cliTestPassword)); code != 1 {
+	if code, _, _ := cliRun(t, kh, "", "backup", "-client-host", "keep-ip", "-key", key, "-o", p, "-no-password", "-password-file", writePwFile(t, cliTestPassword)); code != 1 {
 		t.Errorf("оба флага: код %d", code)
 	}
-	if code, _, e := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-password-file", writePwFile(t, "короткий")); code != 1 || !strings.Contains(e, "короче 12") {
+	if code, _, e := cliRun(t, kh, "", "backup", "-client-host", "keep-ip", "-key", key, "-o", p, "-password-file", writePwFile(t, "короткий")); code != 1 || !strings.Contains(e, "короче 12") {
 		t.Errorf("короткий пароль: %d %s", code, e)
 	}
-	code, out, e := cliRun(t, kh, "", "backup", "-key", key, "-o", p, "-password-file", writePwFile(t, cliTestPassword))
+	code, out, e := cliRun(t, kh, "", "backup", "-client-host", "keep-ip", "-key", key, "-o", p, "-password-file", writePwFile(t, cliTestPassword))
 	if code != 0 {
 		t.Fatalf("с паролем: %d %s", code, e)
 	}
@@ -76,7 +76,7 @@ func TestCLIEncryptedRead(t *testing.T) {
 	keyA, khA, _ := setupFakeSSHForRunWithExec(t)
 	p := filepath.Join(t.TempDir(), "c.aabk")
 	good := writePwFile(t, cliTestPassword)
-	if code, _, e := cliRun(t, khA, "", "backup", "-key", keyA, "-o", p, "-password-file", good); code != 0 {
+	if code, _, e := cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", p, "-password-file", good); code != 0 {
 		t.Fatalf("backup: %d %s", code, e)
 	}
 	if code, _, e := cliRun(t, "", "", "backup-info", p); code != 2 || !strings.Contains(e, "-password-file") {
@@ -98,7 +98,7 @@ func TestCLIEncryptedRead(t *testing.T) {
 	}
 	// незашифрованная копия пароль не спрашивает
 	p2 := filepath.Join(t.TempDir(), "plain.aabk")
-	cliRun(t, khA, "", "backup", "-key", keyA, "-o", p2, "-no-password")
+	cliRun(t, khA, "", "backup", "-client-host", "keep-ip", "-key", keyA, "-o", p2, "-no-password")
 	if code, _, e := cliRun(t, "", "", "backup-info", p2); code != 0 {
 		t.Errorf("незашифрованная: %d %s", code, e)
 	}

@@ -66,6 +66,8 @@ func issuedAddressLine(a IssuedAddress) string {
 		return "имя " + a.Value + " (сейчас " + a.ResolvedIP + ") — при переезде перенаправьте имя на новый сервер"
 	case a.Kind == AddressKindName:
 		return "имя " + a.Value + " (разрешить его сейчас не удалось)"
+	case a.Kind == AddressKindUnknown:
+		return "адрес выдачи неизвестен (в ключе IP, адрес для клиентов не выбран — конфиги могли выдаваться по DNS-имени)"
 	}
 	return "в копии нет адреса"
 }

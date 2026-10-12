@@ -334,6 +334,12 @@ func (u *ui) showXRayConfig(cl core.ClientEntry) {
 	if cl.ClientID == core.XRayServiceRowID && u.xrayServiceRow(cl) {
 		return
 	}
+	if u.needClientHostGate() {
+		// конфиг собирается заново с текущим адресом — те же ворота, что у
+		// создания и перевыпуска (З4 AU-LOGIC)
+		u.ensureClientHost(func() { u.showXRayConfig(cl) })
+		return
+	}
 	cur := u.cur
 	u.setBusy(true)
 	u.status.SetText(fmt.Sprintf("Собираю конфиг %q с сервера...", cl.Name()))
