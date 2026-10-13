@@ -96,7 +96,7 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// показ — по явному «Всё равно показать QR».
 	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
 	// показ диалога показывает всё содержимое.
-	qr := qrObject(cl.Name(), sc.Config)
+	qr := qrObject(cl.Name(), sc.Config, u.savedQRContainer())
 	qrBox := container.NewVBox()
 	showQR := func() {
 		if len(qrBox.Objects) == 0 {
@@ -199,8 +199,21 @@ func qrDecision(ch core.SavedCheck) qrMode {
 
 // qrObject — QR конфига или честная надпись, что QR построить не удалось
 // (текст ошибки QR не содержит конфига).
-func qrObject(name, config string) fyne.CanvasObject {
+//
+// Текстовый QR влезает — он (его читают и AmneziaWG, и WireGuard, и
+// AmneziaVPN). Не влезает (AmneziaWG 2 с длинными I1–I5), а контейнер
+// известен — серия QR формата AmneziaVPN (core.AmneziaQRSeries). Серию не
+// построить — надпись называет обе причины.
+func qrObject(name, config, containerName string) fyne.CanvasObject {
 	png, err := core.QRPNG(config, 256)
+	var big *core.QRTooLargeError
+	if errors.As(err, &big) && containerName != "" {
+		pngs, serr := core.AmneziaQRSeries(config, containerName, "")
+		if serr == nil {
+			return newQRSeries(name, pngs)
+		}
+		err = fmt.Errorf("%w; серия QR AmneziaVPN не построена: %v", err, serr)
+	}
 	if err != nil {
 		l := widget.NewLabel("Не удалось построить QR-код: " + err.Error())
 		l.Wrapping = fyne.TextWrapWord
@@ -210,6 +223,102 @@ func qrObject(name, config string) fyne.CanvasObject {
 	img.FillMode = canvas.ImageFillOriginal
 	img.SetMinSize(fyne.NewSize(256, 256))
 	return img
+}
+
+// qrSeries — серия QR формата AmneziaVPN: один код на виду, «QR i из N»,
+// кнопки «Назад»/«Далее». Сканер приложения собирает куски по номеру в
+// заголовке: порядок любой, повтор безвреден, таймера нет — автопереключение
+// не нужно, человек листает сам.
+type qrSeries struct {
+	widget.BaseWidget
+	name       string
+	pngs       [][]byte
+	idx        int
+	img        *canvas.Image
+	pos        *widget.Label
+	caption    *widget.Label
+	side       bool
+	prev, next *widget.Button
+	box        *fyne.Container
+}
+
+// qrSeriesCaption — подпись серии: какое приложение её читает.
+const qrSeriesCaption = "Сканируйте в приложении AmneziaVPN"
+
+func newQRSeries(name string, pngs [][]byte) *qrSeries {
+	s := &qrSeries{name: core.SanitizeName(name), pngs: pngs}
+	s.img = canvas.NewImageFromResource(nil)
+	s.img.FillMode = canvas.ImageFillContain
+	s.img.ScaleMode = canvas.ImageScalePixels
+	s.img.SetMinSize(fyne.NewSize(256, 256))
+	s.pos = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	s.prev = widget.NewButtonWithIcon("Назад", theme.NavigateBackIcon(), func() { s.show(s.idx - 1) })
+	s.next = widget.NewButtonWithIcon("Далее", theme.NavigateNextIcon(), func() { s.show(s.idx + 1) })
+	s.next.IconPlacement = widget.ButtonIconTrailingText
+	s.caption = widget.NewLabel(qrSeriesCaption)
+	s.box = container.NewVBox(
+		container.NewCenter(s.img),
+		container.NewBorder(nil, nil, s.prev, s.next, s.pos),
+	)
+	s.ExtendBaseWidget(s)
+	s.show(0)
+	return s
+}
+
+// show — показать код i (за краями — ничего не делает).
+func (s *qrSeries) show(i int) {
+	if i < 0 || i >= len(s.pngs) {
+		return
+	}
+	s.idx = i
+	s.img.Resource = fyne.NewStaticResource(fmt.Sprintf("%s-%d-qr.png", s.name, i+1), s.pngs[i])
+	s.img.Refresh()
+	if s.side {
+		s.pos.SetText(fmt.Sprintf("QR %d из %d", i+1, len(s.pngs)))
+	} else {
+		s.pos.SetText(fmt.Sprintf("QR %d из %d · %s", i+1, len(s.pngs), qrSeriesCaption))
+	}
+	if i == 0 {
+		s.prev.Disable()
+	} else {
+		s.prev.Enable()
+	}
+	if i == len(s.pngs)-1 {
+		s.next.Disable()
+	} else {
+		s.next.Enable()
+	}
+}
+
+// setSide — раскладка «код слева, справа — листание, подпись и extra»
+// (окно со строкой честности AmneziaWG 2). Вызывать до показа.
+func (s *qrSeries) setSide(extra fyne.CanvasObject) {
+	s.side = true
+	s.box.Objects = []fyne.CanvasObject{container.NewBorder(nil, nil, container.NewCenter(s.img), nil,
+		container.NewVBox(container.NewBorder(nil, nil, s.prev, s.next, s.pos), s.caption, extra))}
+	s.show(s.idx)
+}
+
+func (s *qrSeries) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(s.box)
+}
+
+// savedQRContainer — контейнер для серии QR в «Показать QR»: текущий
+// протокол. Не выбран — "" (не знаем): серии нет, тип не угадывается.
+func (u *ui) savedQRContainer() string {
+	if u.cur == nil {
+		return ""
+	}
+	return u.cur.Name
+}
+
+// isQRShown —на месте QR код (одиночный или серия), а не надпись об ошибке.
+func isQRShown(o fyne.CanvasObject) bool {
+	switch o.(type) {
+	case *canvas.Image, *qrSeries:
+		return true
+	}
+	return false
 }
 
 // qrSlot — место QR в окне. Картинка — по центру, своего размера. Надпись

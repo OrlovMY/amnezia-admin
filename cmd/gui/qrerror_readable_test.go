@@ -96,7 +96,7 @@ func TestQRErrorReadable(t *testing.T) {
 func TestQRSlotErrorFullWidth(t *testing.T) {
 	test.NewTempApp(t)
 	big := strings.Repeat("x", core.QRMaxBytes+1)
-	box := container.NewVBox(qrSlot(qrObject("x", big)))
+	box := container.NewVBox(qrSlot(qrObject("x", big, "")))
 	w := test.NewWindow(box)
 	defer w.Close()
 	w.Resize(fyne.NewSize(480, 400))
