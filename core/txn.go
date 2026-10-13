@@ -1179,7 +1179,7 @@ func (s *Session) planAddUserLocked(c *Container, name string) (*Plan, error) {
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
-		result:     &NewUser{Name: name, IP: clientIP, Config: config, Note: note},
+		result:     &NewUser{Name: name, IP: clientIP, Config: config, Note: note, Container: c.Name},
 	}
 	s.fillSHA(p)
 	return p, nil
@@ -1364,7 +1364,7 @@ func (s *Session) planRekeyLocked(c *Container, clientID string) (*Plan, error) 
 		tblBefore:  tblBefore,
 		tblAfter:   tblAfter,
 		tblExisted: tblExisted,
-		result:     &NewUser{Name: name, IP: clientIP, Config: config, Replaces: clientID, Note: note},
+		result:     &NewUser{Name: name, IP: clientIP, Config: config, Replaces: clientID, Note: note, Container: c.Name},
 	}
 	s.fillSHA(p)
 	return p, nil

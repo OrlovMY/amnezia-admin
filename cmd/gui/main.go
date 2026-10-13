@@ -3156,7 +3156,7 @@ func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
 const awg2ConfigDialogWidth = 760
 
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
-	qrObj := qrObject(nu.Name, nu.QRText())
+	qrObj := qrObject(nu.Name, nu.QRText(), nu.Container)
 
 	savedLabel := widget.NewLabel("")
 	savedLabel.Wrapping = fyne.TextWrapWord
@@ -3244,6 +3244,10 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	if nu.Link != "" {
 		hint.SetText("QR — ссылка vless://: отсканируйте её в приложении Amnezia на телефоне или импортируйте файл .json.")
 	}
+	if s, ok := qrObj.(*qrSeries); ok {
+		hint.SetText(fmt.Sprintf("Конфиг не влезает в один QR — показана серия из %d QR формата AmneziaVPN. "+
+			"Отсканируйте все коды в приложении AmneziaVPN, порядок любой. Приложения AmneziaWG и WireGuard серию не читают — им нужен файл.", len(s.pngs)))
+	}
 	hint.Wrapping = fyne.TextWrapWord
 	// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче;
 	// пустая Note — метки нет.
@@ -3283,11 +3287,16 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// QR перенесённая по словам надпись. В Center и в левом краю Border она
 	// получала свою МИНИМАЛЬНУЮ ширину — одну букву — и шла столбиком.
 	// Теперь надпись — на всю ширину диалога (qrSlot, сторож TestQRErrorReadable).
-	_, isQR := qrObj.(*canvas.Image)
+	isQR := isQRShown(qrObj)
 	qrTop := qrSlot(qrObj)
 	dialogW := float32(480)
 	if nu.Note != "" {
-		if isQR {
+		if s, ok := qrObj.(*qrSeries); ok {
+			// Серия: «Назад/Далее» и подпись — справа от кода, над строкой
+			// честности; под кодом им места нет на окне 857×517.
+			s.setSide(noteLabel)
+			qrTop = s
+		} else if isQR {
 			qrTop = container.NewBorder(nil, nil, qrObj, nil, container.NewVBox(noteLabel))
 		} else {
 			qrTop = container.NewVBox(qrObj, noteLabel)

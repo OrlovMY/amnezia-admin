@@ -1182,6 +1182,10 @@ type NewUser struct {
 	Link string
 	// Ext — расширение файла конфига; "" — ".conf" (XRay: ".json").
 	Ext string
+	// Container — имя контейнера на сервере (amnezia-awg2 и т. п.): по нему
+	// строится серия QR формата AmneziaVPN (AmneziaQRSeries). "" — не
+	// известно: серии нет, только текстовый QR.
+	Container string
 }
 
 // QRText — текст для QR-кода конфига.

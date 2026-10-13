@@ -150,6 +150,11 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 			nu.Note = core.AWG2ConfigNote
 			nu.Config += strings.Repeat("# I1 = <b 0xc7>\n", 400)
 		}
+		if state == "AmneziaWG 2, серия QR" {
+			// Конфиг AWG2 не влез в текстовый QR — серия формата AmneziaVPN.
+			nu = seriesNewUser()
+			nu.Note = core.AWG2ConfigNote
+		}
 		u.showConfigDialog(nu, "создан")
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
@@ -282,6 +287,10 @@ var moreForms = []osmotrForm{
 	{name: "(д) конфиг готов, AmneziaWG 2, QR не построен", open: openConfig("AmneziaWG 2, QR не построен"), width: awg2ConfigDialogWidth - 8,
 		inventory: []string{"подпись:Конфиг готов", "подпись:Не удалось построить QR-код: конфиг слиш…", "прокрутка:",
 			"кнопка:Сохранить ещё в…", "кнопка:Закрыть", "кнопка:Скопировать путь", "подпись:Параметры маскировки взяты из файла серв…"}},
+	{name: "(д) конфиг готов, AmneziaWG 2, серия QR", open: openConfig("AmneziaWG 2, серия QR"), width: awg2ConfigDialogWidth - 8,
+		inventory: []string{"подпись:Конфиг готов", "изображение:", "кнопка:Назад", "кнопка:Далее", "подпись:QR 1 из 3", "подпись:" + qrSeriesCaption,
+			"прокрутка:", "кнопка:Сохранить ещё в…", "кнопка:Закрыть", "кнопка:Скопировать путь",
+			"подпись:Параметры маскировки взяты из файла серв…"}},
 	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
