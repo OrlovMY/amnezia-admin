@@ -3315,8 +3315,34 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// ЖИВЬЁМ НЕ ПРОВЕРЕНО — вынесено владельцу на приёмку.
 	autoSave()
 	d := dialog.NewCustom("Конфиг готов", "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(dialogW, 560))
+	d.Resize(configDialogSize(u.win.Canvas(), dialogW))
 	d.Show()
+}
+
+// configDialogMinHeight — прежняя фиксированная высота диалогов показа
+// конфига; ниже неё диалог не просим.
+const configDialogMinHeight = 560
+
+// configDialogMargin — сколько точек окна оставить над и под диалогом
+// вместе, чтобы было видно, что это диалог поверх окна.
+const configDialogMargin = 48
+
+// configDialogSize — размер диалогов показа конфига («Конфиг готов»,
+// «Показать конфиг»): ширина — как задана, высота — почти всё окно, но не
+// меньше configDialogMinHeight. Раньше высота была 560 при любом окне, и на
+// высоком окне текст под серией QR шёл полосой в три строки с прокруткой
+// (жалоба владельца 13.10).
+//
+// Больше окна диалог не станет: Fyne 2.7.4 (widget/popup.go,
+// modalPopUpRenderer.Layout) сам урезает содержимое до
+// canvasSize - padding и центрирует его. Поэтому на окне ниже 560 + поля
+// просить 560 безопасно — так было и раньше.
+func configDialogSize(c fyne.Canvas, w float32) fyne.Size {
+	h := c.Size().Height - configDialogMargin
+	if h < configDialogMinHeight {
+		h = configDialogMinHeight
+	}
+	return fyne.NewSize(w, h)
 }
 
 // scrollToEnd доводит прокрутку до конца СРАЗУ после того, как в её
