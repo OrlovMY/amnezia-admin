@@ -97,10 +97,10 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
 	// показ диалога показывает всё содержимое.
 	qr := qrObject(cl.Name(), sc.Config)
-	qrBox := container.NewCenter()
+	qrBox := container.NewVBox()
 	showQR := func() {
 		if len(qrBox.Objects) == 0 {
-			qrBox.Add(qr)
+			qrBox.Add(qrSlot(qr))
 		}
 	}
 	var anyway, unverified, stale *widget.Button
@@ -210,6 +210,16 @@ func qrObject(name, config string) fyne.CanvasObject {
 	img.FillMode = canvas.ImageFillOriginal
 	img.SetMinSize(fyne.NewSize(256, 256))
 	return img
+}
+
+// qrSlot — место QR в окне. Картинка — по центру, своего размера. Надпись
+// «QR не построен» — НА ВСЮ ширину: в Center перенос по словам получает
+// минимальную ширину (одну букву) и идёт столбиком (находка владельца 12.10).
+func qrSlot(o fyne.CanvasObject) fyne.CanvasObject {
+	if _, ok := o.(*canvas.Image); ok {
+		return container.NewCenter(o)
+	}
+	return o
 }
 
 // errPermsNotLimited — файл записан, но права 0600 поставить не удалось.

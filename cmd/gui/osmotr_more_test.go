@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -140,6 +141,15 @@ func openConfig(state string) func(t *testing.T, u *ui, sized func()) osmotrScen
 			// сцена, а не только подмена ревьюера.
 			nu.Note = core.AWG2ConfigNote
 		}
+		if state == "QR не построен" {
+			nu.Config += strings.Repeat("# I1 = <b 0xc7>\n", 400)
+		}
+		if state == "AmneziaWG 2, QR не построен" {
+			// Находка владельца 12.10: конфиг AWG2 не влез в QR — надпись
+			// на месте QR шла столбиком по букве (сторож TestQRErrorReadable).
+			nu.Note = core.AWG2ConfigNote
+			nu.Config += strings.Repeat("# I1 = <b 0xc7>\n", 400)
+		}
 		u.showConfigDialog(nu, "создан")
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
@@ -269,6 +279,9 @@ var moreForms = []osmotrForm{
 	// от QR, диалог шире (awg2ConfigDialogWidth − 8 = 752).
 	{name: "(д) конфиг готов, AmneziaWG 2", open: openConfig("AmneziaWG 2"), width: awg2ConfigDialogWidth - 8,
 		inventory: cat(invConfigBase, []string{"кнопка:Скопировать путь", "подпись:Параметры маскировки взяты из файла серв…"})},
+	{name: "(д) конфиг готов, AmneziaWG 2, QR не построен", open: openConfig("AmneziaWG 2, QR не построен"), width: awg2ConfigDialogWidth - 8,
+		inventory: []string{"подпись:Конфиг готов", "подпись:Не удалось построить QR-код: конфиг слиш…", "прокрутка:",
+			"кнопка:Сохранить ещё в…", "кнопка:Закрыть", "кнопка:Скопировать путь", "подпись:Параметры маскировки взяты из файла серв…"}},
 	{name: "(д) конфиг готов, отказ с длинным путём", open: openConfig("отказ, длинный путь"), width: 472, inventory: invConfigBase},
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
