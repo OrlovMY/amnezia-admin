@@ -107,14 +107,19 @@ const formAWG2Series = "(д) конфиг готов, AmneziaWG 2, серия QR
 
 // TestConfigDialogFollowsWindowHeight — тест доезда: на высоком окне
 // текстовая часть видна существенно больше, чем при прежних 560.
-// Подмена «вернуть 560» в configDialogSize роняет его.
+// Подмена «вернуть 560» в configDialogSize роняет его; подмена 480×560
+// только в savedconf.go роняет случай «Показать конфиг» (ревью QA-01 F1).
 func TestConfigDialogFollowsWindowHeight(t *testing.T) {
-	small := measureConfigDialog(t, formAWG2Series, fyne.NewSize(1229, 620))
-	tall := measureConfigDialog(t, formAWG2Series, fyne.NewSize(1229, 900))
-	// Окно выросло на 280 т.; прокрутка обязана забрать почти всё.
-	if tall.infoH-small.infoH < 200 {
-		t.Errorf("на окне 1229×900 текст виден на %.1f т. (%.1f строк), на 1229×620 — %.1f т.: диалог не растёт с окном",
-			tall.infoH, tall.lines, small.infoH)
+	for _, form := range []string{formAWG2Series, "(м) конфигурация: найден, ключ сервера сверен"} {
+		t.Run(form, func(t *testing.T) {
+			small := measureConfigDialog(t, form, fyne.NewSize(1229, 620))
+			tall := measureConfigDialog(t, form, fyne.NewSize(1229, 900))
+			// Окно выросло на 280 т.; прокрутка обязана забрать почти всё.
+			if tall.infoH-small.infoH < 200 {
+				t.Errorf("на окне 1229×900 текст виден на %.1f т. (%.1f строк), на 1229×620 — %.1f т.: диалог не растёт с окном",
+					tall.infoH, tall.lines, small.infoH)
+			}
+		})
 	}
 }
 
