@@ -3244,7 +3244,10 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	if nu.Link != "" {
 		hint.SetText("QR — ссылка vless://: отсканируйте её в приложении Amnezia на телефоне или импортируйте файл .json.")
 	}
-	if s, ok := qrObj.(*qrSeries); ok {
+	if s, ok := qrObj.(*qrSeries); ok && s.alt != nil {
+		hint.SetText("QR формата AmneziaVPN: в приложении сервер будет назван адресом из конфига. " +
+			"Для AmneziaWG и WireGuard — кнопка «" + qrTextButton + "» или файл.")
+	} else if ok {
 		hint.SetText(fmt.Sprintf("Конфиг не влезает в один QR — показана серия из %d QR формата AmneziaVPN. "+
 			"Отсканируйте все коды в приложении AmneziaVPN, порядок любой. Приложения AmneziaWG и WireGuard серию не читают — им нужен файл.", len(s.pngs)))
 	}

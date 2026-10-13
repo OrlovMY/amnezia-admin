@@ -83,7 +83,7 @@ var awgSigKeys = []string{"I1", "I2", "I3", "I4", "I5"}
 // AmneziaQRJSON — JSON сервера в формате экспорта AmneziaVPN для одного
 // клиентского .conf. Ошибка — если в конфиге нет обязательного (ключи,
 // адрес сервера): текст ошибки называет поле, но не содержимое конфига.
-func AmneziaQRJSON(conf, container, description string) ([]byte, error) {
+func AmneziaQRJSON(conf, container string) ([]byte, error) {
 	proto, ok := amneziaProtoKey(container)
 	if !ok {
 		return nil, ErrAmneziaQRContainer
@@ -180,12 +180,13 @@ func AmneziaQRJSON(conf, container, description string) ([]byte, error) {
 	// разберёт и импортирует сервер без клиента (исследование §6.2).
 	srv["last_config"] = string(last)
 
-	if description == "" {
-		description = host
-	}
+	// description — заголовок сервера в списке приложения (serversModel.cpp
+	// NameRole). Это адрес, с которым выдан конфиг (Endpoint = EndpointHost
+	// сессии: DNS-имя, если выбрано, иначе адрес ключа), — не «Сервер N» и не
+	// подпись нашего списка. Адреса нет — ошибка выше, ничего не выдумываем.
 	top := map[string]any{
 		"format_version":   1,
-		"description":      description,
+		"description":      host,
 		"hostName":         host,
 		"containers":       []any{map[string]any{"container": container, proto: srv}},
 		"defaultContainer": container,
@@ -236,8 +237,8 @@ func AmneziaQRChunks(q []byte) ([]string, error) {
 // AmneziaQRTexts — тексты серии QR и ключ vpn:// (тот же, что отдаёт
 // «Поделиться» приложения) для клиентского .conf. Ключ — секрет: не
 // печатать, не журналировать.
-func AmneziaQRTexts(conf, container, description string) (texts []string, vpnKey string, err error) {
-	js, err := AmneziaQRJSON(conf, container, description)
+func AmneziaQRTexts(conf, container string) (texts []string, vpnKey string, err error) {
+	js, err := AmneziaQRJSON(conf, container)
 	if err != nil {
 		return nil, "", err
 	}
@@ -255,8 +256,8 @@ const AmneziaQRModulePx = 2
 
 // AmneziaQRSeries — PNG серии QR формата AmneziaVPN, коррекция LOW (как у
 // приложения).
-func AmneziaQRSeries(conf, container, description string) ([][]byte, error) {
-	texts, _, err := AmneziaQRTexts(conf, container, description)
+func AmneziaQRSeries(conf, container string) ([][]byte, error) {
+	texts, _, err := AmneziaQRTexts(conf, container)
 	if err != nil {
 		return nil, err
 	}

@@ -262,7 +262,7 @@ func TestXRayAddRestartsOnce(t *testing.T) {
 	pub, _ := curve25519.X25519(raw, curve25519.Basepoint)
 	pbk := base64.RawURLEncoding.EncodeToString(pub)
 	if !strings.HasPrefix(nu.Link, "vless://"+id+"@"+raceCreds().Host+":443?") || !strings.Contains(nu.Link, "pbk="+pbk) ||
-		!strings.Contains(nu.Link, "flow=xtls-rprx-vision") || !strings.HasSuffix(nu.Link, "#AmneziaVPN") {
+		!strings.Contains(nu.Link, "flow=xtls-rprx-vision") || !strings.HasSuffix(nu.Link, "#"+raceCreds().Host) {
 		t.Errorf("ссылка %q", nu.Link)
 	}
 	if !strings.Contains(nu.Config, id) || !strings.Contains(nu.Config, pbk) || nu.FileExt() != ".json" || nu.QRText() != nu.Link || !json.Valid([]byte(nu.Config)) {

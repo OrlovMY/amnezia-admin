@@ -171,18 +171,18 @@ func TestSavedQRContainerTable(t *testing.T) {
 	}
 }
 
-// Серия из одного кода: «QR 1 из 1», обе кнопки выключены, листание — на месте.
+// Серия из одного кода: листать нечего — «Назад/Далее» скрыты и выключены, подпись без «1 из 1».
 func TestQRSeriesSingle(t *testing.T) {
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
 	nu := seriesNewUser()
-	pngs, err := core.AmneziaQRSeries(nu.Config, nu.Container, "")
+	pngs, err := core.AmneziaQRSeries(nu.Config, nu.Container)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := newQRSeries(nu.Name, pngs[:1])
-	if !strings.HasPrefix(s.pos.Text, "QR 1 из 1 ") || !s.prev.Disabled() || !s.next.Disabled() {
-		t.Fatalf("%q назад выкл=%v далее выкл=%v", s.pos.Text, s.prev.Disabled(), s.next.Disabled())
+	if s.pos.Text != qrSeriesCaption || s.prev.Visible() || s.next.Visible() || !s.prev.Disabled() || !s.next.Disabled() {
+		t.Fatalf("%q назад видна=%v далее видна=%v", s.pos.Text, s.prev.Visible(), s.next.Visible())
 	}
 	test.Tap(s.next)
 	test.Tap(s.prev)
