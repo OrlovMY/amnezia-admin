@@ -1,16 +1,17 @@
 //go:build ignore
 
-// Генератор знака amnezia-admin: две «A» грубой кистью в незамкнутом
-// круге, цвет — акварельные полосы под маской (приём символа Amnezia,
-// https://amnezia.org/img/logos/logo-a-sym.svg; композиция и кривые свои).
-// Цвета полос — из символа Amnezia, фон #1C1D21 — onyxBlack из
-// amnezia-client client/ui/qml/Modules/Style/AmneziaStyle.qml.
+// Генератор знака amnezia-admin (вариант 01, выбор владельца 13.10.2026):
+// две «A» грубой кистью в незамкнутом круге, внутренние ноги сходятся
+// внизу; цвет — акварельные полосы под маской по диагонали (приём символа
+// Amnezia, https://amnezia.org/img/logos/logo-a-sym.svg; композиция и
+// кривые свои). Цвета полос — из символа Amnezia, фон #1C1D21 — onyxBlack
+// из amnezia-client client/ui/qml/Modules/Style/AmneziaStyle.qml.
 //
 // Сборка, из корня репозитория:
 //
 //  1. go run assets/gen.go svg assets
 //     → assets/logo.svg (крупный, для 48/256) и assets/logo-small.svg
-//     (упрощённый: толще мазки, без щетинок — для 16/32).
+//     (упрощённый: толще мазки, без щетинок, короче шипы — для 16/32).
 //
 //  2. Растры — РУЧНОЙ шаг через headless Chrome (pure-Go рендереры SVG,
 //     например oksvg, не понимают <mask>, а без маски знак теряет цвет).
@@ -53,6 +54,7 @@ func bez(a, b, c, d pt) func(float64) pt {
 	}
 }
 
+// arc — дуга кольца с неровным радиусом (±2.5).
 func arc(c pt, r, a0, a1 float64) func(float64) pt {
 	return func(t float64) pt {
 		a := (a0 + (a1-a0)*t) * math.Pi / 180
@@ -61,18 +63,17 @@ func arc(c pt, r, a0, a1 float64) func(float64) pt {
 	}
 }
 
-// style — почерк кисти: rough=1 — крупный знак, 0 — упрощённый для 16/32.
-type style struct {
-	rough, wmul float64
-}
-
 // brush — контур мазка: ширина неравномерная, концы — острые шипы,
-// края рваные (шум + редкие щетинки).
-func brush(rng *rand.Rand, s style, f func(float64) pt, w, head, tail float64) string {
-	const n = 90
-	w *= s.wmul
+// края рваные (шум + редкие щетинки); small — без щетинок и шума.
+func brush(rng *rand.Rand, f func(float64) pt, w, head, tail float64, small bool) string {
+	const n = 110
+	rough := 1.0
+	if small {
+		rough = 0
+	}
 	var L, R []pt
 	nl, nr := 0.0, 0.0
+	_, _ = rng.Float64(), rng.Float64() // сохраняет последовательность seed варианта 01
 	for i := 0; i <= n; i++ {
 		t := float64(i) / n
 		p := f(t)
@@ -90,12 +91,12 @@ func brush(rng *rand.Rand, s style, f func(float64) pt, w, head, tail float64) s
 		prof *= 0.85 + 0.25*math.Sin(t*7+w)
 		nl = 0.85*nl + 0.15*(rng.Float64()*2-1)
 		nr = 0.85*nr + 0.15*(rng.Float64()*2-1)
-		hl := w / 2 * prof * (1 + 0.22*s.rough*nl)
-		hr := w / 2 * prof * (1 + 0.22*s.rough*nr)
-		if prof > 0.5 && rng.Float64() < 0.025*s.rough {
+		hl := w / 2 * prof * (1 + 0.22*rough*nl)
+		hr := w / 2 * prof * (1 + 0.22*rough*nr)
+		if prof > 0.5 && rng.Float64() < 0.025*rough {
 			hl += w * 0.22 * rng.Float64() // щетинка
 		}
-		if prof > 0.5 && rng.Float64() < 0.025*s.rough {
+		if prof > 0.5 && rng.Float64() < 0.025*rough {
 			hr += w * 0.22 * rng.Float64()
 		}
 		L = append(L, pt{p.x + nx*hl, p.y + ny*hl})
@@ -113,29 +114,27 @@ func brush(rng *rand.Rand, s style, f func(float64) pt, w, head, tail float64) s
 	return b.String()
 }
 
-// Мазки знака: две A наклонены друг к другу, внутренние ноги сходятся
-// внизу, левая вершина загнута шипом; одна перекладина насквозь; кольцо
-// крупнее букв, незамкнуто (разрыв сверху справа), буквы выходят наружу.
-func strokes(r *rand.Rand, s style) []string {
+// strokes — кольцо (r=100, разрыв сверху справа −100°…−48°), две A,
+// наклонённые друг к другу, с общей нижней точкой, сквозная перекладина.
+func strokes(r *rand.Rand, small bool) []string {
 	P := func(x, y float64) pt { return pt{x, y} }
-	tail := 0.25
-	if s.rough == 0 {
-		tail = 0.15 // короче шипы на малых размерах
+	wm, tail, rw := 1.35, 0.25, 15.0
+	if small {
+		wm, tail, rw = wm*1.15, tail*0.6, rw*1.3
 	}
 	return []string{
-		brush(r, s, arc(P(128, 134), 100, -48, 262), 15, 0.06, 0.1),
-		brush(r, s, bez(P(50, 248), P(60, 160), P(70, 80), P(84, 4)), 22, 0.06, tail),
-		brush(r, s, bez(P(84, 24), P(102, 90), P(116, 160), P(128, 214)), 18, 0.1, tail),
-		brush(r, s, bez(P(178, 4), P(160, 90), P(142, 160), P(128, 214)), 18, 0.06, tail),
-		brush(r, s, bez(P(178, 24), P(190, 90), P(198, 160), P(208, 248)), 22, 0.1, tail),
-		brush(r, s, bez(P(4, 140), P(90, 126), P(150, 158), P(252, 138)), 16, 0.3, tail*0.6),
+		brush(r, arc(P(128, 134), 100, -48, 260), rw, 0.06, 0.1, small),
+		brush(r, bez(P(50, 248), P(60, 160), P(70, 80), P(84, 4)), 22*wm, 0.06, tail, small),
+		brush(r, bez(P(84, 24), P(102, 90), P(116, 160), P(128, 214)), 18*wm, 0.1, tail, small),
+		brush(r, bez(P(178, 4), P(160, 90), P(142, 160), P(128, 214)), 18*wm, 0.06, tail, small),
+		brush(r, bez(P(178, 24), P(190, 90), P(198, 160), P(208, 248)), 22*wm, 0.1, tail, small),
+		brush(r, bez(P(4, 140), P(90, 126), P(150, 158), P(252, 138)), 16*wm, 0.3, tail*0.6, small),
 	}
 }
 
-// Акварельные полосы с волнистыми краями: в повёрнутой на −30° системе
-// слева сверху вниз бирюза → голубые → серый → фиолетовые, справа розовый
-// → жёлтые → оранжевые. После поворота: бирюза сверху слева, розовый
-// сверху справа, жёлто-оранжевые справа, фиолет слева внизу.
+// bands — акварельные полосы с волнистыми краями: в повёрнутой на −30°
+// системе слева сверху вниз бирюза → голубые → серый → фиолетовые, справа
+// розовый → жёлтые → оранжевые.
 func bands(c pt) string {
 	type st struct {
 		y0  float64
@@ -184,10 +183,10 @@ func bands(c pt) string {
 	return fmt.Sprintf(`<g transform="rotate(-30 %g %g)">%s</g>`, c.x, c.y, b.String())
 }
 
-func svg(s style) string {
+func svg(small bool) string {
 	r := rand.New(rand.NewSource(9))
 	var m strings.Builder
-	for _, d := range strokes(r, s) {
+	for _, d := range strokes(r, small) {
 		fmt.Fprintf(&m, `<path fill="white" d="%s"/>`, d)
 	}
 	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
@@ -207,8 +206,8 @@ func main() {
 	dir := os.Args[2]
 	switch os.Args[1] {
 	case "svg":
-		must(os.WriteFile(filepath.Join(dir, "logo.svg"), []byte(svg(style{rough: 1, wmul: 1.35})), 0o644))
-		must(os.WriteFile(filepath.Join(dir, "logo-small.svg"), []byte(svg(style{rough: 0, wmul: 1.55})), 0o644))
+		must(os.WriteFile(filepath.Join(dir, "logo.svg"), []byte(svg(false)), 0o644))
+		must(os.WriteFile(filepath.Join(dir, "logo-small.svg"), []byte(svg(true)), 0o644))
 	case "ico":
 		ico(dir)
 	default:
