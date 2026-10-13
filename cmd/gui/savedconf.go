@@ -96,7 +96,10 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// показ — по явному «Всё равно показать QR».
 	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
 	// показ диалога показывает всё содержимое.
-	qr := qrObject(cl.Name(), sc.Config, u.savedQRContainer())
+	qr, qrNote := qrObjectNote(cl.Name(), sc.Config, u.savedQRContainer())
+	if qrNote != "" {
+		from.SetText(from.Text + "\n\n" + qrNote)
+	}
 	qrBox := container.NewVBox()
 	showQR := func() {
 		if len(qrBox.Objects) == 0 {
@@ -209,32 +212,42 @@ func qrDecision(ch core.SavedCheck) qrMode {
 // он доступен кнопкой «Текстовый QR» (AmneziaWG, WireGuard). Не влезает —
 // только серия. Серию не построить — текстовый QR, а не влез и он —
 // надпись с обеими причинами.
-func qrObject(name, config, containerName string) fyne.CanvasObject {
+//
+// note — что сказать человеку рядом: текстовый QR влез, а QR AmneziaVPN
+// не построен (приложение назовёт сервер «Сервер N»); "" — сказать нечего.
+func qrObjectNote(name, config, containerName string) (obj fyne.CanvasObject, note string) {
 	png, err := core.QRPNG(config, 256)
 	if err == nil && containerName != "" {
-		if pngs, serr := core.AmneziaQRSeries(config, containerName); serr == nil {
+		pngs, serr := core.AmneziaQRSeries(config, containerName)
+		switch {
+		case serr == nil:
 			s := newQRSeries(name, pngs)
 			s.setAlt(png)
-			return s
+			return s, ""
+		case !errors.Is(serr, core.ErrAmneziaQRContainer):
+			// XRay (ErrAmneziaQRContainer) — не потеря: заголовок несёт
+			// метка ссылки vless://. Остальное — сказать вслух.
+			note = "QR формата AmneziaVPN не построен (" + serr.Error() +
+				"); при сканировании текстового QR приложение AmneziaVPN назовёт сервер «Сервер N»."
 		}
 	}
 	var big *core.QRTooLargeError
 	if errors.As(err, &big) && containerName != "" {
 		pngs, serr := core.AmneziaQRSeries(config, containerName)
 		if serr == nil {
-			return newQRSeries(name, pngs)
+			return newQRSeries(name, pngs), ""
 		}
 		err = fmt.Errorf("%w; серия QR AmneziaVPN не построена: %v", err, serr)
 	}
 	if err != nil {
 		l := widget.NewLabel("Не удалось построить QR-код: " + err.Error())
 		l.Wrapping = fyne.TextWrapWord
-		return l
+		return l, ""
 	}
 	img := canvas.NewImageFromResource(fyne.NewStaticResource(core.SanitizeName(name)+"-qr.png", png))
 	img.FillMode = canvas.ImageFillOriginal
 	img.SetMinSize(fyne.NewSize(256, 256))
-	return img
+	return img, note
 }
 
 // qrSeries — серия QR формата AmneziaVPN: один код на виду, «QR i из N»,
