@@ -139,7 +139,7 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// 857×517 двум кнопкам столбиком места нет.
 	content := container.NewBorder(qrBox, container.NewGridWithColumns(2, saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
-	d.Resize(fyne.NewSize(480, 560))
+	d.Resize(configDialogSize(u.win.Canvas(), 480))
 	d.Show()
 	anyway.Hide() // после показа: d.Show() показывает всё содержимое
 	unverified.Hide()
