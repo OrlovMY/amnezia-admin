@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -51,9 +52,6 @@ const (
 	// xrayFingerprintDefault — fingerprint клиента, если в server.json его нет
 	// (master template.json; protocolConstants.h: defaultFingerprint).
 	xrayFingerprintDefault = "chrome"
-	// xrayLinkAlias — метка ссылки vless:// (APPLICATION_NAME приложения,
-	// exportController.cpp:347).
-	xrayLinkAlias = "AmneziaVPN"
 )
 
 // IsXRay — контейнер XRay с каталогом из закрытого списка.
@@ -767,7 +765,9 @@ func xrayLink(srv *xrayServer, host, id string) string {
 	if strings.Contains(h, ":") {
 		h = "[" + h + "]" // IPv6
 	}
-	return "vless://" + id + "@" + h + ":" + srv.port + "?" + strings.Join(q, "&") + "#" + xrayLinkAlias
+	// Метка (#…) — заголовок сервера в приложении (vless.cpp:75 → description
+	// в importController.cpp:709): адрес выдачи, не «AmneziaVPN» и не «Сервер N».
+	return "vless://" + id + "@" + h + ":" + srv.port + "?" + strings.Join(q, "&") + "#" + url.PathEscape(host)
 }
 
 // urlQueryEscape — экранирование значения запроса (QUrl FullyEncoded: всё

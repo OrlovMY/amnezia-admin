@@ -96,7 +96,10 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// показ — по явному «Всё равно показать QR».
 	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
 	// показ диалога показывает всё содержимое.
-	qr := qrObject(cl.Name(), sc.Config, u.savedQRContainer())
+	qr, qrNote := qrObjectNote(cl.Name(), sc.Config, u.savedQRContainer())
+	if qrNote != "" {
+		from.SetText(from.Text + "\n\n" + qrNote)
+	}
 	qrBox := container.NewVBox()
 	showQR := func() {
 		if len(qrBox.Objects) == 0 {
@@ -132,7 +135,9 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// АУДИТ-МЕНЮ-QR-UX Н1: QR — вне прокрутки, сверху, целиком; пока он не
 	// разрешён, место пустое, и кнопки показа — первыми под сверкой.
 	info := container.NewVScroll(container.NewVBox(check, anyway, unverified, stale, from))
-	content := container.NewBorder(qrBox, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
+	// Кнопки в ряд: под QR формата AmneziaVPN — строка листания, и на окне
+	// 857×517 двум кнопкам столбиком места нет.
+	content := container.NewBorder(qrBox, container.NewGridWithColumns(2, saveBtn, copyBtn), nil, nil, info)
 	d := dialog.NewCustom(title, "Закрыть", content, u.win)
 	d.Resize(fyne.NewSize(480, 560))
 	d.Show()
@@ -200,29 +205,49 @@ func qrDecision(ch core.SavedCheck) qrMode {
 // qrObject — QR конфига или честная надпись, что QR построить не удалось
 // (текст ошибки QR не содержит конфига).
 //
-// Текстовый QR влезает — он (его читают и AmneziaWG, и WireGuard, и
-// AmneziaVPN). Не влезает (AmneziaWG 2 с длинными I1–I5), а контейнер
-// известен — серия QR формата AmneziaVPN (core.AmneziaQRSeries). Серию не
-// построить — надпись называет обе причины.
-func qrObject(name, config, containerName string) fyne.CanvasObject {
+// Контейнер известен (WireGuard/AmneziaWG) — по умолчанию QR формата
+// AmneziaVPN (core.AmneziaQRSeries): только в нём приложение получает
+// заголовок сервера (description = адрес выдачи). Из текстового .conf оно
+// берёт «Сервер N» (importController.cpp:643). Текстовый QR влезает —
+// он доступен кнопкой «Текстовый QR» (AmneziaWG, WireGuard). Не влезает —
+// только серия. Серию не построить — текстовый QR, а не влез и он —
+// надпись с обеими причинами.
+//
+// note — что сказать человеку рядом: текстовый QR влез, а QR AmneziaVPN
+// не построен (приложение назовёт сервер «Сервер N»); "" — сказать нечего.
+func qrObjectNote(name, config, containerName string) (obj fyne.CanvasObject, note string) {
 	png, err := core.QRPNG(config, 256)
+	if err == nil && containerName != "" {
+		pngs, serr := core.AmneziaQRSeries(config, containerName)
+		switch {
+		case serr == nil:
+			s := newQRSeries(name, pngs)
+			s.setAlt(png)
+			return s, ""
+		case !errors.Is(serr, core.ErrAmneziaQRContainer):
+			// XRay (ErrAmneziaQRContainer) — не потеря: заголовок несёт
+			// метка ссылки vless://. Остальное — сказать вслух.
+			note = "QR формата AmneziaVPN не построен (" + serr.Error() +
+				"); при сканировании текстового QR приложение AmneziaVPN назовёт сервер «Сервер N»."
+		}
+	}
 	var big *core.QRTooLargeError
 	if errors.As(err, &big) && containerName != "" {
-		pngs, serr := core.AmneziaQRSeries(config, containerName, "")
+		pngs, serr := core.AmneziaQRSeries(config, containerName)
 		if serr == nil {
-			return newQRSeries(name, pngs)
+			return newQRSeries(name, pngs), ""
 		}
 		err = fmt.Errorf("%w; серия QR AmneziaVPN не построена: %v", err, serr)
 	}
 	if err != nil {
 		l := widget.NewLabel("Не удалось построить QR-код: " + err.Error())
 		l.Wrapping = fyne.TextWrapWord
-		return l
+		return l, ""
 	}
 	img := canvas.NewImageFromResource(fyne.NewStaticResource(core.SanitizeName(name)+"-qr.png", png))
 	img.FillMode = canvas.ImageFillOriginal
 	img.SetMinSize(fyne.NewSize(256, 256))
-	return img
+	return img, note
 }
 
 // qrSeries — серия QR формата AmneziaVPN: один код на виду, «QR i из N»,
@@ -240,6 +265,10 @@ type qrSeries struct {
 	side       bool
 	prev, next *widget.Button
 	box        *fyne.Container
+	// alt — текстовый QR (.conf) для AmneziaWG/WireGuard; nil — не влез.
+	alt     []byte
+	altMode bool
+	altBtn  *widget.Button
 }
 
 // qrSeriesCaption — подпись серии: какое приложение её читает.
@@ -255,14 +284,39 @@ func newQRSeries(name string, pngs [][]byte) *qrSeries {
 	s.prev = widget.NewButtonWithIcon("Назад", theme.NavigateBackIcon(), func() { s.show(s.idx - 1) })
 	s.next = widget.NewButtonWithIcon("Далее", theme.NavigateNextIcon(), func() { s.show(s.idx + 1) })
 	s.next.IconPlacement = widget.ButtonIconTrailingText
+	s.pos.Truncation = fyne.TextTruncateEllipsis
 	s.caption = widget.NewLabel(qrSeriesCaption)
+	s.altBtn = widget.NewButton(qrTextButton, func() {
+		s.altMode = !s.altMode
+		s.show(s.idx)
+	})
+	s.altBtn.Hide()
 	s.box = container.NewVBox(
 		container.NewCenter(s.img),
-		container.NewBorder(nil, nil, s.prev, s.next, s.pos),
+		s.navRow(),
 	)
 	s.ExtendBaseWidget(s)
 	s.show(0)
 	return s
+}
+
+// Подписи переключателя «серия AmneziaVPN ↔ текстовый QR».
+const (
+	qrTextButton   = "Текстовый QR"
+	qrSeriesButton = "QR для AmneziaVPN"
+	qrTextCaption  = "Текстовый QR: AmneziaWG, WireGuard"
+	qrOneCaption   = "QR формата AmneziaVPN"
+)
+
+func (s *qrSeries) navRow() fyne.CanvasObject {
+	return container.NewBorder(nil, nil, s.prev, container.NewHBox(s.next, s.altBtn), s.pos)
+}
+
+// setAlt — текстовый QR как вторая форма (кнопка «Текстовый QR»).
+func (s *qrSeries) setAlt(png []byte) {
+	s.alt = png
+	s.altBtn.Show()
+	s.show(s.idx)
 }
 
 // show — показать код i (за краями — ничего не делает).
@@ -271,11 +325,34 @@ func (s *qrSeries) show(i int) {
 		return
 	}
 	s.idx = i
+	if s.altMode && s.alt != nil {
+		s.img.Resource = fyne.NewStaticResource(s.name+"-text-qr.png", s.alt)
+		s.img.Refresh()
+		s.pos.SetText(qrTextCaption)
+		s.caption.SetText(qrTextCaption)
+		s.altBtn.SetText(qrSeriesButton)
+		s.prev.Hide()
+		s.next.Hide()
+		return
+	}
+	s.altBtn.SetText(qrTextButton)
+	s.caption.SetText(qrSeriesCaption)
+	s.prev.Show()
+	s.next.Show()
 	s.img.Resource = fyne.NewStaticResource(fmt.Sprintf("%s-%d-qr.png", s.name, i+1), s.pngs[i])
 	s.img.Refresh()
-	if s.side {
+	switch {
+	case len(s.pngs) == 1:
+		// Один код — листать нечего: без «Назад/Далее» и «1 из 1».
+		s.prev.Hide()
+		s.next.Hide()
+		s.pos.SetText(qrSeriesCaption)
+		if s.side {
+			s.pos.SetText(qrOneCaption)
+		}
+	case s.side:
 		s.pos.SetText(fmt.Sprintf("QR %d из %d", i+1, len(s.pngs)))
-	} else {
+	default:
 		s.pos.SetText(fmt.Sprintf("QR %d из %d · %s", i+1, len(s.pngs), qrSeriesCaption))
 	}
 	if i == 0 {
@@ -295,7 +372,7 @@ func (s *qrSeries) show(i int) {
 func (s *qrSeries) setSide(extra fyne.CanvasObject) {
 	s.side = true
 	s.box.Objects = []fyne.CanvasObject{container.NewBorder(nil, nil, container.NewCenter(s.img), nil,
-		container.NewVBox(container.NewBorder(nil, nil, s.prev, s.next, s.pos), s.caption, extra))}
+		container.NewVBox(s.navRow(), s.caption, extra))}
 	s.show(s.idx)
 }
 

@@ -174,7 +174,7 @@ func TestAmneziaQRRoundTrip(t *testing.T) {
 		{"AWG2, огромный I1 (не влезает в один QR)", "amnezia-awg2", "awg", awg2Config(t, 6000), 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			texts, key, err := core.AmneziaQRTexts(c.conf, c.container, "")
+			texts, key, err := core.AmneziaQRTexts(c.conf, c.container)
 			if err != nil {
 				t.Fatalf("серия не построена: %v", err)
 			}
@@ -199,7 +199,7 @@ func TestAmneziaQRRoundTrip(t *testing.T) {
 				t.Fatalf("DecodeVpnKey: %v %v", err, m["defaultContainer"])
 			}
 			// Доезд от картинки: PNG → тот же текст, коррекция L.
-			pngs, err := core.AmneziaQRSeries(c.conf, c.container, "")
+			pngs, err := core.AmneziaQRSeries(c.conf, c.container)
 			if err != nil || len(pngs) != len(texts) {
 				t.Fatalf("PNG серии: %v, %d из %d", err, len(pngs), len(texts))
 			}
@@ -233,13 +233,48 @@ func TestAddUserCarriesContainer(t *testing.T) {
 	}
 }
 
+// Заголовок сервера в приложении (description) и hostName — адрес, с которым
+// выдан конфиг: DNS-имя, если выбрано, иначе адрес ключа. Боевым путём:
+// AddUser на fakesrv → .conf → ключ AmneziaVPN → их декодер. Подмена
+// «description = подпись списка / Сервер N» роняет тест.
+func TestAmneziaQRDescriptionIsEndpoint(t *testing.T) {
+	for _, c := range []struct{ name, clientHost, want string }{
+		{"DNS-имя выбрано", "vpn.example.com", "vpn.example.com"},
+		{"IP оставлен", "", raceCreds().Host},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sess := core.NewSessionWithRunner(awg2With(t, awg3Extra), raceCreds())
+			sess.ClientHost = c.clientHost
+			cs, err := sess.FindContainers()
+			if err != nil || len(cs) != 1 {
+				t.Fatalf("%v %+v", err, cs)
+			}
+			u, err := sess.AddUser(&cs[0], "Eve")
+			if err != nil {
+				t.Fatal(err)
+			}
+			texts, _, err := core.AmneziaQRTexts(u.Config, u.Container)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var top map[string]any
+			if err := json.Unmarshal(mirrorUncompress(t, mirrorAssemble(t, texts)), &top); err != nil {
+				t.Fatal(err)
+			}
+			if top["description"] != c.want || top["hostName"] != c.want {
+				t.Fatalf("description %q, hostName %q, ждали %q", top["description"], top["hostName"], c.want)
+			}
+		})
+	}
+}
+
 // Третье состояние: серия не построена — ошибка с причиной, а не пустая серия.
 func TestAmneziaQRRefuses(t *testing.T) {
-	if _, _, err := core.AmneziaQRTexts(wgClientConf(""), "amnezia-xray", ""); !errors.Is(err, core.ErrAmneziaQRContainer) {
+	if _, _, err := core.AmneziaQRTexts(wgClientConf(""), "amnezia-xray"); !errors.Is(err, core.ErrAmneziaQRContainer) {
 		t.Errorf("XRay: ждали ErrAmneziaQRContainer, получили %v", err)
 	}
 	noEP := strings.Replace(wgClientConf(""), "Endpoint = 203.0.113.10:51820\n", "", 1)
-	texts, _, err := core.AmneziaQRTexts(noEP, "amnezia-awg", "")
+	texts, _, err := core.AmneziaQRTexts(noEP, "amnezia-awg")
 	if err == nil || texts != nil || !strings.Contains(err.Error(), "Endpoint") {
 		t.Errorf("без Endpoint: ждали ошибку с полем, получили %v, %d кусков", err, len(texts))
 	}

@@ -69,7 +69,7 @@ func TestXRayPrecheckDead(t *testing.T) {
 // TestXRayLinkFormat — AU-UX M4: ссылка в форме vless.cpp Serialize
 // (amnezia-client 94b51df): type — только если network != tcp (у нас tcp —
 // нет); порядок encryption, security, flow, sni, fp, pbk, sid; пустой
-// spiderX не пишется; метка #AmneziaVPN.
+// spiderX не пишется; метка — адрес выдачи (заголовок сервера в приложении).
 func TestXRayLinkFormat(t *testing.T) {
 	srv := fakesrv.NewXRay("dev")
 	sess, x := xraySession(t, srv)
@@ -82,7 +82,7 @@ func TestXRayLinkFormat(t *testing.T) {
 	for _, kv := range strings.Split(q, "&") {
 		keys = append(keys, strings.SplitN(kv, "=", 2)[0])
 	}
-	if got := strings.Join(keys, ","); got != "encryption,security,flow,sni,fp,pbk,sid" || strings.Contains(nu.Link, "type=") || !strings.HasSuffix(nu.Link, "#AmneziaVPN") {
+	if got := strings.Join(keys, ","); got != "encryption,security,flow,sni,fp,pbk,sid" || strings.Contains(nu.Link, "type=") || !strings.HasSuffix(nu.Link, "#"+sess.EndpointHost()) {
 		t.Fatalf("параметры %q в %q", got, nu.Link)
 	}
 }
