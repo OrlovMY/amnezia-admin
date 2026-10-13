@@ -1435,7 +1435,7 @@ type QRTooLargeError struct {
 }
 
 func (e *QRTooLargeError) Error() string {
-	return fmt.Sprintf("конфиг слишком большой для одного QR-кода — %d байт при максимуме %d; используйте файл конфигурации", e.Len, e.Max)
+	return fmt.Sprintf("конфиг слишком большой для одного QR — %d байт при максимуме %d; используйте файл конфигурации", e.Len, e.Max)
 }
 
 // QRPNG кодирует text в QR-код и возвращает PNG-байты размером size×size px.

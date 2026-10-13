@@ -8,12 +8,44 @@ package core_test
 // «слишком большой» — безымянной ошибкой без размеров.
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
 
 	"amnezia-admin/core"
+
+	"github.com/skip2/go-qrcode"
 )
+
+// TestQRLevel — уровень коррекции зафиксирован: M, пока конфиг в него
+// влезает (≤ 2331 байт), и L только сверх того. Подмена порядка (L раньше
+// M) или «только L» даёт другую картинку и роняет случаи «→ M».
+func TestQRLevel(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		text string
+		lvl  qrcode.RecoveryLevel
+	}{
+		{"AWG2, короткий I1 → M", awg2Config(t, 4), qrcode.Medium},
+		{"ровно предел M → M", strings.Repeat("x", 2331), qrcode.Medium},
+		{"AWG2, длинный I1 → L", awg2Config(t, 2000), qrcode.Low},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := core.QRPNG(c.text, 256)
+			if err != nil {
+				t.Fatalf("QR не построен: %v", err)
+			}
+			want, err := qrcode.Encode(c.text, c.lvl, 256)
+			if err != nil {
+				t.Fatalf("проверка ничего не значит: эталон не построен: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("%d байт: QR построен не на ожидаемом уровне коррекции", len(c.text))
+			}
+		})
+	}
+}
 
 // awg2Config — клиентский конфиг AWG2, выданный AddUser, при I1 из n
 // шестнадцатеричных знаков.
