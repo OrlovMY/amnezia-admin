@@ -18,19 +18,21 @@ import (
 )
 
 func TestAWG2NoteFullyVisible(t *testing.T) {
-	f := formByName(t, "(д) конфиг готов, AmneziaWG 2")
-	for _, size := range osmotrSizes {
-		for _, th := range osmotrThemes {
-			t.Run(fmt.Sprintf("%s/%s", size, th.name), func(t *testing.T) {
-				u := osmotrUI(t, th.v)
-				s := f.open(t, u, sizeWindow(u, size))
-				osmotrFrame(s.root, s.mins)
-				top, bottom, vTop, vBottom, where := awg2NoteSpan(t, s.root)
-				t.Logf("строка честности %.1f..%.1f, видно %.1f..%.1f (%s)", top, bottom, vTop, vBottom, where)
-				if top < vTop-0.5 || bottom > vBottom+0.5 {
-					t.Errorf("строка честности не видна целиком при открытии: %.1f..%.1f, видно %.1f..%.1f (%s)", top, bottom, vTop, vBottom, where)
-				}
-			})
+	for _, form := range []string{"(д) конфиг готов, AmneziaWG 2", "(д) конфиг готов, AmneziaWG 2, серия QR"} {
+		f := formByName(t, form)
+		for _, size := range osmotrSizes {
+			for _, th := range osmotrThemes {
+				t.Run(fmt.Sprintf("%s/%s/%s", form, size, th.name), func(t *testing.T) {
+					u := osmotrUI(t, th.v)
+					s := f.open(t, u, sizeWindow(u, size))
+					osmotrFrame(s.root, s.mins)
+					top, bottom, vTop, vBottom, where := awg2NoteSpan(t, s.root)
+					t.Logf("строка честности %.1f..%.1f, видно %.1f..%.1f (%s)", top, bottom, vTop, vBottom, where)
+					if top < vTop-0.5 || bottom > vBottom+0.5 {
+						t.Errorf("строка честности не видна целиком при открытии: %.1f..%.1f, видно %.1f..%.1f (%s)", top, bottom, vTop, vBottom, where)
+					}
+				})
+			}
 		}
 	}
 }
