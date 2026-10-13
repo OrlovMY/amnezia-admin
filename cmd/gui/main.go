@@ -3155,18 +3155,7 @@ func (u *ui) saveConfigFile(nu *core.NewUser) (core.SaveResult, error) {
 const awg2ConfigDialogWidth = 760
 
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
-	var qrObj fyne.CanvasObject
-	if png, err := core.QRPNG(nu.QRText(), 256); err == nil {
-		res := fyne.NewStaticResource(core.SanitizeName(nu.Name)+"-qr.png", png)
-		img := canvas.NewImageFromResource(res)
-		img.FillMode = canvas.ImageFillOriginal
-		img.SetMinSize(fyne.NewSize(256, 256))
-		qrObj = img
-	} else {
-		l := widget.NewLabel("Не удалось построить QR-код: " + err.Error())
-		l.Wrapping = fyne.TextWrapWord
-		qrObj = l
-	}
+	qrObj := qrObject(nu.Name, nu.QRText())
 
 	savedLabel := widget.NewLabel("")
 	savedLabel.Wrapping = fyne.TextWrapWord
@@ -3289,10 +3278,19 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// не помещалась даже первой: подпись 111.4 т. при видимой прокрутке
 	// 104.9 т. (1229×620) и 61.9 т. (972×517). Диалог с ней шире
 	// (awg2ConfigDialogWidth), чтобы рядом с QR она шла в 4–5 строк.
-	var qrTop fyne.CanvasObject = container.NewCenter(qrObj)
+	// QR не построен (находка владельца 12.10: AmneziaWG 2) — на месте
+	// QR перенесённая по словам надпись. В Center и в левом краю Border она
+	// получала свою МИНИМАЛЬНУЮ ширину — одну букву — и шла столбиком.
+	// Теперь надпись — на всю ширину диалога (qrSlot, сторож TestQRErrorReadable).
+	_, isQR := qrObj.(*canvas.Image)
+	qrTop := qrSlot(qrObj)
 	dialogW := float32(480)
 	if nu.Note != "" {
-		qrTop = container.NewBorder(nil, nil, qrObj, nil, container.NewVBox(noteLabel))
+		if isQR {
+			qrTop = container.NewBorder(nil, nil, qrObj, nil, container.NewVBox(noteLabel))
+		} else {
+			qrTop = container.NewVBox(qrObj, noteLabel)
+		}
 		dialogW = awg2ConfigDialogWidth
 	}
 	content = container.NewBorder(qrTop, container.NewVBox(saveBtn, copyBtn), nil, nil, info)
