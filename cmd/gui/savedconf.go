@@ -96,11 +96,7 @@ func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedCon
 	// показ — по явному «Всё равно показать QR».
 	// QR в дерево окна не входит вовсе, пока не разрешён: Hide ненадёжен —
 	// показ диалога показывает всё содержимое.
-	containerName := ""
-	if u.cur != nil {
-		containerName = u.cur.Name
-	}
-	qr := qrObject(cl.Name(), sc.Config, containerName)
+	qr := qrObject(cl.Name(), sc.Config, u.savedQRContainer())
 	qrBox := container.NewVBox()
 	showQR := func() {
 		if len(qrBox.Objects) == 0 {
@@ -307,7 +303,16 @@ func (s *qrSeries) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(s.box)
 }
 
-// isQRShown — на месте QR код (одиночный или серия), а не надпись об ошибке.
+// savedQRContainer — контейнер для серии QR в «Показать QR»: текущий
+// протокол. Не выбран — "" (не знаем): серии нет, тип не угадывается.
+func (u *ui) savedQRContainer() string {
+	if u.cur == nil {
+		return ""
+	}
+	return u.cur.Name
+}
+
+// isQRShown —на месте QR код (одиночный или серия), а не надпись об ошибке.
 func isQRShown(o fyne.CanvasObject) bool {
 	switch o.(type) {
 	case *canvas.Image, *qrSeries:

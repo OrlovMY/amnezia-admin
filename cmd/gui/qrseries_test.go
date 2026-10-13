@@ -142,6 +142,55 @@ func TestQRSeriesSavedConfig(t *testing.T) {
 	}
 }
 
+// «Показать QR»: контейнер неизвестен (u.cur == nil) — честная надпись,
+// без серии; угадывать тип нельзя (ревью PR #54).
+func TestSavedQRContainerTable(t *testing.T) {
+	nu := seriesNewUser()
+	for _, c := range []struct {
+		name   string
+		cur    *core.Container
+		series bool
+	}{
+		{"протокол не выбран", nil, false},
+		{"AmneziaWG 2", &core.Container{Name: "amnezia-awg2"}, true},
+		{"AmneziaWG", &core.Container{Name: "amnezia-awg"}, true},
+		{"XRay", &core.Container{Name: "amnezia-xray"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			u := &ui{cur: c.cur}
+			o := qrObject(nu.Name, nu.Config, u.savedQRContainer())
+			if _, ok := o.(*qrSeries); ok != c.series {
+				t.Fatalf("серия=%v, ждали %v (%T)", ok, c.series, o)
+			}
+			if !c.series {
+				if l, ok := o.(*widget.Label); !ok || !strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
+					t.Fatalf("ждали честную надпись, получили %T", o)
+				}
+			}
+		})
+	}
+}
+
+// Серия из одного кода: «QR 1 из 1», обе кнопки выключены, листание — на месте.
+func TestQRSeriesSingle(t *testing.T) {
+	a := test.NewApp()
+	t.Cleanup(a.Quit)
+	nu := seriesNewUser()
+	pngs, err := core.AmneziaQRSeries(nu.Config, nu.Container, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newQRSeries(nu.Name, pngs[:1])
+	if !strings.HasPrefix(s.pos.Text, "QR 1 из 1 ") || !s.prev.Disabled() || !s.next.Disabled() {
+		t.Fatalf("%q назад выкл=%v далее выкл=%v", s.pos.Text, s.prev.Disabled(), s.next.Disabled())
+	}
+	test.Tap(s.next)
+	test.Tap(s.prev)
+	if s.idx != 0 || s.img.Resource == nil {
+		t.Fatalf("idx %d", s.idx)
+	}
+}
+
 func walkLabels(root fyne.CanvasObject, f func(*widget.Label)) {
 	var walk func(o fyne.CanvasObject)
 	walk = func(o fyne.CanvasObject) {
