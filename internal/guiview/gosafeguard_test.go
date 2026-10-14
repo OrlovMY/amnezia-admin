@@ -28,6 +28,9 @@ import (
 //   - он не заходит в функции, вызванные из goSafe: нарушение, спрятанное в
 //     отдельный метод (u.updateLabel()), останется невидимым. Это цена
 //     разбора одного тела, и она названа, а не умолчана;
+//   - запуск горутины ВНУТРИ fyne.Do/uiDo — fyne.Do(func(){ go func(){
+//     label.SetText(…) }() }) — не ловится: всё внутри аргумента fyne.Do
+//     считается безопасным (как и до обёртки uiDo);
 //   - он проверяет cmd/gui/main.go — единственный файл GUI. Появится второй
 //     файл с goSafe, сторож про него не узнает (тогда правится путь здесь).
 
@@ -85,6 +88,12 @@ func verifiedWrappers(files []*ast.File) (ok map[string]bool, problems []string)
 							assigns++
 						}
 					}
+				case *ast.UnaryExpr:
+					// &uiDo — запись через указатель (*p = …) сторож не
+					// проследит, поэтому взятие адреса — как присваивание
+					if id, isID := x.X.(*ast.Ident); isID && x.Op == token.AND && id.Name == name {
+						assigns++
+					}
 				}
 				return true
 			})
@@ -95,7 +104,7 @@ func verifiedWrappers(files []*ast.File) (ok map[string]bool, problems []string)
 		case decls != 1 || good != 1:
 			problems = append(problems, name+": боевое определение — не ровно `var "+name+" = fyne.Do`")
 		case assigns != 0:
-			problems = append(problems, name+": в боевом коде ей присваивают другое значение")
+			problems = append(problems, name+": в боевом коде ей присваивают другое значение или берут её адрес")
 		default:
 			ok[name] = true
 		}
@@ -247,6 +256,10 @@ func TestGoSafeGuardSeesViolation(t *testing.T) {
 		{"обёртка проверена", "var uiDo = fyne.Do\nvar uiCall = fyne.Do", 2, 2},
 		// подмена (а): боевое uiDo — не fyne.Do; вызов через неё — нарушение
 		{"обёртка подменена", "var uiDo = func(f func()) { f() }\nvar uiCall = fyne.Do", 3, 1},
+		// определение верное, но в боевом коде её переприсваивают (аудит р5)
+		{"обёртка переприсвоена", "var uiDo = fyne.Do\nvar uiCall = fyne.Do\nfunc init() { uiDo = func(f func()) { f() } }", 3, 1},
+		// взят адрес — запись через указатель не проследить (аудит р5)
+		{"адрес обёртки взят", "var uiDo = fyne.Do\nvar uiCall = fyne.Do\nfunc init() { p := &uiDo; *p = func(f func()) { f() } }", 3, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			bad, good := goSafeCanary(t, c.def)
