@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,13 +50,110 @@ var widgetMethods = map[string]bool{
 	"Focus":            true,
 }
 
-// insideFyneDo — множество узлов, лежащих внутри вызова fyne.Do(...) в
-// данном поддереве.
-func insideFyneDo(root ast.Node) map[ast.Node]bool {
+// doWrappers — ЗАКРЫТЫЙ список обёрток, равных fyne.Do (одна запись).
+// uiDo — шов теста диалога пина (аудит р2 H1 по PR #57). Обёртка признаётся,
+// только если сторож САМ увидел её боевое определение — ровно
+// `var uiDo = fyne.Do` в не-тестовом файле cmd/gui — и ни одного
+// присваивания ей в боевом коде. Новая обёртка с другим именем сюда не
+// входит и считается нарушением, пока не внесена видимой строкой диффа.
+var doWrappers = []string{"uiDo"}
+
+const guiDir = "../../cmd/gui"
+
+// verifiedWrappers — какие обёртки из doWrappers проверены по боевому
+// определению в files; problems — почему обёртка не признана.
+func verifiedWrappers(files []*ast.File) (ok map[string]bool, problems []string) {
+	ok = map[string]bool{}
+	for _, name := range doWrappers {
+		decls, good, assigns := 0, 0, 0
+		for _, f := range files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.ValueSpec:
+					for i, id := range x.Names {
+						if id.Name != name {
+							continue
+						}
+						decls++
+						if i < len(x.Values) && isFyneDo(x.Values[i]) && x.Type == nil {
+							good++
+						}
+					}
+				case *ast.AssignStmt:
+					for _, l := range x.Lhs {
+						if id, isID := l.(*ast.Ident); isID && id.Name == name {
+							assigns++
+						}
+					}
+				}
+				return true
+			})
+		}
+		switch {
+		case decls == 0:
+			// обёртка не объявлена — и не признаётся
+		case decls != 1 || good != 1:
+			problems = append(problems, name+": боевое определение — не ровно `var "+name+" = fyne.Do`")
+		case assigns != 0:
+			problems = append(problems, name+": в боевом коде ей присваивают другое значение")
+		default:
+			ok[name] = true
+		}
+	}
+	return ok, problems
+}
+
+func isFyneDo(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Do" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "fyne"
+}
+
+// guiProdFiles — не-тестовые .go файлы cmd/gui.
+func guiProdFiles(t *testing.T) []*ast.File {
+	t.Helper()
+	names, err := filepath.Glob(filepath.Join(guiDir, "*.go"))
+	if err != nil || len(names) == 0 {
+		t.Fatalf("сторож ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: нет .go в %s (%v)", guiDir, err)
+	}
+	var files []*ast.File
+	fset := token.NewFileSet()
+	for _, n := range names {
+		if strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, n, raw, 0)
+		if err != nil {
+			t.Fatalf("сторож ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: %s не разбирается: %v", n, err)
+		}
+		files = append(files, f)
+	}
+	return files
+}
+
+// insideFyneDo — множество узлов, лежащих внутри вызова fyne.Do(...) или
+// проверенной обёртки (wrappers) в данном поддереве.
+func insideFyneDo(root ast.Node, wrappers map[string]bool) map[ast.Node]bool {
 	safe := map[ast.Node]bool{}
 	ast.Inspect(root, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
+			return true
+		}
+		if id, isID := call.Fun.(*ast.Ident); isID && wrappers[id.Name] {
+			for _, arg := range call.Args {
+				ast.Inspect(arg, func(m ast.Node) bool {
+					safe[m] = true
+					return true
+				})
+			}
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -86,6 +185,10 @@ func TestGoSafeTouchesWidgetsOnlyInsideFyneDo(t *testing.T) {
 		t.Fatalf("сторож ПЕРЕСТАЛ ЧТО-ЛИБО ПРОВЕРЯТЬ: %s не разбирается: %v", guiMainPath, err)
 	}
 
+	wrappers, problems := verifiedWrappers(guiProdFiles(t))
+	for _, p := range problems {
+		t.Errorf("обёртка fyne.Do не признана: %s — вызовы через неё считаются нарушением", p)
+	}
 	checked := 0
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -101,7 +204,7 @@ func TestGoSafeTouchesWidgetsOnlyInsideFyneDo(t *testing.T) {
 			return true
 		}
 		checked++
-		safe := insideFyneDo(lit.Body)
+		safe := insideFyneDo(lit.Body, wrappers)
 		ast.Inspect(lit.Body, func(m ast.Node) bool {
 			inner, ok := m.(*ast.CallExpr)
 			if !ok {
@@ -135,11 +238,39 @@ func TestGoSafeTouchesWidgetsOnlyInsideFyneDo(t *testing.T) {
 // нарушении он обязан сработать. Иначе «сторож зелёный» значило бы только,
 // что он ничего не смотрит.
 func TestGoSafeGuardSeesViolation(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		def       string
+		bad, good int
+	}{
+		// uiDo = fyne.Do — вызов через неё законен; uiCall — не в списке
+		{"обёртка проверена", "var uiDo = fyne.Do\nvar uiCall = fyne.Do", 2, 2},
+		// подмена (а): боевое uiDo — не fyne.Do; вызов через неё — нарушение
+		{"обёртка подменена", "var uiDo = func(f func()) { f() }\nvar uiCall = fyne.Do", 3, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			bad, good := goSafeCanary(t, c.def)
+			if bad != c.bad || good != c.good {
+				t.Errorf("сторож насчитал нарушений %d, законных %d; ждали %d и %d — он не сработает и на настоящем",
+					bad, good, c.bad, c.good)
+			}
+		})
+	}
+}
+
+// goSafeCanary — сторож на подложенном файле: прямой SetText (нарушение),
+// SetText в fyne.Do (законно), в uiDo (законно, если обёртка проверена),
+// в незнакомой обёртке uiCall (нарушение всегда).
+func goSafeCanary(t *testing.T, def string) (bad, good int) {
+	t.Helper()
 	src := `package main
+` + def + `
 func f() {
 	goSafe(func() {
 		label.SetText("прямо из фоновой goroutine")
 		fyne.Do(func() { label.SetText("а так можно") })
+		uiDo(func() { label.SetText("через проверенную обёртку") })
+		uiCall(func() { label.SetText("через обёртку вне списка") })
 	})
 }`
 	fset := token.NewFileSet()
@@ -147,7 +278,7 @@ func f() {
 	if err != nil {
 		t.Fatalf("образец не разбирается: %v", err)
 	}
-	var bad, good int
+	wrappers, _ := verifiedWrappers([]*ast.File{file})
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || len(call.Args) != 1 {
@@ -157,7 +288,7 @@ func f() {
 			return true
 		}
 		lit := call.Args[0].(*ast.FuncLit)
-		safe := insideFyneDo(lit.Body)
+		safe := insideFyneDo(lit.Body, wrappers)
 		ast.Inspect(lit.Body, func(m ast.Node) bool {
 			inner, ok := m.(*ast.CallExpr)
 			if !ok {
@@ -176,13 +307,7 @@ func f() {
 		})
 		return true
 	})
-	if bad != 1 {
-		t.Errorf("сторож не увидел подложенного нарушения (насчитал %d) — он не сработает и на настоящем", bad)
-	}
-	if good != 1 {
-		t.Errorf("сторож принял законный вызов внутри fyne.Do за нарушение (насчитал законных %d) — "+
-			"такой сторож ослабят первой же правкой", good)
-	}
+	return bad, good
 }
 
 // TestGoSafeGuardNamesTheDrivers — пояснение у счётчика фоновых операций
