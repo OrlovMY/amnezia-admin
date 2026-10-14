@@ -22,7 +22,7 @@ func TestQRNoteWhenAmneziaFormatFails(t *testing.T) {
 	}{
 		{"AmneziaWG, нет Endpoint", "amnezia-awg", true},
 		{"XRay", "amnezia-xray", false},
-		{"контейнер неизвестен", "", false},
+		{"контейнер неизвестен", "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o, note := qrObjectNote("x", noEndpoint, c.container)
@@ -32,7 +32,11 @@ func TestQRNoteWhenAmneziaFormatFails(t *testing.T) {
 			if got := note != ""; got != c.wantNote {
 				t.Fatalf("пометка %q, ждали есть=%v", note, c.wantNote)
 			}
-			if c.wantNote && (!strings.Contains(note, "Сервер N") || !strings.Contains(note, "в конфиге нет") || strings.Contains(note, "PrivateKey =")) {
+			why := "в конфиге нет"
+			if c.container == "" {
+				why = "Протокол сервера не выбран"
+			}
+			if c.wantNote && (!strings.Contains(note, "Сервер N") || !strings.Contains(note, why) || strings.Contains(note, "PrivateKey =")) {
 				t.Fatalf("пометка без причины или с содержимым: %q", note)
 			}
 		})

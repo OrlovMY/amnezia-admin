@@ -214,9 +214,16 @@ func qrDecision(ch core.SavedCheck) qrMode {
 // надпись с обеими причинами.
 //
 // note — что сказать человеку рядом: текстовый QR влез, а QR AmneziaVPN
-// не построен (приложение назовёт сервер «Сервер N»); "" — сказать нечего.
+// не построен или протокол неизвестен (приложение назовёт сервер «Сервер N»);
+// "" — сказать нечего.
 func qrObjectNote(name, config, containerName string) (obj fyne.CanvasObject, note string) {
 	png, err := core.QRPNG(config, 256)
+	if err == nil && containerName == "" {
+		// Протокол неизвестен (u.cur == nil в «Показать QR»): серию не
+		// строим — тип не угадывается, — но и молчать нельзя: из текстового
+		// QR приложение возьмёт «Сервер N» (ревью: третье состояние).
+		note = qrNoContainerNote
+	}
 	if err == nil && containerName != "" {
 		pngs, serr := core.AmneziaQRSeries(config, containerName)
 		switch {
@@ -249,6 +256,10 @@ func qrObjectNote(name, config, containerName string) (obj fyne.CanvasObject, no
 	img.SetMinSize(fyne.NewSize(256, 256))
 	return img, note
 }
+
+// qrNoContainerNote — пометка, когда протокол сервера неизвестен.
+const qrNoContainerNote = "Протокол сервера не выбран — QR формата AmneziaVPN не построен; " +
+	"при сканировании текстового QR приложение AmneziaVPN назовёт сервер «Сервер N»."
 
 // qrSeries — серия QR формата AmneziaVPN: один код на виду, «QR i из N»,
 // кнопки «Назад»/«Далее». Сканер приложения собирает куски по номеру в
@@ -305,7 +316,6 @@ const (
 	qrTextButton   = "Текстовый QR"
 	qrSeriesButton = "QR для AmneziaVPN"
 	qrTextCaption  = "Текстовый QR: AmneziaWG, WireGuard"
-	qrOneCaption   = "QR формата AmneziaVPN"
 )
 
 func (s *qrSeries) navRow() fyne.CanvasObject {
@@ -328,8 +338,8 @@ func (s *qrSeries) show(i int) {
 	if s.altMode && s.alt != nil {
 		s.img.Resource = fyne.NewStaticResource(s.name+"-text-qr.png", s.alt)
 		s.img.Refresh()
-		s.pos.SetText(qrTextCaption)
 		s.caption.SetText(qrTextCaption)
+		s.setPos(qrTextCaption)
 		s.altBtn.SetText(qrSeriesButton)
 		s.prev.Hide()
 		s.next.Hide()
@@ -346,14 +356,11 @@ func (s *qrSeries) show(i int) {
 		// Один код — листать нечего: без «Назад/Далее» и «1 из 1».
 		s.prev.Hide()
 		s.next.Hide()
-		s.pos.SetText(qrSeriesCaption)
-		if s.side {
-			s.pos.SetText(qrOneCaption)
-		}
+		s.setPos(qrSeriesCaption)
 	case s.side:
-		s.pos.SetText(fmt.Sprintf("QR %d из %d", i+1, len(s.pngs)))
+		s.setPos(fmt.Sprintf("QR %d из %d", i+1, len(s.pngs)))
 	default:
-		s.pos.SetText(fmt.Sprintf("QR %d из %d · %s", i+1, len(s.pngs), qrSeriesCaption))
+		s.setPos(fmt.Sprintf("QR %d из %d · %s", i+1, len(s.pngs), qrSeriesCaption))
 	}
 	if i == 0 {
 		s.prev.Disable()
@@ -365,6 +372,18 @@ func (s *qrSeries) show(i int) {
 	} else {
 		s.next.Enable()
 	}
+}
+
+// setPos — строка над/рядом с кодом. В боковой раскладке подпись «что
+// сканировать» несёт s.caption; если pos сказал бы то же самое (один код,
+// текстовый QR), pos скрыт — подпись ровно один раз (ревью: дубль).
+func (s *qrSeries) setPos(text string) {
+	s.pos.SetText(text)
+	if s.side && text == s.caption.Text {
+		s.pos.Hide()
+		return
+	}
+	s.pos.Show()
 }
 
 // setSide — раскладка «код слева, справа — листание, подпись и extra»

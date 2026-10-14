@@ -38,6 +38,60 @@ var qrAfterTap = map[string]string{
 
 // qrVisibleHeight — видимая высота QR и где он лежит.
 func qrVisibleHeight(pop *widget.PopUp) (visible, full float32, where string, found bool) {
+	img, parents := findQRImage(pop)
+	if img == nil {
+		return 0, 0, "", false
+	}
+	d := fyne.CurrentApp().Driver()
+	ip, is := d.AbsolutePositionForObject(img), img.Size()
+	top, bottom := ip.Y, ip.Y+is.Height
+	clipTop, clipBottom := float32(-1e9), float32(1e9)
+	where = "рамка диалога"
+	cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
+	clipTop, clipBottom = cp.Y, cp.Y+cs.Height
+	for i := len(parents) - 1; i >= 0; i-- {
+		if sc, ok := parents[i].(*container.Scroll); ok {
+			sp := d.AbsolutePositionForObject(sc)
+			clipTop, clipBottom = max(clipTop, sp.Y), min(clipBottom, sp.Y+sc.Size().Height)
+			where = "прокрутка"
+			break
+		}
+	}
+	v := min(bottom, clipBottom) - max(top, clipTop)
+	if v < 0 {
+		v = 0
+	}
+	return v, is.Height, where, true
+}
+
+// qrVisibleWidth — видимая ширина QR (аудит F4 по PR #57: прежний сторож
+// мерил только по Y, и QR шириной 1400 в окне 857 проходил). Отсечение —
+// рамкой диалога, прокруткой над QR и самим окном (канвой).
+func qrVisibleWidth(pop *widget.PopUp, canvasW float32) (visible, full float32, found bool) {
+	img, parents := findQRImage(pop)
+	if img == nil {
+		return 0, 0, false
+	}
+	d := fyne.CurrentApp().Driver()
+	ip, is := d.AbsolutePositionForObject(img), img.Size()
+	cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
+	clipL, clipR := max(cp.X, 0), min(cp.X+cs.Width, canvasW)
+	for i := len(parents) - 1; i >= 0; i-- {
+		if sc, ok := parents[i].(*container.Scroll); ok {
+			sp := d.AbsolutePositionForObject(sc)
+			clipL, clipR = max(clipL, sp.X), min(clipR, sp.X+sc.Size().Width)
+			break
+		}
+	}
+	v := min(ip.X+is.Width, clipR) - max(ip.X, clipL)
+	if v < 0 {
+		v = 0
+	}
+	return v, is.Width, true
+}
+
+// findQRImage — первая видимая картинка «*-qr.png» и путь к ней.
+func findQRImage(pop *widget.PopUp) (*canvas.Image, []fyne.CanvasObject) {
 	var img *canvas.Image
 	var parents []fyne.CanvasObject
 	var walk func(o fyne.CanvasObject, path []fyne.CanvasObject)
@@ -64,29 +118,7 @@ func qrVisibleHeight(pop *widget.PopUp) (visible, full float32, where string, fo
 		}
 	}
 	walk(pop, nil)
-	if img == nil {
-		return 0, 0, "", false
-	}
-	d := fyne.CurrentApp().Driver()
-	ip, is := d.AbsolutePositionForObject(img), img.Size()
-	top, bottom := ip.Y, ip.Y+is.Height
-	clipTop, clipBottom := float32(-1e9), float32(1e9)
-	where = "рамка диалога"
-	cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
-	clipTop, clipBottom = cp.Y, cp.Y+cs.Height
-	for i := len(parents) - 1; i >= 0; i-- {
-		if sc, ok := parents[i].(*container.Scroll); ok {
-			sp := d.AbsolutePositionForObject(sc)
-			clipTop, clipBottom = max(clipTop, sp.Y), min(clipBottom, sp.Y+sc.Size().Height)
-			where = "прокрутка"
-			break
-		}
-	}
-	v := min(bottom, clipBottom) - max(top, clipTop)
-	if v < 0 {
-		v = 0
-	}
-	return v, is.Height, where, true
+	return img, parents
 }
 
 func TestQRFullyVisible(t *testing.T) {
@@ -123,6 +155,11 @@ func TestQRFullyVisible(t *testing.T) {
 					t.Logf("QR: видно %.1f из %.1f (%s)", v, full, where)
 					if full < 256 || v < full-0.5 {
 						t.Errorf("QR срезан: видно %.1f из %.1f (%s) — отсканировать нельзя", v, full, where)
+					}
+					hv, hfull, _ := qrVisibleWidth(pop, s.canvas.Size().Width)
+					t.Logf("QR по ширине: видно %.1f из %.1f", hv, hfull)
+					if hfull < 256 || hv < hfull-0.5 {
+						t.Errorf("QR срезан по ширине: видно %.1f из %.1f — отсканировать нельзя", hv, hfull)
 					}
 				})
 			}

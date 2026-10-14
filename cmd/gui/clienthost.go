@@ -296,8 +296,9 @@ func throttledVaultDecrypt(path, pin string) (core.VaultPayload, core.VaultInfo,
 	}
 	payload, info, derr := vaultDecrypt(path, pin)
 	if derr != nil {
-		st := core.RegisterFailure(cur, now)
-		if serr := core.SaveThrottle(dir, name, st); serr != nil {
+		// учёт неудачи — одной операцией под замком (два окна — две неудачи)
+		st, serr := core.RecordThrottleFailure(dir, name, now)
+		if serr != nil {
 			return core.VaultPayload{}, core.VaultInfo{}, serr
 		}
 		msg := "неправильный пин-код или файл повреждён"
