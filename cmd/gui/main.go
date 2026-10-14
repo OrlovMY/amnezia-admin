@@ -846,14 +846,11 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			payload, vinfo, err := vaultDecrypt(path, pin)
 			if err != nil {
 				now := clock.Now()
-				prev, cerr := core.LoadThrottle(vaultDir, vaultName)
-				var st core.ThrottleState
-				if cerr == nil {
-					st = core.RegisterFailure(prev, now)
-					// пишем счётчик до любого дальнейшего ветвления; не
-					// записан — «осталось попыток» было бы неправдой (Н8)
-					cerr = core.SaveThrottle(vaultDir, vaultName, st)
-				}
+				// пишем счётчик до любого дальнейшего ветвления; не
+				// записан — «осталось попыток» было бы неправдой (Н8).
+				// Прочитать-изменить-записать — одной операцией под замком:
+				// неудачи из двух окон засчитываются обе (ревью SEC).
+				st, cerr := core.RecordThrottleFailure(vaultDir, vaultName, now)
 				fyne.Do(func() {
 					pinEntry.SetText("")
 					if cerr != nil {

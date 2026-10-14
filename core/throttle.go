@@ -14,13 +14,13 @@
 // ГРАНИЦЫ (что счётчик НЕ ограничивает, названо сознательно):
 //   - удаление или откат throttle.json — у кого есть доступ к файлам
 //     пользователя, у того и сам .avlt, и перебор он ведёт вне программы;
-//   - несколько запущенных экземпляров программы (раунд 4 долгов, AU-LOGIC
-//     М-2, решение ядра — не чинить): чтение-изменение-запись без блокировки
-//     между процессами, две одновременные неверные попытки из двух окон
-//     могут учесться как одна, K окон дают около 10·K попыток до блокировки.
-//     Кто может запускать программу, тот имеет и .avlt; ключ защищает
-//     медленное получение ключа из пина (argon2id, core/vault.go), а счётчик —
-//     лишь ограничение попыток через интерфейс одного окна.
+//
+// НЕСКОЛЬКО ОКОН (ревью SEC, fix/review-nits; прежде — граница AU-LOGIC М-2):
+// чтение-изменение-запись throttle.json идёт под межпроцессным замком
+// каталога (.throttle.lock, flock/LockFileEx — tryLockFile), а неудача
+// учитывается одной операцией RecordThrottleFailure. Одновременные неверные
+// попытки из двух окон засчитываются обе. Замок не взят за throttleLockWait —
+// ошибка (ввод закрыт), а не запись без замка.
 package core
 
 import (
@@ -72,6 +72,44 @@ func RegisterSuccess() ThrottleState {
 
 func throttleFilePath(dir string) string {
 	return filepath.Join(dir, "throttle.json")
+}
+
+// throttleLockName — файл замка счётчика в каталоге хранилищ.
+const throttleLockName = ".throttle.lock"
+
+// throttleLockWait — сколько ждать замок, прежде чем отказать.
+var throttleLockWait = 10 * time.Second
+
+// lockThrottle — fn под замком каталога dir. Переменная — шов теста
+// (подмена «без замка» обязана ронять TestThrottleConcurrentFailuresAllCounted).
+var lockThrottle = withThrottleLock
+
+// withThrottleLock — fn под исключительным межпроцессным замком
+// dir/.throttle.lock. Замок не открыть или не взять — *ThrottleError: что
+// записано в счётчике, неизвестно, и fn без замка не выполняется.
+func withThrottleLock(dir, op string, fn func() error) error {
+	path := filepath.Join(dir, throttleLockName)
+	lf, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return newThrottleError(op, path, err, false)
+	}
+	defer lf.Close()
+	deadline := time.Now().Add(throttleLockWait)
+	for {
+		busy, err := tryLockFile(lf)
+		if err != nil {
+			return newThrottleError(op, path, err, false)
+		}
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			return newThrottleError(op, path, fmt.Errorf("счётчик занят другим окном дольше %v", throttleLockWait), false)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer unlockFile(lf)
+	return fn()
 }
 
 // ThrottleError — счётчик попыток не удалось прочитать или записать. Путь и
@@ -171,11 +209,38 @@ func readThrottleMap(path string) (map[string]ThrottleState, error) {
 // не читается или повреждён — *ThrottleError: сколько попыток израсходовано,
 // неизвестно, и ноль здесь был бы выдумкой, снимающей ограничение.
 func LoadThrottle(dir, vaultName string) (ThrottleState, error) {
-	m, err := readThrottleMap(throttleFilePath(dir))
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return ThrottleState{}, nil // нет каталога — нет и файла: попыток не было
+	}
+	var st ThrottleState
+	err := lockThrottle(dir, "прочитать", func() error {
+		m, err := readThrottleMap(throttleFilePath(dir))
+		if err != nil {
+			return err
+		}
+		st = m[vaultName]
+		return nil
+	})
 	if err != nil {
 		return ThrottleState{}, err
 	}
-	return m[vaultName], nil
+	return st, nil
+}
+
+// RecordThrottleFailure — учесть неудачу ввода пина ОДНОЙ операцией под
+// замком: прочитать, RegisterFailure, записать. Возвращает записанное
+// состояние. Ошибка — неудача не учтена (или неизвестно, учтена ли): ввод
+// закрыть, «осталось попыток» не обещать.
+func RecordThrottleFailure(dir, vaultName string, now time.Time) (ThrottleState, error) {
+	var st ThrottleState
+	err := updateThrottle(dir, vaultName, func(cur ThrottleState) ThrottleState {
+		st = RegisterFailure(cur, now)
+		return st
+	})
+	if err != nil {
+		return ThrottleState{}, err
+	}
+	return st, nil
 }
 
 // SaveThrottle сохраняет состояние для vaultName, не трогая записи других
@@ -183,17 +248,27 @@ func LoadThrottle(dir, vaultName string) (ThrottleState, error) {
 // 0600. Повреждённый существующий файл НЕ перезаписывается молча: в нём могли
 // быть счётчики других хранилищ, и молчаливая замена сбросила бы их.
 func SaveThrottle(dir, vaultName string, st ThrottleState) error {
-	path := throttleFilePath(dir)
-	// wrap — с путём, на котором не удалось (Н-1): каталог, .tmp или сам файл.
-	wrap := func(at string, err error) error { return newThrottleError("сохранить", at, err, false) }
+	return updateThrottle(dir, vaultName, func(ThrottleState) ThrottleState { return st })
+}
+
+// updateThrottle — запись vaultName = f(прежнее) под замком каталога.
+func updateThrottle(dir, vaultName string, f func(ThrottleState) ThrottleState) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return wrap(dir, err)
+		return newThrottleError("сохранить", dir, err, false)
 	}
+	return lockThrottle(dir, "сохранить", func() error { return saveThrottleLocked(dir, vaultName, f) })
+}
+
+// saveThrottleLocked — прочитать-изменить-записать; вызывать под замком.
+func saveThrottleLocked(dir, vaultName string, f func(ThrottleState) ThrottleState) error {
+	path := throttleFilePath(dir)
+	// wrap — с путём, на котором не удалось (Н-1): .tmp или сам файл.
+	wrap := func(at string, err error) error { return newThrottleError("сохранить", at, err, false) }
 	m, err := readThrottleMap(path)
 	if err != nil {
 		return err
 	}
-	m[vaultName] = st
+	m[vaultName] = f(m[vaultName])
 
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
