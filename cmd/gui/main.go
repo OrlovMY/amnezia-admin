@@ -904,6 +904,9 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				if closed {
 					// «Отмена» во время ожидания счётчика или расшифровки:
 					// человек отказался — входа нет (решение ядра, аудит р2).
+					// Пин больше не нужен — обнулить, как в прочих путях
+					// (SEC-01, В2 п.5; аудит р3).
+					*vc.pin = ""
 					return
 				}
 				stopTicker()
