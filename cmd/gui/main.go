@@ -741,6 +741,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	const throttleAttempts = 10
 
 	var d dialog.Dialog
+	closed := false // диалог закрыт («Отмена»); читается и пишется в потоке интерфейса
 	var openBtn *widget.Button
 	var retryBtn *widget.Button
 	var ticker *time.Ticker
@@ -795,7 +796,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		goSafe(func() {
 			for range tk.C {
 				done := false
-				fyne.Do(func() {
+				uiDo(func() {
 					if countdownGen != myGen {
 						done = true // диалог закрыт или отсчёт перезапущен — эта goroutine больше не актуальна
 						return
@@ -838,14 +839,14 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		statusLabel.SetText(pinThrottleWaitText)
 		tc := clock
 		goSafe(func() {
-			cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+			cur, lerr := loadThrottle(vaultDir, vaultName)
 			if lerr == nil {
 				if blocked, remaining := core.CheckThrottle(cur, tc.Now()); blocked {
-					fyne.Do(func() { startCountdown(tc.Now().Add(remaining)) })
+					uiDo(func() { startCountdown(tc.Now().Add(remaining)) })
 					return
 				}
 			}
-			fyne.Do(func() {
+			uiDo(func() {
 				if lerr != nil {
 					closeInput(lerr)
 					return
@@ -863,7 +864,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				// Прочитать-изменить-записать — одной операцией под замком:
 				// неудачи из двух окон засчитываются обе (ревью SEC).
 				st, cerr := core.RecordThrottleFailure(vaultDir, vaultName, now)
-				fyne.Do(func() {
+				uiDo(func() {
 					pinEntry.SetText("")
 					if cerr != nil {
 						closeInput(cerr)
@@ -899,7 +900,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			// submit()); обнуляется в attemptConnect/confirmForgetHostKey сразу
 			// после того, как он больше не нужен (SEC-01, С3, п.2).
 			vc := &vaultCtx{path: path, pin: &pin, info: vinfo, payload: payload}
-			fyne.Do(func() {
+			uiDo(func() {
+				if closed {
+					// «Отмена» во время ожидания счётчика или расшифровки:
+					// человек отказался — входа нет (решение ядра, аудит р2).
+					return
+				}
 				stopTicker()
 				d.Hide()
 				u.attemptConnect(payload.Key, vc, connectBtn, info)
@@ -933,10 +939,10 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			var lerr error
 			if err == nil {
 				// счётчик — здесь, вне потока интерфейса (аудит F2)
-				fyne.Do(func() { statusLabel.SetText(pinThrottleWaitText) })
-				cur, lerr = core.LoadThrottle(vaultDir, vaultName)
+				uiDo(func() { statusLabel.SetText(pinThrottleWaitText) })
+				cur, lerr = loadThrottle(vaultDir, vaultName)
 			}
-			fyne.Do(func() {
+			uiDo(func() {
 				if err != nil {
 					clock = nil
 					statusLabel.SetText("Подключение к интернету не обнаружено.")
@@ -978,7 +984,12 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 		retryBtn,
 	)
 	d = dialog.NewCustom("Введите пин-код", "Отмена", content, u.win)
-	d.SetOnClosed(stopTicker) // не течь тикером, если пользователь закрыл диалог во время отсчёта
+	// не течь тикером, если пользователь закрыл диалог во время отсчёта;
+	// closed — фоновая расшифровка после «Отмена» не входит
+	d.SetOnClosed(func() {
+		closed = true
+		stopTicker()
+	})
 	d.Resize(fyne.NewSize(380, 280))
 	d.Show()
 	// Человек ткнул в сохранённый сервер, чтобы ВВЕСТИ ПИН, — курсор стоит
@@ -987,6 +998,15 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	acquireOnlineTime()
 }
+
+// uiDo — fyne.Do для диалога пина. Переменная — шов теста: в тестовом
+// драйвере fyne.Do выполняется сразу в вызывающей горутине, и параллельные
+// окна теста иначе трогали бы виджеты одновременно (аудит р2 H1).
+var uiDo = fyne.Do
+
+// loadThrottle — чтение счётчика в диалоге пина; шов теста «чтение не в
+// потоке интерфейса» (аудит р2 M1).
+var loadThrottle = core.LoadThrottle
 
 // pinThrottleWaitText — состояние диалога пина, пока читается счётчик
 // попыток: замок может держать другое окно программы (аудит F2).
