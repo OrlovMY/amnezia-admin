@@ -831,18 +831,30 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			return
 		}
 		pin := pinEntry.Text
-		cur, lerr := core.LoadThrottle(vaultDir, vaultName)
-		if lerr != nil {
-			closeInput(lerr)
-			return
-		}
-		if blocked, remaining := core.CheckThrottle(cur, clock.Now()); blocked {
-			startCountdown(clock.Now().Add(remaining))
-			return
-		}
 		openBtn.Disable()
-		statusLabel.SetText("Расшифровываю...")
+		// Счётчик читается ВНЕ потока интерфейса (аудит F2): замок
+		// throttle.json может держать другое окно программы, ждём до
+		// throttleLockWait, и окно в это время не должно висеть.
+		statusLabel.SetText(pinThrottleWaitText)
+		tc := clock
 		goSafe(func() {
+			cur, lerr := core.LoadThrottle(vaultDir, vaultName)
+			if lerr == nil {
+				if blocked, remaining := core.CheckThrottle(cur, tc.Now()); blocked {
+					fyne.Do(func() { startCountdown(tc.Now().Add(remaining)) })
+					return
+				}
+			}
+			fyne.Do(func() {
+				if lerr != nil {
+					closeInput(lerr)
+					return
+				}
+				statusLabel.SetText("Расшифровываю...")
+			})
+			if lerr != nil {
+				return
+			}
 			payload, vinfo, err := vaultDecrypt(path, pin)
 			if err != nil {
 				now := clock.Now()
@@ -917,6 +929,13 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
 			onlineNow, err := core.FetchNetworkTime(ctx)
+			var cur core.ThrottleState
+			var lerr error
+			if err == nil {
+				// счётчик — здесь, вне потока интерфейса (аудит F2)
+				fyne.Do(func() { statusLabel.SetText(pinThrottleWaitText) })
+				cur, lerr = core.LoadThrottle(vaultDir, vaultName)
+			}
 			fyne.Do(func() {
 				if err != nil {
 					clock = nil
@@ -926,7 +945,6 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 				}
 				tc := core.NewTrustedClock(onlineNow)
 				clock = &tc
-				cur, lerr := core.LoadThrottle(vaultDir, vaultName)
 				if lerr != nil {
 					closeInput(lerr)
 					return
@@ -969,6 +987,10 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 
 	acquireOnlineTime()
 }
+
+// pinThrottleWaitText — состояние диалога пина, пока читается счётчик
+// попыток: замок может держать другое окно программы (аудит F2).
+const pinThrottleWaitText = "Проверяю счётчик попыток… Если он занят другим окном программы — жду его (до 10 с)."
 
 // vaultDecrypt — попытка расшифровки хранилища пином: чтение файла и
 // OpenVaultInfo. Переменная — шов для теста (раунд 5 долгов, AU-LOGIC М-4):

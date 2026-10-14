@@ -71,6 +71,9 @@ func TestThrottleLockBusyFailsClosed(t *testing.T) {
 	if !asThrottleError(err, &te) {
 		t.Fatalf("замок занят, а ошибка %v — ждали *ThrottleError", err)
 	}
+	if te.Fault != FaultBusy {
+		t.Errorf("замок занят, а разбор %d — ждали FaultBusy (совет про другое окно)", te.Fault)
+	}
 	if _, serr := os.Stat(throttleFilePath(dir)); !os.IsNotExist(serr) {
 		t.Fatalf("при занятом замке throttle.json записан (%v)", serr)
 	}
@@ -82,4 +85,35 @@ func asThrottleError(err error, te **ThrottleError) bool {
 		*te = e
 	}
 	return ok
+}
+
+// TestThrottleNoLockFileReadOpenWriteClosed — каталог, где файл замка не
+// создать (на его месте папка — модель «только для чтения», одинаковая на
+// трёх ОС). ЧТЕНИЕ счётчика проходит без замка и даёт записанное значение
+// (раньше чтение тоже проходило; это не потеря учёта). ЗАПИСЬ неудачи без
+// замка не делается: *ThrottleError с путём замка, счётчик не изменён.
+func TestThrottleNoLockFileReadOpenWriteClosed(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveThrottle(dir, "a.avlt", ThrottleState{Fails: 3}); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(dir, throttleLockName)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadThrottle(dir, "a.avlt")
+	if err != nil || st.Fails != 3 {
+		t.Fatalf("чтение без файла замка: %+v, %v — ждали 3 попытки без ошибки", st, err)
+	}
+	_, err = RecordThrottleFailure(dir, "a.avlt", time.Now())
+	var te *ThrottleError
+	if !asThrottleError(err, &te) || te.Path != lock || te.Op != throttleOpWrite {
+		t.Fatalf("запись без замка: %v — ждали *ThrottleError «сохранить» по %s", err, lock)
+	}
+	if st, _ := LoadThrottle(dir, "a.avlt"); st.Fails != 3 {
+		t.Fatalf("счётчик изменён без замка: %+v", st)
+	}
 }

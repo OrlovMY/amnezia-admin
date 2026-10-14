@@ -91,6 +91,13 @@ func withThrottleLock(dir, op string, fn func() error) error {
 	path := filepath.Join(dir, throttleLockName)
 	lf, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
+		if op == throttleOpRead {
+			// Файл замка не создать (каталог только для чтения и т. п.):
+			// ЧТЕНИЕ идёт без замка — это не потеря учёта, записать
+			// неудачу здесь нельзя и с замком; запись закроет ввод сама.
+			// Читатель видит прежний или новый файл целиком (tmp+rename).
+			return fn()
+		}
 		return newThrottleError(op, path, err, false)
 	}
 	defer lf.Close()
@@ -104,7 +111,9 @@ func withThrottleLock(dir, op string, fn func() error) error {
 			break
 		}
 		if time.Now().After(deadline) {
-			return newThrottleError(op, path, fmt.Errorf("счётчик занят другим окном дольше %v", throttleLockWait), false)
+			e := newThrottleError(op, path, fmt.Errorf("счётчик занят другим окном программы дольше %v", throttleLockWait), false)
+			e.Fault = FaultBusy
+			return e
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -140,6 +149,15 @@ const (
 	FaultIsDir
 	// FaultDenied — нет прав.
 	FaultDenied
+	// FaultBusy — замок счётчика держит другое окно программы дольше
+	// throttleLockWait.
+	FaultBusy
+)
+
+// Операции ThrottleError.Op.
+const (
+	throttleOpRead  = "прочитать"
+	throttleOpWrite = "сохранить"
 )
 
 // newThrottleError — ошибка с путём неудавшейся операции и её разбором.
@@ -213,7 +231,7 @@ func LoadThrottle(dir, vaultName string) (ThrottleState, error) {
 		return ThrottleState{}, nil // нет каталога — нет и файла: попыток не было
 	}
 	var st ThrottleState
-	err := lockThrottle(dir, "прочитать", func() error {
+	err := lockThrottle(dir, throttleOpRead, func() error {
 		m, err := readThrottleMap(throttleFilePath(dir))
 		if err != nil {
 			return err
@@ -256,7 +274,7 @@ func updateThrottle(dir, vaultName string, f func(ThrottleState) ThrottleState) 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return newThrottleError("сохранить", dir, err, false)
 	}
-	return lockThrottle(dir, "сохранить", func() error { return saveThrottleLocked(dir, vaultName, f) })
+	return lockThrottle(dir, throttleOpWrite, func() error { return saveThrottleLocked(dir, vaultName, f) })
 }
 
 // saveThrottleLocked — прочитать-изменить-записать; вызывать под замком.
