@@ -1,6 +1,7 @@
 package guiview
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,6 +32,10 @@ import (
 //   - запуск горутины ВНУТРИ fyne.Do/uiDo — fyne.Do(func(){ go func(){
 //     label.SetText(…) }() }) — не ловится: всё внутри аргумента fyne.Do
 //     считается безопасным (как и до обёртки uiDo);
+//   - обёртка uiDo признаётся по закрытому списку позиций имени в
+//     не-тестовых файлах cmd/gui; тестовые файлы (шов serialUI) сторож не
+//     читает. Подмена значения через рефлексию, unsafe или go:linkname — вне
+//     синтаксического разбора и не ловится;
 //   - он проверяет cmd/gui/main.go — единственный файл GUI. Появится второй
 //     файл с goSafe, сторож про него не узнает (тогда правится путь здесь).
 
@@ -56,60 +61,102 @@ var widgetMethods = map[string]bool{
 // doWrappers — ЗАКРЫТЫЙ список обёрток, равных fyne.Do (одна запись).
 // uiDo — шов теста диалога пина (аудит р2 H1 по PR #57). Обёртка признаётся,
 // только если сторож САМ увидел её боевое определение — ровно
-// `var uiDo = fyne.Do` в не-тестовом файле cmd/gui — и ни одного
-// присваивания ей в боевом коде. Новая обёртка с другим именем сюда не
+// `var uiDo = fyne.Do` в не-тестовом файле cmd/gui — и имя нигде больше
+// не стоит, кроме вызова uiDo(…) (закрытый список позиций,
+// verifiedWrappers). Новая обёртка с другим именем сюда не
 // входит и считается нарушением, пока не внесена видимой строкой диффа.
 var doWrappers = []string{"uiDo"}
 
 const guiDir = "../../cmd/gui"
 
-// verifiedWrappers — какие обёртки из doWrappers проверены по боевому
-// определению в files; problems — почему обёртка не признана.
+// verifiedWrappers — какие обёртки из doWrappers признаны в files;
+// problems — почему обёртка не признана.
+//
+// ЗАКРЫТЫЙ СПИСОК ПОЗИЦИЙ (аудит р6 по PR #57: перечислять обходы —
+// присваивание, &, скобки, range, затенение… — бесконечно, поэтому
+// перечисляется разрешённое). Идентификатор с именем обёртки — любой
+// *ast.Ident, независимо от области видимости — допустим ровно в двух
+// позициях:
+//
+//	(1) имя в ЕДИНСТВЕННОМ объявлении уровня пакета `var uiDo = fyne.Do`:
+//	    одно имя, без типа, одно значение — ровно селектор fyne.Do, и файл
+//	    импортирует fyne.io/fyne/v2 под именем fyne;
+//	(2) непосредственно Fun у вызова: uiDo(…), не (uiDo)(…).
+//
+// Любое иное появление — обёртка не признана.
 func verifiedWrappers(files []*ast.File) (ok map[string]bool, problems []string) {
 	ok = map[string]bool{}
 	for _, name := range doWrappers {
-		decls, good, assigns := 0, 0, 0
+		defs, other := 0, 0
 		for _, f := range files {
+			var stack []ast.Node
 			ast.Inspect(f, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.ValueSpec:
-					for i, id := range x.Names {
-						if id.Name != name {
-							continue
-						}
-						decls++
-						if i < len(x.Values) && isFyneDo(x.Values[i]) && x.Type == nil {
-							good++
-						}
-					}
-				case *ast.AssignStmt:
-					for _, l := range x.Lhs {
-						if id, isID := l.(*ast.Ident); isID && id.Name == name {
-							assigns++
-						}
-					}
-				case *ast.UnaryExpr:
-					// &uiDo — запись через указатель (*p = …) сторож не
-					// проследит, поэтому взятие адреса — как присваивание
-					if id, isID := x.X.(*ast.Ident); isID && x.Op == token.AND && id.Name == name {
-						assigns++
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				if id, isID := n.(*ast.Ident); isID && id.Name == name {
+					switch {
+					case isWrapperDef(f, stack, id):
+						defs++
+					case isCallFun(stack, id):
+					default:
+						other++
 					}
 				}
+				stack = append(stack, n)
 				return true
 			})
 		}
 		switch {
-		case decls == 0:
-			// обёртка не объявлена — и не признаётся
-		case decls != 1 || good != 1:
-			problems = append(problems, name+": боевое определение — не ровно `var "+name+" = fyne.Do`")
-		case assigns != 0:
-			problems = append(problems, name+": в боевом коде ей присваивают другое значение или берут её адрес")
+		case defs == 0 && other == 0:
+			// обёртки нет — и не признаётся
+		case defs != 1:
+			problems = append(problems, fmt.Sprintf("%s: объявлений `var %s = fyne.Do` уровня пакета — %d, а не одно", name, name, defs))
+		case other != 0:
+			problems = append(problems, fmt.Sprintf("%s: имя стоит вне разрешённых позиций (%d раз): только объявление и вызов %s(…)", name, other, name))
 		default:
 			ok[name] = true
 		}
 	}
 	return ok, problems
+}
+
+// isWrapperDef — позиция (1): stack — предки id (последний — родитель).
+func isWrapperDef(f *ast.File, stack []ast.Node, id *ast.Ident) bool {
+	if len(stack) < 3 {
+		return false
+	}
+	spec, ok := stack[len(stack)-1].(*ast.ValueSpec)
+	if !ok || len(spec.Names) != 1 || spec.Names[0] != id || spec.Type != nil || len(spec.Values) != 1 {
+		return false
+	}
+	gd, ok := stack[len(stack)-2].(*ast.GenDecl)
+	if !ok || gd.Tok != token.VAR {
+		return false
+	}
+	if _, top := stack[len(stack)-3].(*ast.File); !top {
+		return false
+	}
+	return isFyneDo(spec.Values[0]) && importsFyne(f)
+}
+
+// isCallFun — позиция (2): id — непосредственно Fun у вызова.
+func isCallFun(stack []ast.Node, id *ast.Ident) bool {
+	if len(stack) == 0 {
+		return false
+	}
+	call, ok := stack[len(stack)-1].(*ast.CallExpr)
+	return ok && call.Fun == ast.Expr(id)
+}
+
+func importsFyne(f *ast.File) bool {
+	for _, im := range f.Imports {
+		if im.Path.Value == `"fyne.io/fyne/v2"` && (im.Name == nil || im.Name.Name == "fyne") {
+			return true
+		}
+	}
+	return false
 }
 
 func isFyneDo(e ast.Expr) bool {
@@ -250,19 +297,27 @@ func TestGoSafeGuardSeesViolation(t *testing.T) {
 	for _, c := range []struct {
 		name      string
 		def       string
+		imp       bool // импорт fyne.io/fyne/v2
 		bad, good int
 	}{
-		// uiDo = fyne.Do — вызов через неё законен; uiCall — не в списке
-		{"обёртка проверена", "var uiDo = fyne.Do\nvar uiCall = fyne.Do", 2, 2},
-		// подмена (а): боевое uiDo — не fyne.Do; вызов через неё — нарушение
-		{"обёртка подменена", "var uiDo = func(f func()) { f() }\nvar uiCall = fyne.Do", 3, 1},
-		// определение верное, но в боевом коде её переприсваивают (аудит р5)
-		{"обёртка переприсвоена", "var uiDo = fyne.Do\nvar uiCall = fyne.Do\nfunc init() { uiDo = func(f func()) { f() } }", 3, 1},
-		// взят адрес — запись через указатель не проследить (аудит р5)
-		{"адрес обёртки взят", "var uiDo = fyne.Do\nvar uiCall = fyne.Do\nfunc init() { p := &uiDo; *p = func(f func()) { f() } }", 3, 1},
+		{"законная обёртка", "var uiDo = fyne.Do\n", true, 2, 2},
+		{"поддельное определение", "var uiDo = func(f func()) { f() }\n", true, 3, 1},
+		{"второе определение", "var uiDo = fyne.Do\nvar uiDo = fyne.Do\n", true, 3, 1},
+		{"типизированное определение", "var uiDo func(func()) = fyne.Do\n", true, 3, 1},
+		{"без импорта fyne", "var uiDo = fyne.Do\n", false, 3, 1},
+		{"присваивание в init", "var uiDo = fyne.Do\nfunc init() { uiDo = func(f func()) { f() } }\n", true, 3, 1},
+		{"присваивание в скобках", "var uiDo = fyne.Do\nfunc init() { (uiDo) = func(f func()) { f() } }\n", true, 3, 1},
+		{"взят адрес", "var uiDo = fyne.Do\nfunc init() { p := &uiDo; *p = func(f func()) { f() } }\n", true, 3, 1},
+		{"взят адрес в скобках", "var uiDo = fyne.Do\nfunc init() { p := &(uiDo); *p = func(f func()) { f() } }\n", true, 3, 1},
+		{"for range присваивание", "var uiDo = fyne.Do\nfunc init() { var xs []func(func()); for _, uiDo = range xs {} }\n", true, 3, 1},
+		{"параметр", "var uiDo = fyne.Do\nfunc g(uiDo func(func())) {}\n", true, 3, 1},
+		{"именованный результат", "var uiDo = fyne.Do\nfunc g() (uiDo func(func())) { return }\n", true, 3, 1},
+		{"for :=", "var uiDo = fyne.Do\nfunc init() { for _, uiDo := range []int{} { _ = uiDo } }\n", true, 3, 1},
+		{"локальный var", "var uiDo = fyne.Do\nfunc init() { var uiDo = 1; _ = uiDo }\n", true, 3, 1},
+		{"вызов в скобках", "var uiDo = fyne.Do\nfunc init() { (uiDo)(func() {}) }\n", true, 3, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			bad, good := goSafeCanary(t, c.def)
+			bad, good := goSafeCanary(t, c.def, c.imp)
 			if bad != c.bad || good != c.good {
 				t.Errorf("сторож насчитал нарушений %d, законных %d; ждали %d и %d — он не сработает и на настоящем",
 					bad, good, c.bad, c.good)
@@ -274,10 +329,13 @@ func TestGoSafeGuardSeesViolation(t *testing.T) {
 // goSafeCanary — сторож на подложенном файле: прямой SetText (нарушение),
 // SetText в fyne.Do (законно), в uiDo (законно, если обёртка проверена),
 // в незнакомой обёртке uiCall (нарушение всегда).
-func goSafeCanary(t *testing.T, def string) (bad, good int) {
+func goSafeCanary(t *testing.T, def string, imp bool) (bad, good int) {
 	t.Helper()
-	src := `package main
-` + def + `
+	head := "package main\n"
+	if imp {
+		head += "import \"fyne.io/fyne/v2\"\n"
+	}
+	src := head + def + `var uiCall = fyne.Do
 func f() {
 	goSafe(func() {
 		label.SetText("прямо из фоновой goroutine")
