@@ -402,8 +402,8 @@ type targetView struct {
 	force *escButton
 	// onCancel — действие на «Отмена»/Esc этого окна
 	onCancel func(func())
-	list  *widget.Accordion // свёрнутый длинный список; nil — список короткий
-	text  string
+	list     *widget.Accordion // свёрнутый длинный список; nil — список короткий
+	text     string
 }
 
 // targetSections — заголовок с числом (всегда виден) и список: короткий —

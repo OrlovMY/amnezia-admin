@@ -1143,7 +1143,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			// сейчас (Е1). Ошибка перезапечатывания не фатальна — соединение
 			// остаётся, просто отпечаток не будет запечатан на этот раз.
 			if resealErr := reseal(vc, sess.HostKeyFingerprint); resealErr != nil {
-				fyne.Do(func() {
+				uiDo(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить отпечаток ключа в хранилище: " + resealErr.Error())
 					}
@@ -1157,7 +1157,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			notice, labelErr := refreshVaultLabel(vc, lblBefore, cfg, creds)
 			labelNotice = notice
 			if labelErr != nil {
-				fyne.Do(func() {
+				uiDo(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить подпись сервера для списка сохранённых: " + labelErr.Error())
 					}
@@ -1168,7 +1168,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			*vc.pin = "" // пин больше не нужен (SEC-01, В2 п.5)
 		}
 
-		fyne.Do(func() {
+		uiDo(func() {
 			u.closeMigDst() // цель прежнего источника не должна пережить смену источника
 			u.sess = sess
 			u.vaultPath, u.clientHostSet = "", core.ClientHostSetting{}
@@ -2744,7 +2744,7 @@ func (u *ui) refresh() {
 			}
 		}
 
-		fyne.Do(func() {
+		uiDo(func() {
 			// setBusy(false) — определяет ТЕКУЩЕЕ u.canManage (обновлённое
 			// ниже, если ответ не устарел) и лишь потом снимает занятость —
 			// поэтому вызван через defer, а не первой строкой: иначе кнопки
