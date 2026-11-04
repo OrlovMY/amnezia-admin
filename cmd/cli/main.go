@@ -17,6 +17,7 @@
 //	amnezia-admin backup-info [-password-file файл] файл.aabk
 //	amnezia-admin diagnose -key vpn://... [-fix [-yes]]
 //	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
+//	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -1008,6 +1009,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey/show-config XRay/backup: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер); keep-ip — явно оставить IP")
 	clientHostOK := fs.Bool("client-host-confirm", false, "add/rekey: выдать конфиг с -client-host, даже если имя указывает на другие адреса или проверить его не удалось")
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
+	toKey := fs.String("to-key", os.Getenv("AMNEZIA_TO_KEY"), "migrate: ключ vpn://... НОВОГО сервера (цели); -key — источник")
+	toHostkey := fs.String("to-hostkey", "", "migrate: ожидаемый отпечаток ключа хоста цели SHA256:… (обязателен без терминала для нового сервера)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -1019,6 +1022,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		// сознательно отказался", не должен получать один и тот же код для
 		// обоих случаев).
 		return 1
+	}
+
+	// migrate — два сервера, свой разбор ключей и подключение (migrate.go).
+	if cmd == "migrate" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return runMigrateCmd(ctx, stdin, stdout, stderr, stdinIsTTY(), *key, *toKey, *hostkey, *toHostkey, knownHostsPath, *clientHost, *clientHostOK,
+			migrateFlags{apply: *apply, addrOK: *addrChanges, skipXRay: *skipXRay, replaceUsers: *replaceUsers, yes: *yes, pwFile: *pwFile, noPw: *noPw}, time.Now())
 	}
 
 	if *key == "" {
@@ -1284,7 +1295,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | diagnose)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | migrate | diagnose)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))
