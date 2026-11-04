@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,10 +43,16 @@ func migrateKey(host string) string {
 // newMigFixture — srcFp/dstFp: отпечатки ключей хоста источника и цели.
 func newMigFixture(t *testing.T, dstHost, srcFp, dstFp string) *migFixture {
 	t.Helper()
-	serialUI(t)
 	src, dst := fakesrv.New(), fakesrv.New()
 	src.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("OLD-PSK\n"))
 	dst.SetFile("/opt/amnezia/awg/wireguard_psk.key", []byte("NEW-PSK\n"))
+	return newMigFixtureOn(t, src, dst, dstHost, srcFp, dstFp)
+}
+
+// newMigFixtureOn — то же на заданных серверах (например, с XRay).
+func newMigFixtureOn(t *testing.T, src, dst *fakesrv.Server, dstHost, srcFp, dstFp string) *migFixture {
+	t.Helper()
+	serialUI(t)
 	u := backupUI(t, src, migTestSrcHost)
 	u.sess = keepIPSession(src, migTestSrcHost)
 	u.sess.HostKeyFingerprint = srcFp
@@ -424,4 +432,51 @@ func TestGUIMigrateClosesTargetSession(t *testing.T) {
 			t.Errorf("после переноса закрыто %d", len(closed))
 		}
 	})
+}
+
+// TestGUIMigrateClosesTargetOnSourceChange — Р2-2: подключение к ДРУГОМУ
+// источнику (настоящий attemptConnect на ListenSSH) закрывает сессию цели
+// прежнего переноса. Подмена: убрать closeMigDst из attemptConnect — роняет.
+func TestGUIMigrateClosesTargetOnSourceChange(t *testing.T) {
+	var closed []*core.Session
+	old := migClose
+	migClose = func(s *core.Session) { closed = append(closed, s) }
+	t.Cleanup(func() { migClose = old })
+	f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+	f.start(t)
+	dst := f.u.migDst
+	if dst == nil {
+		t.Fatal("сессии цели нет")
+	}
+	hk, err := fakesrv.NewHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pw = "fakepw-source-change"
+	srv, err := fakesrv.ListenSSH("127.0.0.1:0", "root", pw, hk, fakesrv.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	host, port, _ := net.SplitHostPort(srv.Addr())
+	j, _ := json.Marshal(map[string]any{"hostName": host, "userName": "root", "password": pw, "port": port})
+	key := "vpn://" + base64.RawURLEncoding.EncodeToString(j)
+	// known_hosts заранее: без вопроса о доверии ключу хоста
+	kh := filepath.Join(core.DefaultVaultDir(), "known_hosts")
+	creds, _ := core.CredsFromConfig(map[string]any{"hostName": host, "userName": "root", "password": pw, "port": port})
+	warm, err := core.ConnectWithHostKey(creds, core.HostKeyPolicy{KnownHostsPath: kh, Prompt: func(string, string) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warm.Close()
+	f.u.showConnectScreen("")
+	btn, info := widget.NewButton("", nil), widget.NewLabel("")
+	f.u.attemptConnect(key, nil, btn, info)
+	waitGUIGoroutines(t)
+	if f.u.sess == nil || f.u.sess.Creds.Host != host {
+		t.Fatalf("источник не сменился: %v (%s)", f.u.sess, info.Text)
+	}
+	if len(closed) != 1 || closed[0] != dst || f.u.migDst != nil {
+		t.Errorf("при смене источника закрыто %d, migDst=%v", len(closed), f.u.migDst)
+	}
 }

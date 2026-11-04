@@ -32,14 +32,24 @@ import (
 
 // Тексты (сторожа тестов берут их отсюда).
 const (
-	migrateMenuText    = "Перенести на сервер…"
-	migrateAskTitle    = "Перенос на новый сервер"
-	migrateAskNext     = "Продолжить"
-	migrateApplyText   = "Перенести на новый сервер"
-	migrateWinTitle    = "Перенос на новый сервер"
-	migrateNoDiskText  = "Копия старого сервера на диск не записывалась: её данные только в памяти программы."
-	migrateSrcSafeText = "Старый сервер продолжает работать: он только читался и не изменён."
-	migrateAddrHint    = "Адрес выдачи у источника неизвестен (в ключе IP, адрес для клиентов не выбран). Чтобы подтверждать его не пришлось, подключитесь к старому серверу с заданным адресом для клиентов."
+	migrateMenuText        = "Перенести на сервер…"
+	migrateAskTitle        = "Перенос на новый сервер"
+	migrateAskNext         = "Продолжить"
+	migrateApplyText       = "Перенести на новый сервер"
+	migrateWinTitle        = "Перенос на новый сервер"
+	migrateNoDiskText      = "Копия старого сервера на диск не записывалась: её данные только в памяти программы."
+	migrateSrcSafeText     = "Старый сервер продолжает работать: он только читался и не изменён."
+	migrateAddrConsequence = "Если адрес выдачи другой или не проверен, старые конфиги клиентов к новому серверу НЕ придут, пока адрес не перенесён на него у хостера."
+	migrateAutoCopyAsk     = "Автокопия НОВОГО сервера (его состояние до замены) будет сохранена на диск. Защитить её паролем?"
+	migrateAutoCopyNote    = "Перед заменой программа сохранит на диск АВТОКОПИЮ НОВОГО сервера (его нынешнее состояние; источник на диск не пишется)."
+	migrateReasonStop      = "«Перенести» недоступна: проверка нового сервера нашла расхождения или план не построен (см. выше)."
+	migrateReasonAddr      = "«Перенести» недоступна: подтвердите адрес (галка выше)."
+	migrateReasonXRay      = "«Перенести» недоступна: выберите, что делать с XRay."
+	migrateReasonMode      = "«Перенести» недоступна: выберите, защищать ли автокопию паролем."
+	migrateReasonPwShort   = "«Перенести» недоступна: пароль автокопии — не короче %d символов."
+	migrateReasonPwDiff    = "«Перенести» недоступна: пароли не совпадают."
+	migrateReasonReady     = "Всё подтверждено — можно переносить."
+	migrateAddrHint        = "Адрес выдачи у источника неизвестен (в ключе IP, адрес для клиентов не выбран). Чтобы подтверждать его не пришлось, подключитесь к старому серверу с заданным адресом для клиентов."
 )
 
 // migState — итог переноса. Нулевое значение — НЕИЗВЕСТНО: если ничего не
@@ -264,6 +274,10 @@ type migrateView struct {
 	pw, pw2   *widget.Entry
 	text      string
 	users     *targetView
+	// pinned — обязательные элементы в закреплённой панели (вне прокрутки);
+	// reason — почему «Перенести» погашена (или что всё подтверждено).
+	pinned []fyne.CanvasObject
+	reason *widget.Label
 }
 
 func (v *migrateView) layer() core.BackupLayer {
@@ -319,9 +333,14 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 		}
 	}
 	var update func()
+	// Обязательный выбор — в ЗАКРЕПЛЁННОЙ панели над кнопками (вне прокрутки):
+	// решение принимается по тому, что человек видит без прокрутки. В
+	// прокрутке остаётся только информационная часть.
+	var pinned []fyne.CanvasObject
 	if compat.NeedAddressConfirm {
+		pinned = append(pinned, wrapLabel(migrateAddrConsequence, true))
 		v.addrCheck = widget.NewCheck(restoreAddrCheck, func(bool) { update() })
-		sections = append(sections, v.addrCheck)
+		pinned = append(pinned, v.addrCheck)
 		if b.IssuedAddress.Kind == core.AddressKindUnknown {
 			sections = append(sections, wrapLabel(migrateAddrHint, false))
 		}
@@ -329,22 +348,27 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 	if xray {
 		sections = append(sections, restartSections()...)
 		v.xrayRadio = widget.NewRadioGroup([]string{restoreXRayCheck, restoreSkipXRay}, func(string) { update() })
-		sections = append(sections, wrapLabel(restoreXRayHint, true), v.xrayRadio)
+		pinned = append(pinned, wrapLabel(restoreXRayHint, true), v.xrayRadio)
 	}
 	// единственное, что пишется на диск, — автокопия ЦЕЛИ
-	hint := wrapLabel("", false)
-	warn := wrapLabel("", true)
+	warn := wrapLabel("", false)
+	v.reason = wrapLabel("", true)
 	v.pw, v.pw2 = widget.NewPasswordEntry(), widget.NewPasswordEntry()
 	v.pw.SetPlaceHolder(fmt.Sprintf("Пароль автокопии (не короче %d символов)", core.BackupPasswordMin))
 	v.pw2.SetPlaceHolder("Повторите пароль")
 	v.pw.OnChanged = func(string) { update() }
 	v.pw2.OnChanged = func(string) { update() }
 	v.mode = widget.NewRadioGroup([]string{backupWithPassword, backupNoPassword}, func(string) { update() })
-	sections = append(sections,
-		wrapLabel("Перед заменой программа сохранит на диск АВТОКОПИЮ НОВОГО сервера (его нынешнее состояние; источник на диск не пишется). Защитить её паролем?", true),
-		v.mode, v.pw, v.pw2, hint, warn)
+	v.mode.Horizontal = true
+	pwRow := container.NewGridWithColumns(2, v.pw, v.pw2)
+	pwRow.Hide()
+	// пояснение про автокопию и предупреждение выбранного режима — в
+	// прокручиваемой части: в закреплённой панели только сам выбор
+	sections = append(sections, wrapLabel(migrateAutoCopyNote, false), warn)
+	pinned = append(pinned, wrapLabel(migrateAutoCopyAsk, true), v.mode, pwRow, v.reason)
+	v.pinned = pinned
 	var cw confirmWin
-	cw = u.confirmWindowBtn(migrateWinTitle, sections, migrateApplyText, true, func() {
+	cw = u.confirmWindowPinned(migrateWinTitle, sections, pinned, migrateApplyText, true, func() {
 		if rp.NeedsTargetConfirm() {
 			v.users = u.targetConfirm(rp, func() { u.doMigrate(m, v, true) })
 			v.users.onCancel(u.closeMigDst)
@@ -355,35 +379,43 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 	v.d, v.apply = cw.d, cw.ok
 	cw.onCancel(u.closeMigDst) // отмена окна подтверждения — сессия цели закрыта
 	update = func() {
-		can := !compat.Stop && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
-		if xray {
-			can = can && v.xrayRadio.Selected != ""
-		}
-		hint.SetText("")
+		// reason — первая непройденная причина, по порядку важности
+		reason := ""
+		pwOK := true
 		warn.SetText("")
-		v.pw.Hide()
-		v.pw2.Hide()
+		pwRow.Hide()
 		switch v.mode.Selected {
 		case backupNoPassword:
 			warn.SetText(core.AutoCopyUnencryptedNote)
 		case backupWithPassword:
-			v.pw.Show()
-			v.pw2.Show()
+			pwRow.Show()
 			warn.SetText(core.BackupPasswordWarning)
 			switch {
 			case core.ValidateBackupPassword(core.NewSecret([]byte(v.pw.Text))) != nil:
-				hint.SetText(fmt.Sprintf("Пароль — не короче %d символов.", core.BackupPasswordMin))
-				can = false
+				pwOK = false
 			case v.pw.Text != v.pw2.Text:
-				hint.SetText("Пароли не совпадают.")
-				can = false
+				pwOK = false
 			}
-		default:
-			can = false // режим автокопии выбирается явно
 		}
-		if can {
+		switch {
+		case compat.Stop || rp == nil:
+			reason = migrateReasonStop
+		case v.addrCheck != nil && !v.addrCheck.Checked:
+			reason = migrateReasonAddr
+		case xray && v.xrayRadio.Selected == "":
+			reason = migrateReasonXRay
+		case v.mode.Selected == "":
+			reason = migrateReasonMode
+		case !pwOK && core.ValidateBackupPassword(core.NewSecret([]byte(v.pw.Text))) != nil:
+			reason = fmt.Sprintf(migrateReasonPwShort, core.BackupPasswordMin)
+		case !pwOK:
+			reason = migrateReasonPwDiff
+		}
+		if reason == "" {
+			v.reason.SetText(migrateReasonReady)
 			v.apply.Enable()
 		} else {
+			v.reason.SetText(reason)
 			v.apply.Disable()
 		}
 		cw.refit()

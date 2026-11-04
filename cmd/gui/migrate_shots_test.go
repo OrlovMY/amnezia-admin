@@ -46,6 +46,9 @@ func (f *migFixture) shot(t *testing.T, name string, keyLines []string) {
 			return
 		}
 		cm, ss := sc.Content.MinSize(), sc.Size()
+		if ss.Width <= 0 || ss.Height <= 0 {
+			return // скрытая строка (поля пароля не выбраны)
+		}
 		t.Logf("[%s] прокрутка: область %.0fx%.0f, содержимое min %.0fx%.0f (вертикальная нужна: %v)", name, ss.Width, ss.Height, cm.Width, cm.Height, cm.Height > ss.Height+0.5)
 		if cm.Width > ss.Width+0.5 {
 			t.Errorf("[%s] нужна ГОРИЗОНТАЛЬНАЯ прокрутка: содержимое %.0f шире области %.0f", name, cm.Width, ss.Width)
@@ -101,7 +104,21 @@ func TestGUIMigrateShots(t *testing.T) {
 	f.shot(t, "1-окно-подтверждения", keys)
 	f.u.migShown.mode.SetSelected(backupNoPassword)
 	f.u.migShown.addrCheck.SetChecked(true)
-	f.shot(t, "1b-окно-подтверждения-выбран-режим", keys)
+	f.shot(t, "1b-окно-подтверждения-выбран-режим", append(keys, "недоступна", "Всё подтверждено"))
+
+	// худший случай: адрес + XRay + пароль, окно 900x600
+	x := newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, "SHA256:a", "SHA256:b")
+	x.u.win.Resize(fyne.NewSize(900, 600))
+	x.start(t)
+	pin := []string{"недоступна", "Всё подтверждено", "[" + migrateApplyText + "]", "[Отмена]", "Источник (только чтение)"}
+	x.shot(t, "6-худший-случай-900x600-начало", pin)
+	x.u.migShown.addrCheck.SetChecked(true)
+	x.u.migShown.xrayRadio.SetSelected(restoreXRayCheck)
+	x.u.migShown.mode.SetSelected(backupWithPassword)
+	x.shot(t, "6b-худший-случай-900x600-пароль", pin)
+	x.u.migShown.pw.SetText("автокопия-пароль-12345")
+	x.u.migShown.pw2.SetText("автокопия-пароль-12345")
+	x.shot(t, "6c-худший-случай-900x600-готово", pin)
 
 	res := []string{"ПЕРЕНЕСЕНО", "НЕ ПЕРЕНЕСЕНО", "НЕИЗВЕСТНО", "Старый сервер продолжает работать", "Автокопия НОВОГО сервера", "[Закрыть]"}
 	for _, c := range []struct {

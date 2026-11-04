@@ -18,6 +18,7 @@ func TestMaskTextVpnKey(t *testing.T) {
 		{"в конце строки", "dial: " + k1, "dial: " + h},
 		{"два ключа", k1 + " и " + k2, h + " и " + h},
 		{"в кавычках", `key="` + k1 + `"`, `key="` + h + `"`},
+		{"регистр VPN://", "ошибка VPN://AAAAeJyrVkrLz1eyUspIz", "ошибка " + h},
 		{"уже скрыт", "ключ " + h, "ключ " + h},
 		{"пустой vpn://", "vpn:// пуст", "vpn:// пуст"},
 		{"нет ключа", "connection refused", "connection refused"},

@@ -612,7 +612,7 @@ var rePEMHeader = regexp.MustCompile(`(?i)-----BEGIN[^\n-]*-----`)
 var rePEMFooter = regexp.MustCompile(`(?i)-----END[^\n-]*-----`)
 
 // reVpnKey — ключ vpn:// (base64 любого алфавита) в свободном тексте.
-var reVpnKey = regexp.MustCompile(`vpn://[A-Za-z0-9+/=_-]+`)
+var reVpnKey = regexp.MustCompile(`(?i)vpn://[A-Za-z0-9+/=_-]+`)
 
 // maskFreeText заменяет значения известных секретов в произвольном тексте
 // (stderr сервера, текст команды) на hiddenPlaceholder.

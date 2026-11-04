@@ -72,6 +72,13 @@ var beforeBackupWork func()
 // эту ширину, плюс рамка окна; не больше окна программы — тогда и только
 // тогда работает прокрутка. scroll — прокрутка вокруг inner (nil — её нет).
 func (u *ui) fitDialog(d dialog.Dialog, inner, scroll fyne.CanvasObject, width float32) {
+	u.fitDialogPinned(d, inner, scroll, nil, width)
+}
+
+// fitDialogPinned — то же с закреплённой панелью pinned под прокруткой (вне
+// её): панель укладывается в ту же ширину и входит в рамку окна, а не в
+// прокручиваемую часть.
+func (u *ui) fitDialogPinned(d dialog.Dialog, inner, scroll, pinned fyne.CanvasObject, width float32) {
 	win := u.win.Canvas().Size()
 	margin := 4 * theme.Padding()
 	if win.Width < 1 || win.Height < 1 {
@@ -89,6 +96,10 @@ func (u *ui) fitDialog(d dialog.Dialog, inner, scroll fyne.CanvasObject, width f
 		chromeH -= inner.MinSize().Height
 	}
 	innerW := width - 6*theme.Padding()
+	if pinned != nil {
+		pinned.Resize(fyne.NewSize(innerW, pinned.MinSize().Height))
+		chromeH = d.MinSize().Height - scroll.MinSize().Height
+	}
 	inner.Resize(fyne.NewSize(innerW, inner.MinSize().Height)) // переносы по этой ширине
 	need := inner.MinSize().Height + chromeH
 	h := need
