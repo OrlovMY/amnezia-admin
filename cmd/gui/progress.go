@@ -89,6 +89,7 @@ func (u *ui) closeIntercept() {
 // closeWindow — закрыть программу (шов теста: тестовое окно дважды не
 // закрывается).
 func (u *ui) closeWindow() {
+	u.closeMigDst()
 	if u.closeWin != nil {
 		u.closeWin()
 		return

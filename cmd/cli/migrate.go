@@ -35,6 +35,9 @@ var bypassAddressGate bool
 
 const migrateUnknownAddrHint = "Адрес выдачи у источника неизвестен (в ключе IP, адрес для клиентов не выбран). Чтобы не понадобился -address-changes, запускайте переезд с -client-host <имя> или -client-host keep-ip."
 
+// migrateDial — подключение (шов теста: ошибка с ключом внутри).
+var migrateDial = core.ConnectWithHostKey
+
 // migrateConnect — сессия одной стороны переезда. role — «источник» /
 // «цель» (в текстах); hostkeyFlag — имя флага отпечатка (для подсказки).
 func migrateConnect(role, key, hostkey, hostkeyFlag, knownHostsPath string, in io.Reader, w, errOut io.Writer, isTTY bool) (*core.Session, int) {
@@ -48,7 +51,7 @@ func migrateConnect(role, key, hostkey, hostkeyFlag, knownHostsPath string, in i
 		fmt.Fprintln(errOut, "Ошибка ("+role+"): "+core.MaskText(err.Error()))
 		return nil, 1
 	}
-	sess, err := core.ConnectWithHostKey(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, hostkey, knownHostsPath))
+	sess, err := migrateDial(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, hostkey, knownHostsPath))
 	if err != nil {
 		fmt.Fprintln(errOut, "SSH ("+role+"):", core.MaskText(err.Error()))
 		if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {

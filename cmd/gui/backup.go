@@ -72,6 +72,13 @@ var beforeBackupWork func()
 // эту ширину, плюс рамка окна; не больше окна программы — тогда и только
 // тогда работает прокрутка. scroll — прокрутка вокруг inner (nil — её нет).
 func (u *ui) fitDialog(d dialog.Dialog, inner, scroll fyne.CanvasObject, width float32) {
+	u.fitDialogPinned(d, inner, scroll, nil, width)
+}
+
+// fitDialogPinned — то же с закреплённой панелью pinned под прокруткой (вне
+// её): панель укладывается в ту же ширину и входит в рамку окна, а не в
+// прокручиваемую часть.
+func (u *ui) fitDialogPinned(d dialog.Dialog, inner, scroll, pinned fyne.CanvasObject, width float32) {
 	win := u.win.Canvas().Size()
 	margin := 4 * theme.Padding()
 	if win.Width < 1 || win.Height < 1 {
@@ -89,6 +96,10 @@ func (u *ui) fitDialog(d dialog.Dialog, inner, scroll fyne.CanvasObject, width f
 		chromeH -= inner.MinSize().Height
 	}
 	innerW := width - 6*theme.Padding()
+	if pinned != nil {
+		pinned.Resize(fyne.NewSize(innerW, pinned.MinSize().Height))
+		chromeH = d.MinSize().Height - scroll.MinSize().Height
+	}
 	inner.Resize(fyne.NewSize(innerW, inner.MinSize().Height)) // переносы по этой ширине
 	need := inner.MinSize().Height + chromeH
 	h := need
@@ -108,9 +119,10 @@ func (u *ui) backupMenu() {
 	var d dialog.Dialog
 	save := widget.NewButtonWithIcon(backupSaveText, theme.DocumentSaveIcon(), func() { d.Hide(); u.backupDialog() })
 	restore := widget.NewButtonWithIcon(backupRestoreText, theme.FolderOpenIcon(), func() { d.Hide(); u.restorePick() })
+	migrate := widget.NewButtonWithIcon(migrateMenuText, theme.MailForwardIcon(), func() { d.Hide(); u.migrateAsk() })
 	body := container.NewVBox(
 		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
-		save, restore)
+		save, restore, migrate)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
 	u.fitDialog(d, body, nil, 560)
 	d.Show()
@@ -388,8 +400,10 @@ type restoreView struct {
 type targetView struct {
 	d     dialog.Dialog
 	force *escButton
-	list  *widget.Accordion // свёрнутый длинный список; nil — список короткий
-	text  string
+	// onCancel — действие на «Отмена»/Esc этого окна
+	onCancel func(func())
+	list     *widget.Accordion // свёрнутый длинный список; nil — список короткий
+	text     string
 }
 
 // targetSections — заголовок с числом (всегда виден) и список: короткий —
@@ -414,7 +428,7 @@ func (u *ui) targetConfirm(rp *core.RestorePlan, onOK func()) *targetView {
 	secs, acc, text := targetSections(rp)
 	secs = append(secs, wrapLabel("Перед записью будет снята автокопия этого сервера. Записать, только если эти пользователи вам не нужны или перенесены иначе.", false))
 	cw := u.confirmWindowBtn(restoreUsersTitle, secs, restoreForceText, true, onOK, 640)
-	return &targetView{d: cw.d, force: cw.ok, list: acc, text: text}
+	return &targetView{d: cw.d, force: cw.ok, onCancel: cw.onCancel, list: acc, text: text}
 }
 
 // restoreWindow — устройство окна подтверждения XRay (AU-UX H1): «Отмена» и

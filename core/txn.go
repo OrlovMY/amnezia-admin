@@ -611,6 +611,9 @@ var rePEMHeader = regexp.MustCompile(`(?i)-----BEGIN[^\n-]*-----`)
 // открытым перед строкой END (ревью SEC-01, V2).
 var rePEMFooter = regexp.MustCompile(`(?i)-----END[^\n-]*-----`)
 
+// reVpnKey — ключ vpn:// (base64 любого алфавита) в свободном тексте.
+var reVpnKey = regexp.MustCompile(`(?i)vpn://[A-Za-z0-9+/=_-]+`)
+
 // maskFreeText заменяет значения известных секретов в произвольном тексте
 // (stderr сервера, текст команды) на hiddenPlaceholder.
 func maskFreeText(s string) string {
@@ -618,6 +621,9 @@ func maskFreeText(s string) string {
 		return s
 	}
 	s = maskPEM(s)
+	// Ключ vpn:// — ВЕСЬ конфиг сервера (пароль root или приватный SSH-ключ):
+	// в свободном тексте скрывается целиком, где бы ни стоял (граница одна).
+	s = reVpnKey.ReplaceAllString(s, "vpn://"+hiddenPlaceholder)
 	// Сначала закавыченные значения — там значение идёт до закрывающей
 	// кавычки целиком.
 	s = reFreeTextSecretQuoted.ReplaceAllStringFunc(s, func(m string) string {
