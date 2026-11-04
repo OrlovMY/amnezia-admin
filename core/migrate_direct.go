@@ -53,10 +53,22 @@ func SameServer(a, b *Session, resolve Resolver) (SameServerVerdict, string) {
 		return SameUnknown, "сессия не передана"
 	}
 	if a.HostKeyFingerprint != "" && b.HostKeyFingerprint != "" {
-		if a.HostKeyFingerprint == b.HostKeyFingerprint {
-			return SameYes, "у обоих один и тот же ключ хоста " + a.HostKeyFingerprint
+		if a.HostKeyFingerprint != b.HostKeyFingerprint {
+			return SameNo, "ключи хоста различаются"
 		}
-		return SameNo, "ключи хоста различаются"
+		// Ключ хоста равен: один сервер — только если и адреса те же. Новый
+		// VPS, поднятый из снимка или клона старого, несёт тот же ключ хоста
+		// при другом адресе — это «не знаем», а не «один сервер».
+		if a.Creds != nil && b.Creds != nil {
+			aips, aok := hostIPs(a.Creds.Host, resolve)
+			bips, bok := hostIPs(b.Creds.Host, resolve)
+			if aok && bok && intersects(aips, bips) {
+				return SameYes, "у обоих один и тот же ключ хоста " + a.HostKeyFingerprint + " и один адрес"
+			}
+		}
+		return SameUnknown, "ключ хоста у обоих одинаковый (" + a.HostKeyFingerprint + "), но адреса разные или не сверены: это либо один сервер под двумя адресами, " +
+			"либо новый сервер, поднятый из снимка или клона старого, с тем же ключом хоста. Не записываем, пока не уверены. Если это клон — на новом сервере " +
+			"перегенерируйте ключи хоста (rm /etc/ssh/ssh_host_* && dpkg-reconfigure openssh-server или эквивалент для вашей ОС), удалите старый отпечаток из known_hosts и повторите"
 	}
 	if a.Creds == nil || b.Creds == nil {
 		return SameUnknown, "адрес одного из серверов неизвестен"

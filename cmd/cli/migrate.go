@@ -48,7 +48,11 @@ func migrateConnect(role, key, hostkey, hostkeyFlag, knownHostsPath string, in i
 	if err != nil {
 		fmt.Fprintln(errOut, "SSH ("+role+"):", core.MaskText(err.Error()))
 		if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {
-			fmt.Fprintln(errOut, "Без терминала подключение к новому серверу требует явного отпечатка: "+hostkeyFlag+" SHA256:... ("+role+")")
+			what := "к новому серверу (цели)"
+			if role == "источник" {
+				what = "к серверу-источнику"
+			}
+			fmt.Fprintln(errOut, "Без терминала подключение "+what+" требует явного отпечатка: "+hostkeyFlag+" SHA256:... ("+role+")")
 			return nil, 2
 		}
 		return nil, 1
@@ -247,6 +251,9 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	}
 	if err != nil {
 		backupErr(errOut, "", err)
+		if errors.Is(err, core.ErrRestoreStopped) {
+			return exitRestoreStopped // остановлено до записи (автокопия не снята и т. п.)
+		}
 		return 1
 	}
 	printLines(w, core.MigrationOutcomeLines(auto, layer.Name() == core.PasswordLayerName, outs))

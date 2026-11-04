@@ -295,7 +295,8 @@ func TestMigrateSameServer(t *testing.T) {
 		a, b *Session
 		want SameServerVerdict
 	}{
-		{"один ключ хоста, разные имена", mk("a.example", "22", "SHA256:x"), mk("b.example", "2222", "SHA256:x"), SameYes},
+		{"один ключ хоста, один адрес, разные порты", mk(migSrcHost, "22", "SHA256:x"), mk(migSrcHost, "2222", "SHA256:x"), SameYes},
+		{"один ключ хоста, адреса разные (клон) — не знаем", mk(migSrcHost, "22", "SHA256:x"), mk(migDstHost, "22", "SHA256:x"), SameUnknown},
 		{"тот же адрес и порт", mk(migSrcHost, "22", ""), mk(migSrcHost, "", ""), SameYes},
 		{"разные адреса", mk(migSrcHost, "22", ""), mk(migDstHost, "22", ""), SameNo},
 		{"разные ключи хоста", mk(migSrcHost, "22", "SHA256:x"), mk(migSrcHost, "2222", "SHA256:y"), SameNo},
