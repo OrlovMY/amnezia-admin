@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"context"
 	"os"
 	"path/filepath"
@@ -334,5 +335,38 @@ func TestMigrateCLIErrorsMasked(t *testing.T) {
 	}
 	if n < 10 {
 		t.Fatalf("сторож ничего не видит: строк вывода %d", n)
+	}
+}
+
+// TestCLIMigrateKeyNeverInOutput — ключ из -key/-to-key не появляется ни в
+// выводе, ни в ошибке, даже если ошибка подключения несёт его целиком
+// (шов migrateDial; граница маскировки — core.MaskText).
+// Подмена: убрать правило vpn:// из core.maskFreeText — роняет.
+func TestCLIMigrateKeyNeverInOutput(t *testing.T) {
+	keyA, khA, _ := setupFakeSSHForRunWithExec(t)
+	keyB, _, _ := setupFakeSSHForRunWithExec(t)
+	old := migrateDial
+	t.Cleanup(func() { migrateDial = old })
+	for _, which := range []string{"источник", "цель"} {
+		n := 0
+		migrateDial = func(c *core.ServerCreds, p core.HostKeyPolicy) (*core.Session, error) {
+			n++
+			if (which == "источник") == (n == 1) {
+				return nil, errors.New("dial " + keyA + " и " + keyB + " отказ")
+			}
+			return old(c, p)
+		}
+		var o, er bytes.Buffer
+		code := runMigrateCmd(context.Background(), strings.NewReader(""), &o, &er, false, keyA, keyB, "", "", khA, "", false, migrateFlags{}, time.Now())
+		all := o.String() + er.String()
+		if code == 0 || !strings.Contains(all, "отказ") {
+			t.Fatalf("%s: ошибка не дошла до вывода (код %d): %s", which, code, all)
+		}
+		for _, k := range []string{keyA, keyB} {
+			body := strings.TrimPrefix(k, "vpn://")
+			if strings.Contains(all, body[:24]) {
+				t.Errorf("%s: ключ в выводе: %s", which, all)
+			}
+		}
 	}
 }

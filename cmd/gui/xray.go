@@ -60,6 +60,8 @@ type confirmWin struct {
 	ok *escButton
 	// refit — пересчитать размер по содержимому (оно изменилось)
 	refit func()
+	// onCancel — зарегистрировать действие на «Отмена»/Esc (не на «OK»)
+	onCancel func(func())
 }
 
 // confirmWindowBtn — то же, и кнопка подтверждения (окно восстановления
@@ -79,9 +81,13 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 			cv.SetOnTypedKey(prevKey)
 		}
 	}
+	var cancelHook func()
 	cancel := func() {
 		restoreKeys()
 		d.Hide()
+		if cancelHook != nil {
+			cancelHook()
+		}
 	}
 	cancelBtn := newEscButton(guiview.XRayRestartCancel(), theme.CancelIcon(), cancel, cancel)
 	okIcon := theme.ConfirmIcon()
@@ -105,8 +111,7 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	u.fitDialog(d, inner, body, w)
 	cv.SetOnTypedKey(func(e *fyne.KeyEvent) {
 		if e.Name == fyne.KeyEscape {
-			restoreKeys()
-			d.Hide()
+			cancel()
 			return
 		}
 		if prevKey != nil {
@@ -116,7 +121,7 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	d.Show()
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
-	return confirmWin{d, okBtn, func() { u.fitDialog(d, inner, body, w) }}
+	return confirmWin{d, okBtn, func() { u.fitDialog(d, inner, body, w) }, func(f func()) { cancelHook = f }}
 }
 
 // escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В

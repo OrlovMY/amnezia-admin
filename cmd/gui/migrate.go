@@ -95,15 +95,31 @@ func migrateSameText(v core.SameServerVerdict, why string) string {
 
 // migrateSide — строка про сторону переезда: адрес и отпечаток ключа хоста.
 func migrateSide(role string, s *core.Session) string {
-	host := "?"
+	host, port := "?", "?"
 	if s != nil && s.Creds != nil {
-		host = s.Creds.Host // порт и прочее из ключа не печатаем (сторож printguard)
+		host = s.Creds.Host
+		if s.Creds.Port != "" { // пустой порт — «не знаем», не «22»
+			port = s.Creds.Port
+		}
 	}
 	fp := "не определён"
 	if s != nil && s.HostKeyFingerprint != "" {
 		fp = s.HostKeyFingerprint
 	}
-	return fmt.Sprintf("%s: %s, ключ хоста %s", role, host, fp)
+	return fmt.Sprintf("%s: %s:%s, ключ хоста %s", role, host, port, fp)
+}
+
+// migClose — закрытие сессии цели (шов теста: видно, что закрыто).
+var migClose = func(s *core.Session) { s.Close() }
+
+// closeMigDst — закрыть сессию цели, если она ещё открыта (SSH root на новый
+// сервер не должен висеть без видимого признака): «Отмена» окон переноса,
+// смена источника, выход из программы, конец переноса.
+func (u *ui) closeMigDst() {
+	if u.migDst != nil {
+		migClose(u.migDst)
+		u.migDst = nil
+	}
 }
 
 // migrateConnect — подключение к цели (шов теста). Ключ хоста — тем же
@@ -146,10 +162,7 @@ func (u *ui) migrateAsk() *escButton {
 // источника и проверка цели: всё вне потока интерфейса, с прогрессом и
 // отменой. Ключ в окна и ошибки не попадает.
 func (u *ui) migrateStart(key string) {
-	if u.migDst != nil { // прежняя цель, если окно закрыли без переноса
-		u.migDst.Close()
-		u.migDst = nil
-	}
+	u.closeMigDst() // прежняя цель, если окно закрыли без переноса
 	ctx, cancel := context.WithCancel(context.Background())
 	u.setBusy(true)
 	pv := u.progressWindow("Подготовка переноса", cancel)
@@ -163,7 +176,7 @@ func (u *ui) migrateStart(key string) {
 			u.setBusy(false)
 			closeDst := func() {
 				if dst != nil {
-					dst.Close()
+					migClose(dst)
 				}
 			}
 			if u.opFinished(err) {
@@ -198,29 +211,14 @@ func migrateErrText(err error) string {
 
 // migratePrepare — фоновая часть. text != "" — остановка с готовым текстом.
 func (u *ui) migratePrepare(ctx context.Context, src *core.Session, key, knownHosts string, pv *progressView) (*core.Session, *core.Migration, string, error) {
-	// scrub — текст ошибки без ключа и пароля целиком (MaskText знает форму
-	// «password=…», но не сам ключ vpn://): маскировка здесь, на границе.
-	pw := ""
-	scrub := func(err error) string {
-		t := core.MaskText(err.Error())
-		if k := strings.TrimSpace(key); k != "" {
-			t = strings.ReplaceAll(t, k, "<ключ скрыт>")
-			t = strings.ReplaceAll(t, strings.TrimPrefix(k, "vpn://"), "<ключ скрыт>")
-		}
-		if pw != "" {
-			t = strings.ReplaceAll(t, pw, "<скрыто>")
-		}
-		return t
-	}
 	cfg, err := core.DecodeVpnKey(key)
 	if err != nil {
-		return nil, nil, "", errors.New("ключ нового сервера не разобран: " + scrub(err))
+		return nil, nil, "", errors.New("ключ нового сервера не разобран: " + core.MaskText(err.Error()))
 	}
 	creds, err := core.CredsFromConfig(cfg)
 	if err != nil {
-		return nil, nil, "", errors.New("ключ нового сервера: " + scrub(err))
+		return nil, nil, "", errors.New("ключ нового сервера: " + core.MaskText(err.Error()))
 	}
-	pw = creds.Password
 	pv.report(core.Progress{Text: "подключение к новому серверу…"})
 	dst, err := migrateConnect(creds, core.HostKeyPolicy{
 		KnownHostsPath: knownHosts,
@@ -233,7 +231,7 @@ func (u *ui) migratePrepare(ctx context.Context, src *core.Session, key, knownHo
 		},
 	})
 	if err != nil {
-		return nil, nil, "", errors.New("подключение к новому серверу не удалось: " + scrub(err))
+		return nil, nil, "", errors.New("подключение к новому серверу не удалось: " + core.MaskText(err.Error()))
 	}
 	if ctx.Err() != nil {
 		return dst, nil, "", core.ErrCanceled
@@ -349,11 +347,13 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 	cw = u.confirmWindowBtn(migrateWinTitle, sections, migrateApplyText, true, func() {
 		if rp.NeedsTargetConfirm() {
 			v.users = u.targetConfirm(rp, func() { u.doMigrate(m, v, true) })
+			v.users.onCancel(u.closeMigDst)
 			return
 		}
 		u.doMigrate(m, v, false)
 	}, 900)
 	v.d, v.apply = cw.d, cw.ok
+	cw.onCancel(u.closeMigDst) // отмена окна подтверждения — сессия цели закрыта
 	update = func() {
 		can := !compat.Stop && rp != nil && (v.addrCheck == nil || v.addrCheck.Checked)
 		if xray {
@@ -424,10 +424,7 @@ func (u *ui) doMigrate(m *core.Migration, v *migrateView, targetOK bool) {
 		auto, outs, err := u.runMigrateCtx(ctx, m, layer, xrayOK, targetOK, addrOK, time.Now(), pv.report)
 		uiDo(func() {
 			u.setBusy(false)
-			if u.migDst != nil {
-				u.migDst.Close()
-				u.migDst = nil
-			}
+			u.closeMigDst()
 			if u.opFinished(err) {
 				return
 			}
@@ -463,7 +460,7 @@ func (u *ui) migrateResult(auto string, enc bool, outs []core.RestoreOutcome, er
 		body = migrateSrcSafeText + "\n" + strings.Join(core.MigrationOutcomeLines(auto, enc, outs), "\n")
 	}
 	d := dialog.NewCustom("Итог переноса", "Закрыть", container.NewVScroll(container.NewVBox(hl, wrapLabel(body, false))), u.win)
-	sizeDialog(d, fyne.NewSize(680, 460))
+	sizeDialog(d, fyne.NewSize(700, 580))
 	d.Show()
 	return d
 }

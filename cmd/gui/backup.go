@@ -389,6 +389,8 @@ type restoreView struct {
 type targetView struct {
 	d     dialog.Dialog
 	force *escButton
+	// onCancel — действие на «Отмена»/Esc этого окна
+	onCancel func(func())
 	list  *widget.Accordion // свёрнутый длинный список; nil — список короткий
 	text  string
 }
@@ -415,7 +417,7 @@ func (u *ui) targetConfirm(rp *core.RestorePlan, onOK func()) *targetView {
 	secs, acc, text := targetSections(rp)
 	secs = append(secs, wrapLabel("Перед записью будет снята автокопия этого сервера. Записать, только если эти пользователи вам не нужны или перенесены иначе.", false))
 	cw := u.confirmWindowBtn(restoreUsersTitle, secs, restoreForceText, true, onOK, 640)
-	return &targetView{d: cw.d, force: cw.ok, list: acc, text: text}
+	return &targetView{d: cw.d, force: cw.ok, onCancel: cw.onCancel, list: acc, text: text}
 }
 
 // restoreWindow — устройство окна подтверждения XRay (AU-UX H1): «Отмена» и

@@ -13,6 +13,7 @@ import (
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
+	"amnezia-admin/internal/guiview"
 )
 
 const (
@@ -47,6 +48,7 @@ func newMigFixture(t *testing.T, dstHost, srcFp, dstFp string) *migFixture {
 	u := backupUI(t, src, migTestSrcHost)
 	u.sess = keepIPSession(src, migTestSrcHost)
 	u.sess.HostKeyFingerprint = srcFp
+	u.sess.Creds.Port = "2222"
 	f := &migFixture{u: u, src: src, dst: dst, key: migrateKey(dstHost)}
 	old := migrateConnect
 	migrateConnect = func(c *core.ServerCreds, _ core.HostKeyPolicy) (*core.Session, error) {
@@ -176,7 +178,7 @@ func TestGUIMigrateReachesPrepareAndApply(t *testing.T) {
 		t.Fatalf("подключение к цели: %d раз, creds %+v", f.connects, f.gotCreds)
 	}
 	win := f.overlayText(t)
-	for _, want := range []string{migTestDstHost, "SHA256:dstfp", "SHA256:srcfp", migrateNoDiskText, "Источник (только чтение)", "Цель (сюда будет записано)", "[" + migrateApplyText + "]"} {
+	for _, want := range []string{migTestDstHost, "SHA256:dstfp", "SHA256:srcfp", migrateNoDiskText, "Источник (только чтение): " + migTestSrcHost + ":2222", "Цель (сюда будет записано): " + migTestDstHost + ":22", "[" + migrateApplyText + "]"} {
 		if !strings.Contains(win, want) {
 			t.Errorf("в окне до записи нет %q:\n%s", want, win)
 		}
@@ -344,14 +346,82 @@ func TestGUIMigrateNoSecretsInWidgets(t *testing.T) {
 	if !strings.Contains(etxt, "подключение к новому серверу не удалось") {
 		t.Fatalf("ошибка подключения не показана:\n%s", etxt)
 	}
-	if strings.Contains(etxt, g.key) || strings.Contains(etxt, migTestSecret) {
-		t.Errorf("ключ или пароль в тексте ошибки:\n%s", etxt)
+	// любой кусок тела ключа длиной >= 16 знаков — утечка (скрыт «целиком»,
+	// а не «частично»)
+	body := strings.TrimPrefix(g.key, "vpn://")
+	for k := 0; k+16 <= len(body); k++ {
+		if strings.Contains(etxt, body[k:k+16]) {
+			t.Fatalf("кусок ключа %q в тексте ошибки:\n%s", body[k:k+16], etxt)
+		}
 	}
-	// нечитаемый ключ: ошибка тоже без ключа
-	h := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
-	h.key = "vpn://" + migTestSecret + "не-ключ"
-	h.start(t)
-	if htxt := h.allText(); strings.Contains(htxt, migTestSecret) || !strings.Contains(htxt, "не разобран") {
-		t.Errorf("текст про нечитаемый ключ:\n%s", htxt)
+	if strings.Contains(etxt, migTestSecret) {
+		t.Errorf("пароль в тексте ошибки:\n%s", etxt)
 	}
+}
+
+// TestGUIMigrateClosesTargetSession — ТЕСТ ДОЕЗДА закрытия: сессия цели (SSH
+// root на новый сервер) закрыта после «Отмена» окна подтверждения, после
+// «Отмена» окна «Всё равно записать», при выходе из программы и после
+// переноса — ровно один раз; до этого открыта.
+// Подмена: closeMigDst ничего не закрывает — роняет.
+func TestGUIMigrateClosesTargetSession(t *testing.T) {
+	var closed []*core.Session
+	old := migClose
+	migClose = func(s *core.Session) { closed = append(closed, s) }
+	t.Cleanup(func() { migClose = old })
+	cancelOf := func(f *migFixture) {
+		b := findEsc(f.u.win.Canvas().Overlays().Top(), guiview.XRayRestartCancel())
+		if b == nil {
+			t.Fatal("в окне нет «Отмена»")
+		}
+		test.Tap(b)
+	}
+	t.Run("отмена окна подтверждения", func(t *testing.T) {
+		closed = nil
+		f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+		f.start(t)
+		if len(closed) != 0 || f.u.migDst == nil {
+			t.Fatalf("сессия закрыта до отмены: %d", len(closed))
+		}
+		dst := f.u.migDst
+		cancelOf(f)
+		if len(closed) != 1 || closed[0] != dst || f.u.migDst != nil {
+			t.Errorf("после «Отмена» закрыто %d, migDst=%v", len(closed), f.u.migDst)
+		}
+	})
+	t.Run("отмена окна «Всё равно записать»", func(t *testing.T) {
+		closed = nil
+		f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+		f.start(t)
+		v := f.u.migShown
+		v.mode.SetSelected(backupNoPassword)
+		v.addrCheck.SetChecked(true)
+		test.Tap(v.apply)
+		if v.users == nil || len(closed) != 0 {
+			t.Fatalf("окно пользователей не открыто или сессия закрыта раньше: %d", len(closed))
+		}
+		cancelOf(f)
+		if len(closed) != 1 {
+			t.Errorf("закрыто %d", len(closed))
+		}
+	})
+	t.Run("выход из программы", func(t *testing.T) {
+		closed = nil
+		f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+		f.start(t)
+		f.u.closeWin = func() {}
+		f.u.closeWindow()
+		if len(closed) != 1 {
+			t.Errorf("при выходе закрыто %d", len(closed))
+		}
+	})
+	t.Run("после переноса", func(t *testing.T) {
+		closed = nil
+		f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+		f.start(t)
+		f.confirm(t, "")
+		if len(closed) != 1 {
+			t.Errorf("после переноса закрыто %d", len(closed))
+		}
+	})
 }

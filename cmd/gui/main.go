@@ -1169,6 +1169,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 		}
 
 		fyne.Do(func() {
+			u.closeMigDst() // цель прежнего источника не должна пережить смену источника
 			u.sess = sess
 			u.vaultPath, u.clientHostSet = "", core.ClientHostSetting{}
 			if vc != nil {

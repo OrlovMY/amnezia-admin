@@ -355,6 +355,9 @@ var holderFields = map[string]bool{
 // законный код уже есть. Разрешено ровно то, что не секрет:
 //   - .Creds.User / .Creds.Host — подпись "Сервер: user@host" на главном
 //     экране (пользователь и хост не секрет, пароль — секрет);
+//   - .Creds.Port — порт SSH: нужен, чтобы два сервера на одном адресе
+//     различались в окне переноса; не секрет (закрытая позиция: пароль и
+//     прочее под .Creds по-прежнему запрещены);
 //   - .HostKeyFingerprint — отпечаток ключа хоста: он и так показывается
 //     человеку в диалогах доверия ключу;
 //   - .Label / .Created — метка и дата записи хранилища;
@@ -367,6 +370,7 @@ var holderFields = map[string]bool{
 var allowedSelectorSuffixes = []string{
 	".Creds.User",
 	".Creds.Host",
+	".Creds.Port",
 	".HostKeyFingerprint",
 	".Label",
 	".Created",
@@ -1224,6 +1228,9 @@ func TestGuiGuardRulesThemselves(t *testing.T) {
 		{"поле Key записи хранилища", "vc.payload.Key", verdictForbidden},
 		{"разрешённый селектор User", "u.sess.Creds.User", verdictAllowed},
 		{"разрешённый селектор Host", "u.sess.Creds.Host", verdictAllowed},
+		{"разрешённый селектор Port", "u.sess.Creds.Port", verdictAllowed},
+		{"канарейка: пароль под Creds", "u.sess.Creds.Password", verdictForbidden},
+		{"канарейка: сосед Port не разрешён", "u.sess.Creds.PortKey", verdictForbidden},
 		{"отпечаток ключа хоста", "vc.payload.HostKeyFingerprint", verdictAllowed},
 		{"постороннее выражение", "victim.Name()", verdictNeutral},
 		{"состояние интерфейса", "st.Primary", verdictNeutral},
