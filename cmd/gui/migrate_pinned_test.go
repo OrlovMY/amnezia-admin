@@ -9,9 +9,17 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
+)
+
+// реальная длина отпечатка: «SHA256:» + 43 знака base64
+const (
+	realFpSrc = "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"
+	realFpDst = "SHA256:uNiVztksCsDhcc0u9e8hE6/OUdXXqQvTCmKo3m2+Sas"
 )
 
 func xrayMigServer() *fakesrv.Server {
@@ -38,7 +46,7 @@ func inScroll(root fyne.CanvasObject) map[fyne.CanvasObject]bool {
 // лежат в границах окна на канве и НЕ внутри прокрутки.
 // Подмена: вернуть pinned в sections (в прокрутку) — роняет.
 func TestGUIMigratePinnedVisible(t *testing.T) {
-	f := newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, "SHA256:a", "SHA256:b")
+	f := newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst)
 	f.u.win.Resize(fyne.NewSize(900, 600))
 	f.start(t)
 	v := f.u.migShown
@@ -53,6 +61,52 @@ func TestGUIMigratePinnedVisible(t *testing.T) {
 	drv := fyne.CurrentApp().Driver()
 	must := map[string]fyne.CanvasObject{"галка адреса": v.addrCheck, "выбор XRay": v.xrayRadio, "выбор автокопии": v.mode,
 		"пароль": v.pw, "повтор пароля": v.pw2, "причина": v.reason, "кнопка": v.apply}
+	// строки «Источник»/«Цель» с адресом:портом и отпечатком реальной длины:
+	// не переносятся и видны в первом экране прокручиваемой части
+	var side *widget.Label
+	var viewport fyne.CanvasObject
+	walkObjects(top, func(o fyne.CanvasObject) {
+		if l, ok := o.(*widget.Label); ok && strings.Contains(l.Text, "Цель (сюда будет записано)") && side == nil {
+			side = l
+		}
+	})
+	if side == nil {
+		t.Fatal("строки «Цель» в окне нет")
+	}
+	walkObjects(top, func(o fyne.CanvasObject) {
+		if sc, ok := o.(*container.Scroll); ok && viewport == nil {
+			walkObjects(sc.Content, func(x fyne.CanvasObject) {
+				if x == side {
+					viewport = sc
+				}
+			})
+		}
+	})
+	if viewport == nil {
+		t.Fatal("строки «Цель» нет в прокручиваемой части")
+	}
+	if !strings.Contains(side.Text, realFpDst) || !strings.Contains(side.Text, migTestDstHost+":22") {
+		t.Fatalf("в строке цели нет адреса:порта и полного отпечатка:\n%s", side.Text)
+	}
+	ref := wrapLabel(side.Text, false)
+	ref.Resize(fyne.NewSize(5000, 100))
+	unwrapped := ref.MinSize().Height
+	var widest float32
+	for _, ln := range strings.Split(side.Text, "\n") {
+		w, _ := drv.RenderedTextSize(ln, theme.TextSize(), fyne.TextStyle{}, nil)
+		if w.Width > widest {
+			widest = w.Width
+		}
+	}
+	sp, ss := drv.AbsolutePositionForObject(side), side.Size()
+	vp, vs := drv.AbsolutePositionForObject(viewport), viewport.Size()
+	t.Logf("строки сторон: ширина строки без переноса %.0f; (%.0f,%.0f) %.0fx%.0f, без переноса %.0f; область (%.0f,%.0f) %.0fx%.0f", widest, sp.X, sp.Y, ss.Width, ss.Height, unwrapped, vp.X, vp.Y, vs.Width, vs.Height)
+	if ss.Height > unwrapped+0.5 {
+		t.Errorf("строки сторон переносятся: высота %.0f, в одну линию на строку %.0f", ss.Height, unwrapped)
+	}
+	if sp.Y+ss.Height > vp.Y+vs.Height+0.5 {
+		t.Errorf("строки сторон не помещаются в видимую область прокрутки: низ %.0f, область до %.0f", sp.Y+ss.Height, vp.Y+vs.Height)
+	}
 	for name, o := range must {
 		p, s := drv.AbsolutePositionForObject(o), o.Size()
 		t.Logf("%s: (%.0f,%.0f) %.0fx%.0f, в прокрутке: %v", name, p.X, p.Y, s.Width, s.Height, scroll[o])
@@ -84,7 +138,7 @@ func TestGUIMigrateDisabledReason(t *testing.T) {
 	step("начало", migrateReasonAddr, false)
 	v.addrCheck.SetChecked(true)
 	step("адрес подтверждён", migrateReasonXRay, false)
-	v.xrayRadio.SetSelected(restoreXRayCheck)
+	v.xrayRadio.SetSelected(migrateXRayRestart)
 	step("XRay выбран", migrateReasonMode, false)
 	v.mode.SetSelected(backupWithPassword)
 	step("с паролем, пусто", strings.Replace(migrateReasonPwShort, "%d", "12", 1), false)

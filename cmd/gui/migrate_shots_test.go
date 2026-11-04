@@ -107,13 +107,13 @@ func TestGUIMigrateShots(t *testing.T) {
 	f.shot(t, "1b-окно-подтверждения-выбран-режим", append(keys, "недоступна", "Всё подтверждено"))
 
 	// худший случай: адрес + XRay + пароль, окно 900x600
-	x := newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, "SHA256:a", "SHA256:b")
+	x := newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst)
 	x.u.win.Resize(fyne.NewSize(900, 600))
 	x.start(t)
 	pin := []string{"недоступна", "Всё подтверждено", "[" + migrateApplyText + "]", "[Отмена]", "Источник (только чтение)"}
 	x.shot(t, "6-худший-случай-900x600-начало", pin)
 	x.u.migShown.addrCheck.SetChecked(true)
-	x.u.migShown.xrayRadio.SetSelected(restoreXRayCheck)
+	x.u.migShown.xrayRadio.SetSelected(migrateXRayRestart)
 	x.u.migShown.mode.SetSelected(backupWithPassword)
 	x.shot(t, "6b-худший-случай-900x600-пароль", pin)
 	x.u.migShown.pw.SetText("автокопия-пароль-12345")

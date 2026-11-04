@@ -39,6 +39,8 @@ const (
 	migrateWinTitle        = "Перенос на новый сервер"
 	migrateNoDiskText      = "Копия старого сервера на диск не записывалась: её данные только в памяти программы."
 	migrateSrcSafeText     = "Старый сервер продолжает работать: он только читался и не изменён."
+	migrateXRayRestart     = "Перезапустить XRay (подключения XRay оборвутся)"
+	migrateXRaySkip        = "Без XRay (на новом сервере останется прежний)"
 	migrateAddrConsequence = "Если адрес выдачи другой или не проверен, старые конфиги клиентов к новому серверу НЕ придут, пока адрес не перенесён на него у хостера."
 	migrateAutoCopyAsk     = "Автокопия НОВОГО сервера (его состояние до замены) будет сохранена на диск. Защитить её паролем?"
 	migrateAutoCopyNote    = "Перед заменой программа сохранит на диск АВТОКОПИЮ НОВОГО сервера (его нынешнее состояние; источник на диск не пишется)."
@@ -347,7 +349,8 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 	}
 	if xray {
 		sections = append(sections, restartSections()...)
-		v.xrayRadio = widget.NewRadioGroup([]string{restoreXRayCheck, restoreSkipXRay}, func(string) { update() })
+		v.xrayRadio = widget.NewRadioGroup([]string{migrateXRayRestart, migrateXRaySkip}, func(string) { update() })
+		v.xrayRadio.Horizontal = true // одна строка в закреплённой панели
 		pinned = append(pinned, wrapLabel(restoreXRayHint, true), v.xrayRadio)
 	}
 	// единственное, что пишется на диск, — автокопия ЦЕЛИ
@@ -442,7 +445,7 @@ func (u *ui) runMigrateCtx(ctx context.Context, m *core.Migration, layer core.Ba
 }
 
 func (u *ui) doMigrate(m *core.Migration, v *migrateView, targetOK bool) {
-	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == restoreXRayCheck
+	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == migrateXRayRestart
 	addrOK := v.addrCheck == nil || v.addrCheck.Checked
 	layer := v.layer()
 	enc := layer != nil && layer.Name() == core.PasswordLayerName

@@ -128,7 +128,7 @@ func (f *migFixture) confirm(t *testing.T, pw string) {
 		v.addrCheck.SetChecked(true)
 	}
 	if v.xrayRadio != nil {
-		v.xrayRadio.SetSelected(restoreXRayCheck)
+		v.xrayRadio.SetSelected(migrateXRayRestart)
 	}
 	if v.apply.Disabled() {
 		t.Fatalf("«Перенести» выключена при полном наборе условий:\n%s", v.text)
