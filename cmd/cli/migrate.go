@@ -29,6 +29,10 @@ type migrateFlags struct {
 	noPw                                       bool
 }
 
+// bypassAddressGate — шов теста: обойти проверку адреса в CLI, чтобы убедиться,
+// что ядро без подтверждения само не пишет (вторая линия).
+var bypassAddressGate bool
+
 const migrateUnknownAddrHint = "Адрес выдачи у источника неизвестен (в ключе IP, адрес для клиентов не выбран). Чтобы не понадобился -address-changes, запускайте переезд с -client-host <имя> или -client-host keep-ip."
 
 // migrateConnect — сессия одной стороны переезда. role — «источник» /
@@ -162,7 +166,7 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 		printLines(w, core.CompatStopLines(compat))
 		return exitRestoreStopped
 	}
-	if compat.NeedAddressConfirm && f.apply && !f.addrOK {
+	if compat.NeedAddressConfirm && f.apply && !f.addrOK && !bypassAddressGate {
 		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: адрес другой или не проверен. Если вы понимаете последствия (см. «Адрес» выше) — повторите с флагом -address-changes.")
 		if b.IssuedAddress.Kind == core.AddressKindUnknown {
 			fmt.Fprintln(w, migrateUnknownAddrHint)
