@@ -128,6 +128,11 @@ type ui struct {
 	// restoreLayer — слой копии-источника восстановления (автокопия его
 	// наследует; nil — без пароля).
 	restoreLayer core.BackupLayer
+	// migDst — сессия нового сервера (цели) между проверкой и итогом переноса
+	// (migrate.go); закрывается после переноса или при следующем переносе.
+	migDst *core.Session
+	// migShown — окно подтверждения переноса (для тестов).
+	migShown *migrateView
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView

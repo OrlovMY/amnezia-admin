@@ -108,9 +108,10 @@ func (u *ui) backupMenu() {
 	var d dialog.Dialog
 	save := widget.NewButtonWithIcon(backupSaveText, theme.DocumentSaveIcon(), func() { d.Hide(); u.backupDialog() })
 	restore := widget.NewButtonWithIcon(backupRestoreText, theme.FolderOpenIcon(), func() { d.Hide(); u.restorePick() })
+	migrate := widget.NewButtonWithIcon(migrateMenuText, theme.MailForwardIcon(), func() { d.Hide(); u.migrateAsk() })
 	body := container.NewVBox(
 		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
-		save, restore)
+		save, restore, migrate)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
 	u.fitDialog(d, body, nil, 560)
 	d.Show()
