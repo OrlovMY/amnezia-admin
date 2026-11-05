@@ -62,6 +62,8 @@ type confirmWin struct {
 	refit func()
 	// onCancel — зарегистрировать действие на «Отмена»/Esc (не на «OK»)
 	onCancel func(func())
+	// cancel — кнопка «Отмена» (окно-шаг меняет её надпись на «Назад»)
+	cancel *escButton
 }
 
 // confirmWindowBtn — то же, и кнопка подтверждения (окно восстановления
@@ -135,7 +137,7 @@ func (u *ui) confirmWindowPinned(title string, sections, pinned []fyne.CanvasObj
 	d.Show()
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
-	return confirmWin{d, okBtn, func() { u.fitDialogPinned(d, inner, body, pinBox, w) }, func(f func()) { cancelHook = f }}
+	return confirmWin{d, okBtn, func() { u.fitDialogPinned(d, inner, body, pinBox, w) }, func(f func()) { cancelHook = f }, cancelBtn}
 }
 
 // escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В

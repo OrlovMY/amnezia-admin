@@ -354,14 +354,43 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 		return exitToHostUsage
 	}
 
+	// Маркер незавершённой операции — до первой записи на цель; снимается
+	// только при измеренном итоге (аудит AU GUI-TO-HOST M1).
+	var names0 []string
+	for _, it := range plan.Items {
+		names0 = append(names0, it.Container)
+	}
+	mk := core.OpMarker{Target: host, Started: now, Step: "установка Amnezia", Installed: names0, Tool: version.String()}
+	if err := core.BeginOpMarker(mk); err != nil {
+		if errors.Is(err, core.ErrOpMarkerPending) {
+			backupErr(errOut, "Установка не начата: ", err)
+		} else {
+			backupErr(errOut, "Установка не начата (без маркера обрыв посреди установки остался бы без следа): ", err)
+		}
+		fmt.Fprintln(w, "Ничего не изменено.")
+		return exitToHostNo
+	}
+	stopAwake, awake := core.KeepAwake()
+	defer stopAwake()
+	if awake {
+		fmt.Fprintln(w, "Сон ПК запрещён до конца установки и переноса. Не закрывайте крышку ноутбука и не рвите сеть до итога.")
+	} else {
+		fmt.Fprintln(w, "Не усыпляйте ПК, не закрывайте крышку ноутбука и не рвите сеть до итога (на этой ОС программа сон не запрещает).")
+	}
 	res := toHostInstall(dst, plan, core.InstallOptions{Backup: b, Resolve: toHostResolve, PreviewAccepted: true})
 	printLines(w, res.Lines())
 	if !res.ReadyForRestore() {
 		printInstallFailed(w, res)
 		if res.Refused == "" && res.Measure == nil {
+			fmt.Fprintln(w, "Маркер незавершённой операции оставлен: итог установки неизвестен, программа напомнит о нём при следующем запуске migrate.")
 			return exitToHostUnknown
 		}
+		clearOpMarker(errOut)
 		return exitToHostNo
+	}
+	mk.Step = "перенос клиентов"
+	if err := core.WriteOpMarker(mk); err != nil {
+		backupErr(errOut, "Маркер незавершённой операции не обновлён (останется шаг «установка»): ", err)
 	}
 
 	// --- перенос клиентов: тот же путь, что -to-key, с ответами, данными выше ---
@@ -369,6 +398,11 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	mf := o.mf
 	mf.pre = &migratePre{layer: layer, warning: warning, confirmed: true, source: b}
 	code = toHostMigrate(ctx, in, w, errOut, isTTY, src, dst, mf, now)
+	if code == exitToHostUnknown {
+		fmt.Fprintln(w, "Маркер незавершённой операции оставлен: итог переноса неизвестен, программа напомнит о нём при следующем запуске migrate.")
+	} else {
+		clearOpMarker(errOut)
+	}
 
 	// Ключ выдаётся и при неудаче переноса: без него контейнеры на новом
 	// сервере не продолжить ничем (ревью PR #70, H1б).
@@ -427,51 +461,35 @@ func readKeyFile(path string, warn io.Writer) (string, error) {
 	return k, nil
 }
 
-// shQuote / psQuote — путь в одинарных кавычках для sh и PowerShell.
-func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// printOpMarker — если прошлая установка не завершена (или маркер не
+// прочитан) — сказать; маркер не снимается (убрать — удалить файл).
+func printOpMarker(errOut io.Writer) {
+	m, err := core.ReadOpMarker()
+	where := "файл маркера в каталоге данных программы"
+	if p, perr := core.OpMarkerPath(); perr == nil {
+		where = p
+	}
+	switch {
+	case err != nil:
+		fmt.Fprintln(errOut, "ВНИМАНИЕ: "+core.MaskText(err.Error())+" — итог прошлой установки на новый сервер может быть неизвестен.")
+	case m != nil:
+		fmt.Fprintln(errOut, "ВНИМАНИЕ: "+m.Text())
+		fmt.Fprintln(errOut, "Когда сервер проверен — удалите маркер: "+where)
+	}
+}
+
+// clearOpMarker — итог измерен: маркер снимается; не вышло — сказать.
+func clearOpMarker(errOut io.Writer) {
+	if err := core.ClearOpMarker(); err != nil {
+		backupErr(errOut, "Маркер незавершённой операции не удалён (при следующем запуске будет ложное напоминание): ", err)
+	}
+}
 
 // continueHint — команда продолжения переноса на уже поставленный сервер
-// (аудит AU-1, M1/M2): ключи — только файлами (-key-file/-to-key-file, в
-// argv не попадают); все флаги, без которых повтор остановится там же:
-// -address-changes (если адрес требовал подтверждения), -replace-users (на
-// цели уже могут быть перенесённые клиенты), слой автокопии как в этом
-// запуске (путь, не пароль), -skip-xray, -apply.
+// (аудит AU-1, M1/M2); собирается core.ContinueHint — тем же, что в GUI.
 func continueHint(o toHostOpts, keyPath string, needAddr bool) (sh, ps string) {
-	type arg struct {
-		v     string
-		quote bool
-	}
-	args := []arg{{"amnezia-admin", false}, {"migrate", false}, {"-key-file", false}}
-	if o.srcKeyFile != "" {
-		args = append(args, arg{o.srcKeyFile, true})
-	} else {
-		args = append(args, arg{"<файл с ключом источника>", false})
-	}
-	args = append(args, arg{"-to-key-file", false}, arg{keyPath, true})
-	if needAddr || o.mf.addrOK {
-		args = append(args, arg{"-address-changes", false})
-	}
-	args = append(args, arg{"-replace-users", false})
-	switch {
-	case o.mf.pwFile != "":
-		args = append(args, arg{"-password-file", false}, arg{o.mf.pwFile, true})
-	case o.mf.noPw:
-		args = append(args, arg{"-no-password", false})
-	}
-	if o.mf.skipXRay {
-		args = append(args, arg{"-skip-xray", false})
-	}
-	args = append(args, arg{"-apply", false})
-	var a, b []string
-	for _, x := range args {
-		if x.quote {
-			a, b = append(a, shQuote(x.v)), append(b, psQuote(x.v))
-		} else {
-			a, b = append(a, x.v), append(b, x.v)
-		}
-	}
-	return strings.Join(a, " "), strings.Join(b, " ")
+	return core.ContinueHint(core.ContinueHintOptions{SrcKeyFile: o.srcKeyFile, KeyPath: keyPath,
+		AddressChanges: needAddr || o.mf.addrOK, PasswordFile: o.mf.pwFile, NoPassword: o.mf.noPw, SkipXRay: o.mf.skipXRay})
 }
 
 // printInstallFailed — после неудачной установки: что осталось на сервере,
@@ -597,8 +615,8 @@ func keyFilePermText(path string) string {
 	return "права 0600 — только владелец"
 }
 
-// writeAdminKeyFile — ключ (Reveal) в новый файл 0600 (на Windows — права каталога); существующий файл не
-// перезаписывается. Возвращает абсолютный путь.
+// writeAdminKeyFile — -key-out или каталог ключей по умолчанию; запись —
+// core.WriteAdminKeyFile (общая с GUI).
 func writeAdminKeyFile(keyOut, host string, key core.AdminKey, now time.Time) (string, error) {
 	p := strings.TrimSpace(keyOut)
 	if p == "" {
@@ -609,30 +627,7 @@ func writeAdminKeyFile(keyOut, host string, key core.AdminKey, now time.Time) (s
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", err
 		}
-		safe := strings.Map(func(r rune) rune {
-			if r == '.' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-				return r
-			}
-			return '_'
-		}, host)
-		p = filepath.Join(dir, "admin-"+safe+"-"+now.Format("20060102-150405")+".vpn.txt")
+		p = filepath.Join(dir, core.AdminKeyFileName(host, now))
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("файл %s уже есть — не перезаписываю", abs)
-		}
-		return "", err
-	}
-	_, werr := f.WriteString(key.Reveal() + "\n")
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		_ = os.Remove(abs)
-		return "", fmt.Errorf("запись файла %s не удалась", abs)
-	}
-	return abs, nil
+	return core.WriteAdminKeyFile(p, key)
 }

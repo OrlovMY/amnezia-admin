@@ -133,6 +133,14 @@ type ui struct {
 	migDst *core.Session
 	// migShown — окно подтверждения переноса (для тестов).
 	migShown *migrateView
+	// toHostConnShown / toHostShown — окна режима «новый чистый сервер»
+	// (migrate_tohost.go; для тестов).
+	toHostConnShown *toHostConnView
+	toHostShown     *toHostView
+	toHostReviewed  *toHostReview
+	// toHostLogin — пароль входа нового сервера; затирается в closeMigDst
+	// (любое закрытие: «Назад», смена источника, выход, конец операции).
+	toHostLogin *core.Secret
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView
@@ -168,6 +176,7 @@ func main() {
 	// крестик и Alt+F4 во время операции копии (AU-UX П-1)
 	w.SetCloseIntercept(u.closeIntercept)
 	u.showConnectScreen("")
+	u.showOpMarker() // незавершённая прошлая установка на новый сервер
 	w.ShowAndRun()
 }
 

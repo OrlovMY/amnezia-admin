@@ -54,7 +54,7 @@ func (u *ui) diagnoseAfterConnect(sess *core.Session, cs []core.Container) {
 	}
 	goSafe(func() {
 		rep := sess.Diagnose(cs)
-		fyne.Do(func() {
+		uiDo(func() {
 			if u.sess != sess {
 				return // уже другое подключение
 			}
