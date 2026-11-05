@@ -135,6 +135,22 @@ func TestCLICommandListBeforeKey(t *testing.T) {
 	}
 }
 
+// Аудит AU р1, H1: ключ, вставленный вместо подкоманды, не печатается.
+func TestUnknownCommandMasksKey(t *testing.T) {
+	t.Setenv("AMNEZIA_KEY", "")
+	body := strings.Repeat("QUFBQUJCQkJDQ0NDRERERA", 8)
+	var o, e bytes.Buffer
+	if code := run([]string{"vpn://" + body}, strings.NewReader(""), &o, &e, t.TempDir()+"/kh"); code != 1 {
+		t.Fatalf("код %d", code)
+	}
+	if strings.Contains(e.String()+o.String(), body[:40]) {
+		t.Fatalf("тело ключа в выводе: %s", e.String())
+	}
+	if !strings.Contains(e.String(), "неизвестная команда") {
+		t.Fatalf("нет сообщения: %s", e.String())
+	}
+}
+
 func TestProvisionCheckUsage(t *testing.T) {
 	t.Setenv("AMNEZIA_KEY", "")
 	t.Setenv("AMNEZIA_TO_KEY", "")

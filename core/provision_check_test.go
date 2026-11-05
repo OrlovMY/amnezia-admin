@@ -113,7 +113,7 @@ func TestProvClassifyTable(t *testing.T) {
 		{"kernel empty", kC, "", nil, ProvUnknown},
 
 		{"arch ok", aC, "ARCH=aarch64\nEND\n", nil, ProvOK},
-		{"arch bad", aC, "ARCH=armv7l\nEND\n", nil, ProvBad},
+		{"arch bad", aC, "ARCH=armv7l\nEND\n", nil, ProvUnknown}, // аудит AU р1, L1: не проверено — не «нет»,
 		{"arch blank", aC, "ARCH=\nEND\n", nil, ProvUnknown},
 		{"arch fail", aC, "", fail, ProvUnknown},
 		{"arch empty", aC, "", nil, ProvUnknown},

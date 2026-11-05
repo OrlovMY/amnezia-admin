@@ -169,13 +169,16 @@ func provArgvOK(a []string) bool {
 	case "sed":
 		return len(a) == 2 && provSedExpr.MatchString(a[1])
 	case "docker":
-		return (len(a) == 4 && a[1] == "version" && a[2] == "--format" && provFormat.MatchString(a[3])) ||
+		return (len(a) == 4 && (a[1] == "version" || a[1] == "info") && a[2] == "--format" && provFormat.MatchString(a[3])) ||
 			(len(a) == 5 && a[1] == "ps" && a[2] == "-a" && a[3] == "--format" && provFormat.MatchString(a[4]))
 	}
 	return false
 }
 
-var provKeywords = map[string]bool{"if": true, "then": true, "else": true, "fi": true, "!": true}
+// provVarNames — имена переменных, которые скрипты проб вправе присваивать.
+var provVarNames = map[string]bool{"u": true, "o": true, "p": true, "c": true, "r": true, "rc": true}
+
+var provKeywords = map[string]bool{"if": true, "then": true, "else": true, "fi": true, "elif": true, "!": true}
 
 func provScriptViolations(script string) []string {
 	l := &provLexer{s: script}
@@ -199,6 +202,11 @@ func provScriptViolations(script string) []string {
 			continue
 		}
 		if provAssign.MatchString(a[0]) {
+			// N5: имена — закрытый список (PATH=, IFS= и т. п. меняют смысл
+			// следующих команд).
+			if name, _, _ := strings.Cut(a[0], "="); !provVarNames[name] {
+				bad = append(bad, "присваивание вне закрытого списка имён: "+a[0])
+			}
 			if len(a) > 1 {
 				bad = append(bad, "команда после присваивания: "+strings.Join(a, " "))
 			}
@@ -240,6 +248,9 @@ func TestProvScriptsClosedProgramList(t *testing.T) {
 		` sudo -n rm /x`,
 		` echo "$(echo x`,
 		` echo x</etc/shadow`,
+		` PATH=/tmp; ss -lntu`,
+		` IFS=x`,
+		` r=$(docker info --format "{{.DockerRootDir}}" >/tmp/f)`,
 	} {
 		if len(provScriptViolations(canary)) == 0 {
 			t.Errorf("канарейка не поймана: %s", canary)

@@ -139,7 +139,8 @@ const (
 	provDockerScript = ProvDockerTag + ` if command -v docker >/dev/null 2>&1; then echo DOCKER=yes; o=$(docker version --format "{{.Server.Version}}" 2>&1); echo "SRVRC=$?"; echo "SRV=$(echo "$o" | head -n 1)"; else echo DOCKER=no; fi; echo END`
 	provCtrScript    = ProvCtrTag + ` o=$(docker ps -a --format "{{.Names}}|{{.Ports}}" 2>&1); echo "RC=$?"; echo "$o" | sed "s/^/N=/"; echo END`
 	provPortsScript  = ProvPortsTag + ` if command -v ss >/dev/null 2>&1; then o=$(ss -lntu 2>&1); echo "SSRC=$?"; echo "$o" | sed "s/^/L=/"; else echo SS=none; fi; echo END`
-	provDiskScript   = ProvDiskTag + ` p=/; if [ -d /var/lib/docker ]; then p=/var/lib/docker; fi; echo "DFPATH=$p"; o=$(df -Pk "$p" 2>&1); echo "DFRC=$?"; echo "$o" | tail -n 1 | sed "s/^/DF=/"; echo END`
+	provDiskScript   = ProvDiskTag + ` c=/; if [ -d /var/lib/docker ]; then c=/var/lib/docker; elif [ -d /var/lib ]; then c=/var/lib; elif [ -d /var ]; then c=/var; fi; echo "CHAIN=$c"; p=$c;` +
+		` if command -v docker >/dev/null 2>&1; then r=$(docker info --format "{{.DockerRootDir}}" 2>&1); rc=$?; r=$(echo "$r" | head -n 1); echo "DRRC=$rc"; echo "DROOT=$r"; if [ "$rc" = 0 ] && [ -d "$r" ]; then p=$r; fi; fi; echo "DFPATH=$p"; o=$(df -Pk "$p" 2>&1); echo "DFRC=$?"; echo "$o" | tail -n 1 | sed "s/^/DF=/"; echo END`
 )
 
 func provCmd(script string) string { return "sh -c '" + script + "'" }
@@ -183,7 +184,7 @@ func (s *Session) ProvisionCheck() ProvisionReport {
 	r.Items = append(r.Items,
 		classifyPort(pP, pub, "порт AmneziaWG", "udp", ProvAWGPort),
 		classifyPort(pP, pub, "порт XRay", "tcp", ProvXRayPort))
-	r.Items = append(r.Items, classifyDisk(s.provProbe(provDiskScript, nil)))
+	r.Items = append(r.Items, classifyDisk(s.provProbe(provDiskScript, func(p probe) bool { return deniedIn(p.get("DROOT")) })))
 	return r
 }
 
@@ -279,7 +280,10 @@ func classifyArch(p probe) ProvItem {
 	case a == "x86_64" || a == "amd64" || a == "aarch64" || a == "arm64":
 		return ProvItem{what, ProvOK, a}
 	}
-	return ProvItem{what, ProvBad, a + ": образы Amnezia собираются для x86_64 и aarch64"}
+	// Аудит AU р1, L1: проверенного источника о годности других архитектур
+	// нет (контейнеры собираются на сервере из Dockerfile) — «не знаем», а
+	// не «нет».
+	return unk(what, a+": не проверено, что образы Amnezia собираются на "+a+" (проверены только x86_64 и aarch64)")
 }
 
 // classifyProvAppArmor — профили wg/wg-quick хоста ломают WireGuard в
@@ -438,8 +442,13 @@ func publishedPorts(d, c probe) pubPorts {
 				b, err2 = strconv.Atoi(hi)
 			}
 			if err1 != nil || err2 != nil || b < a || (proto != "tcp" && proto != "udp") {
-				// N4: не разобрали — не «свободно», а «не знаем».
-				return pubPorts{why: "порты контейнеров Docker не разобраны («" + srvText(strings.TrimSpace(part)) + "»)"}
+				// N4: не разобрали — не «свободно», а «не знаем». N6: уже
+				// найденные занятые порты не сбрасываются — список неполный.
+				if pp.known {
+					pp.known = false
+					pp.why = "порты контейнеров Docker разобраны не все («" + srvText(strings.TrimSpace(part)) + "»)"
+				}
+				continue
 			}
 			if isRange {
 				pp.ranges = append(pp.ranges, pubRange{proto, a, b, name})
@@ -506,7 +515,11 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 	// Опубликованный контейнером порт — измеренное «занят», даже если ss
 	// не ответил: docker ps его видит.
 	case pub.busy(proto, port) != "":
-		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — освободите его или выберите другой порт при установке"}
+		note := ""
+		if !pub.known {
+			note = " (список портов контейнеров неполный: " + pub.why + ")"
+		}
+		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — освободите его или выберите другой порт при установке" + note}
 	case !p.ok:
 		return notRan(what, p)
 	case p.has("SS"):
@@ -537,8 +550,25 @@ func classifyDisk(p probe) ProvItem {
 	switch {
 	case !p.ok:
 		return notRan(what, p)
+	case p.get("DFPATH") == "":
+		return unk(what, "каталог данных Docker определить не удалось")
+	// Аудит AU р1, M1: при работающем демоне меряется DockerRootDir (там
+	// лягут образы); если он назван, но мерили не его, — «не знаем», а не
+	// цепочка по умолчанию.
+	case p.get("DRRC") == "0" && (strings.TrimSpace(p.get("DROOT")) == "" || p.get("DFPATH") != p.get("DROOT")):
+		return unk(what, "Docker назвал каталог данных «"+srvText(p.get("DROOT"))+"», а измерить его не удалось")
+	// Docker есть, но DockerRootDir не прочитан не потому, что демон лежит
+	// (нет прав, иная ошибка): data-root может быть где угодно — не знаем.
+	case p.has("DRRC") && p.get("DRRC") != "0" && !strings.Contains(p.get("DROOT"), "Cannot connect to the Docker daemon"):
+		return unk(what, "каталог данных Docker прочитать не удалось: "+srvText(p.get("DROOT")))
 	case p.get("DFRC") != "0":
 		return unk(what, "df не выполнился: "+srvText(p.get("DF")))
+	}
+	src := "ближайший существующий каталог по цепочке /var/lib/docker → /var/lib → /var → /"
+	if p.get("DRRC") == "0" {
+		src = "каталог данных Docker (DockerRootDir)"
+	} else if p.has("DRRC") {
+		src += "; демон Docker остановлен, data-root из его настроек не прочитан"
 	}
 	f := strings.Fields(p.get("DF"))
 	if len(f) < 4 {
@@ -548,7 +578,7 @@ func classifyDisk(p probe) ProvItem {
 	if err != nil {
 		return unk(what, "вывод df не разобран: «"+f[3]+"»")
 	}
-	free := fmt.Sprintf("%.1f ГиБ свободно на %s", float64(kb)/1024/1024, p.get("DFPATH"))
+	free := fmt.Sprintf("%.1f ГиБ свободно на %s (%s)", float64(kb)/1024/1024, srvText(p.get("DFPATH")), src)
 	if kb < provMinFreeKB {
 		return ProvItem{what, ProvBad, free + " — нужно не меньше 1 ГиБ"}
 	}

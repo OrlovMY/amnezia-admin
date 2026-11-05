@@ -997,7 +997,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return 0
 	}
 	if !knownCLICommand(cmd) {
-		fmt.Fprintf(stderr, "неизвестная команда %q (%s)\n", cmd, cliCommandList)
+		// Аудит AU р1, H1: первым аргументом бывает вставленный ключ vpn://
+		// — печать только через границу маскировки.
+		fmt.Fprintln(stderr, core.MaskText(fmt.Sprintf("неизвестная команда %q (%s)", cmd, cliCommandList)))
 		return 1
 	}
 
