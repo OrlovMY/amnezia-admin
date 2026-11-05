@@ -128,6 +128,11 @@ type ui struct {
 	// restoreLayer — слой копии-источника восстановления (автокопия его
 	// наследует; nil — без пароля).
 	restoreLayer core.BackupLayer
+	// migDst — сессия нового сервера (цели) между проверкой и итогом переноса
+	// (migrate.go); закрывается после переноса или при следующем переносе.
+	migDst *core.Session
+	// migShown — окно подтверждения переноса (для тестов).
+	migShown *migrateView
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView
@@ -1138,7 +1143,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			// сейчас (Е1). Ошибка перезапечатывания не фатальна — соединение
 			// остаётся, просто отпечаток не будет запечатан на этот раз.
 			if resealErr := reseal(vc, sess.HostKeyFingerprint); resealErr != nil {
-				fyne.Do(func() {
+				uiDo(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить отпечаток ключа в хранилище: " + resealErr.Error())
 					}
@@ -1152,7 +1157,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			notice, labelErr := refreshVaultLabel(vc, lblBefore, cfg, creds)
 			labelNotice = notice
 			if labelErr != nil {
-				fyne.Do(func() {
+				uiDo(func() {
 					if u.status != nil {
 						u.status.SetText("Не удалось сохранить подпись сервера для списка сохранённых: " + labelErr.Error())
 					}
@@ -1163,7 +1168,8 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 			*vc.pin = "" // пин больше не нужен (SEC-01, В2 п.5)
 		}
 
-		fyne.Do(func() {
+		uiDo(func() {
+			u.closeMigDst() // цель прежнего источника не должна пережить смену источника
 			u.sess = sess
 			u.vaultPath, u.clientHostSet = "", core.ClientHostSetting{}
 			if vc != nil {
@@ -2738,7 +2744,7 @@ func (u *ui) refresh() {
 			}
 		}
 
-		fyne.Do(func() {
+		uiDo(func() {
 			// setBusy(false) — определяет ТЕКУЩЕЕ u.canManage (обновлённое
 			// ниже, если ответ не устарел) и лишь потом снимает занятость —
 			// поэтому вызван через defer, а не первой строкой: иначе кнопки

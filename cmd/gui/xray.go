@@ -60,11 +60,19 @@ type confirmWin struct {
 	ok *escButton
 	// refit — пересчитать размер по содержимому (оно изменилось)
 	refit func()
+	// onCancel — зарегистрировать действие на «Отмена»/Esc (не на «OK»)
+	onCancel func(func())
 }
 
 // confirmWindowBtn — то же, и кнопка подтверждения (окно восстановления
 // включает её по галкам).
 func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText string, danger bool, onOK func(), width ...float32) confirmWin {
+	return u.confirmWindowPinned(title, sections, nil, okText, danger, onOK, width...)
+}
+
+// confirmWindowPinned — то же, но pinned (обязательный выбор и причина
+// погашенной кнопки) стоит ВНЕ прокрутки, над кнопками: виден всегда.
+func (u *ui) confirmWindowPinned(title string, sections, pinned []fyne.CanvasObject, okText string, danger bool, onOK func(), width ...float32) confirmWin {
 	w := float32(560)
 	if len(width) > 0 {
 		w = width[0]
@@ -79,9 +87,13 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 			cv.SetOnTypedKey(prevKey)
 		}
 	}
+	var cancelHook func()
 	cancel := func() {
 		restoreKeys()
 		d.Hide()
+		if cancelHook != nil {
+			cancelHook()
+		}
 	}
 	cancelBtn := newEscButton(guiview.XRayRestartCancel(), theme.CancelIcon(), cancel, cancel)
 	okIcon := theme.ConfirmIcon()
@@ -99,14 +111,21 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	}
 	inner := container.NewVBox(sections...)
 	body := container.NewVScroll(inner)
-	content := container.NewBorder(nil, container.NewCenter(container.NewHBox(cancelBtn, okBtn)), nil, nil, body)
+	btns := container.NewCenter(container.NewHBox(cancelBtn, okBtn))
+	var pinBox fyne.CanvasObject
+	bottom := fyne.CanvasObject(btns)
+	if len(pinned) > 0 {
+		pb := container.NewVBox(pinned...)
+		pinBox = pb
+		bottom = container.NewVBox(widget.NewSeparator(), pb, btns)
+	}
+	content := container.NewBorder(nil, bottom, nil, nil, body)
 	d = dialog.NewCustomWithoutButtons(title, content, u.win)
 	d.SetOnClosed(restoreKeys)
-	u.fitDialog(d, inner, body, w)
+	u.fitDialogPinned(d, inner, body, pinBox, w)
 	cv.SetOnTypedKey(func(e *fyne.KeyEvent) {
 		if e.Name == fyne.KeyEscape {
-			restoreKeys()
-			d.Hide()
+			cancel()
 			return
 		}
 		if prevKey != nil {
@@ -116,7 +135,7 @@ func (u *ui) confirmWindowBtn(title string, sections []fyne.CanvasObject, okText
 	d.Show()
 	cv.Focus(cancelBtn)
 	u.xrayWarnShown = d
-	return confirmWin{d, okBtn, func() { u.fitDialog(d, inner, body, w) }}
+	return confirmWin{d, okBtn, func() { u.fitDialogPinned(d, inner, body, pinBox, w) }, func(f func()) { cancelHook = f }}
 }
 
 // escButton — кнопка окна подтверждения, которая по Esc отменяет окно. В
