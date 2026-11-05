@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -260,10 +261,12 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 			p["port"] = v
 		}
 		if a := strings.TrimSpace(strings.Split(iface["Address"], ",")[0]); a != "" {
-			ip, cidr, _ := strings.Cut(a, "/")
-			p["subnet_address"] = ip
-			if cidr != "" {
-				p["subnet_cidr"] = cidr
+			// subnet_address — адрес СЕТИ (10.8.1.1/24 → 10.8.1.0), как его
+			// хранит приложение; адрес хоста интерфейса сюда не кладётся
+			// (ревью PR #69, R1). Без маски сеть не вычислить — поля нет.
+			if pfx, err := netip.ParsePrefix(a); err == nil && pfx.Addr().Is4() {
+				p["subnet_address"] = pfx.Masked().Addr().String()
+				p["subnet_cidr"] = strconv.Itoa(pfx.Bits())
 			}
 		}
 		if container != "amnezia-wireguard" {
@@ -355,3 +358,56 @@ func VerifyAdminKey(key AdminKey, want AdminKeyInput, expectedFingerprint, known
 	sess.Close()
 	return nil
 }
+
+// AdminKeyContainersFromServer — параметры протокола для ключа по каждому
+// контейнеру names, прочитанные с сервера после переноса (в ключ идёт то,
+// что на сервере стоит, а не то, что было в копии). notes — оговорки для
+// человека (у XRay нет ни одного клиента, ревью PR #69 R3). Контейнер,
+// параметры которого не прочитаны, — ошибка с его именем: неполный ключ
+// не выдаётся.
+func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyContainer, notes []string, err error) {
+	if len(names) == 0 {
+		return nil, nil, errors.New("ключ: нет ни одного контейнера")
+	}
+	found, err := s.FindContainers()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ключ: список контейнеров на сервере не прочитан: %w", err)
+	}
+	for _, n := range names {
+		var c *Container
+		for i := range found {
+			if found[i].Name == n {
+				c = &found[i]
+			}
+		}
+		if c == nil || c.Dir == "" {
+			return nil, nil, fmt.Errorf("ключ: контейнера %q на сервере не видно — параметры не прочитаны", n)
+		}
+		var conf []byte
+		if n == "amnezia-xray" {
+			raw, srv, rerr := s.readXRayConf(c)
+			if rerr != nil {
+				return nil, nil, fmt.Errorf("ключ: контейнер %q, server.json не прочитан: %w", n, rerr)
+			}
+			if len(srv.ids) == 0 {
+				notes = append(notes, XRayNoClientsNote)
+			}
+			conf = raw
+		} else {
+			out, rerr := s.catConf(c)
+			if rerr != nil {
+				return nil, nil, fmt.Errorf("ключ: контейнер %q, конфигурация не прочитана: %w", n, rerr)
+			}
+			conf = []byte(out)
+		}
+		p, perr := ProtocolParamsFromServer(n, conf)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		cs = append(cs, AdminKeyContainer{Name: n, Protocol: p})
+	}
+	return cs, notes, nil
+}
+
+// XRayNoClientsNote — оговорка: XRay поставлен, но клиентов в нём нет.
+const XRayNoClientsNote = "XRay: на сервере нет ни одного клиента XRay — ключ даёт управление сервером, но подключаться по XRay пока некому; клиента можно добавить в приложении Amnezia или командой add"
