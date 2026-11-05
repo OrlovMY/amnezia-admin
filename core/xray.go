@@ -233,7 +233,15 @@ var reShortID = regexp.MustCompile(`^[0-9a-fA-F]{1,16}$`)
 
 // parseXRayServer — разбор server.json по закрытому списку формы. Ошибка
 // типа *xrayUnknown — формат не знаком; иной ошибки не бывает.
-func parseXRayServer(data []byte) (*xrayServer, error) {
+func parseXRayServer(data []byte) (*xrayServer, error) { return parseXRayServerMode(data, false) }
+
+// parseXRayServerEmptyOK — тот же строгий разбор, но пустой список клиентов
+// допустим (clientFlow остаётся пустым): так читает server.json выдача ключа
+// vpn://, которой flow клиентов не нужен (ревью PR #70-2, M1). Все прочие
+// проверки формы — те же.
+func parseXRayServerEmptyOK(data []byte) (*xrayServer, error) { return parseXRayServerMode(data, true) }
+
+func parseXRayServerMode(data []byte, emptyOK bool) (*xrayServer, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
@@ -320,6 +328,9 @@ func parseXRayServer(data []byte) (*xrayServer, error) {
 	}
 	switch len(flows) {
 	case 0:
+		if emptyOK && len(rawClients) == 0 {
+			break
+		}
 		return nil, unknownf("в server.json нет ни одного клиента — неизвестно, какой flow у новых")
 	case 1:
 		for f := range flows {

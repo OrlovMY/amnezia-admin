@@ -104,6 +104,10 @@ type MigrationOptions struct {
 	Now         time.Time
 	Resolve     Resolver
 	Progress    ProgressFunc
+	// Source — уже прочитанная копия источника (migrate -to-host читает
+	// источник один раз: по ней же строился план установки). nil —
+	// прочитать источник здесь.
+	Source *Backup
 }
 
 // Migration — собранный в памяти источник, проверка цели и план. Ни одного
@@ -128,7 +132,10 @@ func PrepareMigration(ctx context.Context, src, dst *Session, opt MigrationOptio
 	if v, why := SameServer(src, dst, opt.Resolve); v != SameNo {
 		return nil, fmt.Errorf("%w (%s)", ErrSameServer, why)
 	}
-	b, err := src.CollectBackupCtx(ctx, opt.ToolVersion, opt.Now, opt.Resolve, opt.Progress)
+	b, err := opt.Source, error(nil)
+	if b == nil {
+		b, err = src.CollectBackupCtx(ctx, opt.ToolVersion, opt.Now, opt.Resolve, opt.Progress)
+	}
 	if err != nil {
 		if errors.Is(err, ErrCanceled) {
 			return nil, err

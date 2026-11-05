@@ -166,6 +166,56 @@ func deniedIn(v string) bool { return strings.Contains(strings.ToLower(v), "perm
 // ProvisionCheck — предпроверка цели по открытой сессии. Ошибок не
 // возвращает: всё, что узнать не удалось, — ProvUnknown с причиной.
 func (s *Session) ProvisionCheck() ProvisionReport {
+	return s.provisionCheck([]ProvPort{
+		{Name: "порт AmneziaWG", Proto: "udp", Port: ProvAWGPort, Note: "порт по умолчанию"},
+		{Name: "порт XRay", Proto: "tcp", Port: ProvXRayPort, Note: "порт по умолчанию"},
+	}, nil)
+}
+
+// ProvPort — порт, свободу которого проверяет предпроверка.
+type ProvPort struct {
+	Name, Proto string
+	Port        int
+	Note        string // «порт по умолчанию» / «порт из копии»
+}
+
+// ProvisionPortsFromBackup — порты контейнеров копии, которые будут
+// поставлены (NotIncluded пропускаются). Порт, который не читается числом,
+// — отдельный пункт «узнать не удалось», а не умолчание вместо ответа.
+func ProvisionPortsFromBackup(b *Backup) (ports []ProvPort, bad []ProvItem) {
+	if b == nil {
+		return nil, []ProvItem{unk("порты из копии", "копии источника нет")}
+	}
+	for _, c := range b.Containers {
+		if c.Status == CtrNotIncluded {
+			continue
+		}
+		proto := "udp"
+		if c.Name == "amnezia-xray" {
+			proto = "tcp"
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(c.Port))
+		if err != nil || n < 1 || n > 65535 {
+			bad = append(bad, unk("порт "+c.Name+" (из копии)", fmt.Sprintf("порт в копии не читается числом: %q", c.Port)))
+			continue
+		}
+		ports = append(ports, ProvPort{Name: "порт " + c.Name, Proto: proto, Port: n, Note: "порт из копии"})
+	}
+	if len(ports) == 0 && len(bad) == 0 {
+		bad = append(bad, unk("порты из копии", "в копии нет ни одного контейнера, который будет поставлен"))
+	}
+	return ports, bad
+}
+
+// ProvisionCheckFor — предпроверка с портами КОПИИ источника (план БК §1:
+// «ProvisionCheck(порты из копии)»): ставиться будут именно они, умолчания
+// приложения здесь ни при чём.
+func (s *Session) ProvisionCheckFor(b *Backup) ProvisionReport {
+	ports, bad := ProvisionPortsFromBackup(b)
+	return s.provisionCheck(ports, bad)
+}
+
+func (s *Session) provisionCheck(ports []ProvPort, portItems []ProvItem) ProvisionReport {
 	var r ProvisionReport
 	osP := s.provProbe(provOSScript, nil)
 	r.Items = append(r.Items, classifyOS(osP))
@@ -182,9 +232,14 @@ func (s *Session) ProvisionCheck() ProvisionReport {
 	r.Items = append(r.Items, classifyContainers(dP, cP))
 	pP := s.provProbe(provPortsScript, nil)
 	pub := publishedPorts(dP, cP)
-	r.Items = append(r.Items,
-		classifyPort(pP, pub, "порт AmneziaWG", "udp", ProvAWGPort),
-		classifyPort(pP, pub, "порт XRay", "tcp", ProvXRayPort))
+	for _, pp := range ports {
+		it := classifyPort(pP, pub, pp.Name, pp.Proto, pp.Port)
+		if pp.Note != "порт по умолчанию" {
+			it.What = strings.Replace(it.What, "(порт по умолчанию)", "("+pp.Note+")", 1)
+		}
+		r.Items = append(r.Items, it)
+	}
+	r.Items = append(r.Items, portItems...)
 	diskP := s.provProbe(provDiskScript, func(p probe) bool {
 		return deniedIn(p.get("DROOT")) || (p.get("DJRC") != "" && p.get("DJRC") != "0")
 	})

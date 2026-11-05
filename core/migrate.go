@@ -157,6 +157,17 @@ func (s *Session) CheckTarget(b *Backup, resolve Resolver) (*CompatReport, error
 	return r, nil
 }
 
+// TargetAddressCheck — проверка адреса выдачи копии b против адреса
+// targetHost — ТА ЖЕ, что в CheckTarget (NeedAddressConfirm), но без
+// контейнеров цели: для решения ДО установки на чистый сервер.
+func TargetAddressCheck(b *Backup, targetHost string, resolve Resolver) (need bool, text string) {
+	if b == nil {
+		return true, "копии нет — адрес выдачи неизвестен"
+	}
+	v, t := addressVerdict(b.IssuedAddress, targetHost, resolve)
+	return v == AddrDiffers || v == AddrUnknown, t
+}
+
 func confNameOf(c *Container) (string, bool) {
 	if IsXRay(c) {
 		return xrayConfFile, true
