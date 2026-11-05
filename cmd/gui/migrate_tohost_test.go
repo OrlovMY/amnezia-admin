@@ -31,18 +31,21 @@ const (
 // thFixture — источник (fakesrv) + швы режима «новый чистый сервер».
 type thFixture struct {
 	*migFixture
-	connects  int
-	pwGiven   []string // пароль, отданный ConnectNew колбэком (по попыткам)
-	keysOut   core.KeyOutcome
-	prov      core.ProvisionReport
-	install   func() core.InstallResult
-	applyErr  error
-	applyOuts []core.RestoreOutcome
-	applied   int
-	installed int
-	verifyErr error
-	keyDir    string
-	opened    []string
+	connects     int
+	pwGiven      []string // пароль, отданный ConnectNew колбэком (по попыткам)
+	keysOut      core.KeyOutcome
+	prov         core.ProvisionReport
+	install      func() core.InstallResult
+	applyErr     error
+	applyOuts    []core.RestoreOutcome
+	applied      int
+	installed    int
+	verifyErr    error
+	keyDir       string
+	opened       []string
+	marker       string
+	awake        int
+	awakeStopped int
 }
 
 func okInstall(names ...string) core.InstallResult {
@@ -131,6 +134,12 @@ func newTHFixtureOn(t *testing.T, m *migFixture) *thFixture {
 	toHostVerify = func(core.AdminKey, core.AdminKeyInput, string, string) error { return f.verifyErr }
 	toHostKeyDir = func() (string, error) { return f.keyDir, nil }
 	toHostOpenDir = func(d string) error { f.opened = append(f.opened, d); return nil }
+	// маркер — в свой каталог теста; запрет сна — шов (ОС не трогается)
+	f.marker = filepath.Join(t.TempDir(), "marker.json")
+	oldMk, oldAw := core.OpMarkerPath, toHostKeepAwake
+	core.OpMarkerPath = func() (string, error) { return f.marker, nil }
+	toHostKeepAwake = func() (func(), bool) { f.awake++; return func() { f.awakeStopped++ }, true }
+	t.Cleanup(func() { core.OpMarkerPath, toHostKeepAwake = oldMk, oldAw })
 	return f
 }
 
@@ -387,7 +396,7 @@ func TestGUIToHostThreeOutcomes(t *testing.T) {
 		{"не измерено", func() core.InstallResult {
 			return core.InstallResult{Containers: []core.InstallContainerResult{{Container: "amnezia-awg", Outcome: core.InstallInstalled}}}
 		}, nil, "НЕИЗВЕСТНО — установка не измерена", 0, "amnezia-awg (не подтверждено)"},
-		{"перенос не удался", nil, errors.New("связь"), "НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере поставлена", 1, "режим «" + migrateModeKey + "», вставьте ключ из файла"},
+		{"перенос не удался", nil, errors.New("связь"), "НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере поставлена", 1, "режим «" + migrateModeKey + "» → кнопка «" + migrateFromFileText + "» и выберите файл"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newTHFixture(t)
@@ -819,5 +828,165 @@ func TestGUIToHostLoginPwWipedOnClose(t *testing.T) {
 	f.u.closeWindow()
 	if b := p.Bytes(); strings.Trim(string(b), "\x00") != "" {
 		t.Error("пароль входа не затёрт при закрытии")
+	}
+}
+
+// TestGUIToHostOpMarker — маркер незавершённой операции (аудит AU M1):
+// измеренный итог снимает, неизвестный оставляет; при запуске — окно с
+// «Понятно — убрать» / «Оставить»; повреждённый маркер — не «нет маркера».
+// Запрет сна ставится и снимается.
+// Подмены: снимать всегда; не писать до установки — роняют.
+func TestGUIToHostOpMarker(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		install func() core.InstallResult
+		keep    bool
+	}{
+		{"перенесено", nil, false},
+		{"установка не удалась (измерено)", func() core.InstallResult {
+			return core.InstallResult{Measure: &core.CompatReport{}, Containers: []core.InstallContainerResult{{Container: "amnezia-awg", Outcome: core.InstallNotInstalled, Rollback: core.RollbackDone}}}
+		}, false},
+		{"установка не измерена", func() core.InstallResult {
+			return core.InstallResult{Containers: []core.InstallContainerResult{{Container: "amnezia-awg", Outcome: core.InstallInstalled}}}
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newTHFixture(t)
+			f.keysOut = core.KeysAccepted
+			sawMarker := false
+			f.install = func() core.InstallResult {
+				m, err := core.ReadOpMarker()
+				sawMarker = err == nil && m != nil && m.Target == migTestDstHost
+				if c.install != nil {
+					return c.install()
+				}
+				return okInstall("amnezia-awg")
+			}
+			f.startHost(t)
+			v := f.fill(t, false, "")
+			if !strings.Contains(f.allText(), "не рвите сеть") {
+				t.Error("нет строки «не рвите сеть» перед кнопкой")
+			}
+			test.Tap(v.apply)
+			waitGUIGoroutines(t)
+			if !sawMarker {
+				t.Error("маркера не было во время установки")
+			}
+			if f.awake != 1 || f.awakeStopped != 1 {
+				t.Errorf("запрет сна: поставлен %d, снят %d", f.awake, f.awakeStopped)
+			}
+			m, err := core.ReadOpMarker()
+			if err != nil || (m != nil) != c.keep {
+				t.Fatalf("маркер после итога: %v %v (ждали оставлен=%v)", m, err, c.keep)
+			}
+			d := f.u.showOpMarker()
+			if (d != nil) != c.keep {
+				t.Fatalf("окно при запуске: %v", d != nil)
+			}
+			if !c.keep {
+				return
+			}
+			if !strings.Contains(f.allText(), "итог неизвестен") || !strings.Contains(f.allText(), migTestDstHost) {
+				t.Errorf("нет текста маркера:\n%s", f.allText())
+			}
+			test.Tap(findEsc(f.u.win.Canvas().Overlays().Top(), opMarkerKeep))
+			if m, _ := core.ReadOpMarker(); m == nil {
+				t.Error("«Оставить» сняло маркер")
+			}
+			f.u.showOpMarker()
+			test.Tap(findEsc(f.u.win.Canvas().Overlays().Top(), opMarkerClear))
+			if m, err := core.ReadOpMarker(); m != nil || err != nil {
+				t.Errorf("«Понятно — убрать» не сняло маркер: %v %v", m, err)
+			}
+		})
+	}
+	// повреждённый маркер — окно «не прочитан», а не тишина
+	f := newTHFixture(t)
+	if err := os.WriteFile(f.marker, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.u.showOpMarker(); d == nil || !strings.Contains(f.allText(), "повреждён") {
+		t.Errorf("повреждённый маркер не показан:\n%s", f.allText())
+	}
+}
+
+// TestGUIToHostContinueHintParity — команда продолжения в GUI = core
+// (та же, что CLI): -address-changes при подтверждённом адресе, слой
+// автокопии, -replace-users, -apply (аудит AU M3).
+func TestGUIToHostContinueHintParity(t *testing.T) {
+	for _, pw := range []bool{true, false} {
+		f := newTHFixture(t)
+		f.keysOut = core.KeysAccepted
+		f.applyErr = errors.New("связь")
+		f.startHost(t)
+		v := f.next(t)
+		if v.addrCheck == nil {
+			t.Fatal("сцена ничего не значит: адрес не требует подтверждения")
+		}
+		v.replace.SetChecked(true)
+		v.addrCheck.SetChecked(true)
+		if pw {
+			v.mode.SetSelected(backupWithPassword)
+			v.pw.SetText(migTestAutoPw)
+			v.pw2.SetText(migTestAutoPw)
+		} else {
+			v.mode.SetSelected(backupNoPassword)
+		}
+		v.consent.SetChecked(true)
+		v.keyPw.SetText(thKeyPw)
+		test.Tap(v.apply)
+		waitGUIGoroutines(t)
+		ents, _ := os.ReadDir(f.keyDir)
+		if len(ents) != 1 {
+			t.Fatal("ключа нет")
+		}
+		path := filepath.Join(f.keyDir, ents[0].Name())
+		sh, ps := core.ContinueHint(core.ContinueHintOptions{KeyPath: path, AddressChanges: true, PasswordAsk: pw, NoPassword: !pw})
+		txt := f.allText()
+		if !strings.Contains(txt, sh) || !strings.Contains(txt, ps) {
+			t.Errorf("команда продолжения не совпала с core:\nждали %s\n%s", sh, txt)
+		}
+		for _, w := range []string{"-address-changes", "-replace-users", "-apply", map[bool]string{true: "-password-file", false: "-no-password"}[pw]} {
+			if !strings.Contains(sh, w) {
+				t.Errorf("нет %s", w)
+			}
+		}
+	}
+}
+
+// TestGUIMigrateKeyFromFile — «Из файла…»: ключ читается из файла, в окне —
+// только имя файла; доходит до подключения к цели (аудит AU M2).
+func TestGUIMigrateKeyFromFile(t *testing.T) {
+	f := newMigFixture(t, migTestDstHost, "SHA256:srcfp", "SHA256:dstfp")
+	kf := filepath.Join(t.TempDir(), "new.vpn.txt")
+	if err := os.WriteFile(kf, []byte(f.key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := migrateKeyFileOpen
+	migrateKeyFileOpen = func(_ *ui, pick func(string)) { pick(kf) }
+	t.Cleanup(func() { migrateKeyFileOpen = old })
+	f.u.backupMenu()
+	test.Tap(buttonByText(t, topPopup(t, f.u.win.Canvas()), migrateMenuText))
+	ov := f.u.win.Canvas().Overlays().Top()
+	ok := findEsc(ov, migrateAskNext)
+	if !ok.Disabled() {
+		t.Fatal("«Продолжить» включена без ключа")
+	}
+	test.Tap(buttonByText(t, ov, migrateFromFileText))
+	txt := f.allText()
+	if !strings.Contains(txt, "ключ из файла new.vpn.txt") {
+		t.Errorf("имени файла нет:\n%s", txt)
+	}
+	body := strings.TrimPrefix(f.key, "vpn://")
+	if strings.Contains(txt, body[:16]) || strings.Contains(txt, migTestSecret) {
+		t.Fatal("ключ на экране")
+	}
+	if ok.Disabled() {
+		t.Fatal("«Продолжить» выключена при ключе из файла")
+	}
+	test.Tap(ok)
+	waitGUIGoroutines(t)
+	if f.connects != 1 || f.gotCreds == nil || f.gotCreds.Host != migTestDstHost {
+		t.Fatalf("ключ из файла не дошёл до подключения: %d", f.connects)
 	}
 }

@@ -16,10 +16,12 @@ package main
 // с согласия; BuildAdminKey → VerifyAdminKey → файл) → итог: перенесено /
 // не перенесено / НЕИЗВЕСТНО.
 //
-// Секреты: пароль входа и пароль для ключа живут в core.Secret и
-// затираются; поле пароля очищается сразу после чтения; ключ vpn:// пишется
-// только в файл (Reveal), на экран — путь. Все тексты ошибок — через
-// core.MaskText.
+// Секреты: пароль входа и пароль для ключа держатся в core.Secret и
+// затираются (Wipe) после использования и при любом закрытии; поля паролей
+// очищаются сразу после чтения. Честно: строки Entry.Text (и копия, которую
+// делает SSH-библиотека) — строки Go, их затереть нельзя — как в CLI.
+// Ключ vpn:// пишется только в файл (Reveal), на экран — путь. Все тексты
+// ошибок — через core.MaskText.
 
 import (
 	"context"
@@ -61,10 +63,12 @@ const (
 	toHostModeLabel      = "Автокопия нового сервера:"
 	toHostOpenDirText    = "Открыть папку"
 	toHostCancelTitle    = "Прервать установку?"
+	toHostNoSleepWin     = "До итога не закрывайте крышку ноутбука и не рвите сеть (сон ПК программа на это время запретит)."
+	toHostNoSleepOther   = "До итога не закрывайте крышку ноутбука, не усыпляйте ПК и не рвите сеть (на этой ОС программа сон не запрещает)."
 	toHostCancelYes      = "Прервать после установки (клиентов не переносить)"
 	toHostNoCancelApply  = "Идёт запись клиентов на новый сервер — запись клиентов прервать нельзя, дождитесь итога."
 	toHostCancelNo       = "Продолжить установку"
-	toHostCancelWarn     = "Установку прервать нельзя: она дойдёт до конца — до последнего контейнера плана (ядро не останавливает установку посреди работы). После этого программа покажет НАСТОЯЩИЙ итог установки по контейнерам (что встало, что откатилось), клиентов переносить НЕ будет и ключ vpn:// НЕ выдаст. Старый сервер не изменён."
+	toHostCancelWarn     = "Установку прервать нельзя: она дойдёт до конца — до последнего контейнера плана (ядро не останавливает установку посреди работы). После этого программа покажет НАСТОЯЩИЙ итог установки по контейнерам (что встало, что откатилось), клиентов переносить НЕ будет и ключ vpn:// НЕ выдаст. Новый сервер останется с Amnezia, но без клиентов и без ключа: чтобы продолжить, понадобится вручную удалить контейнеры (docker rm -f …) и повторить перенос, или взять ключ в приложении Amnezia. Старый сервер не изменён."
 	toHostPwHint         = "Пароль (не отображается и не сохраняется)"
 	toHostKeyPwHint      = "Пароль root для ключа vpn://"
 	toHostReasonConnHost = "«Подключиться» недоступна: укажите IP или DNS-имя (без пользователя и порта)."
@@ -121,7 +125,9 @@ var (
 		return s.AdminKeyContainersFromServer(names)
 	}
 	toHostVerify = core.VerifyAdminKey
-	toHostKeyDir = func() (string, error) {
+	// toHostKeepAwake — запрет сна на время установки и переноса.
+	toHostKeepAwake = core.KeepAwake
+	toHostKeyDir    = func() (string, error) {
 		d, err := core.UserConfigsDir()
 		if err != nil {
 			return "", err
@@ -181,7 +187,7 @@ func (u *ui) toHostConnect(host, port, user, keysWhy string) *toHostConnView {
 	v.reason = wrapLabel("", true)
 	form := container.New(layout.NewFormLayout(), widget.NewLabel("Адрес:"), v.host, widget.NewLabel("Порт SSH:"), v.port, widget.NewLabel("Пользователь:"), v.user)
 	sections := []fyne.CanvasObject{
-		wrapLabel("Новый сервер — чистый: Amnezia на нём ещё нет, ключа vpn:// у него нет. Программа войдёт по SSH (ключами этого компьютера, а если не выйдет — по паролю; пароль используется один раз и не сохраняется), "+
+		wrapLabel("Новый сервер — чистый: Amnezia на нём ещё нет, ключа vpn:// у него нет. Программа войдёт по SSH (ключами этого компьютера, а если не выйдет — по паролю; пароль используется один раз и не сохраняется — кроме случая, когда вы на следующем шаге разрешите положить его в ключ vpn://), "+
 			"проверит сервер, покажет план установки и всё, что изменится, и только после вашего подтверждения поставит Amnezia и перенесёт клиентов. Старый сервер только читается.", false),
 		form,
 	}
@@ -575,7 +581,11 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 	}
 	v.reason = wrapLabel("", true)
 	sections = append(sections, wrapLabel(migrateAutoCopyAsk, false), wrapLabel(toHostConsentNote, false))
-	pinned = append(pinned, container.NewBorder(nil, nil, widget.NewLabelWithStyle(toHostModeLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.mode), pwRow, keyRow, v.reason)
+	noSleep := toHostNoSleepOther
+	if core.KeepAwakeSupported {
+		noSleep = toHostNoSleepWin
+	}
+	pinned = append(pinned, container.NewBorder(nil, nil, widget.NewLabelWithStyle(toHostModeLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.mode), pwRow, keyRow, wrapLabel(noSleep, true), v.reason)
 	v.pinned = pinned
 	var cw confirmWin
 	cw = u.confirmWindowPinned(toHostWinTitle, sections, pinned, toHostApplyText, true, func() { u.toHostRun(st, v) }, 900)
@@ -662,6 +672,9 @@ type toHostOutcome struct {
 	keyPath  string
 	keyLines []string
 	names    []string
+	notes    []string // маркер, запрет сна — что сказать в итоге
+	addr     bool     // адрес выдачи подтверждался
+	xraySkip bool     // XRay оставлен как есть
 }
 
 // toHostVerdict — один из трёх исходов. «Неизвестно» проверяется раньше
@@ -691,8 +704,9 @@ func toHostVerdict(o toHostOutcome) (migState, string) {
 // toHostRun — установка, перенос и ключ в фоне; «Отмена» — только с
 // предупреждением, что прерванная установка = «неизвестно».
 func (u *ui) toHostRun(st *toHostState, v *toHostView) {
-	o := toHostOutcome{consent: v.consent.Checked}
+	o := toHostOutcome{consent: v.consent.Checked, addr: st.needAddr}
 	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == migrateXRayRestart
+	o.xraySkip = v.xrayRadio != nil && !xrayOK
 	addrOK := v.addrCheck == nil || v.addrCheck.Checked
 	layer := v.layer()
 	o.enc = layer != nil && layer.Name() == core.PasswordLayerName
@@ -754,8 +768,28 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		if toHostBeforeInstall != nil {
 			toHostBeforeInstall()
 		}
-		pv.report(core.Progress{Text: "Шаг 1 из 3: установка Amnezia на новый сервер (это может занять несколько минут)…"})
-		o.res = toHostInstall(st.dst, st.plan, core.InstallOptions{Backup: st.b, Resolve: backupResolve, PreviewAccepted: true})
+		// маркер незавершённой операции — ДО первой записи на цель; без него
+		// обрыв посреди установки не оставил бы следа (аудит AU M1)
+		mk := core.OpMarker{Target: st.host, Started: time.Now(), Step: "установка Amnezia", Installed: o.names, Tool: version.String()}
+		if err := core.WriteOpMarker(mk); err != nil {
+			o.res = core.InstallResult{Refused: "маркер незавершённой операции не записан (" + core.MaskText(err.Error()) + ") — без него обрыв посреди установки остался бы без следа"}
+		} else {
+			stopAwake, awake := toHostKeepAwake()
+			defer stopAwake()
+			if awake {
+				o.notes = append(o.notes, "Сон ПК был запрещён на время установки и переноса.")
+			} else if core.KeepAwakeSupported {
+				o.notes = append(o.notes, "Запретить сон ПК не удалось — установка шла без этой защиты.")
+			}
+			pv.report(core.Progress{Text: "Шаг 1 из 3: установка Amnezia на новый сервер (это может занять несколько минут)…"})
+			o.res = toHostInstall(st.dst, st.plan, core.InstallOptions{Backup: st.b, Resolve: backupResolve, PreviewAccepted: true})
+			if o.res.ReadyForRestore() {
+				mk.Step = "перенос клиентов"
+				if err := core.WriteOpMarker(mk); err != nil {
+					o.notes = append(o.notes, "Маркер незавершённой операции не обновлён (останется шаг «установка»): "+core.MaskText(err.Error()))
+				}
+			}
+		}
 		o.canceled = canceled.Load()
 		if o.res.ReadyForRestore() {
 			applying.Store(true) // с этого места «Прервать» не принимается
@@ -775,6 +809,14 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		if toHostKeyAllowed(o) {
 			pv.report(core.Progress{Text: "Шаг 3 из 3: ключ vpn:// нового сервера…"})
 			o.keyPath, o.keyLines = toHostIssueKey(st, o.names, keyPw, time.Now())
+		}
+		// маркер снимается только при ИЗМЕРЕННОМ итоге
+		if vst, vhead := toHostVerdict(o); vst == migUnknown {
+			o.notes = append(o.notes, "Маркер незавершённой операции оставлен ("+strings.SplitN(vhead, " —", 2)[0]+"): программа напомнит о нём при следующем запуске.")
+		} else if o.res.Refused == "" || !strings.HasPrefix(o.res.Refused, "маркер") {
+			if err := core.ClearOpMarker(); err != nil {
+				o.notes = append(o.notes, "Маркер незавершённой операции не удалён (при следующем запуске будет ложное напоминание): "+core.MaskText(err.Error()))
+			}
 		}
 		uiDo(func() {
 			u.setBusy(false)
@@ -955,13 +997,19 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 		case o.canceled && o.keyPath == "":
 			body = append(body, "Продолжить режимом «"+migrateModeKey+"» нельзя: ключа нового сервера нет. Варианты: удалить поставленные контейнеры (docker rm -f "+strings.Join(o.names, " ")+"; для XRay и docker volume rm его тома) и повторить перенос на чистый сервер с нуля; или добавить сервер в приложение Amnezia (логин и пароль), взять из него ключ «полный доступ» и продолжить режимом «"+migrateModeKey+"».")
 		case o.keyPath != "":
-			body = append(body, "Продолжить перенос на уже поставленный сервер: «Копия…» → «"+migrateMenuText+"» → режим «"+migrateModeKey+"», вставьте ключ из файла "+o.keyPath+
-				" (или командой: amnezia-admin migrate -key-file <ключ старого сервера> -to-key-file '"+o.keyPath+"' -replace-users -apply).")
+			sh, ps := core.ContinueHint(core.ContinueHintOptions{KeyPath: o.keyPath, AddressChanges: o.addr,
+				PasswordAsk: o.enc, NoPassword: !o.enc, SkipXRay: o.xraySkip})
+			body = append(body, "Продолжить перенос на уже поставленный сервер: «Копия…» → «"+migrateMenuText+"» → режим «"+migrateModeKey+"» → кнопка «"+migrateFromFileText+"» и выберите файл "+o.keyPath+
+				" (ключ читается из файла напрямую — не копируйте его через буфер обмена).",
+				"Или командой: "+sh, "PowerShell: "+ps)
 		default:
 			body = append(body, "Ключ нового сервера не выдан — продолжить можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ «полный доступ»; затем режим «"+migrateModeKey+"». Повторная установка откажет: сервер уже не чистый.")
 		}
 	} else if transferred && o.keyPath == "" {
 		body = append(body, "", "Перенос выполнен, но ключ vpn:// нового сервера не выдан. Программа управляет сервером только по ключу: добавьте новый сервер в приложение Amnezia (адрес "+st.host+", пользователь "+st.user+", пароль) и выгрузите из него ключ «полный доступ».")
+	}
+	if len(o.notes) > 0 {
+		body = append(append(body, ""), o.notes...)
 	}
 	objs := []fyne.CanvasObject{hl, wrapLabel(strings.Join(body, "\n"), false)}
 	if o.keyPath != "" {
@@ -977,3 +1025,31 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	d.Show()
 	return d
 }
+
+// showOpMarker — при запуске: прошлая установка не завершена (или маркер не
+// прочитан) — сказать; «Понятно — убрать» снимает маркер, «Оставить» — нет.
+func (u *ui) showOpMarker() dialog.Dialog {
+	m, err := core.ReadOpMarker()
+	var text string
+	switch {
+	case err != nil:
+		text = core.MaskText(err.Error()) + " — итог прошлой установки на новый сервер может быть неизвестен. Проверьте сервер вручную."
+	case m != nil:
+		text = m.Text()
+	default:
+		return nil
+	}
+	cw := u.confirmWindowBtn(opMarkerTitle, []fyne.CanvasObject{wrapLabel(text, false)}, opMarkerClear, false, func() {
+		if err := core.ClearOpMarker(); err != nil {
+			u.migrateInfo("Маркер не убран", core.MaskText(err.Error()))
+		}
+	}, 640)
+	cw.cancel.SetText(opMarkerKeep)
+	return cw.d
+}
+
+const (
+	opMarkerTitle = "Прошлая установка не завершена"
+	opMarkerClear = "Понятно — убрать"
+	opMarkerKeep  = "Оставить"
+)

@@ -24,6 +24,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
@@ -144,6 +145,22 @@ var migrateConnect = func(creds *core.ServerCreds, pol core.HostKeyPolicy) (*cor
 	return core.ConnectWithHostKey(creds, pol)
 }
 
+// migrateFromFileText — кнопка выбора файла ключа.
+const migrateFromFileText = "Из файла…"
+
+// migrateKeyFileOpen — диалог выбора файла ключа (шов теста).
+var migrateKeyFileOpen = func(u *ui, pick func(path string)) {
+	d := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+		if err != nil || r == nil {
+			return
+		}
+		path := r.URI().Path()
+		_ = r.Close()
+		pick(path)
+	}, u.win)
+	d.Show()
+}
+
 // migrateAsk — первый шаг: какой новый сервер. Режимы: «Сервер с Amnezia
 // (ключ vpn://)» — как было (выбран по умолчанию), и «Новый чистый сервер
 // (по IP/имени)» — migrate_tohost.go.
@@ -154,6 +171,32 @@ func (u *ui) migrateAsk() *escButton {
 	e := widget.NewPasswordEntry() // ключ содержит пароль/SSH-ключ: не показывать
 	e.SetPlaceHolder("vpn://…")
 	keyHint := wrapLabel("Ключ нового сервера:", true)
+	// «Из файла…» — ключ читается из файла напрямую, без буфера обмена
+	// (аудит AU GUI-TO-HOST M2); в окне — только имя файла.
+	var fileKey core.Secret
+	fileLbl := wrapLabel("", false)
+	var update func()
+	fromFile := widget.NewButtonWithIcon(migrateFromFileText, theme.FolderOpenIcon(), func() {
+		migrateKeyFileOpen(u, func(path string) {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				u.migrateInfo("Ключ не прочитан", "Файл "+path+" не прочитан.")
+				return
+			}
+			k := []byte(strings.TrimSpace(string(b)))
+			clear(b)
+			if len(k) == 0 {
+				u.migrateInfo("Ключ не прочитан", "Файл "+path+" пуст.")
+				return
+			}
+			fileKey.Wipe()
+			fileKey = core.NewSecret(k)
+			clear(k)
+			e.SetText("")
+			fileLbl.SetText("ключ из файла " + filepath.Base(path))
+			update()
+		})
+	})
 	var ok *escButton
 	mode := widget.NewRadioGroup([]string{migrateModeKey, migrateModeHost}, nil)
 	mode.Required = true
@@ -161,7 +204,7 @@ func (u *ui) migrateAsk() *escButton {
 		wrapLabel("Источник — сервер, к которому вы сейчас подключены (только чтение). Цель — НОВЫЙ сервер. "+
 			"Данные старого сервера пойдут на новый напрямую, из памяти, без записи копии на диск. Перед заменой программа сохранит на диск автокопию нового сервера.", false),
 		wrapLabel("Новый сервер:", true), mode,
-		keyHint, e,
+		keyHint, container.NewBorder(nil, nil, nil, fromFile, e), fileLbl,
 	}, migrateAskNext, false, func() {
 		if mode.Selected == migrateModeHost {
 			e.SetText("")
@@ -169,20 +212,34 @@ func (u *ui) migrateAsk() *escButton {
 			return
 		}
 		key := e.Text
+		if key == "" && fileKey.Len() > 0 {
+			key = string(fileKey.Bytes())
+		}
+		fileKey.Wipe()
 		e.SetText("")
 		u.migrateStart(key)
 	}, 640)
 	ok = cw.ok
-	update := func() {
+	cw.onCancel(func() { fileKey.Wipe() })
+	update = func() {
 		host := mode.Selected == migrateModeHost
 		if host {
 			keyHint.Hide()
 			e.Hide()
+			fromFile.Hide()
+			fileLbl.Hide()
 		} else {
 			keyHint.Show()
 			e.Show()
+			fromFile.Show()
+			fileLbl.Show()
 		}
-		if host || mode.Selected == migrateModeKey && strings.TrimSpace(e.Text) != "" {
+		if strings.TrimSpace(e.Text) != "" && fileKey.Len() > 0 { // ввод вручную главнее файла
+			fileKey.Wipe()
+			fileKey = core.Secret{}
+			fileLbl.SetText("")
+		}
+		if host || mode.Selected == migrateModeKey && (strings.TrimSpace(e.Text) != "" || fileKey.Len() > 0) {
 			ok.Enable()
 		} else {
 			ok.Disable()

@@ -1106,6 +1106,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 
 	// migrate — два сервера, свой разбор ключей и подключение (migrate.go).
 	if cmd == "migrate" {
+		printOpMarker(stderr) // незавершённая прошлая установка — сказать до всего
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 		set := map[string]bool{}

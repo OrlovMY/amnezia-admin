@@ -176,6 +176,7 @@ func main() {
 	// крестик и Alt+F4 во время операции копии (AU-UX П-1)
 	w.SetCloseIntercept(u.closeIntercept)
 	u.showConnectScreen("")
+	u.showOpMarker() // незавершённая прошлая установка на новый сервер
 	w.ShowAndRun()
 }
 
