@@ -361,8 +361,13 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 		names0 = append(names0, it.Container)
 	}
 	mk := core.OpMarker{Target: host, Started: now, Step: "установка Amnezia", Installed: names0, Tool: version.String()}
-	if err := core.WriteOpMarker(mk); err != nil {
-		backupErr(errOut, "Маркер незавершённой операции не записан — установка не начата (без него обрыв посреди установки остался бы без следа): ", err)
+	if err := core.BeginOpMarker(mk); err != nil {
+		if errors.Is(err, core.ErrOpMarkerPending) {
+			backupErr(errOut, "Установка не начата: ", err)
+		} else {
+			backupErr(errOut, "Установка не начата (без маркера обрыв посреди установки остался бы без следа): ", err)
+		}
+		fmt.Fprintln(w, "Ничего не изменено.")
 		return exitToHostNo
 	}
 	stopAwake, awake := core.KeepAwake()

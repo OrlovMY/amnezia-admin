@@ -673,8 +673,11 @@ type toHostOutcome struct {
 	keyLines []string
 	names    []string
 	notes    []string // маркер, запрет сна — что сказать в итоге
-	addr     bool     // адрес выдачи подтверждался
-	xraySkip bool     // XRay оставлен как есть
+	// markerErr — маркер новой установки не начат (ErrOpMarkerPending /
+	// ErrOpMarkerNotWritten): установка не начиналась, маркер не снимается.
+	markerErr error
+	addr      bool // адрес выдачи подтверждался
+	xraySkip  bool // XRay оставлен как есть
 }
 
 // toHostVerdict — один из трёх исходов. «Неизвестно» проверяется раньше
@@ -771,8 +774,13 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		// маркер незавершённой операции — ДО первой записи на цель; без него
 		// обрыв посреди установки не оставил бы следа (аудит AU M1)
 		mk := core.OpMarker{Target: st.host, Started: time.Now(), Step: "установка Amnezia", Installed: o.names, Tool: version.String()}
-		if err := core.WriteOpMarker(mk); err != nil {
-			o.res = core.InstallResult{Refused: "маркер незавершённой операции не записан (" + core.MaskText(err.Error()) + ") — без него обрыв посреди установки остался бы без следа"}
+		if err := core.BeginOpMarker(mk); err != nil {
+			o.markerErr = err
+			why := " — без него обрыв посреди установки остался бы без следа"
+			if errors.Is(err, core.ErrOpMarkerPending) {
+				why = ""
+			}
+			o.res = core.InstallResult{Refused: core.MaskText(err.Error()) + why}
 		} else {
 			stopAwake, awake := toHostKeepAwake()
 			defer stopAwake()
@@ -813,7 +821,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		// маркер снимается только при ИЗМЕРЕННОМ итоге
 		if vst, vhead := toHostVerdict(o); vst == migUnknown {
 			o.notes = append(o.notes, "Маркер незавершённой операции оставлен ("+strings.SplitN(vhead, " —", 2)[0]+"): программа напомнит о нём при следующем запуске.")
-		} else if o.res.Refused == "" || !strings.HasPrefix(o.res.Refused, "маркер") {
+		} else if o.markerErr == nil { // свой маркер не писался — чужой не трогать
 			if err := core.ClearOpMarker(); err != nil {
 				o.notes = append(o.notes, "Маркер незавершённой операции не удалён (при следующем запуске будет ложное напоминание): "+core.MaskText(err.Error()))
 			}

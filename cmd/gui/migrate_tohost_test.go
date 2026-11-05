@@ -990,3 +990,50 @@ func TestGUIMigrateKeyFromFile(t *testing.T) {
 		t.Fatalf("ключ из файла не дошёл до подключения: %d", f.connects)
 	}
 }
+
+// TestGUIToHostOpMarkerPending — прежний маркер молча не перезаписывается и
+// не снимается: есть / повреждён → «установка не начиналась» с причиной,
+// Install не вызван, маркер тот же; нет → установка идёт. Признак — тип
+// ошибки (errors.Is), не начало строки. Подмена: снимать маркер при отказе
+// (прежнее условие по тексту) — роняет.
+func TestGUIToHostOpMarkerPending(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		refuse     bool
+	}{
+		{"нет маркера", "", false},
+		{"есть маркер", `{"target":"192.0.2.77","started":"2026-11-06T10:00:00Z","step":"установка"}`, true},
+		{"повреждён", "{", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newTHFixture(t)
+			f.keysOut = core.KeysAccepted
+			if c.body != "" {
+				if err := os.WriteFile(f.marker, []byte(c.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.startHost(t)
+			v := f.fill(t, false, "")
+			test.Tap(v.apply)
+			waitGUIGoroutines(t)
+			txt := f.allText()
+			if !c.refuse {
+				if f.installed != 1 {
+					t.Fatalf("без маркера установка не шла:\n%s", txt)
+				}
+				return
+			}
+			if f.installed != 0 || !strings.Contains(txt, "установка не начиналась") || !strings.Contains(txt, "сначала проверьте") || !strings.Contains(txt, f.marker) {
+				t.Errorf("отказ не тот (установок %d):\n%s", f.installed, txt)
+			}
+			if b, _ := os.ReadFile(f.marker); string(b) != c.body {
+				t.Error("прежний маркер изменён или снят")
+			}
+		})
+	}
+	o := toHostOutcome{markerErr: fmt.Errorf("обёртка: %w", core.ErrOpMarkerPending)}
+	if !errors.Is(o.markerErr, core.ErrOpMarkerPending) || errors.Is(o.markerErr, core.ErrOpMarkerNotWritten) {
+		t.Error("типы ошибок маркера не различаются")
+	}
+}

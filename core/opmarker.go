@@ -93,6 +93,35 @@ func ClearOpMarker() error {
 	return nil
 }
 
+// ErrOpMarkerPending — есть маркер прежней незавершённой установки (или он
+// не прочитан): новая установка не начинается, прежний след не стирается.
+var ErrOpMarkerPending = errors.New("есть незавершённая установка")
+
+// ErrOpMarkerNotWritten — маркер новой установки записать не удалось.
+var ErrOpMarkerNotWritten = errors.New("маркер незавершённой операции не записан")
+
+// BeginOpMarker — перед первой записью на цель: если маркер прежней
+// установки есть или не прочитан — ErrOpMarkerPending (молча не
+// перезаписывается); иначе записать m (ошибка — ErrOpMarkerNotWritten).
+func BeginOpMarker(m OpMarker) error {
+	where := "файл маркера в каталоге данных программы"
+	if p, perr := OpMarkerPath(); perr == nil {
+		where = p
+	}
+	old, err := ReadOpMarker()
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %v — сначала проверьте прежний новый сервер и уберите маркер (GUI: «Понятно — убрать» при запуске; CLI: удалить файл %s)", ErrOpMarkerPending, err, where)
+	case old != nil:
+		return fmt.Errorf("%w на %s (%s) — сначала проверьте тот сервер и уберите маркер (GUI: «Понятно — убрать» при запуске; CLI: удалить файл %s)",
+			ErrOpMarkerPending, old.Target, old.Started.Local().Format("02.01.2006 15:04"), where)
+	}
+	if err := WriteOpMarker(m); err != nil {
+		return fmt.Errorf("%w: %v", ErrOpMarkerNotWritten, err)
+	}
+	return nil
+}
+
 // Text — сообщение человеку.
 func (m OpMarker) Text() string {
 	inst := "—"

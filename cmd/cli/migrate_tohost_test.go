@@ -73,6 +73,12 @@ type thEnv struct {
 
 func newTHEnv(t *testing.T) *thEnv {
 	e := &thEnv{t: t, dst: &thRec{f: healthyProvCLI()}, backup: thBackup(), pwAnswer: thPw, keyDir: t.TempDir()}
+	// маркер незавершённой операции — свой у каждого теста: оставленный
+	// одним тестом не должен останавливать следующий
+	mkPath := filepath.Join(t.TempDir(), "marker.json")
+	oldMk := core.OpMarkerPath
+	core.OpMarkerPath = func() (string, error) { return mkPath, nil }
+	t.Cleanup(func() { core.OpMarkerPath = oldMk })
 	e.install = core.InstallResult{
 		Containers: []core.InstallContainerResult{{Container: "amnezia-awg2", Outcome: core.InstallInstalled, Measured: core.CompatMatch, VPN: core.CompatMatch}},
 		Measure:    &core.CompatReport{},
@@ -613,6 +619,43 @@ func TestToHostOpMarker(t *testing.T) {
 			printOpMarker(&buf)
 			if c.keep != strings.Contains(buf.String(), "не завершена") {
 				t.Errorf("напоминание: %q", buf.String())
+			}
+		})
+	}
+}
+
+// TestToHostOpMarkerPending — прежний маркер молча не перезаписывается:
+// есть / повреждён → отказ до установки с причиной, маркер не тронут;
+// нет → установка идёт (тест доезда через run).
+func TestToHostOpMarkerPending(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		refuse     bool
+	}{
+		{"нет маркера", "", false},
+		{"есть маркер", `{"target":"192.0.2.77","started":"2026-11-06T10:00:00Z","step":"установка"}`, true},
+		{"повреждён", "{", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newTHEnv(t)
+			p, _ := core.OpMarkerPath()
+			if c.body != "" {
+				if err := os.WriteFile(p, []byte(c.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, out, errOut := e.run(true, "n\ny\n", migrateFlags{apply: true, noPw: true})
+			if c.refuse {
+				if code != 1 || e.installed != 0 || !strings.Contains(errOut, "сначала проверьте") || !strings.Contains(errOut, p) {
+					t.Fatalf("код %d, установок %d\n%s\n%s", code, e.installed, out, errOut)
+				}
+				if b, _ := os.ReadFile(p); string(b) != c.body {
+					t.Error("прежний маркер изменён")
+				}
+				return
+			}
+			if code != 0 || e.installed != 1 {
+				t.Fatalf("без маркера: код %d, установок %d\n%s", code, e.installed, errOut)
 			}
 		})
 	}
