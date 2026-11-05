@@ -10,16 +10,14 @@ package main
 // данных идут ПОСЛЕ измеренных, а не среди нулей.
 
 import (
-	"encoding/csv"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/statsview"
 )
 
 // statsSource — то, что `stats` читает с сервера.
@@ -56,37 +54,33 @@ func runStats(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src statsSou
 	return 1
 }
 
-func collectorText(st core.CollectorStatus) string {
-	switch st.State {
-	case core.CollectorInstalled:
-		// Аудит AU-1, С2: «работает» — только по исходу службы и свежему
-		// снимку, никогда по одному «таймер активен».
-		switch st.Collect {
-		case core.CollectWorking:
-			return fmt.Sprintf("установлен, сбор работает (последний снимок %d мин назад, снимок раз в 5 минут)", int(st.SnapshotAge.Minutes()))
-		case core.CollectStopped:
-			return "установлен, но сбор НЕ работает: " + st.CollectWhy
-		case core.CollectPending:
-			if !st.NextRun.IsZero() {
-				return "установлен, первый снимок ожидается до " + st.NextRun.UTC().Format("15:04") + " UTC"
-			}
-			return "установлен, первый снимок ожидается (время срабатывания таймера неизвестно)"
+// cliHints — как CLI называет действия в текстах общего пакета.
+var cliHints = statsview.Hints{
+	Install:   "amnezia-admin stats install",
+	Uninstall: "amnezia-admin stats uninstall",
+	Export:    "amnezia-admin stats -csv итоги.csv -by month",
+}
+
+// Правила — в internal/statsview (одна копия на CLI и GUI); здесь — печать.
+func collectorText(st core.CollectorStatus) string { return statsview.CollectorText(st, cliHints) }
+func fullText(why string) string                   { return statsview.FullText(why, cliHints) }
+func dayText(d int64) string                       { return statsview.DayText(d) }
+func csvSafe(s string) string                      { return statsview.CSVSafe(s) }
+
+const utf8BOM = statsview.UTF8BOM
+
+// printNotes — пометки общего пакета с цветом по их весу.
+func printNotes(out io.Writer, ns []statsview.Note) {
+	for _, n := range ns {
+		switch n.Level {
+		case statsview.Warn:
+			fmt.Fprintln(out, cWarn(n.Text))
+		case statsview.Dim:
+			fmt.Fprintln(out, cDim(n.Text))
+		default:
+			fmt.Fprintln(out, n.Text)
 		}
-		return "установлен; идёт ли сбор — неизвестно: " + st.CollectWhy
-	case core.CollectorNotInstalled:
-		return "не установлен (установить: amnezia-admin stats install)"
-	case core.CollectorPartial:
-		return "установлен не полностью или другой версии: " + strings.Join(st.Detail, "; ") +
-			" (переустановить: amnezia-admin stats install)"
 	}
-	why := strings.Join(st.Detail, "; ")
-	if st.Err != nil {
-		why = st.Err.Error()
-	}
-	if why == "" {
-		why = "причина неизвестна"
-	}
-	return "узнать не удалось: " + why
 }
 
 func runStatsStatus(out, errOut io.Writer, src statsSource) int {
@@ -103,7 +97,7 @@ func runStatsStatus(out, errOut io.Writer, src statsSource) int {
 	case l.Empty():
 		fmt.Fprintln(out, "Накопленных данных нет.")
 	default:
-		statsDataNotes(out, l, core.AllTime)
+		printNotes(out, statsview.DataNotes(l, core.AllTime))
 	}
 	if st.State == core.CollectorUnknown || st.State == core.CollectorInstalled && st.Collect == core.CollectUnknown {
 		return 1
@@ -111,244 +105,8 @@ func runStatsStatus(out, errOut io.Writer, src statsSource) int {
 	return 0
 }
 
-// statsDataNotes — полнота данных ЗА ВЫБРАННЫЙ ПЕРИОД и по каждому
-// контейнеру (аудит AU-1, С3): учтённые сутки и сутки без снимков между
-// ними — дыра в середине видна, а не прячется за «с … по …».
-func statsDataNotes(out io.Writer, l *core.TrafficLog, r core.DayRange) {
-	any := false
-	for _, c := range l.Containers() {
-		var days []int64
-		for _, d := range l.CoveredDays(c) {
-			if d >= r.From && d <= r.To {
-				days = append(days, d)
-			}
-		}
-		if len(days) == 0 {
-			continue
-		}
-		any = true
-		lo, hi := days[0], days[len(days)-1]
-		fmt.Fprintf(out, "%s: учтены сутки (UTC) с %s по %s, всего %d.\n", c, dayText(lo), dayText(hi), len(days))
-		have := map[int64]bool{}
-		for _, d := range days {
-			have[d] = true
-		}
-		var gaps []string
-		n := 0
-		for d := lo; d <= hi; d++ {
-			if !have[d] {
-				n++
-				if len(gaps) < 5 {
-					gaps = append(gaps, dayText(d))
-				}
-			}
-		}
-		if n > 0 {
-			more := ""
-			if n > len(gaps) {
-				more = fmt.Sprintf(" и ещё %d", n-len(gaps))
-			}
-			fmt.Fprintln(out, cWarn(fmt.Sprintf("  %s: нет снимков за %d сут.: %s%s — цифры за них неполные, если в это время был перезапуск.",
-				c, n, strings.Join(gaps, ", "), more)))
-		}
-	}
-	if !any {
-		fmt.Fprintln(out, "Учтённых интервалов за период нет: нужно не меньше двух снимков в нём.")
-	}
-	if n := l.PartialIn(r); n > 0 {
-		fmt.Fprintln(out, cWarn(fmt.Sprintf("Интервалов с перезапуском после перерыва в сборе: %d — трафик до перезапуска в них потерян; "+
-			"такие цифры помечены «≥» (не меньше).", n)))
-	}
-	if !l.LastSnapshot.IsZero() {
-		fmt.Fprintln(out, "Последний снимок: "+l.LastSnapshot.UTC().Format("2006-01-02 15:04")+" UTC")
-	}
-	if l.Corrupt > 0 {
-		fmt.Fprintln(out, cWarn(fmt.Sprintf("Пропущено повреждённых записей: %d — цифры могут быть неполными.", l.Corrupt)))
-	}
-	if l.Failed > 0 {
-		fmt.Fprintln(out, cWarn(fmt.Sprintf("Снимков, в которых сервер не отдал счётчики: %d.", l.Failed)))
-	}
-	if l.Torn {
-		fmt.Fprintln(out, cDim("Последний снимок ещё дописывается или оборван — не учтён."))
-	}
-	// С1 ревью 1: отброшенный журнал — не молча (признак 4 CLAUDE.md).
-	if l.RawStale {
-		fmt.Fprintln(out, cWarn("Журнал снимков устарел (ротация на сервере была прервана) и не учтён: "+
-			"цифры неполные — нет снимков после последней ротации. Сборщик исправит это при следующем запуске (до 5 минут)."))
-	}
-	if l.Heuristic > 0 {
-		fmt.Fprintln(out, cDim(fmt.Sprintf("Интервалов без признака перезапуска сервера/контейнера: %d (снимки старого формата). "+
-			"В них перезапуск, после которого счётчик успел перерасти прежний, мог остаться незамеченным — цифры могут быть занижены.", l.Heuristic)))
-	}
-}
-
-func dayText(d int64) string { return core.DayStart(d).Format("2006-01-02") }
-
-func parseDay(s string) (int64, error) {
-	t, err := time.ParseInLocation("2006-01-02", s, time.UTC)
-	if err != nil {
-		return 0, fmt.Errorf("дата %q: нужен формат ГГГГ-ММ-ДД", s)
-	}
-	return core.DayOf(t), nil
-}
-
 func statsRange(f statsFlags) (core.DayRange, string, error) {
-	r := core.AllTime
-	if f.from != "" {
-		d, err := parseDay(f.from)
-		if err != nil {
-			return r, "", err
-		}
-		r.From = d
-	}
-	if f.to != "" {
-		d, err := parseDay(f.to)
-		if err != nil {
-			return r, "", err
-		}
-		r.To = d
-	}
-	if r.From > r.To {
-		return r, "", fmt.Errorf("начало периода позже конца")
-	}
-	switch {
-	case f.from == "" && f.to == "":
-		return r, "за всё время", nil
-	case f.to == "":
-		return r, "с " + f.from, nil
-	case f.from == "":
-		return r, "по " + f.to, nil
-	}
-	return r, f.from + " … " + f.to, nil
-}
-
-// statsRow — строка таблицы/CSV.
-type statsRow struct {
-	key   core.TrafficKey
-	proto string
-	name  string
-}
-
-// statsRows — все клиенты: из clientsTable каждого контейнера семейства WG
-// и из данных сборщика (удалённые клиенты остаются в истории).
-func statsRows(src statsSource, containers []core.Container, l *core.TrafficLog) ([]statsRow, []string) {
-	var notes []string
-	rows := map[core.TrafficKey]*statsRow{}
-	protoOf := map[string]string{}
-	for i := range containers {
-		c := &containers[i]
-		if _, err := core.WGFamilyOf(c); err != nil {
-			continue
-		}
-		protoOf[c.Name] = c.Title()
-		if !c.Managed() {
-			continue
-		}
-		clients, err := src.LoadClients(c)
-		if err != nil {
-			notes = append(notes, fmt.Sprintf("Имена клиентов %s прочитать не удалось: %v — показаны ключи.", c.Title(), err))
-			continue
-		}
-		for _, cl := range clients {
-			k := core.TrafficKey{Container: c.Name, PubKey: cl.ClientID}
-			rows[k] = &statsRow{key: k, proto: c.Title(), name: cl.Name()}
-		}
-	}
-	if l != nil {
-		for _, k := range l.Keys() {
-			if rows[k] != nil {
-				continue
-			}
-			p := protoOf[k.Container]
-			if p == "" {
-				p = k.Container
-			}
-			rows[k] = &statsRow{key: k, proto: p, name: "(нет в списке клиентов) " + shortKey(k.PubKey)}
-		}
-	}
-	out := make([]statsRow, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].proto != out[j].proto {
-			return out[i].proto < out[j].proto
-		}
-		if out[i].name != out[j].name {
-			return out[i].name < out[j].name
-		}
-		return out[i].key.PubKey < out[j].key.PubKey
-	})
-	return out, notes
-}
-
-func shortKey(k string) string {
-	if r := []rune(k); len(r) > 10 {
-		return string(r[:10]) + "…"
-	}
-	return k
-}
-
-// cellNums — цифры ячейки: измеренные (rank 0) или нижняя граница при
-// частичной потере (rank 1); иначе rank 2 и цифр нет.
-func cellNums(c core.TrafficCell) (rx, tx int64, rank int) {
-	if rx, tx, ok := c.Measured(); ok {
-		return rx, tx, 0
-	}
-	if rx, tx, ok := c.LowerBound(); ok {
-		return rx, tx, 1
-	}
-	return 0, 0, 2
-}
-
-// statsCellText — текст одной цифры. Число — только у измеренной ячейки;
-// у частично потерянной — «≥ число» (аудит AU-1, С3).
-func statsCellText(c core.TrafficCell, v func(rx, tx int64) int64) string {
-	switch c.State {
-	case core.TrafficMeasured:
-		rx, tx, _ := c.Measured()
-		return core.HumanBytes(v(rx, tx))
-	case core.TrafficPartial:
-		rx, tx, _ := c.LowerBound()
-		return "≥ " + core.HumanBytes(v(rx, tx))
-	case core.TrafficNoData:
-		return "нет данных"
-	case core.TrafficNotInstalled:
-		return "не собиралось"
-	}
-	return "?"
-}
-
-func statsSeenText(c core.TrafficCell) string {
-	if _, _, rank := cellNums(c); rank == 2 {
-		return statsCellText(c, nil)
-	}
-	if c.LastHandshake.IsZero() {
-		return "не подключался"
-	}
-	return c.LastHandshake.UTC().Format("2006-01-02 15:04")
-}
-
-func cellRx(rx, _ int64) int64     { return rx }
-func cellTx(_, tx int64) int64     { return tx }
-func cellTotal(rx, tx int64) int64 { return rx + tx }
-
-// statsSort — измеренные по убыванию «всего», за ними — без данных (по
-// имени). Порядок — тоже утверждение: «нет данных» внизу среди нулей
-// выглядел бы нулём (25.09: нарушение было в сортировке, не в тексте).
-func statsSort(rows []statsRow, cells map[core.TrafficKey]core.TrafficCell) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		// Измеренные, затем «не меньше» (нижняя граница), затем без данных.
-		ri, ti, ki := cellNums(cells[rows[i].key])
-		rj, tj, kj := cellNums(cells[rows[j].key])
-		if ki != kj {
-			return ki < kj
-		}
-		if ki < 2 && ri+ti != rj+tj {
-			return ri+ti > rj+tj
-		}
-		return false
-	})
+	return statsview.ParseRange(f.from, f.to)
 }
 
 func runStatsShow(out, errOut io.Writer, src statsSource, containers []core.Container, f statsFlags) int {
@@ -381,158 +139,47 @@ func runStatsShow(out, errOut io.Writer, src statsSource, containers []core.Cont
 			"поэтому «за всё время» начнёт копиться только после установки: amnezia-admin stats install")
 		return 0
 	}
-	rows, notes := statsRows(src, containers, l)
+	rows, notes := statsview.Rows(statsview.ReadClients(containers, src.LoadClients), l)
 	if f.csv != "" {
 		return writeStatsCSV(out, errOut, rows, l, st.State, r, f)
 	}
 	cells := map[core.TrafficKey]core.TrafficCell{}
 	for _, row := range rows {
-		cells[row.key] = l.Cell(row.key, r, st.State)
+		cells[row.Key] = l.Cell(row.Key, r, st.State)
 	}
-	statsSort(rows, cells)
+	statsview.SortByTotal(rows, cells)
 	fmt.Fprintln(out, "Период: "+label+" (сутки по UTC). Принято — от клиента, отправлено — клиенту (со стороны сервера).")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, cHead(pad("#", 4)+pad("Протокол", 14)+pad("Имя", 34)+pad("Принято", 13)+pad("Отправлено", 13)+pad("Всего", 13)+"Последнее подключение (UTC)"))
 	fmt.Fprintln(out, cDim(strings.Repeat("─", 4+14+34+13*3+27)))
 	for i, row := range rows {
-		c := cells[row.key]
-		fmt.Fprintln(out, pad(fmt.Sprint(i+1), 4)+pad(row.proto, 14)+pad(row.name, 34)+
-			pad(statsCellText(c, cellRx), 13)+pad(statsCellText(c, cellTx), 13)+pad(statsCellText(c, cellTotal), 13)+statsSeenText(c))
+		c := cells[row.Key]
+		fmt.Fprintln(out, pad(fmt.Sprint(i+1), 4)+pad(row.Proto, 14)+pad(row.Name, 34)+
+			pad(statsview.CellText(c, statsview.Rx), 13)+pad(statsview.CellText(c, statsview.Tx), 13)+pad(statsview.CellText(c, statsview.Total), 13)+statsview.SeenText(c))
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(out, "Клиентов нет.")
 	}
 	fmt.Fprintln(out)
-	statsDataNotes(out, l, r)
+	printNotes(out, statsview.DataNotes(l, r))
 	for _, n := range notes {
 		fmt.Fprintln(out, cWarn(n))
 	}
-	for _, c := range containers {
-		if core.IsXRay(&c) {
-			fmt.Fprintln(out, cDim("XRay: сервер не ведёт счётчиков трафика по клиентам — статистики по ним нет."))
-			break
-		}
+	if n := statsview.XRayNote(containers); n != "" {
+		fmt.Fprintln(out, cDim(n))
 	}
 	return 0
 }
 
-// csvSafe — ячейка, которую Excel не примет за формулу (имя клиента
-// задаёт человек).
-//
-// Закрытый список (ревью 1, Н1): без префикса остаётся только ячейка,
-// начинающаяся с латинской или русской буквы или цифры; всё прочее
-// (=, +, -, @, скобка, пробел, табуляция…) получает «'». Ключ base64 на «+»
-// — тоже.
-func csvSafe(s string) string {
-	if s == "" {
-		return s
-	}
-	r := []rune(s)[0]
-	if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' ||
-		r >= 'А' && r <= 'я' || r == 'Ё' || r == 'ё' {
-		return s
-	}
-	return "'" + s
-}
-
-// fullText — что случилось и что делать, когда сборщик остановлен
-// пределом объёма (ревью 1, Н3).
-func fullText(why string) string {
-	head := "Сборщик остановлен: достигнут предел объёма 100 МБ (" + why + "). Новые снимки не пишутся."
-	if why == "raw" {
-		return head + " Причина — ротация журнала не удаётся (место на диске, awk). Проверьте сервер, затем удалите метку: rm " +
-			core.StatsDir + "/FULL — сбор продолжится."
-	}
-	return head + " Сохраните выгрузку (amnezia-admin stats -csv итоги.csv -by month), затем на сервере освободите место: " +
-		"rm " + core.StatsDir + "/daily.log " + core.StatsDir + "/FULL — сбор начнётся заново (старые итоги будут потеряны)."
-}
-
-func stateText(c core.TrafficCell) string {
-	switch c.State {
-	case core.TrafficMeasured:
-		return "измерено"
-	case core.TrafficPartial:
-		return "неполные (не меньше)"
-	case core.TrafficNoData:
-		return "нет данных"
-	case core.TrafficNotInstalled:
-		return "сборщик не установлен"
-	}
-	return "неизвестно"
-}
-
-const utf8BOM = "\xef\xbb\xbf"
-
-type statsPeriod struct {
-	label string
-	r     core.DayRange
-}
-
-// statsPeriods — периоды выгрузки: один (за выбранный период) или сутки/
-// месяцы между первыми и последними учтёнными сутками, обрезанные периодом.
-func statsPeriods(l *core.TrafficLog, r core.DayRange, label, by string) []statsPeriod {
-	if by == "" {
-		return []statsPeriod{{label, r}}
-	}
-	days := l.CoveredDays("")
-	if len(days) == 0 {
-		return nil
-	}
-	lo, hi := days[0], days[len(days)-1]
-	if r.From > lo {
-		lo = r.From
-	}
-	if r.To < hi {
-		hi = r.To
-	}
-	var ps []statsPeriod
-	for d := lo; d <= hi; d++ {
-		if by == "day" {
-			ps = append(ps, statsPeriod{dayText(d), core.DayRange{From: d, To: d}})
-			continue
-		}
-		t := core.DayStart(d)
-		m := t.Format("2006-01")
-		if len(ps) > 0 && ps[len(ps)-1].label == m {
-			ps[len(ps)-1].r.To = d
-			continue
-		}
-		ps = append(ps, statsPeriod{m, core.DayRange{From: d, To: d}})
-	}
-	return ps
-}
-
-func writeStatsCSV(out, errOut io.Writer, rows []statsRow, l *core.TrafficLog, cs core.CollectorState, r core.DayRange, f statsFlags) int {
+func writeStatsCSV(out, errOut io.Writer, rows []statsview.Row, l *core.TrafficLog, cs core.CollectorState, r core.DayRange, f statsFlags) int {
 	_, label, _ := statsRange(f)
-	periods := statsPeriods(l, r, label, f.by)
-	var b strings.Builder
-	b.WriteString(utf8BOM) // Excel: UTF-8
-	w := csv.NewWriter(&b)
-	w.Comma = ';'
-	w.UseCRLF = true
-	_ = w.Write([]string{"Период", "Протокол", "Клиент", "Публичный ключ", "Принято, байт", "Отправлено, байт", "Всего, байт", "Последнее подключение (UTC)", "Состояние"})
-	for _, p := range periods {
-		for _, row := range rows {
-			c := l.Cell(row.key, p.r, cs)
-			rec := []string{p.label, row.proto, row.name, row.key.PubKey, "", "", "", "", stateText(c)}
-			if rx, tx, rank := cellNums(c); rank < 2 {
-				rec[4], rec[5], rec[6] = fmt.Sprint(rx), fmt.Sprint(tx), fmt.Sprint(rx+tx)
-				if !c.LastHandshake.IsZero() {
-					rec[7] = c.LastHandshake.UTC().Format("2006-01-02 15:04")
-				}
-			}
-			for i := range rec {
-				rec[i] = csvSafe(rec[i]) // все ячейки, не только имя
-			}
-			_ = w.Write(rec)
-		}
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
+	periods := statsview.Periods(l, r, label, f.by)
+	data, n, err := statsview.CSV(rows, l, cs, periods)
+	if err != nil {
 		fmt.Fprintln(errOut, "CSV:", err)
 		return 1
 	}
-	if err := os.WriteFile(f.csv, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(f.csv, data, 0o600); err != nil {
 		fmt.Fprintln(errOut, "CSV не записан:", err)
 		return 1
 	}
@@ -540,7 +187,7 @@ func writeStatsCSV(out, errOut io.Writer, rows []statsRow, l *core.TrafficLog, c
 	if err != nil {
 		abs = f.csv
 	}
-	fmt.Fprintf(out, "CSV записан: %s (строк: %d; пустые цифры — «нет данных», не ноль).\n", abs, len(periods)*len(rows))
+	fmt.Fprintf(out, "CSV записан: %s (строк: %d; пустые цифры — «нет данных», не ноль).\n", abs, n)
 	if len(periods) == 0 {
 		fmt.Fprintln(out, cWarn("Учтённых суток нет — в файле только заголовок."))
 	}
@@ -573,14 +220,7 @@ func runStatsInstall(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src s
 		return 0
 	}
 	fmt.Fprintln(out, "Сейчас: "+collectorText(st))
-	fmt.Fprintln(out, "Будет выполнено на сервере (от root): mkdir -p "+core.StatsDir+
-		"; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):")
-	for _, f := range core.StatsInstallFiles() {
-		fmt.Fprintf(out, "\n── %s (права %s) ──\n%s", f.Path, f.Mode, f.Content)
-	}
-	fmt.Fprintln(out, "\nзатем: systemctl daemon-reload; systemctl enable --now "+core.StatsUnit+".timer")
-	fmt.Fprintln(out, "Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в "+core.StatsDir+
-		"; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall")
+	fmt.Fprintln(out, statsview.InstallText(cliHints))
 	ok, code := statsAsk(in, out, errOut, isTTY, yes, "Установить сборщик статистики?")
 	if !ok {
 		return code
@@ -604,9 +244,7 @@ func runStatsUninstall(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src
 		return 0
 	}
 	fmt.Fprintln(out, "Сейчас: "+collectorText(st))
-	fmt.Fprintln(out, "Будет: systemctl disable --now "+core.StatsUnit+".timer; удалены "+
-		core.StatsTimerPath+", "+core.StatsServicePath+", "+core.StatsScriptPath+".")
-	fmt.Fprintln(out, "Накопленные данные ("+core.StatsDir+"/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r "+core.StatsDir)
+	fmt.Fprintln(out, statsview.UninstallText())
 	ok, code := statsAsk(in, out, errOut, isTTY, yes, "Снять сборщик статистики?")
 	if !ok {
 		return code

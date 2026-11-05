@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
+	"amnezia-admin/internal/statsview"
 )
 
 // Окно «Статистика» (задание GUI-STATS). Подмены, которые обязаны ронять:
@@ -50,10 +51,10 @@ func tStatsClients() []core.ClientEntry {
 func tStatsLines(t *testing.T, l *core.TrafficLog, r core.DayRange) []statsLine {
 	t.Helper()
 	c := core.Container{Name: "amnezia-awg", Proto: "AmneziaWG", Support: core.SupportYes}
-	rows, _ := statsRowsOf([]statsClients{{c: c, read: true, clients: tStatsClients()}}, l)
+	rows, _ := statsview.Rows([]statsview.ContainerClients{{C: c, Read: true, Clients: tStatsClients()}}, l)
 	var ls []statsLine
 	for _, row := range rows {
-		ls = append(ls, statsLine{row: row, cell: l.Cell(row.key, r, core.CollectorInstalled)})
+		ls = append(ls, statsLine{row: row, cell: l.Cell(row.Key, r, core.CollectorInstalled)})
 	}
 	return ls
 }
@@ -61,7 +62,7 @@ func tStatsLines(t *testing.T, l *core.TrafficLog, r core.DayRange) []statsLine 
 func lineOf(t *testing.T, ls []statsLine, name string) statsLine {
 	t.Helper()
 	for _, l := range ls {
-		if l.row.name == name {
+		if l.row.Name == name {
 			return l
 		}
 	}
@@ -94,7 +95,7 @@ func TestStatsCellsThreeStates(t *testing.T) {
 	// Период без снимков — у всех «нет данных», ни одного «0 B».
 	for _, ln := range tStatsLines(t, tStatsLog(), core.DayRange{From: tDay0 + 10, To: tDay0 + 20}) {
 		if got := statsCellAt(ln, statsColTotal); got != "нет данных" {
-			t.Errorf("период без снимков, %s: %q", ln.row.name, got)
+			t.Errorf("период без снимков, %s: %q", ln.row.Name, got)
 		}
 	}
 }
@@ -108,7 +109,7 @@ func TestStatsSortRanksFixed(t *testing.T) {
 			statsSortLines(ls, col, desc)
 			pos := map[string]int{}
 			for i, l := range ls {
-				pos[l.row.name] = i
+				pos[l.row.Name] = i
 			}
 			if pos["Abe"] != len(ls)-1 {
 				t.Errorf("%s desc=%v: «нет данных» не внизу: %v", statsColTitles[col], desc, pos)
@@ -120,12 +121,12 @@ func TestStatsSortRanksFixed(t *testing.T) {
 	}
 	ls := tStatsLines(t, tStatsLog(), core.AllTime)
 	statsSortLines(ls, statsColTotal, true)
-	if ls[0].row.name != "Alice" || ls[1].row.name != "Bob" {
-		t.Errorf("по убыванию «Всего»: %s, %s", ls[0].row.name, ls[1].row.name)
+	if ls[0].row.Name != "Alice" || ls[1].row.Name != "Bob" {
+		t.Errorf("по убыванию «Всего»: %s, %s", ls[0].row.Name, ls[1].row.Name)
 	}
 	statsSortLines(ls, statsColTotal, false)
-	if ls[0].row.name != "Bob" || ls[1].row.name != "Alice" {
-		t.Errorf("по возрастанию «Всего»: %s, %s", ls[0].row.name, ls[1].row.name)
+	if ls[0].row.Name != "Bob" || ls[1].row.Name != "Alice" {
+		t.Errorf("по возрастанию «Всего»: %s, %s", ls[0].row.Name, ls[1].row.Name)
 	}
 }
 
@@ -233,8 +234,8 @@ func TestStatsWindowNoDataNotZero(t *testing.T) {
 	if got := viewRow(t, v, "Carl")[statsColTotal]; !strings.HasPrefix(got, "≥ ") {
 		t.Errorf("Carl — неполные: %q", got)
 	}
-	if n := len(v.lines); v.lines[n-1].row.name != "Abe" {
-		t.Errorf("последняя строка %s, ждали Abe (нет данных)", v.lines[n-1].row.name)
+	if n := len(v.lines); v.lines[n-1].row.Name != "Abe" {
+		t.Errorf("последняя строка %s, ждали Abe (нет данных)", v.lines[n-1].row.Name)
 	}
 	if !strings.Contains(v.status.Text, "сбор работает") {
 		t.Errorf("статус: %q", v.status.Text)
@@ -244,8 +245,8 @@ func TestStatsWindowNoDataNotZero(t *testing.T) {
 	}
 	// Сортировка нажатием заголовка: «Всего» по возрастанию — Abe всё равно внизу.
 	v.sortBy(statsColTotal)
-	if v.lines[0].row.name != "Bob" || v.lines[len(v.lines)-1].row.name != "Abe" {
-		t.Errorf("по возрастанию: первая %s, последняя %s", v.lines[0].row.name, v.lines[len(v.lines)-1].row.name)
+	if v.lines[0].row.Name != "Bob" || v.lines[len(v.lines)-1].row.Name != "Abe" {
+		t.Errorf("по возрастанию: первая %s, последняя %s", v.lines[0].row.Name, v.lines[len(v.lines)-1].row.Name)
 	}
 	// Период «Неделя» (данные — сегодня) и «свой интервал» без данных.
 	v.periodSel.SetSelected(statsPeriodCustom)
@@ -347,13 +348,13 @@ func TestStatsInstallOnlyAfterYes(t *testing.T) {
 func TestStatsCSVFormat(t *testing.T) {
 	l := tStatsLog()
 	c := core.Container{Name: "amnezia-awg", Proto: "AmneziaWG", Support: core.SupportYes}
-	rows, _ := statsRowsOf([]statsClients{{c: c, read: true, clients: tStatsClients()}}, l)
-	data, n, err := statsCSV(rows, l, core.CollectorInstalled, statsPeriods(l, core.AllTime, "за всё время", statsGroupNone))
+	rows, _ := statsview.Rows([]statsview.ContainerClients{{C: c, Read: true, Clients: tStatsClients()}}, l)
+	data, n, err := statsview.CSV(rows, l, core.CollectorInstalled, statsview.Periods(l, core.AllTime, "за всё время", ""))
 	if err != nil || n != 4 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 	s := string(data)
-	if !strings.HasPrefix(s, statsUTF8BOM+"Период;Протокол;Клиент;Публичный ключ;Принято, байт;Отправлено, байт;Всего, байт;Последнее подключение (UTC);Состояние\r\n") {
+	if !strings.HasPrefix(s, statsview.UTF8BOM+"Период;Протокол;Клиент;Публичный ключ;Принято, байт;Отправлено, байт;Всего, байт;Последнее подключение (UTC);Состояние\r\n") {
 		t.Errorf("заголовок: %q", strings.SplitN(s, "\r\n", 2)[0])
 	}
 	for _, want := range []string{";Abe;KD=;;;;;нет данных\r\n", ";Bob;KB=;0;0;0;;измерено\r\n", ";Alice;KA=;3000;5000;8000;2025-11-08 10:00;измерено\r\n", ";Carl;KC=;100000;1;100001;;неполные (не меньше)\r\n"} {
@@ -362,7 +363,7 @@ func TestStatsCSVFormat(t *testing.T) {
 		}
 	}
 	// Разбивка по дням: период — сутки.
-	if ps := statsPeriods(l, core.AllTime, "x", statsGroupDay); len(ps) != 1 || ps[0].label != "2025-11-08" {
+	if ps := statsview.Periods(l, core.AllTime, "x", statsBy(statsGroupDay)); len(ps) != 1 || ps[0].Name != "2025-11-08" {
 		t.Errorf("разбивка по дням: %+v", ps)
 	}
 
