@@ -107,6 +107,14 @@ func TestProvisionCheckExplicitToKeyBeatsEnv(t *testing.T) {
 	if !strings.Contains(o.String(), "взят из -to-key") {
 		t.Fatalf("ключ не из -to-key: %s", o.String())
 	}
+	// Явный -key при выставленном AMNEZIA_TO_KEY: умолчание флага -to-key
+	// (из окружения) не должно считаться явным.
+	o.Reset()
+	e.Reset()
+	run([]string{"provision-check", "-key", "vpn://explicit"}, strings.NewReader(""), &o, &e, t.TempDir()+"/kh")
+	if !strings.Contains(o.String(), "взят из -key") {
+		t.Fatalf("явный -key проиграл AMNEZIA_TO_KEY: %s / %s", o.String(), e.String())
+	}
 }
 
 // L2: список команд — до ключа и с migrate/provision-check.
