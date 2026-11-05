@@ -43,7 +43,7 @@ func TestInstallVerdictNotBareMatch(t *testing.T) {
 	b := &Backup{Containers: []BackupContainer{wgCtr("amnezia-awg2", "2", VersionKnown)}}
 	it := PlanInstall(b, nil).Items[0]
 	if !it.NeedsMeasurement || it.Verdict() == "совпало" ||
-		!strings.Contains(it.Verdict(), "подтвердится после установки") {
+		!strings.Contains(it.Verdict(), "версия бинаря не закреплена и не измеряется") {
 		t.Errorf("вердикт %q при NeedsMeasurement=%v", it.Verdict(), it.NeedsMeasurement)
 	}
 	if v := (InstallItem{Compat: CompatMatch}).Verdict(); v != "совпало" {

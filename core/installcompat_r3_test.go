@@ -59,7 +59,7 @@ func TestPlanInstallXRayConfByName(t *testing.T) {
 	if it.Compat != CompatMatch || it.SNI == "" {
 		t.Errorf("server.json не первым: %v (%s)", it.Compat, it.Reason)
 	}
-	if v := it.Verdict(); !strings.Contains(v, "server.json и ключи — из копии") || !strings.Contains(v, "подтвердится после установки") {
+	if v := it.Verdict(); !strings.Contains(v, "server.json и ключи — из копии") || !strings.Contains(v, "версия бинаря не закреплена и не измеряется") {
 		t.Errorf("подпись XRay: %q", v)
 	}
 	unread := bc
