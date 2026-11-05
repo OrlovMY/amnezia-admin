@@ -218,7 +218,14 @@ func TestRenderAllFilesMatchesUpstream(t *testing.T) {
 				continue
 			}
 			raw, _ := Script(rev, file)
-			if want := upstreamReplace(string(raw), v); got != want {
+			// Приложение шлёт ВСЕ свои переменные (genBaseVars + протокол),
+			// а не закрытый список файла: подстрочная замена задела бы
+			// переменную скрипта с общим префиксом (ревью-1 L3).
+			full := appVars(file)
+			for k, x := range v {
+				full[k] = x
+			}
+			if want := upstreamReplace(string(raw), full); got != want {
 				t.Errorf("%s/%s: результат расходится с replaceVars приложения", rev, file)
 			}
 			n++
@@ -307,6 +314,79 @@ func TestRenderAWGOptionalEmpty(t *testing.T) {
 }
 
 // Оставшаяся ссылка вне закрытого списка скрипта — ошибка (в т.ч. ${ИМЯ}).
+// appVars — полный набор, который приложение передаёт в replaceVars для
+// файла (scriptsRegistry.cpp genBaseVars + genAwgVars/genWireGuardVars/
+// genXrayVars), с правдоподобными значениями.
+func appVars(file string) map[string]string {
+	folder, _, _ := strings.Cut(file, "/")
+	m := goodPool(folder)
+	for k, v := range map[string]string{
+		"REMOTE_HOST": "203.0.113.7", "PRIMARY_SERVER_DNS": "8.8.8.8", "SECONDARY_SERVER_DNS": "8.8.4.4",
+		"IPSEC_VPN_L2TP_NET": "192.168.42.0/24", "IPSEC_VPN_L2TP_POOL": "192.168.42.10-192.168.42.250",
+		"IPSEC_VPN_L2TP_LOCAL": "192.168.42.1", "IPSEC_VPN_XAUTH_NET": "192.168.43.0/24",
+		"IPSEC_VPN_XAUTH_POOL": "192.168.43.10-192.168.43.250", "IPSEC_VPN_SHA2_TRUNCBUG": "yes",
+		"IPSEC_VPN_VPN_ANDROID_MTU_FIX": "yes", "IPSEC_VPN_DISABLE_IKEV2": "no",
+		"IPSEC_VPN_DISABLE_L2TP": "no", "IPSEC_VPN_DISABLE_XAUTH": "no", "IPSEC_VPN_C2C_TRAFFIC": "no",
+		"XRAY_SITE_NAME": "www.googletagmanager.com", "PERSISTENT_KEEPALIVE": "25-35",
+	} {
+		m[k] = v
+	}
+	return m
+}
+
+// Граница имени: $NAME2 — не $NAME (ревью-1 I2). Подстрочная замена дала
+// бы «amnezia-awg22» и молча прошла бы.
+func TestRenderNameBoundary(t *testing.T) {
+	cases := []struct{ txt, want string }{
+		{"a $CONTAINER_NAME b", "a amnezia-awg2 b"},
+		{"a $CONTAINER_NAME/x", "a amnezia-awg2/x"},
+		{"a $CONTAINER_NAME2", ""},
+		{"a $CONTAINER_NAME_X", ""},
+	}
+	for _, c := range cases {
+		got, err := render(Rev5106, "remove_container.sh", c.txt, map[string]string{"CONTAINER_NAME": "amnezia-awg2"})
+		if c.want == "" {
+			if err == nil {
+				t.Errorf("%q: принято как %q", c.txt, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("%q: %q, %v", c.txt, got, err)
+		}
+	}
+}
+
+// «Ставит» без закреплённого бинаря не выдаётся ни из таблицы, ни в
+// подписи (ревью-1 M1). Доезд: строка таблицы, а не присваивание State.
+func TestSupportYesNeedsPinnedBinary(t *testing.T) {
+	saved := installSupports["x"]
+	defer func() { installSupports["x"] = saved; delete(installSupports, "x") }()
+	installSupports["x"] = map[string]Support{
+		"a": {State: SupportYes, BinaryPinned: false},
+		"b": {State: SupportYes, BinaryPinned: true},
+	}
+	if s := InstallSupport("x", "a"); s.State != SupportScriptOnly {
+		t.Errorf("незакреплённый бинарь выдан как %v", s.State)
+	}
+	if s := InstallSupport("x", "b"); s.State != SupportYes {
+		t.Errorf("закреплённый: %v", s.State)
+	}
+	labels := map[string]SupportState{}
+	for _, st := range []SupportState{SupportUnknown, SupportYes, SupportScriptOnly, SupportPartial, SupportNo} {
+		if prev, dup := labels[st.String()]; dup {
+			t.Errorf("подписи %v и %v совпадают", prev, st)
+		}
+		labels[st.String()] = st
+	}
+	if a, b := InstallSupport(Rev5106, "1.5"), InstallSupport(Rev5106, "3.1"); a.State == b.State {
+		t.Errorf("1.5 и 3.1 неразличимы: %v", a.State)
+	}
+	if !strings.Contains(InstallSupport(Rev5106, "XRay").Note, "v26.7.28") {
+		t.Error("в Note XRay 5.1.0.6 нет расхождения версий")
+	}
+}
+
 func TestRenderLeftover(t *testing.T) {
 	for _, txt := range []string{"echo $AWG_SERVER_PORT $NEW_VAR", "echo ${AWG_SERVER_PORT}"} {
 		if _, err := render(Rev5106, "remove_container.sh", txt, map[string]string{"CONTAINER_NAME": "amnezia-awg2"}); err == nil {
@@ -326,8 +406,12 @@ func TestInstallSupports(t *testing.T) {
 	for _, rev := range RevisionIDs() {
 		for _, f := range families {
 			s := InstallSupport(rev, f)
-			if s.State != SupportYes || s.Source == "" || s.Container == "" {
-				t.Errorf("%s/%s: %+v", rev, f, s)
+			want := map[string]SupportState{"1.5": SupportPartial}[f]
+			if want == SupportUnknown {
+				want = SupportScriptOnly
+			}
+			if s.State != want || s.Source == "" || s.Container == "" || s.BinaryPinned {
+				t.Errorf("%s/%s: %+v, ожидалось %v", rev, f, s, want)
 			}
 			if _, ok := revisions[rev].Files[strings.SplitN(s.Source, ":", 2)[0]]; !ok {
 				t.Errorf("%s/%s: источник %q не вендоренный файл", rev, f, s.Source)

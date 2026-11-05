@@ -12,5 +12,6 @@
 # (core.autocrlf=true). Так же, как хранилище .avlt.
 *.aabk binary
 # Вендоренные скрипты amnezia-client: SHA-256 сверяется по байтам, перевод
-# строк git менять не должен (core.autocrlf=true). Позже *.sh — перекрывает.
+# строк git менять не должен (core.autocrlf=true). Эта строка стоит после
+# *.sh и перекрывает его: text снят, eol=lf у *.sh для этих файлов не действует.
 core/provision/scripts/** -text
