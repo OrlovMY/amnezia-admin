@@ -36,7 +36,7 @@ package core
 //
 // ФОРМАТ daily.log (суточные итоги, пишутся только ротацией):
 //
-//	D <поколение> <сутки UTC> <контейнер> <ключ> <принято> <отправлено> <рукопожатие> <интервалов>
+//	D <поколение> <сутки UTC> <контейнер> <ключ> <принято> <отправлено> <рукопожатие> <интервалов> <из них частично потерянных>
 //	N <поколение> <сутки UTC> <контейнер> <учтённых снимков> <из них без признака запуска>
 //
 // «Сутки UTC» — номер суток от 1970-01-01 (unix-время / 86400): awk без
@@ -153,22 +153,24 @@ $1 == "E" {
 //   - первый снимок контейнера — точка отсчёта, разницы нет.
 //
 // Разница относится к суткам снимка, ЗАВЕРШАЮЩЕГО интервал.
-const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs) {
+const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs, gap, part) {
   blkno++
   day = int(bts / 86400)
   known = (bsig != "" && (bc in psig) && psig[bc] != "")
   rs = (known && psig[bc] != bsig)
+  gap = ((bc in plast) && bts - plast[bc] > 660)
   for (j = 1; j <= m; j++) {
     key = bc SUBSEP pk[j]
     has = 0
+    part = 0
     if (key in prv) {
-      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j] } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j]; if (gap) part = 1 } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
       has = 1
       if (!known) hc[day SUBSEP bc]++
     } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
     if (has) {
       ak = day SUBSEP key
-      arx[ak] += dx; atx[ak] += dt; an[ak]++
+      arx[ak] += dx; atx[ak] += dt; an[ak]++; ap[ak] += part
       if (!(ak in ahs) || phs[j] > ahs[ak]) ahs[ak] = phs[j]
     }
     prv[key] = prx[j]; ptv[key] = ptx[j]; cur[key] = blkno
@@ -179,9 +181,10 @@ const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k,
   if (bc in seen) cov[day SUBSEP bc]++
   seen[bc] = 1
   psig[bc] = bsig
+  plast[bc] = bts
 }
 END {
-  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak] }
+  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak], ap[ak] + 0 }
   for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
 }`
 
@@ -227,12 +230,13 @@ fi
 ts=$(date +%%s)
 rm -f block.tmp
 boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
-if names=$(docker ps --format "{{.Names}}" 2>/dev/null); then
+if names=$(timeout 30 docker ps --format "{{.Names}}" 2>/dev/null); then
   :
 else
   names=""
   printf '\nF %%s - ps\n' "$ts" >> block.tmp
 fi
+all=$(timeout 30 docker ps -a --format "{{.Names}}" 2>/dev/null) || all=""
 for spec in %[3]s; do
   c=${spec%%%%:*}
   r=${spec#*:}
@@ -242,9 +246,15 @@ for spec in %[3]s; do
   for x in $names; do
     if [ "$x" = "$c" ]; then found=1; fi
   done
-  if [ "$found" = 0 ]; then continue; fi
-  st=$(docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
-  if out=$(docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
+  if [ "$found" = 0 ]; then
+    for x in $all; do
+      if [ "$x" = "$c" ]; then found=2; fi
+    done
+    if [ "$found" = 2 ]; then printf '\nF %%s %%s stopped\n' "$ts" "$c" >> block.tmp; fi
+    continue
+  fi
+  st=$(timeout 30 docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
+  if out=$(timeout 30 docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
     if blk=$(printf '%%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" '%[4]s'); then
       printf '\n%%s\n' "$blk" >> block.tmp
     else
@@ -296,6 +306,7 @@ After=docker.service
 [Service]
 Type=oneshot
 Nice=10
+TimeoutStartSec=120s
 ExecStart=/bin/sh ` + StatsScriptPath + `
 `
 }
@@ -336,7 +347,7 @@ const statsHeredoc = "AA_TRAFFIC_STATS_EOF"
 // не меняет, данные (snapshots.log, daily.log) не трогаются.
 func statsInstallScript() string {
 	var b strings.Builder
-	b.WriteString("set -e\numask 022\nmkdir -p " + StatsDir + "\n")
+	b.WriteString("set -e\numask 022\n" + statsDirCheck())
 	for _, f := range StatsInstallFiles() {
 		b.WriteString("cat > " + f.Path + ".new <<'" + statsHeredoc + "'\n")
 		b.WriteString(f.Content)
@@ -348,14 +359,35 @@ func statsInstallScript() string {
 	return b.String()
 }
 
-// statsUninstallScript — снимает таймер, службу и скрипт; ДАННЫЕ ОСТАВЛЯЕТ
-// (snapshots.log, daily.log — это история «за всё время»).
+// statsDirCheck — каталог данных (аудит AU-1, Н1): не симлинк, после
+// mkdir — владелец root и права 0700, иначе отказ с причиной
+// (AA_STATS_BADDIR …) — root не пишет в каталог, который может подменить
+// кто-то другой.
+func statsDirCheck() string {
+	return "if [ -L " + StatsDir + " ]; then echo \"AA_STATS_BADDIR symlink\"; exit 3; fi\n" +
+		"mkdir -p " + StatsDir + "\n" +
+		"chown root:root " + StatsDir + "\n" +
+		"chmod 0700 " + StatsDir + "\n" +
+		"m=$(stat -c %u:%a " + StatsDir + ")\n" +
+		"if [ \"$m\" != \"0:700\" ]; then echo \"AA_STATS_BADDIR $m\"; exit 3; fi\n"
+}
+
+// statsUninstallScript — снимает таймер, службу и скрипт (и *.new от
+// прерванной установки); ДАННЫЕ ОСТАВЛЯЕТ (история «за всё время»).
+// Маркер — только если файлов действительно нет (аудит AU-1, Н2).
 func statsUninstallScript() string {
+	all := ""
+	check := ""
+	for _, p := range []string{StatsTimerPath, StatsServicePath, StatsScriptPath} {
+		all += " " + p + " " + p + ".new"
+		check += "[ ! -e " + p + " ] && [ ! -e " + p + ".new ] && "
+	}
 	return "systemctl disable --now " + StatsUnit + ".timer 2>/dev/null || true\n" +
 		"systemctl stop " + StatsUnit + ".service 2>/dev/null || true\n" +
-		"rm -f " + StatsTimerPath + " " + StatsServicePath + " " + StatsScriptPath + "\n" +
+		"rm -f" + all + "\n" +
+		"systemctl reset-failed " + StatsUnit + ".service " + StatsUnit + ".timer 2>/dev/null || true\n" +
 		"systemctl daemon-reload\n" +
-		"echo AA_STATS_REMOVED\n"
+		"if " + check + "true; then echo AA_STATS_REMOVED; fi\n"
 }
 
 // statsStatusScript — только чтение: суммы файлов, состояние таймера,
@@ -365,6 +397,11 @@ func statsStatusScript() string {
 		"  if [ -e \"$f\" ]; then echo \"AA_F $f $(cksum < \"$f\")\"; else echo \"AA_F $f -\"; fi\n" +
 		"done\n" +
 		"echo \"AA_ACTIVE $(systemctl is-active " + StatsUnit + ".timer 2>/dev/null)\"\n" +
+		// Аудит AU-1, С2: «работает» — не по таймеру, а по исходу службы и
+		// свежести последнего снимка.
+		"systemctl show -p Result -p ActiveState -p SubState " + StatsUnit + ".service 2>/dev/null\n" +
+		"echo \"AA_NOW $(date +%s)\"\n" +
+		"if [ -e " + StatsDir + "/snapshots.log ]; then echo AA_TAIL_BEGIN; tail -n 50 " + StatsDir + "/snapshots.log; echo; echo AA_TAIL_END; fi\n" +
 		"if [ -e " + StatsDir + "/FULL ]; then echo \"AA_FULL $(cat " + StatsDir + "/FULL)\"; fi\n" +
 		"echo AA_STATUS_END\n"
 }

@@ -43,7 +43,17 @@ const (
 	TrafficNoData
 	// TrafficMeasured — измерено.
 	TrafficMeasured
+	// TrafficPartial — измерено НЕ полностью (аудит AU-1, С3): в периоде
+	// есть интервал, в котором между снимками была дыра больше
+	// statsGapSec и при этом перезапуск — трафик от прошлого снимка до
+	// перезапуска потерян. Цифра — нижняя граница, а не измерение.
+	TrafficPartial
 )
+
+// statsGapSec — дыра между снимками, после которой потеря при
+// перезапуске уже не мелочь: два интервала таймера и запас точности.
+// То же число — в awkAgg (TestStatsGapSameInAwk).
+const statsGapSec = 660
 
 // TrafficCell — цифры одного клиента за период.
 type TrafficCell struct {
@@ -58,6 +68,14 @@ type TrafficCell struct {
 // tx — клиенту) и true, только если цифры измерены.
 func (c TrafficCell) Measured() (rx, tx int64, ok bool) {
 	if c.State != TrafficMeasured {
+		return 0, 0, false
+	}
+	return c.rx, c.tx, true
+}
+
+// LowerBound — цифры частично потерянного периода («не меньше»).
+func (c TrafficCell) LowerBound() (rx, tx int64, ok bool) {
+	if c.State != TrafficPartial {
 		return 0, 0, false
 	}
 	return c.rx, c.tx, true
@@ -94,7 +112,7 @@ func floorDiv(a, b int64) int64 {
 
 type trafficAgg struct {
 	rx, tx, hs int64
-	n          int
+	n, partial int
 }
 
 // TrafficLog — разобранные данные сборщика.
@@ -140,7 +158,7 @@ func statsNum(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
-func (l *TrafficLog) add(day int64, k TrafficKey, rx, tx, hs int64, n int) {
+func (l *TrafficLog) add(day int64, k TrafficKey, rx, tx, hs int64, n, partial int) {
 	if l.days[day] == nil {
 		l.days[day] = map[TrafficKey]*trafficAgg{}
 	}
@@ -152,6 +170,7 @@ func (l *TrafficLog) add(day int64, k TrafficKey, rx, tx, hs int64, n int) {
 	a.rx += rx
 	a.tx += tx
 	a.n += n
+	a.partial += partial
 	if hs > a.hs {
 		a.hs = hs
 	}
@@ -195,15 +214,20 @@ func ParseTrafficLog(daily string, haveDaily bool, raw string, haveRaw bool) *Tr
 func (l *TrafficLog) parseDaily(f []string) (int64, bool) {
 	var nums []int64
 	switch {
-	case f[0] == "D" && len(f) == 9 && reStatsCtr.MatchString(f[3]) && reStatsPub.MatchString(f[4]):
-		for _, s := range []string{f[1], f[2], f[5], f[6], f[7], f[8]} {
+	case f[0] == "D" && (len(f) == 9 || len(f) == 10) && reStatsCtr.MatchString(f[3]) && reStatsPub.MatchString(f[4]):
+		// Десятое поле (раунд 3, С3) — частично потерянных интервалов.
+		for _, s := range append([]string{f[1], f[2]}, f[5:]...) {
 			v, err := statsNum(s)
 			if err != nil {
 				return 0, false
 			}
 			nums = append(nums, v)
 		}
-		l.add(nums[1], TrafficKey{f[3], f[4]}, nums[2], nums[3], nums[4], int(nums[5]))
+		partial := 0
+		if len(nums) == 7 {
+			partial = int(nums[6])
+		}
+		l.add(nums[1], TrafficKey{f[3], f[4]}, nums[2], nums[3], nums[4], int(nums[5]), partial)
 		return nums[0], true
 	case f[0] == "N" && (len(f) == 5 || len(f) == 6) && reStatsCtr.MatchString(f[3]):
 		// Шестое поле (раунд 2, С2) — сколько интервалов учтено без
@@ -237,6 +261,8 @@ type trafficState struct {
 	// sig — признак запуска (boot_id и StartedAt контейнера) последнего
 	// целого снимка контейнера; "" — признака не было (старый формат).
 	sig map[string]string
+	// last — время последнего целого снимка контейнера (для дыр, С3).
+	last map[string]int64
 }
 
 // apply — правило разницы. Раунд 2 (С2): если у обоих снимков есть
@@ -244,20 +270,35 @@ type trafficState struct {
 // нуля НЕЗАВИСИМО от величин (прежняя эвристика «уменьшился» не видит
 // перезапуска, после которого счётчик перерос прежний). Без признака —
 // прежняя эвристика, а интервал считается в Heuristic (пометка в выводе).
+//
+// Аудит AU-1, С3: перезапуск в интервале длиннее statsGapSec — трафик от
+// прошлого снимка до перезапуска потерян, интервал помечается partial.
+//
+// Ревью 2, Н6 — известное ограничение: peer удалён и возвращён (toggle)
+// внутри одной жизни контейнера, StartedAt тот же, и за интервал счётчик
+// перерос прежнее накопленное значение — сброс не виден (интервал
+// «известный», в Heuristic не попадает). Практически невозможно: прежнее
+// значение накоплено за всю жизнь контейнера.
 func (st *trafficState) apply(l *TrafficLog, ts int64, c, bsig string, peers []statsPeer) {
 	day := floorDiv(ts, 86400)
 	psig, had := st.sig[c]
 	known := bsig != "" && had && psig != ""
 	restarted := known && psig != bsig
+	lastTS, hadLast := st.last[c]
+	gap := hadLast && ts-lastTS > statsGapSec
 	heur := 0
 	cur := map[TrafficKey]bool{}
 	for _, p := range peers {
 		k := TrafficKey{c, p.pub}
 		var dx, dt int64
 		has := false
+		part := 0
 		if pv, ok := st.prev[k]; ok {
 			if restarted || p.rx < pv[0] || p.tx < pv[1] {
 				dx, dt = p.rx, p.tx // сброс счётчика: перезапуск
+				if gap {
+					part = 1
+				}
 			} else {
 				dx, dt = p.rx-pv[0], p.tx-pv[1]
 			}
@@ -269,7 +310,7 @@ func (st *trafficState) apply(l *TrafficLog, ts int64, c, bsig string, peers []s
 			dx, dt, has = p.rx, p.tx, true // peer добавлен после прошлого снимка
 		}
 		if has {
-			l.add(day, k, dx, dt, p.hs, 1)
+			l.add(day, k, dx, dt, p.hs, 1, part)
 		}
 		st.prev[k] = [2]int64{p.rx, p.tx}
 		cur[k] = true
@@ -285,12 +326,13 @@ func (st *trafficState) apply(l *TrafficLog, ts int64, c, bsig string, peers []s
 	l.Heuristic += heur
 	st.seen[c] = true
 	st.sig[c] = bsig
+	st.last[c] = ts
 }
 
 func (l *TrafficLog) parseRaw(raw string, maxGen int64) {
 	lines := strings.Split(raw, "\n")
 	first := true
-	st := &trafficState{prev: map[TrafficKey][2]int64{}, seen: map[string]bool{}, sig: map[string]string{}}
+	st := &trafficState{prev: map[TrafficKey][2]int64{}, seen: map[string]bool{}, sig: map[string]string{}, last: map[string]int64{}}
 	var (
 		inb   bool
 		bts   int64
@@ -436,6 +478,35 @@ func (l *TrafficLog) CoveredDays(c string) []int64 {
 	return out
 }
 
+// Containers — контейнеры, у которых есть учтённые снимки, по имени.
+func (l *TrafficLog) Containers() []string {
+	set := map[string]bool{}
+	for _, m := range l.cov {
+		for c, n := range m {
+			if n > 0 {
+				set[c] = true
+			}
+		}
+	}
+	var out []string
+	for c := range set {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Partial — сколько учтённых интервалов частично потеряно (С3).
+func (l *TrafficLog) Partial() int {
+	n := 0
+	for _, m := range l.days {
+		for _, a := range m {
+			n += a.partial
+		}
+	}
+	return n
+}
+
 // Empty — данных нет вовсе: ни одного файла.
 func (l *TrafficLog) Empty() bool { return l == nil || (!l.HaveDaily && !l.HaveRaw) }
 
@@ -453,7 +524,7 @@ func (l *TrafficLog) Cell(k TrafficKey, r DayRange, collector CollectorState) Tr
 		return TrafficCell{State: TrafficNoData}
 	}
 	var c TrafficCell
-	n := 0
+	n, partial := 0, 0
 	for d, m := range l.days {
 		if !r.has(d) {
 			continue
@@ -462,6 +533,7 @@ func (l *TrafficLog) Cell(k TrafficKey, r DayRange, collector CollectorState) Tr
 			c.rx += a.rx
 			c.tx += a.tx
 			n += a.n
+			partial += a.partial
 			if a.hs > 0 {
 				if t := time.Unix(a.hs, 0); t.After(c.LastHandshake) {
 					c.LastHandshake = t
@@ -473,6 +545,9 @@ func (l *TrafficLog) Cell(k TrafficKey, r DayRange, collector CollectorState) Tr
 		return TrafficCell{State: TrafficNoData}
 	}
 	c.State = TrafficMeasured
+	if partial > 0 {
+		c.State = TrafficPartial
+	}
 	return c
 }
 
@@ -500,7 +575,33 @@ type CollectorStatus struct {
 	// Full — сборщик остановился по пределу объёма (метка FULL).
 	Full string
 	Err  error
+
+	// Collect — идёт ли сбор НА САМОМ ДЕЛЕ (аудит AU-1, С2): не по
+	// «таймер активен», а по исходу службы и свежести последнего снимка.
+	Collect CollectState
+	// CollectWhy — почему «не работает» или «неизвестно».
+	CollectWhy string
+	// LastSnapshot — время последнего целого снимка (по серверу); нулевое —
+	// снимков нет. SnapshotAge — его возраст по часам сервера.
+	LastSnapshot time.Time
+	SnapshotAge  time.Duration
 }
+
+// CollectState — идёт ли сбор.
+type CollectState int
+
+const (
+	// CollectUnknown — состояние службы или журнала прочитать не удалось.
+	CollectUnknown CollectState = iota
+	// CollectStopped — не работает; причина в CollectWhy.
+	CollectStopped
+	// CollectWorking — служба завершилась успешно И последний снимок не
+	// старше statsFreshSec.
+	CollectWorking
+)
+
+// statsFreshSec — снимок свежий, если не старше двух интервалов таймера.
+const statsFreshSec = 600
 
 // posixCksum — сумма в формате утилиты cksum (POSIX): CRC-32 с многочленом
 // 0x04C11DB7 без отражения по данным и длине, с инверсией.
@@ -535,6 +636,9 @@ func parseCollectorStatus(out string) CollectorStatus {
 	seen, present, ours := 0, 0, 0
 	active := ""
 	ended := false
+	unit := map[string]string{} // systemctl show: Result=, ActiveState=, SubState=
+	var now, lastE int64
+	haveNow, haveTail, haveE, inTail := false, false, false, false
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -572,6 +676,30 @@ func parseCollectorStatus(out string) CollectorStatus {
 			}
 		case "AA_STATUS_END":
 			ended = true
+		case "AA_NOW":
+			if len(f) == 2 {
+				if v, err := statsNum(f[1]); err == nil {
+					now, haveNow = v, true
+				}
+			}
+		case "AA_TAIL_BEGIN":
+			inTail, haveTail = true, true
+			continue
+		case "AA_TAIL_END":
+			inTail = false
+			continue
+		}
+		if inTail {
+			// Последний целый снимок — последняя строка E хвоста журнала.
+			if f[0] == "E" && len(f) == 4 {
+				if v, err := statsNum(f[1]); err == nil {
+					lastE, haveE = v, true
+				}
+			}
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok && len(f) == 1 {
+			unit[k] = v
 		}
 	}
 	switch {
@@ -592,6 +720,38 @@ func parseCollectorStatus(out string) CollectorStatus {
 			st.Detail = append(st.Detail, "таймер не активен ("+a+")")
 		}
 		st.State = CollectorPartial
+	}
+	st.Collect, st.CollectWhy = CollectUnknown, ""
+	if haveE {
+		st.LastSnapshot = time.Unix(lastE, 0)
+		if haveNow {
+			st.SnapshotAge = time.Duration(now-lastE) * time.Second
+		}
+	}
+	res, haveRes := unit["Result"]
+	switch {
+	case st.State == CollectorUnknown:
+		st.CollectWhy = "ответ сервера не разобран"
+	case st.State == CollectorNotInstalled:
+		st.Collect, st.CollectWhy = CollectStopped, "сборщик не установлен"
+	case st.Full != "":
+		st.Collect, st.CollectWhy = CollectStopped, "достигнут предел объёма"
+	case !haveRes || !haveNow:
+		st.CollectWhy = "состояние службы прочитать не удалось"
+	case res != "success":
+		st.Collect, st.CollectWhy = CollectStopped, "последний запуск сборщика завершился с ошибкой (Result="+res+")"
+	case !haveTail:
+		st.Collect, st.CollectWhy = CollectStopped, "снимков ещё нет"
+	case !haveE:
+		st.Collect, st.CollectWhy = CollectStopped, "в последних записях журнала нет ни одного целого снимка"
+	case now-lastE > statsFreshSec:
+		why := fmt.Sprintf("последний снимок %d мин назад", (now-lastE)/60)
+		if unit["ActiveState"] == "activating" {
+			why += "; служба выполняется сейчас — возможно, зависла"
+		}
+		st.Collect, st.CollectWhy = CollectStopped, why
+	default:
+		st.Collect = CollectWorking
 	}
 	return st
 }
@@ -618,6 +778,16 @@ func (s *Session) StatsStatus() CollectorStatus {
 // подтверждения человека: это запись на сервер.
 func (s *Session) StatsInstall() error {
 	out, err := s.statsRun(statsInstallScript())
+	// Аудит AU-1, Н1: отказ по каталогу — с причиной.
+	if i := strings.Index(out, "AA_STATS_BADDIR "); i >= 0 {
+		why := strings.TrimSpace(strings.SplitN(out[i+len("AA_STATS_BADDIR "):], "\n", 2)[0])
+		if why == "symlink" {
+			why = "это символическая ссылка"
+		} else {
+			why = "владелец:права " + why + ", ожидалось 0:700 (root, 0700)"
+		}
+		return fmt.Errorf("установка отменена: каталог %s небезопасен — %s", StatsDir, why)
+	}
 	if err != nil {
 		return fmt.Errorf("установка сборщика: %w", err)
 	}

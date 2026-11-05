@@ -417,6 +417,8 @@ func statsSampleRaw() string {
 		tsig(tsAt(day0+2, 900), awgC, "b2 s1", "A 500 500 9") +
 		tsig(tsAt(day0+2, 1200), awgC, "b2 -", "A 510 510 9") +
 		tsig(tsAt(day0+2, 1500), awgC, "b2 s3", "A 600 600 9") +
+		tsig(tsAt(day0+2, 6000), awgC, "b3 s3", "A 20 20 9") +
+		tblk(tsAt(day0+2, 9000), awgC, "A 1 2 9") +
 		"\nS 1728200000 amnezia-awg 1\nP A 1 1"
 }
 
@@ -502,6 +504,7 @@ func newCollectorEnv(t *testing.T) *collectorEnv {
 d=$(dirname "$0")
 if [ "$1" = ps ]; then
   if [ -e "$d/psfail" ]; then exit 1; fi
+  if [ "$2" = -a ]; then printf 'amnezia-awg\namnezia-wireguard\nother\n'; exit 0; fi
   printf 'amnezia-awg\nother\n'; exit 0
 fi
 if [ "$1" = inspect ] && [ "$2" = -f ] && [ "$4" = amnezia-awg ]; then cat "$d/started"; exit 0; fi

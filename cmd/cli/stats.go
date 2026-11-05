@@ -59,7 +59,15 @@ func runStats(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src statsSou
 func collectorText(st core.CollectorStatus) string {
 	switch st.State {
 	case core.CollectorInstalled:
-		return "установлен, таймер работает (снимок раз в 5 минут)"
+		// Аудит AU-1, С2: «работает» — только по исходу службы и свежему
+		// снимку, никогда по одному «таймер активен».
+		switch st.Collect {
+		case core.CollectWorking:
+			return fmt.Sprintf("установлен, сбор работает (последний снимок %d мин назад, снимок раз в 5 минут)", int(st.SnapshotAge.Minutes()))
+		case core.CollectStopped:
+			return "установлен, но сбор НЕ работает: " + st.CollectWhy
+		}
+		return "установлен; идёт ли сбор — неизвестно: " + st.CollectWhy
 	case core.CollectorNotInstalled:
 		return "не установлен (установить: amnezia-admin stats install)"
 	case core.CollectorPartial:
@@ -90,19 +98,61 @@ func runStatsStatus(out, errOut io.Writer, src statsSource) int {
 	case l.Empty():
 		fmt.Fprintln(out, "Накопленных данных нет.")
 	default:
-		statsDataNotes(out, l)
+		statsDataNotes(out, l, core.AllTime)
 	}
-	if st.State == core.CollectorUnknown {
+	if st.State == core.CollectorUnknown || st.State == core.CollectorInstalled && st.Collect == core.CollectUnknown {
 		return 1
 	}
 	return 0
 }
 
-func statsDataNotes(out io.Writer, l *core.TrafficLog) {
-	if days := l.CoveredDays(""); len(days) > 0 {
-		fmt.Fprintf(out, "Учтены сутки (UTC): с %s по %s, всего %d.\n", dayText(days[0]), dayText(days[len(days)-1]), len(days))
-	} else {
-		fmt.Fprintln(out, "Учтённых интервалов пока нет: нужно не меньше двух снимков.")
+// statsDataNotes — полнота данных ЗА ВЫБРАННЫЙ ПЕРИОД и по каждому
+// контейнеру (аудит AU-1, С3): учтённые сутки и сутки без снимков между
+// ними — дыра в середине видна, а не прячется за «с … по …».
+func statsDataNotes(out io.Writer, l *core.TrafficLog, r core.DayRange) {
+	any := false
+	for _, c := range l.Containers() {
+		var days []int64
+		for _, d := range l.CoveredDays(c) {
+			if d >= r.From && d <= r.To {
+				days = append(days, d)
+			}
+		}
+		if len(days) == 0 {
+			continue
+		}
+		any = true
+		lo, hi := days[0], days[len(days)-1]
+		fmt.Fprintf(out, "%s: учтены сутки (UTC) с %s по %s, всего %d.\n", c, dayText(lo), dayText(hi), len(days))
+		have := map[int64]bool{}
+		for _, d := range days {
+			have[d] = true
+		}
+		var gaps []string
+		n := 0
+		for d := lo; d <= hi; d++ {
+			if !have[d] {
+				n++
+				if len(gaps) < 5 {
+					gaps = append(gaps, dayText(d))
+				}
+			}
+		}
+		if n > 0 {
+			more := ""
+			if n > len(gaps) {
+				more = fmt.Sprintf(" и ещё %d", n-len(gaps))
+			}
+			fmt.Fprintln(out, cWarn(fmt.Sprintf("  %s: нет снимков за %d сут.: %s%s — цифры за них неполные, если в это время был перезапуск.",
+				c, n, strings.Join(gaps, ", "), more)))
+		}
+	}
+	if !any {
+		fmt.Fprintln(out, "Учтённых интервалов за период нет: нужно не меньше двух снимков в нём.")
+	}
+	if l.Partial() > 0 {
+		fmt.Fprintln(out, cWarn(fmt.Sprintf("Интервалов с перезапуском после перерыва в сборе: %d — трафик до перезапуска в них потерян; "+
+			"такие цифры помечены «≥» (не меньше).", l.Partial())))
 	}
 	if !l.LastSnapshot.IsZero() {
 		fmt.Fprintln(out, "Последний снимок: "+l.LastSnapshot.UTC().Format("2006-01-02 15:04")+" UTC")
@@ -234,12 +284,28 @@ func shortKey(k string) string {
 	return k
 }
 
-// statsCellText — текст одной цифры. Число — только у измеренной ячейки.
+// cellNums — цифры ячейки: измеренные (rank 0) или нижняя граница при
+// частичной потере (rank 1); иначе rank 2 и цифр нет.
+func cellNums(c core.TrafficCell) (rx, tx int64, rank int) {
+	if rx, tx, ok := c.Measured(); ok {
+		return rx, tx, 0
+	}
+	if rx, tx, ok := c.LowerBound(); ok {
+		return rx, tx, 1
+	}
+	return 0, 0, 2
+}
+
+// statsCellText — текст одной цифры. Число — только у измеренной ячейки;
+// у частично потерянной — «≥ число» (аудит AU-1, С3).
 func statsCellText(c core.TrafficCell, v func(rx, tx int64) int64) string {
 	switch c.State {
 	case core.TrafficMeasured:
 		rx, tx, _ := c.Measured()
 		return core.HumanBytes(v(rx, tx))
+	case core.TrafficPartial:
+		rx, tx, _ := c.LowerBound()
+		return "≥ " + core.HumanBytes(v(rx, tx))
 	case core.TrafficNoData:
 		return "нет данных"
 	case core.TrafficNotInstalled:
@@ -249,7 +315,7 @@ func statsCellText(c core.TrafficCell, v func(rx, tx int64) int64) string {
 }
 
 func statsSeenText(c core.TrafficCell) string {
-	if _, _, ok := c.Measured(); !ok {
+	if _, _, rank := cellNums(c); rank == 2 {
 		return statsCellText(c, nil)
 	}
 	if c.LastHandshake.IsZero() {
@@ -267,12 +333,13 @@ func cellTotal(rx, tx int64) int64 { return rx + tx }
 // выглядел бы нулём (25.09: нарушение было в сортировке, не в тексте).
 func statsSort(rows []statsRow, cells map[core.TrafficKey]core.TrafficCell) {
 	sort.SliceStable(rows, func(i, j int) bool {
-		ri, ti, oki := cells[rows[i].key].Measured()
-		rj, tj, okj := cells[rows[j].key].Measured()
-		if oki != okj {
-			return oki
+		// Измеренные, затем «не меньше» (нижняя граница), затем без данных.
+		ri, ti, ki := cellNums(cells[rows[i].key])
+		rj, tj, kj := cellNums(cells[rows[j].key])
+		if ki != kj {
+			return ki < kj
 		}
-		if oki && ri+ti != rj+tj {
+		if ki < 2 && ri+ti != rj+tj {
 			return ri+ti > rj+tj
 		}
 		return false
@@ -331,7 +398,7 @@ func runStatsShow(out, errOut io.Writer, src statsSource, containers []core.Cont
 		fmt.Fprintln(out, "Клиентов нет.")
 	}
 	fmt.Fprintln(out)
-	statsDataNotes(out, l)
+	statsDataNotes(out, l, r)
 	for _, n := range notes {
 		fmt.Fprintln(out, cWarn(n))
 	}
@@ -379,6 +446,8 @@ func stateText(c core.TrafficCell) string {
 	switch c.State {
 	case core.TrafficMeasured:
 		return "измерено"
+	case core.TrafficPartial:
+		return "неполные (не меньше)"
 	case core.TrafficNoData:
 		return "нет данных"
 	case core.TrafficNotInstalled:
@@ -441,7 +510,7 @@ func writeStatsCSV(out, errOut io.Writer, rows []statsRow, l *core.TrafficLog, c
 		for _, row := range rows {
 			c := l.Cell(row.key, p.r, cs)
 			rec := []string{p.label, row.proto, row.name, row.key.PubKey, "", "", "", "", stateText(c)}
-			if rx, tx, ok := c.Measured(); ok {
+			if rx, tx, rank := cellNums(c); rank < 2 {
 				rec[4], rec[5], rec[6] = fmt.Sprint(rx), fmt.Sprint(tx), fmt.Sprint(rx+tx)
 				if !c.LastHandshake.IsZero() {
 					rec[7] = c.LastHandshake.UTC().Format("2006-01-02 15:04")

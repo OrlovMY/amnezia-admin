@@ -222,7 +222,7 @@ var statsOwnFiles = map[string]bool{
 var statsVarNames = map[string]bool{
 	"g0": true, "ts": true, "names": true, "c": true, "r": true, "t": true, "i": true,
 	"found": true, "out": true, "blk": true, "sz": true, "ds": true, "gen": true, "p": true,
-	"dg": true, "rg": true, "boot": true, "st": true,
+	"dg": true, "rg": true, "boot": true, "st": true, "all": true, "m": true,
 }
 
 func sgAwkViolations(prog string) []string {
@@ -267,6 +267,13 @@ func sgAllOwn(a []string) bool {
 // sgCollectorArgv — закрытый список команд collect.sh.
 func sgCollectorArgv(ws []sgWord) []string {
 	a := sgTexts(ws)
+	// «timeout 30» допустим только перед docker (аудит AU-1, С1).
+	if len(a) >= 3 && a[0] == "timeout" {
+		if a[1] != "30" || a[2] != "docker" {
+			return []string{"timeout вне шаблона: " + strings.Join(a, " ")}
+		}
+		ws, a = ws[2:], a[2:]
+	}
 	switch a[0] {
 	case "set":
 		if sgEq(a, "set", "-u") {
@@ -292,7 +299,7 @@ func sgCollectorArgv(ws []sgWord) []string {
 			return nil
 		}
 	case "docker":
-		if sgEq(a, "docker", "ps", "--format", "{{.Names}}") || sgEq(a, "docker", "exec", "$c", "$t", "show", "$i", "dump") ||
+		if sgEq(a, "docker", "ps", "--format", "{{.Names}}") || sgEq(a, "docker", "ps", "-a", "--format", "{{.Names}}") || sgEq(a, "docker", "exec", "$c", "$t", "show", "$i", "dump") ||
 			sgEq(a, "docker", "inspect", "-f", "{{.State.StartedAt}}", "$c") {
 			return nil
 		}
@@ -346,7 +353,16 @@ func sgReadonlyArgv(ws []sgWord) []string {
 			return nil
 		}
 	case "systemctl":
-		if sgEq(a, "systemctl", "is-active", StatsUnit+".timer") {
+		if sgEq(a, "systemctl", "is-active", StatsUnit+".timer") ||
+			sgEq(a, "systemctl", "show", "-p", "Result", "-p", "ActiveState", "-p", "SubState", StatsUnit+".service") {
+			return nil
+		}
+	case "date":
+		if sgEq(a, "date", "+%s") {
+			return nil
+		}
+	case "tail":
+		if sgEq(a, "tail", "-n", "50", StatsDir+"/snapshots.log") {
 			return nil
 		}
 	}
@@ -373,14 +389,26 @@ func sgInstallArgv(ws []sgWord) []string {
 		if sgEq(a, "mkdir", "-p", StatsDir) {
 			return nil
 		}
-	case "echo", "true":
+	case "echo", "true", "[":
 		return nil
+	case "exit":
+		if sgEq(a, "exit", "3") {
+			return nil
+		}
+	case "chown":
+		if sgEq(a, "chown", "root:root", StatsDir) {
+			return nil
+		}
+	case "stat":
+		if sgEq(a, "stat", "-c", "%u:%a", StatsDir) {
+			return nil
+		}
 	case "cat":
 		if len(a) == 1 {
 			return nil
 		}
 	case "chmod":
-		if len(a) == 3 && (a[1] == "0755" || a[1] == "0644") && newOf(a[2]) {
+		if len(a) == 3 && (a[1] == "0755" || a[1] == "0644") && newOf(a[2]) || sgEq(a, "chmod", "0700", StatsDir) {
 			return nil
 		}
 	case "mv":
@@ -391,7 +419,7 @@ func sgInstallArgv(ws []sgWord) []string {
 		if len(a) >= 3 && a[1] == "-f" {
 			ok := true
 			for _, p := range a[2:] {
-				ok = ok && statsInstallPaths[p]
+				ok = ok && statsInstallPaths[strings.TrimSuffix(p, ".new")]
 			}
 			if ok {
 				return nil
@@ -401,7 +429,8 @@ func sgInstallArgv(ws []sgWord) []string {
 		if sgEq(a, "systemctl", "daemon-reload") ||
 			sgEq(a, "systemctl", "enable", "--now", StatsUnit+".timer") ||
 			sgEq(a, "systemctl", "disable", "--now", StatsUnit+".timer") ||
-			sgEq(a, "systemctl", "stop", StatsUnit+".service") {
+			sgEq(a, "systemctl", "stop", StatsUnit+".service") ||
+			sgEq(a, "systemctl", "reset-failed", StatsUnit+".service", StatsUnit+".timer") {
 			return nil
 		}
 	}
@@ -582,6 +611,10 @@ func TestStatsScriptClosedList(t *testing.T) {
 		`docker inspect -f "{{.State.StartedAt}}" "$c" > /tmp/x`,
 		`awk -v e=1 'BEGIN { print 1 }'`,
 		`umask 022`,
+		`timeout 30 sh -c id`,
+		`timeout 999 docker ps --format "{{.Names}}"`,
+		`timeout 30 docker run x`,
+		`docker ps -a --format "{{json .}}"`,
 		`printf "\x"`,
 	} {
 		sc := strings.Replace(base, anchor, anchor+canary+"\n", 1)
@@ -595,12 +628,12 @@ func TestStatsScriptClosedList(t *testing.T) {
 	if len(statsScriptViolations(early, sgCollector)) == 0 {
 		t.Error("канарейка не поймана: запись до cd")
 	}
-	for _, canary := range []string{`echo x > /tmp/x`, `cat /etc/shadow`, `rm -f x`, `systemctl stop x`} {
+	for _, canary := range []string{`echo x > /tmp/x`, `cat /etc/shadow`, `rm -f x`, `systemctl stop x`, `tail -n 1 /etc/shadow`, `systemctl show -p Environment x`} {
 		if len(statsScriptViolations(statsReadScript()+canary+"\n", sgReadonly)) == 0 {
 			t.Errorf("канарейка только-чтения не поймана: %s", canary)
 		}
 	}
-	for _, canary := range []string{`rm -f /etc/passwd`, `cat > /etc/x.new`, `systemctl enable --now evil.timer`, `mv /tmp/x.new /etc/x`, `chmod 4755 ` + StatsScriptPath + `.new`} {
+	for _, canary := range []string{`rm -f /etc/passwd`, `rm -f /etc/x.new`, `chown root:root /etc`, `chmod 0777 ` + StatsDir, `stat -c %u /etc/shadow`, `cat > /etc/x.new`, `systemctl enable --now evil.timer`, `mv /tmp/x.new /etc/x`, `chmod 4755 ` + StatsScriptPath + `.new`} {
 		if len(statsScriptViolations(statsInstallScript()+canary+"\n", sgInstall)) == 0 {
 			t.Errorf("канарейка установки не поймана: %s", canary)
 		}
