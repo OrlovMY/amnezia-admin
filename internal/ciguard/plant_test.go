@@ -203,8 +203,8 @@ var plants = []plant{
 		{releaseYML, "      - name: go test -race\n", "      - name: go test -race\n        shell: bash {0} || true\n"}},
 		wantTest: gtm, also: []string{keys}, wantMsg: "у шага задан shell: «bash {0} || true»"},
 	{name: "r2-gotest-subshell", edits: []edit{
-		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
-		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
+		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: |\n          if false; then\n          go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n          fi\n"}},
 		wantTest: gtm, also: []string{progs}, wantMsg: "строка «if false; then» выше вызова"},
 	// --- раунд 4 QA-01: значение -shellcheck и окружение инструментов ---
 	{name: "r4-sc-nonexistent", edits: realWith(`-shellcheck "$SHELLCHECK_BIN" \`, `-shellcheck /nonexistent \`),
@@ -444,7 +444,7 @@ var plants = []plant{
 	// AU-LOGIC High-1: шаг busybox перенесён ПОСЛЕ go test — тесты снова идут без него.
 	{name: "rc1-shells-after-gotest-release", edits: []edit{
 		{releaseYML, "        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n", "        run: echo перенесено\n"},
-		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n\n      - name: Оболочки для скрипта записи (busybox, dash)\n        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"}},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n", "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n\n      - name: Оболочки для скрипта записи (busybox, dash)\n        if: matrix.os == 'linux'\n        run: |\n          set -euo pipefail\n          sudo apt-get install -y busybox\n"}},
 		wantTest: tenv, wantMsg: "стоит ПОСЛЕ go test"},
 	// лишний неустановочный шаг до go test только в одном файле
 	{name: "rc1-extra-step-ci", edits: ci("      - name: go vet\n", "      - name: Лишний\n        run: echo x\n\n      - name: go vet\n"),
@@ -617,10 +617,10 @@ var plants = []plant{
 		wantTest: "TestReleaseMatrixArchMatchesRunnerTable", wantMsg: "метка раннера macos-27 не описана в таблице runnerArch"},
 	// --- go test ---
 	{name: "gotest-multiline-both", edits: []edit{
-		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
-			"        run: |\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"},
-		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n",
-			"        run: |\n          go test -timeout=20m -race -count=1 ./core/ ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
+		{ciYML, "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n",
+			"        run: |\n          go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"},
+		{releaseYML, "        run: go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n",
+			"        run: |\n          go test -timeout=20m -race -count=1 ./core/... ./internal/... ./cmd/cli/ ./cmd/gui/\n          echo ok\n"}},
 		wantTest: gtm, wantMsg: "после вызова стоит строка «echo ok»"},
 	{name: "packages", edits: rel("./cmd/cli/ ./cmd/gui/\n", "./cmd/cli/\n"),
 		wantTest: gtm, wantMsg: "списки go test разошлись", also: []string{tenv}},
@@ -632,7 +632,7 @@ var plants = []plant{
 		{ciYML, "go test -timeout=20m -race", "go test -race"},
 		{releaseYML, "go test -timeout=20m -race", "go test -race"}},
 		wantTest: gtm, wantMsg: "нет обязательного флага -timeout=20m"},
-	{name: "packages-order", edits: rel("-count=1 ./core/ ./internal/...", "-count=1 ./internal/... ./core/"),
+	{name: "packages-order", edits: rel("-count=1 ./core/... ./internal/...", "-count=1 ./internal/... ./core/..."),
 		wantTest: gtm, wantMsg: "списки go test разошлись — на теге проверяется не то, что на PR", also: []string{tenv}},
 	{name: "packages-dir", extraDir: "cmd/planted",
 		wantTest: gtm, wantMsg: "каталог cmd/planted с тестами не входит"},
