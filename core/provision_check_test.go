@@ -84,7 +84,9 @@ func TestProvClassifyTable(t *testing.T) {
 	awgC := func(p probe) ProvItem { return classifyPort(p, "AWG", "udp", ProvAWGPort) }
 	xC := func(p probe) ProvItem { return classifyPort(p, "XRay", "tcp", ProvXRayPort) }
 	diC := classifyDisk
-	ctrC := func(p probe) ProvItem { return classifyContainers(parseProbe("DOCKER=yes\nSRVRC=0\nSRV=27.1\nEND\n", nil), p) }
+	ctrC := func(p probe) ProvItem {
+		return classifyContainers(parseProbe("DOCKER=yes\nSRVRC=0\nSRV=27.1\nEND\n", nil), p)
+	}
 	cases := []struct {
 		name string
 		f    cls
@@ -97,6 +99,10 @@ func TestProvClassifyTable(t *testing.T) {
 		{"os foreign", osC, "ID=gentoo\nVERSION_ID=2\nEND\n", nil, ProvUnknown},
 		{"os no file", osC, "OSREL=none\nEND\n", nil, ProvUnknown},
 		{"os fail", osC, "", fail, ProvUnknown},
+		// sshRunner при ошибке возвращает и накопленный stdout: полный вывод
+		// с ошибкой — всё равно «не удалось», а не «годится».
+		{"os fail with output", osC, okOS, fail, ProvUnknown},
+		{"ports fail with output", func(p probe) ProvItem { return classifyPort(p, "XRay", "tcp", ProvXRayPort) }, okPorts, fail, ProvUnknown},
 		{"os empty", osC, "", nil, ProvUnknown},
 		{"os no END", osC, "ID=ubuntu\nVERSION_ID=24.04\n", nil, ProvUnknown},
 
@@ -124,6 +130,7 @@ func TestProvClassifyTable(t *testing.T) {
 		{"sudo needs pw", suC, "UID=1000\nSUDORC=1\nSUDOERR=sudo: a password is required\nEND\n", nil, ProvBad},
 		{"sudo absent", suC, "UID=1000\nSUDO=none\nEND\n", nil, ProvBad},
 		{"sudo uid blank", suC, "UID=\nEND\n", nil, ProvUnknown},
+		{"sudo not asked", suC, "UID=1000\nEND\n", nil, ProvUnknown},
 		{"sudo fail", suC, "", fail, ProvUnknown},
 		{"sudo empty", suC, "", nil, ProvUnknown},
 
