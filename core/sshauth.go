@@ -250,6 +250,10 @@ func (r recAlgSigner) SignWithAlgorithm(rand io.Reader, data []byte, algo string
 	return r.note(r.as.SignWithAlgorithm(rand, data, algo))
 }
 
+// Ограничение: обёртка не сохраняет ssh.MultiAlgorithmSigner (сужение
+// списка алгоритмов подписи). Ключи из файлов и агента в x/crypto таким
+// сужением не пользуются; если появится — подпись может предложить
+// алгоритм шире, чем разрешал исходный ключ.
 func wrapSigner(s ssh.Signer, rec *keyRec) ssh.Signer {
 	base := recSigner{Signer: s, rec: rec}
 	if as, ok := s.(ssh.AlgorithmSigner); ok {
@@ -260,6 +264,10 @@ func wrapSigner(s ssh.Signer, rec *keyRec) ssh.Signer {
 
 // ErrKbdInteractive — сервер задал в keyboard-interactive не один вопрос о
 // пароле (например код 2FA): пароль туда не отправляется.
+// ErrSecondFactor — пароль уже отправлен в этом соединении, а сервер снова
+// спрашивает скрытый ввод: это второй фактор, пароль повторно не уходит.
+var ErrSecondFactor = errors.New("сервер спрашивает второй фактор (после пароля снова скрытый вопрос) — не поддерживается, пароль повторно не отправлен")
+
 var ErrKbdInteractive = errors.New("сервер спрашивает не только пароль (keyboard-interactive: несколько вопросов или видимый ввод, возможно второй фактор) — пароль не отправлен")
 
 // keysVerdict — исход по ключам из ФАКТОВ рукопожатия, когда вход по
@@ -292,6 +300,7 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	rec := &keyRec{}
 	var pw []byte
 	pwAsked := false
+	pwSent := false // пароль уже ушёл серверу в этом соединении
 	defer func() { clear(pw) }()
 	settleKeys := func() {
 		if len(signers) > 0 && att.Outcome == KeysUndetermined {
@@ -335,7 +344,16 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	}
 	if src.Password != nil {
 		auths = append(auths,
-			ssh.PasswordCallback(getPw),
+			ssh.PasswordCallback(func() (string, error) {
+				if pwSent {
+					return "", ErrSecondFactor
+				}
+				p, err := getPw()
+				if err == nil {
+					pwSent = true
+				}
+				return p, err
+			}),
 			ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
 				if len(questions) == 0 {
 					return nil, nil
@@ -343,10 +361,14 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 				if len(questions) != 1 || echos[0] {
 					return nil, ErrKbdInteractive
 				}
+				if pwSent {
+					return nil, ErrSecondFactor
+				}
 				p, err := getPw()
 				if err != nil {
 					return nil, err
 				}
+				pwSent = true
 				return []string{p}, nil
 			}),
 		)
@@ -358,7 +380,7 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	client, fp, err := dialWithHostKey(host, port, user, auths, pol)
 	if err != nil {
 		ce := ClassifyConnectError(err)
-		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive)
+		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor)
 		if authFail {
 			settleKeys()
 			return nil, att, &AuthError{Keys: att, PasswordTried: pw != nil, Err: err}

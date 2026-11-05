@@ -23,8 +23,21 @@ func dialAgent(sock string) (agent.ExtendedAgent, io.Closer, error) {
 	if err != nil {
 		return nil, nil, errors.New("недоступен: " + err.Error())
 	}
-	// Дедлайн на всё общение с агентом (список ключей и подписи во время
-	// рукопожатия): зависший агент не вешает ConnectNew навсегда.
-	_ = c.SetDeadline(time.Now().Add(agentTimeout))
-	return agent.NewClient(c), c, nil
+	// Дедлайн — на КАЖДУЮ операцию с агентом (список ключей, каждая
+	// подпись), а не от момента подключения: зависший агент не вешает
+	// ConnectNew, а долгое рукопожатие не исчерпывает общий срок.
+	dc := deadlineConn{c}
+	return agent.NewClient(dc), c, nil
+}
+
+type deadlineConn struct{ net.Conn }
+
+func (d deadlineConn) Read(b []byte) (int, error) {
+	_ = d.Conn.SetDeadline(time.Now().Add(agentTimeout))
+	return d.Conn.Read(b)
+}
+
+func (d deadlineConn) Write(b []byte) (int, error) {
+	_ = d.Conn.SetDeadline(time.Now().Add(agentTimeout))
+	return d.Conn.Write(b)
 }

@@ -401,3 +401,76 @@ func TestConnectNewEmptyKnownHostsBeforeKeys(t *testing.T) {
 		t.Fatalf("err=%v att=%#v, want ошибка до сбора ключей", err, att)
 	}
 }
+
+// kbdRounds — сервер keyboard-interactive в несколько раундов; записывает
+// ответы каждого раунда. Принимает, если все раунды пройдены с паролем в
+// первом (второй раунд пароль принимать не должен — проверяем, что он туда не
+// уходит).
+func kbdRounds(rounds [][]string, echos [][]bool, got *[][]string) func(*ssh.ServerConfig) {
+	return func(c *ssh.ServerConfig) {
+		c.PasswordCallback = nil
+		c.KeyboardInteractiveCallback = func(_ ssh.ConnMetadata, ch ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			for i, qs := range rounds {
+				ans, err := ch("", "", qs, echos[i])
+				if err != nil {
+					return nil, err
+				}
+				*got = append(*got, ans)
+			}
+			return nil, nil
+		}
+	}
+}
+
+// TestConnectNewKbdSecondFactor — второй раунд со скрытым вопросом после
+// пароля: пароль во второй раунд не уходит, отказ ErrSecondFactor.
+func TestConnectNewKbdSecondFactor(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	var got [][]string
+	srv := startFakeAuthServerConf(t, nil, "", kbdRounds(
+		[][]string{{"Password: "}, {"Verification code: "}}, [][]bool{{false}, {false}}, &got))
+	ps := &pwSource{pw: sshPw}
+	_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if !errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("err = %v, want ErrSecondFactor", err)
+	}
+	if len(got) != 1 || len(got[0]) != 1 || got[0][0] != sshPw {
+		t.Fatalf("ответы сервера = %d раундов, want ровно один с паролем", len(got))
+	}
+	var ae *AuthError
+	if !errors.As(err, &ae) || leaksPassword(err.Error()) {
+		t.Fatalf("ожидался *AuthError без пароля в тексте: %v", err)
+	}
+}
+
+// TestConnectNewKbdVisibleInput — один вопрос с видимым вводом: это не
+// пароль, пароль не спрашивается и не уходит.
+func TestConnectNewKbdVisibleInput(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	var got [][]string
+	srv := startFakeAuthServerConf(t, nil, "", kbdRounds([][]string{{"Login code: "}}, [][]bool{{true}}, &got))
+	ps := &pwSource{pw: sshPw}
+	_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if !errors.Is(err, ErrKbdInteractive) || ps.calls != 0 || len(got) != 0 {
+		t.Fatalf("err=%v calls=%d rounds=%d, want ErrKbdInteractive, пароль не спрошен и не отправлен", err, ps.calls, len(got))
+	}
+}
+
+// TestConnectNewNoClientAuthUndetermined — сервер впускает без проверки
+// (NoClientAuth), ключ в каталоге есть: это не «ключ принят», а
+// KeysUndetermined с примечанием (тест различения и доезда).
+func TestConnectNewNoClientAuthUndetermined(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	k := writeKey(t, dir, "id_ed25519", "")
+	srv := startFakeAuthServerConf(t, []ssh.PublicKey{k}, "", func(c *ssh.ServerConfig) { c.NoClientAuth = true })
+	ps := &pwSource{pw: sshPw}
+	sess, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: ps.fn}, trustPolicy(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Client.Close()
+	if att.Outcome != KeysUndetermined || ps.calls != 0 || !strings.Contains(strings.Join(att.Notes, ";"), "без проверки ключа") {
+		t.Fatalf("att=%#v calls=%d, want KeysUndetermined с примечанием", att, ps.calls)
+	}
+}
