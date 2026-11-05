@@ -222,6 +222,7 @@ var statsOwnFiles = map[string]bool{
 var statsVarNames = map[string]bool{
 	"g0": true, "ts": true, "names": true, "c": true, "r": true, "t": true, "i": true,
 	"found": true, "out": true, "blk": true, "sz": true, "ds": true, "gen": true, "p": true,
+	"dg": true, "rg": true, "boot": true, "st": true,
 }
 
 func sgAwkViolations(prog string) []string {
@@ -272,7 +273,8 @@ func sgCollectorArgv(ws []sgWord) []string {
 			return nil
 		}
 	case "umask":
-		if sgEq(a, "umask", "022") {
+		// Данные сборщика — только root (раунд 2, Н2).
+		if sgEq(a, "umask", "077") {
 			return nil
 		}
 	case "cd":
@@ -290,7 +292,8 @@ func sgCollectorArgv(ws []sgWord) []string {
 			return nil
 		}
 	case "docker":
-		if sgEq(a, "docker", "ps", "--format", "{{.Names}}") || sgEq(a, "docker", "exec", "$c", "$t", "show", "$i", "dump") {
+		if sgEq(a, "docker", "ps", "--format", "{{.Names}}") || sgEq(a, "docker", "exec", "$c", "$t", "show", "$i", "dump") ||
+			sgEq(a, "docker", "inspect", "-f", "{{.State.StartedAt}}", "$c") {
 			return nil
 		}
 	case "wc":
@@ -298,6 +301,9 @@ func sgCollectorArgv(ws []sgWord) []string {
 			return nil
 		}
 	case "cat", "mv":
+		if sgEq(a, "cat", "/proc/sys/kernel/random/boot_id") {
+			return nil
+		}
 		if sgAllOwn(a[1:]) && (a[0] == "cat" || len(a) == 3) {
 			return nil
 		}
@@ -308,7 +314,7 @@ func sgCollectorArgv(ws []sgWord) []string {
 	case "awk":
 		j := 1
 		for j+1 < len(a) && a[j] == "-v" {
-			if !regexp.MustCompile(`^(ts|c|add|gen)=`).MatchString(a[j+1]) {
+			if !regexp.MustCompile(`^(ts|c|add|gen|b|s)=`).MatchString(a[j+1]) {
 				return []string{"awk -v вне списка: " + a[j+1]}
 			}
 			j += 2
@@ -569,6 +575,13 @@ func TestStatsScriptClosedList(t *testing.T) {
 		`eval x`,
 		`. ./x`,
 		`systemctl stop docker`,
+		`cat /proc/sys/kernel/random/uuid`,
+		`cat /proc/self/environ`,
+		`docker inspect "$c"`,
+		`docker inspect -f "{{json .Config.Env}}" "$c"`,
+		`docker inspect -f "{{.State.StartedAt}}" "$c" > /tmp/x`,
+		`awk -v e=1 'BEGIN { print 1 }'`,
+		`umask 022`,
 		`printf "\x"`,
 	} {
 		sc := strings.Replace(base, anchor, anchor+canary+"\n", 1)

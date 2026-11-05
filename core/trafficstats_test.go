@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 )
 
 const day0 = int64(20000) // 2024-10-04 UTC
@@ -29,6 +28,12 @@ func tblk(ts int64, c string, peers ...string) string {
 }
 
 const awgC = "amnezia-awg"
+
+// tsig — блок нового формата с признаком запуска «boot started».
+func tsig(ts int64, c, sig string, peers ...string) string {
+	b := tblk(ts, c, peers...)
+	return strings.Replace(b, fmt.Sprintf("S %d %s %d\n", ts, c, len(peers)), fmt.Sprintf("S %d %s %d %s\n", ts, c, len(peers), sig), 1)
+}
 
 func cellAll(l *TrafficLog, pub string) TrafficCell {
 	return l.Cell(TrafficKey{awgC, pub}, AllTime, CollectorInstalled)
@@ -58,6 +63,7 @@ func TestTrafficAggregate(t *testing.T) {
 		want    want
 		corrupt int
 		torn    bool
+		heur    int
 	}{
 		{
 			name: "только точка отсчёта — нет данных, не ноль",
@@ -132,6 +138,26 @@ func TestTrafficAggregate(t *testing.T) {
 			pub: "A", r: AllTime, want: want{TrafficMeasured, 10, 20},
 		},
 		{
+			name: "С2: признак запуска сменился, счётчик вырос — сброс",
+			raw:  "H v1 0\n" + tsig(tsAt(day0, 0), awgC, "b1 s1", "A 100 200 0") + tsig(tsAt(day0, 300), awgC, "b1 s2", "A 150 260 0"),
+			pub:  "A", r: AllTime, want: want{TrafficMeasured, 150, 260},
+		},
+		{
+			name: "С2: признак тот же — разница",
+			raw:  "H v1 0\n" + tsig(tsAt(day0, 0), awgC, "b1 s1", "A 100 200 0") + tsig(tsAt(day0, 300), awgC, "b1 s1", "A 150 260 0"),
+			pub:  "A", r: AllTime, want: want{TrafficMeasured, 50, 60},
+		},
+		{
+			name: "С2: сменился boot_id — сброс",
+			raw:  "H v1 0\n" + tsig(tsAt(day0, 0), awgC, "b1 s1", "A 100 200 0") + tsig(tsAt(day0, 300), awgC, "b2 s1", "A 150 260 0"),
+			pub:  "A", r: AllTime, want: want{TrafficMeasured, 150, 260},
+		},
+		{
+			name: "С2: признак неизвестен («-») — прежняя эвристика",
+			raw:  "H v1 0\n" + tsig(tsAt(day0, 0), awgC, "b1 s1", "A 100 200 0") + tsig(tsAt(day0, 300), awgC, "b1 -", "A 150 260 0"),
+			pub:  "A", r: AllTime, want: want{TrafficMeasured, 50, 60}, heur: 1,
+		},
+		{
 			name: "период без снимков — нет данных",
 			raw:  "H v1 0\n" + tblk(tsAt(day0, 0), awgC, "A 100 200 0") + tblk(tsAt(day0, 300), awgC, "A 150 260 0"),
 			pub:  "A", r: DayRange{day0 + 1, day0 + 5}, want: want{TrafficNoData, 0, 0},
@@ -152,6 +178,13 @@ func TestTrafficAggregate(t *testing.T) {
 			}
 			if ok != (c.want.state == TrafficMeasured) {
 				t.Errorf("Measured ok=%v при состоянии %v", ok, got.State)
+			}
+			// Старые блоки (без признака) — эвристика, кроме случаев С2.
+			if c.heur != 0 && l.Heuristic != c.heur {
+				t.Errorf("интервалов без признака: %d, ждали %d", l.Heuristic, c.heur)
+			}
+			if strings.Contains(c.name, "С2") && c.heur == 0 && l.Heuristic != 0 {
+				t.Errorf("при признаках учтено эвристикой: %d", l.Heuristic)
 			}
 			if l.Corrupt != c.corrupt || l.Torn != c.torn {
 				t.Errorf("повреждено %d (ждали %d), хвост %v (ждали %v)", l.Corrupt, c.corrupt, l.Torn, c.torn)
@@ -379,6 +412,11 @@ func statsSampleRaw() string {
 		tblk(tsAt(day0+1, 200), awgC, "A 90 60 5", "C 9 9 4", "B 1 2 6") +
 		tblk(tsAt(day0+1, 300), w, "W 100 300 9") +
 		tblk(tsAt(day0+2, 50), awgC, "A 95 61 7") +
+		tsig(tsAt(day0+2, 300), awgC, "b1 s1", "A 100 70 8") +
+		tsig(tsAt(day0+2, 600), awgC, "b1 s1", "A 110 80 8") +
+		tsig(tsAt(day0+2, 900), awgC, "b2 s1", "A 500 500 9") +
+		tsig(tsAt(day0+2, 1200), awgC, "b2 -", "A 510 510 9") +
+		tsig(tsAt(day0+2, 1500), awgC, "b2 s3", "A 600 600 9") +
 		"\nS 1728200000 amnezia-awg 1\nP A 1 1"
 }
 
@@ -399,6 +437,9 @@ func cellsEqual(t *testing.T, what string, a, b *TrafficLog) {
 				t.Errorf("%s: %v сутки %d: %+v ≠ %+v", what, k, d, ca, cb)
 			}
 		}
+	}
+	if a.Heuristic != b.Heuristic {
+		t.Errorf("%s: интервалов без признака запуска: %d ≠ %d", what, a.Heuristic, b.Heuristic)
 	}
 	for _, c := range []string{"", awgC, "amnezia-wireguard"} {
 		if fmt.Sprint(a.CoveredDays(c)) != fmt.Sprint(b.CoveredDays(c)) {
@@ -436,29 +477,34 @@ func TestAwkMatchesGo(t *testing.T) {
 	}
 }
 
-// TestCollectorScriptEndToEnd — настоящий collect.sh под sh с подменённым
-// docker и date: снимки, F при отказе, ротация с порогом, уменьшенным для
-// теста, FULL. Каталог подменяется на временный (единственная правка
-// текста скрипта, кроме порогов).
-func TestCollectorScriptEndToEnd(t *testing.T) {
+// collectorEnv — настоящий collect.sh под sh с подменёнными docker, date
+// и boot_id. Каталог и путь boot_id подменяются на временные, порог
+// ротации уменьшен — других правок текста скрипта нет.
+type collectorEnv struct {
+	t      *testing.T
+	sh     string
+	data   string
+	bin    string
+	script string
+	sf     string
+}
+
+func newCollectorEnv(t *testing.T) *collectorEnv {
 	sh := needSh(t)
 	dir := t.TempDir()
-	data := filepath.Join(dir, "data")
-	bin := filepath.Join(dir, "bin")
-	for _, d := range []string{data, bin} {
+	e := &collectorEnv{t: t, sh: sh, data: filepath.Join(dir, "data"), bin: filepath.Join(dir, "bin"), sf: filepath.Join(dir, "collect.sh")}
+	for _, d := range []string{e.data, e.bin} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Состояние подмены: файлы в bin/ (rx и время).
-	write := func(name, s string) {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(s), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("docker", `#!/bin/sh
+	e.write("docker", `#!/bin/sh
 d=$(dirname "$0")
-if [ "$1" = ps ]; then printf 'amnezia-awg\nother\n'; exit 0; fi
+if [ "$1" = ps ]; then
+  if [ -e "$d/psfail" ]; then exit 1; fi
+  printf 'amnezia-awg\nother\n'; exit 0
+fi
+if [ "$1" = inspect ] && [ "$2" = -f ] && [ "$4" = amnezia-awg ]; then cat "$d/started"; exit 0; fi
 if [ "$1" = exec ] && [ "$2" = amnezia-awg ] && [ "$3" = wg ] && [ "$5" = wg0 ]; then
   if [ -e "$d/fail" ]; then exit 1; fi
   rx=$(cat "$d/rx")
@@ -468,109 +514,203 @@ if [ "$1" = exec ] && [ "$2" = amnezia-awg ] && [ "$3" = wg ] && [ "$5" = wg0 ];
 fi
 exit 2
 `)
-	write("date", `#!/bin/sh
+	e.write("date", `#!/bin/sh
 cat "$(dirname "$0")/now"
 `)
-	script := StatsCollectorScript()
-	script = strings.ReplaceAll(script, StatsDir, filepath.ToSlash(data))
-	script = strings.Replace(script, fmt.Sprintf(`-gt %d ]`, statsRotateBytes), `-gt 400 ]`, 1)
-	if !strings.Contains(script, "-gt 400 ]") {
+	e.write("started", "2024-10-01T00:00:00.000000001Z\n")
+	e.write("boot_id", "0f0e0d0c-0b0a-0908-0706-050403020100\n")
+	s := StatsCollectorScript()
+	s = strings.ReplaceAll(s, StatsDir, filepath.ToSlash(e.data))
+	s = strings.ReplaceAll(s, "/proc/sys/kernel/random/boot_id", filepath.ToSlash(filepath.Join(e.bin, "boot_id")))
+	s = strings.Replace(s, fmt.Sprintf(`-gt %d ]`, statsRotateBytes), `-gt 400 ]`, 1)
+	if !strings.Contains(s, "-gt 400 ]") {
 		t.Fatal("порог ротации не подменён")
 	}
-	sf := filepath.Join(dir, "collect.sh")
-	if err := os.WriteFile(sf, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+	e.script = s
+	e.setScript(s)
+	return e
+}
+
+func (e *collectorEnv) write(name, s string) {
+	if err := os.WriteFile(filepath.Join(e.bin, name), []byte(s), 0o700); err != nil {
+		e.t.Fatal(err)
 	}
-	run := func(now int64, rx int64, fail bool) {
-		t.Helper()
-		write("now", fmt.Sprintf("%d\n", now))
-		write("rx", fmt.Sprintf("%d\n", rx))
-		_ = os.Remove(filepath.Join(bin, "fail"))
-		if fail {
-			write("fail", "")
-		}
-		cmd := exec.Command(sh, "-c", `cd "$1" && PATH="$(pwd):$PATH" && export PATH && exec sh "$2"`, "sh", filepath.ToSlash(bin), filepath.ToSlash(sf))
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("collect.sh: %v\n%s", err, out)
-		}
+}
+
+func (e *collectorEnv) setScript(s string) {
+	if err := os.WriteFile(e.sf, []byte(s), 0o700); err != nil {
+		e.t.Fatal(err)
 	}
-	read := func() *TrafficLog {
-		t.Helper()
-		get := func(n string) (string, bool) {
-			b, err := os.ReadFile(filepath.Join(data, n))
-			if err != nil {
-				return "", false
-			}
-			return string(b), true
-		}
-		d, hd := get("daily.log")
-		r, hr := get("snapshots.log")
-		return ParseTrafficLog(d, hd, r, hr)
+}
+
+func (e *collectorEnv) flag(name string, on bool) {
+	_ = os.Remove(filepath.Join(e.bin, name))
+	if on {
+		e.write(name, "")
 	}
-	// Счётчик растёт на 10 за снимок, сброс на 6-м снимке, отказ на 4-м.
+}
+
+// run — один запуск сборщика; ошибка возвращается (для «убийства»).
+func (e *collectorEnv) run(now, rx int64) error {
+	e.t.Helper()
+	e.write("now", fmt.Sprintf("%d\n", now))
+	e.write("rx", fmt.Sprintf("%d\n", rx))
+	cmd := exec.Command(e.sh, "-c", `cd "$1" && PATH="$(pwd):$PATH" && export PATH && exec sh "$2"`, "sh", filepath.ToSlash(e.bin), filepath.ToSlash(e.sf))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, out)
+	}
+	return nil
+}
+
+func (e *collectorEnv) mustRun(now, rx int64) {
+	e.t.Helper()
+	if err := e.run(now, rx); err != nil {
+		e.t.Fatalf("collect.sh: %v", err)
+	}
+}
+
+func (e *collectorEnv) read() *TrafficLog {
+	get := func(n string) (string, bool) {
+		b, err := os.ReadFile(filepath.Join(e.data, n))
+		if err != nil {
+			return "", false
+		}
+		return string(b), true
+	}
+	d, hd := get("daily.log")
+	r, hr := get("snapshots.log")
+	return ParseTrafficLog(d, hd, r, hr)
+}
+
+func (e *collectorEnv) dump() {
+	for _, n := range []string{"snapshots.log", "daily.log"} {
+		b, _ := os.ReadFile(filepath.Join(e.data, n))
+		e.t.Logf("%s:\n%s", n, b)
+	}
+}
+
+func (e *collectorEnv) total() (int64, *TrafficLog) {
+	l := e.read()
+	rx, _, ok := l.Cell(TrafficKey{awgC, "KEYA="}, AllTime, CollectorInstalled).Measured()
+	if !ok {
+		return -1, l
+	}
+	return rx, l
+}
+
+// TestCollectorScriptEndToEnd — снимки, F при отказе exec и ps, сброс по
+// уменьшению, сброс по смене StartedAt при ВЫРОСШЕМ счётчике (С2),
+// ротация, FULL.
+func TestCollectorScriptEndToEnd(t *testing.T) {
+	e := newCollectorEnv(t)
 	rx := int64(1000)
-	var wantRx int64
-	for i := 0; i < 12; i++ {
+	var want int64
+	for i := 0; i < 14; i++ {
 		now := tsAt(day0, int64(i)*300)
+		e.flag("fail", i == 3)
+		e.flag("psfail", i == 9)
 		switch {
-		case i == 3:
-			run(now, rx, true)
+		case i == 0:
+		case i == 3 || i == 9:
+			e.mustRun(now, rx)
 			continue
+		case i == 4:
+			rx += 20 // разница через пропущенный снимок 3
+			want += 20
 		case i == 6:
-			rx = 5
-			if i > 0 {
-				wantRx += 5
-			}
+			rx = 5 // сброс: счётчик уменьшился
+			want += 5
+		case i == 11:
+			// Перезапуск контейнера, и счётчик успел перерасти прежний:
+			// по величинам сброса не видно, по StartedAt — видно.
+			e.write("started", "2024-10-02T00:00:00Z\n")
+			rx += 5000
+			want += rx
 		default:
-			if i > 0 {
-				rx += 10
-				wantRx += 10
-				if i == 4 {
-					wantRx += 10 // пропущенный снимок 3: разница через пропуск
-					rx += 10
-				}
-			}
+			rx += 10
+			want += 10
 		}
-		run(now, rx, false)
+		e.mustRun(now, rx)
 	}
-	l := read()
-	if t.Failed() || !l.HaveDaily {
-		for _, n := range []string{"snapshots.log", "daily.log"} {
-			b, _ := os.ReadFile(filepath.Join(data, n))
-			t.Logf("%s:\n%s", n, b)
-		}
+	got, l := e.total()
+	if t.Failed() || got != want || !l.HaveDaily {
+		e.dump()
 	}
 	if !l.HaveDaily {
 		t.Error("ротация не произошла (daily.log нет)")
 	}
-	if l.Failed == 0 && !l.HaveDaily {
-		t.Error("отказ docker не записан строкой F")
+	if got != want {
+		t.Errorf("за всё время: %d, ждали %d (corrupt=%d torn=%v stale=%v)", got, want, l.Corrupt, l.Torn, l.RawStale)
 	}
-	c := l.Cell(TrafficKey{awgC, "KEYA="}, AllTime, CollectorInstalled)
-	got, _, ok := c.Measured()
-	if !ok || got != wantRx {
-		t.Errorf("за всё время: %d ok=%v, ждали %d (corrupt=%d torn=%v stale=%v)", got, ok, wantRx, l.Corrupt, l.Torn, l.RawStale)
+	if l.Corrupt != 0 || l.Torn || l.RawStale {
+		t.Errorf("повреждения в собственных файлах: %d %v %v", l.Corrupt, l.Torn, l.RawStale)
 	}
-	if l.Corrupt != 0 || l.Torn {
-		t.Errorf("повреждения в собственных файлах: %d %v", l.Corrupt, l.Torn)
+	if l.Heuristic != 0 {
+		t.Errorf("при признаках запуска эвристика не нужна, а учтено интервалов без них: %d", l.Heuristic)
 	}
-	if c.LastHandshake.Unix() != 1700000000 {
-		t.Errorf("рукопожатие: %v", c.LastHandshake)
+	// Н3: отказ docker ps — строка F, а не молчание (отдельный каталог:
+	// в основном прогоне F могла уйти в ротацию).
+	e2 := newCollectorEnv(t)
+	e2.flag("psfail", true)
+	e2.mustRun(tsAt(day0, 0), 1)
+	if l2 := e2.read(); l2.Failed != 1 {
+		e2.dump()
+		t.Errorf("отказ docker ps: строк F %d, ждали 1", l2.Failed)
 	}
 	// Предел: журнал больше statsRawCapBytes (подменённого) — FULL и тишина.
-	full := strings.Replace(script, fmt.Sprintf(`-gt %d ]`, statsRawCapBytes), `-gt 1 ]`, 1)
-	if err := os.WriteFile(sf, []byte(full), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	run(tsAt(day0, 99999), rx+1, false)
-	if _, err := os.Stat(filepath.Join(data, "FULL")); err != nil {
+	e.setScript(strings.Replace(e.script, fmt.Sprintf(`-gt %d ]`, statsRawCapBytes), `-gt 1 ]`, 1))
+	e.mustRun(tsAt(day0, 99999), rx+1)
+	if _, err := os.Stat(filepath.Join(e.data, "FULL")); err != nil {
 		t.Error("FULL не создан при превышении предела")
 	}
-	before, _ := os.ReadFile(filepath.Join(data, "snapshots.log"))
-	run(tsAt(day0, 99999+300), rx+2, false)
-	after, _ := os.ReadFile(filepath.Join(data, "snapshots.log"))
+	before, _ := os.ReadFile(filepath.Join(e.data, "snapshots.log"))
+	e.mustRun(tsAt(day0, 99999+300), rx+2)
+	after, _ := os.ReadFile(filepath.Join(e.data, "snapshots.log"))
 	if string(before) != string(after) {
 		t.Error("после FULL сборщик продолжил писать")
 	}
-	_ = time.Now
+}
+
+// TestCollectorKilledBetweenMoves — В1 ревью 1: сборщик убит между
+// `mv daily.new daily.log` и `mv snap.new snapshots.log`. Следующий запуск
+// обязан заменить свёрнутый журнал контрольной точкой, а не дописать в
+// него и свернуть ещё раз (двойной счёт навсегда в daily.log).
+func TestCollectorKilledBetweenMoves(t *testing.T) {
+	e := newCollectorEnv(t)
+	tail := "  mv daily.new daily.log\n  mv snap.new snapshots.log\nfi\n"
+	if !strings.HasSuffix(e.script, tail) {
+		t.Fatal("конец ротации в скрипте не найден")
+	}
+	killed := strings.TrimSuffix(e.script, tail) + "  mv daily.new daily.log\n  exit 9\nfi\n"
+	rx := int64(100)
+	var want int64
+	kills := 0
+	for i := 0; i < 16; i++ {
+		if i > 0 {
+			rx += 100
+			want += 100
+		}
+		now := tsAt(day0, int64(i)*300)
+		if kills == 0 {
+			e.setScript(killed)
+			if err := e.run(now, rx); err != nil {
+				kills++ // ротация оборвана между двумя mv
+				e.setScript(e.script)
+				if l := e.read(); !l.RawStale {
+					t.Error("после обрыва читатель не видит, что журнал устарел")
+				}
+			}
+			continue
+		}
+		e.mustRun(now, rx)
+	}
+	if kills != 1 {
+		t.Fatalf("обрыв не случился (%d)", kills)
+	}
+	got, l := e.total()
+	if got != want || l.RawStale {
+		e.dump()
+		t.Errorf("за всё время после обрыва ротации: %d, ждали %d (stale=%v)", got, want, l.RawStale)
+	}
 }

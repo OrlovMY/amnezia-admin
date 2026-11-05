@@ -80,7 +80,7 @@ func runStatsStatus(out, errOut io.Writer, src statsSource) int {
 	st := src.StatsStatus()
 	fmt.Fprintln(out, "Сборщик статистики: "+collectorText(st))
 	if st.Full != "" {
-		fmt.Fprintln(out, cWarn("Сборщик остановлен: достигнут предел объёма 100 МБ ("+st.Full+"). Новые снимки не пишутся."))
+		fmt.Fprintln(out, cWarn(fullText(st.Full)))
 	}
 	fmt.Fprintln(out, "Данные: "+core.StatsDir)
 	l, err := src.ReadTraffic()
@@ -115,6 +115,15 @@ func statsDataNotes(out io.Writer, l *core.TrafficLog) {
 	}
 	if l.Torn {
 		fmt.Fprintln(out, cDim("Последний снимок ещё дописывается или оборван — не учтён."))
+	}
+	// С1 ревью 1: отброшенный журнал — не молча (признак 4 CLAUDE.md).
+	if l.RawStale {
+		fmt.Fprintln(out, cWarn("Журнал снимков устарел (ротация на сервере была прервана) и не учтён: "+
+			"цифры неполные — нет снимков после последней ротации. Сборщик исправит это при следующем запуске (до 5 минут)."))
+	}
+	if l.Heuristic > 0 {
+		fmt.Fprintln(out, cDim(fmt.Sprintf("Интервалов без признака перезапуска сервера/контейнера: %d (снимки старого формата). "+
+			"В них перезапуск, после которого счётчик успел перерасти прежний, мог остаться незамеченным — цифры могут быть занижены.", l.Heuristic)))
 	}
 }
 
@@ -293,7 +302,7 @@ func runStatsShow(out, errOut io.Writer, src statsSource, containers []core.Cont
 	}
 	fmt.Fprintln(out, "Сборщик статистики: "+collectorText(st))
 	if st.Full != "" {
-		fmt.Fprintln(out, cWarn("Сборщик остановлен: достигнут предел объёма 100 МБ ("+st.Full+"). Новые снимки не пишутся."))
+		fmt.Fprintln(out, cWarn(fullText(st.Full)))
 	}
 	if l.Empty() && st.State == core.CollectorNotInstalled {
 		fmt.Fprintln(out, "Накопленной статистики нет: сборщик на сервере не установлен. Счётчики сервера обнуляются при перезапуске, "+
@@ -337,11 +346,33 @@ func runStatsShow(out, errOut io.Writer, src statsSource, containers []core.Cont
 
 // csvSafe — ячейка, которую Excel не примет за формулу (имя клиента
 // задаёт человек).
+//
+// Закрытый список (ревью 1, Н1): без префикса остаётся только ячейка,
+// начинающаяся с латинской или русской буквы или цифры; всё прочее
+// (=, +, -, @, скобка, пробел, табуляция…) получает «'». Ключ base64 на «+»
+// — тоже.
 func csvSafe(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
-		return "'" + s
+	if s == "" {
+		return s
 	}
-	return s
+	r := []rune(s)[0]
+	if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' ||
+		r >= 'А' && r <= 'я' || r == 'Ё' || r == 'ё' {
+		return s
+	}
+	return "'" + s
+}
+
+// fullText — что случилось и что делать, когда сборщик остановлен
+// пределом объёма (ревью 1, Н3).
+func fullText(why string) string {
+	head := "Сборщик остановлен: достигнут предел объёма 100 МБ (" + why + "). Новые снимки не пишутся."
+	if why == "raw" {
+		return head + " Причина — ротация журнала не удаётся (место на диске, awk). Проверьте сервер, затем удалите метку: rm " +
+			core.StatsDir + "/FULL — сбор продолжится."
+	}
+	return head + " Сохраните выгрузку (amnezia-admin stats -csv итоги.csv -by month), затем на сервере освободите место: " +
+		"rm " + core.StatsDir + "/daily.log " + core.StatsDir + "/FULL — сбор начнётся заново (старые итоги будут потеряны)."
 }
 
 func stateText(c core.TrafficCell) string {
@@ -409,12 +440,15 @@ func writeStatsCSV(out, errOut io.Writer, rows []statsRow, l *core.TrafficLog, c
 	for _, p := range periods {
 		for _, row := range rows {
 			c := l.Cell(row.key, p.r, cs)
-			rec := []string{p.label, row.proto, csvSafe(row.name), row.key.PubKey, "", "", "", "", stateText(c)}
+			rec := []string{p.label, row.proto, row.name, row.key.PubKey, "", "", "", "", stateText(c)}
 			if rx, tx, ok := c.Measured(); ok {
 				rec[4], rec[5], rec[6] = fmt.Sprint(rx), fmt.Sprint(tx), fmt.Sprint(rx+tx)
 				if !c.LastHandshake.IsZero() {
 					rec[7] = c.LastHandshake.UTC().Format("2006-01-02 15:04")
 				}
+			}
+			for i := range rec {
+				rec[i] = csvSafe(rec[i]) // все ячейки, не только имя
 			}
 			_ = w.Write(rec)
 		}
@@ -465,11 +499,12 @@ func runStatsInstall(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src s
 		return 0
 	}
 	fmt.Fprintln(out, "Сейчас: "+collectorText(st))
-	fmt.Fprintln(out, "Будет записано на сервер (от root):")
+	fmt.Fprintln(out, "Будет выполнено на сервере (от root): mkdir -p "+core.StatsDir+
+		"; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):")
 	for _, f := range core.StatsInstallFiles() {
 		fmt.Fprintf(out, "\n── %s (права %s) ──\n%s", f.Path, f.Mode, f.Content)
 	}
-	fmt.Fprintln(out, "\nи выполнено: systemctl daemon-reload; systemctl enable --now "+core.StatsUnit+".timer")
+	fmt.Fprintln(out, "\nзатем: systemctl daemon-reload; systemctl enable --now "+core.StatsUnit+".timer")
 	fmt.Fprintln(out, "Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в "+core.StatsDir+
 		"; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall")
 	ok, code := statsAsk(in, out, errOut, isTTY, yes, "Установить сборщик статистики?")

@@ -21,7 +21,8 @@ package core
 //
 //	H v1 <поколение>                         первая строка файла
 //	                                          пустая строка перед блоком
-//	S <unix-время> <контейнер> <число peer'ов>
+//	S <unix-время> <контейнер> <число peer'ов> <boot_id|-> <StartedAt|->
+//	                                          (старый формат — без двух последних)
 //	P <публичный ключ> <принято> <отправлено> <рукопожатие unix>
 //	…
 //	E <unix-время> <контейнер> <число peer'ов>
@@ -36,7 +37,7 @@ package core
 // ФОРМАТ daily.log (суточные итоги, пишутся только ротацией):
 //
 //	D <поколение> <сутки UTC> <контейнер> <ключ> <принято> <отправлено> <рукопожатие> <интервалов>
-//	N <поколение> <сутки UTC> <контейнер> <учтённых снимков>
+//	N <поколение> <сутки UTC> <контейнер> <учтённых снимков> <из них без признака запуска>
 //
 // «Сутки UTC» — номер суток от 1970-01-01 (unix-время / 86400): awk без
 // strftime (mawk, busybox) считает его одинаково, и Go — тоже.
@@ -50,7 +51,20 @@ package core
 // меньше наибольшего поколения в daily.log. Если ротация не удаётся и
 // журнал вырос до statsRawCapBytes, или daily.log больше statsDailyCapBytes,
 // скрипт создаёт метку FULL и больше ничего не пишет — состояние видно в
-// `stats status`. Пик объёма (журнал 16 МБ + итоги 30 МБ + их копия при
+// `stats status`.
+//
+// ОБРЫВ МЕЖДУ ДВУМЯ mv (ревью 1, В1): daily.log уже нового поколения, а
+// журнал — старого. В начале каждого запуска сборщик сверяет поколения и
+// заменяет такой журнал его контрольной точкой — иначе следующая ротация
+// свернула бы тот же журнал второй раз (двойной счёт навсегда).
+//
+// ПРИЗНАК ЗАПУСКА (ревью 1, С2): в S пишутся boot_id ядра и StartedAt
+// контейнера; смена любого — перезапуск, счётчик считается с нуля даже
+// если перерос прежний. Без признака (старые снимки) — эвристика
+// «уменьшился», и такие интервалы считаются (N, шестое поле; Heuristic).
+// Данные пишутся с umask 077 (Н2) — читаются от root.
+//
+// Пик объёма (журнал 16 МБ + итоги 30 МБ + их копия при
 // ротации) ниже 100 МБ.
 
 import (
@@ -98,7 +112,9 @@ NF == 0 { next }
 }
 END {
   if (bad) exit 1
-  printf "S %s %s %d\n", ts, c, n
+  if (b !~ /^[0-9a-f-]+$/) b = "-"
+  if (s !~ /^[0-9A-Za-z:.+-]+$/) s = "-"
+  printf "S %s %s %d %s %s\n", ts, c, n, b, s
   for (k = 1; k <= n; k++) print p[k]
   printf "E %s %s %d\n", ts, c, n
 }`
@@ -106,9 +122,13 @@ END {
 // awkParse — общий разбор блоков для awkAgg и awkCheckpoint. Правила те
 // же, что в parseTrafficRaw (Go): см. TestAwkMatchesGo.
 const awkParse = `function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
 NF == 0 { next }
 $1 == "S" {
-  if (NF == 4 && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) { inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0 } else { inb = 0 }
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
   next
 }
 $1 == "P" {
@@ -133,15 +153,18 @@ $1 == "E" {
 //   - первый снимок контейнера — точка отсчёта, разницы нет.
 //
 // Разница относится к суткам снимка, ЗАВЕРШАЮЩЕГО интервал.
-const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd) {
+const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs) {
   blkno++
   day = int(bts / 86400)
+  known = (bsig != "" && (bc in psig) && psig[bc] != "")
+  rs = (known && psig[bc] != bsig)
   for (j = 1; j <= m; j++) {
     key = bc SUBSEP pk[j]
     has = 0
     if (key in prv) {
-      if (prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j] } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j] } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
       has = 1
+      if (!known) hc[day SUBSEP bc]++
     } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
     if (has) {
       ak = day SUBSEP key
@@ -155,11 +178,15 @@ const awkAgg = awkParse + `function blk(text,   j, key, has, dx, dt, day, ak, k,
   for (j = 1; j <= nd; j++) { delete prv[dl[j]]; delete ptv[dl[j]] }
   if (bc in seen) cov[day SUBSEP bc]++
   seen[bc] = 1
+  psig[bc] = bsig
 }
 END {
   for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak] }
-  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d\n", gen, a[1], a[2], cov[ak] }
+  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
 }`
+
+// awkHead — поколение из заголовка журнала (пусто, если заголовок не наш).
+const awkHead = `NR == 1 { if ($1 == "H" && $2 == "v1" && $3 ~ /^[0-9]+$/ && length($3) <= 15) printf "%d\n", $3; exit }`
 
 // awkCheckpoint — последний целый снимок каждого контейнера: с него
 // начинается новый журнал после ротации.
@@ -179,17 +206,33 @@ func StatsCollectorScript() string {
 # Читает счётчики wg/awg и дописывает снимок в /opt/amnezia/traffic-stats.
 # Снять: amnezia-admin stats uninstall
 set -u
-umask 022
+umask 077
 cd %[1]s || exit 1
 if [ -e FULL ]; then exit 0; fi
+dg=0
+if [ -e daily.log ]; then dg=$(awk -v add=0 '%[2]s' daily.log) || exit 1; fi
 if [ ! -e snapshots.log ]; then
-  g0=0
-  if [ -e daily.log ]; then g0=$(awk -v add=0 '%[2]s' daily.log) || exit 1; fi
-  printf 'H v1 %%s\n' "$g0" > snapshots.log
+  printf 'H v1 %%s\n' "$dg" > snapshots.log
+fi
+rg=$(awk '%[10]s' snapshots.log) || exit 1
+if [ -n "$rg" ] && [ "$rg" -lt "$dg" ]; then
+  rm -f snap.new
+  printf 'H v1 %%s\n' "$dg" > snap.new
+  if ! awk '%[9]s' snapshots.log >> snap.new; then
+    rm -f snap.new
+    exit 1
+  fi
+  mv snap.new snapshots.log
 fi
 ts=$(date +%%s)
-names=$(docker ps --format "{{.Names}}" 2>/dev/null) || names=""
 rm -f block.tmp
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
+if names=$(docker ps --format "{{.Names}}" 2>/dev/null); then
+  :
+else
+  names=""
+  printf '\nF %%s - ps\n' "$ts" >> block.tmp
+fi
 for spec in %[3]s; do
   c=${spec%%%%:*}
   r=${spec#*:}
@@ -200,8 +243,9 @@ for spec in %[3]s; do
     if [ "$x" = "$c" ]; then found=1; fi
   done
   if [ "$found" = 0 ]; then continue; fi
+  st=$(docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
   if out=$(docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
-    if blk=$(printf '%%s\n' "$out" | awk -v ts="$ts" -v c="$c" '%[4]s'); then
+    if blk=$(printf '%%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" '%[4]s'); then
       printf '\n%%s\n' "$blk" >> block.tmp
     else
       printf '\nF %%s %%s parse\n' "$ts" "$c" >> block.tmp
@@ -240,7 +284,7 @@ if [ "$sz" -gt %[6]d ]; then
   mv daily.new daily.log
   mv snap.new snapshots.log
 fi
-`, StatsDir, awkGen, statsSpecs(), awkBlock, statsRawCapBytes, statsRotateBytes, statsDailyCapBytes, awkAgg, awkCheckpoint)
+`, StatsDir, awkGen, statsSpecs(), awkBlock, statsRawCapBytes, statsRotateBytes, statsDailyCapBytes, awkAgg, awkCheckpoint, awkHead)
 }
 
 // StatsServiceUnit — текст службы.

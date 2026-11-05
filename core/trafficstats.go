@@ -119,12 +119,17 @@ type TrafficLog struct {
 	Failed int
 	// LastSnapshot — время последнего целого снимка в журнале.
 	LastSnapshot time.Time
+	// Heuristic — интервалов, учтённых без признака запуска (снимки
+	// старого формата или сервер не отдал boot_id/StartedAt): перезапуск,
+	// после которого счётчик перерос прежний, в них мог остаться незамеченным.
+	Heuristic int
 }
 
 var (
 	reStatsNum  = regexp.MustCompile(`^[0-9]{1,15}$`)
 	reStatsCtr  = regexp.MustCompile(`^[a-z0-9-]+$`)
 	reStatsPub  = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
+	reStatsSig  = regexp.MustCompile(`^[0-9A-Za-z:.+-]+$`)
 	errStatsBad = errors.New("bad")
 )
 
@@ -200,8 +205,10 @@ func (l *TrafficLog) parseDaily(f []string) (int64, bool) {
 		}
 		l.add(nums[1], TrafficKey{f[3], f[4]}, nums[2], nums[3], nums[4], int(nums[5]))
 		return nums[0], true
-	case f[0] == "N" && len(f) == 5 && reStatsCtr.MatchString(f[3]):
-		for _, s := range []string{f[1], f[2], f[4]} {
+	case f[0] == "N" && (len(f) == 5 || len(f) == 6) && reStatsCtr.MatchString(f[3]):
+		// Шестое поле (раунд 2, С2) — сколько интервалов учтено без
+		// признаков перезапуска; в старых записях его нет.
+		for _, s := range append([]string{f[1], f[2]}, f[4:]...) {
 			v, err := statsNum(s)
 			if err != nil {
 				return 0, false
@@ -209,6 +216,9 @@ func (l *TrafficLog) parseDaily(f []string) (int64, bool) {
 			nums = append(nums, v)
 		}
 		l.addCov(nums[1], f[3], int(nums[2]))
+		if len(nums) == 4 {
+			l.Heuristic += int(nums[3])
+		}
 		return nums[0], true
 	}
 	return 0, false
@@ -224,22 +234,37 @@ type statsPeer struct {
 type trafficState struct {
 	prev map[TrafficKey][2]int64
 	seen map[string]bool
+	// sig — признак запуска (boot_id и StartedAt контейнера) последнего
+	// целого снимка контейнера; "" — признака не было (старый формат).
+	sig map[string]string
 }
 
-func (st *trafficState) apply(l *TrafficLog, ts int64, c string, peers []statsPeer) {
+// apply — правило разницы. Раунд 2 (С2): если у обоих снимков есть
+// признак запуска и он сменился — это перезапуск, и счётчик считается с
+// нуля НЕЗАВИСИМО от величин (прежняя эвристика «уменьшился» не видит
+// перезапуска, после которого счётчик перерос прежний). Без признака —
+// прежняя эвристика, а интервал считается в Heuristic (пометка в выводе).
+func (st *trafficState) apply(l *TrafficLog, ts int64, c, bsig string, peers []statsPeer) {
 	day := floorDiv(ts, 86400)
+	psig, had := st.sig[c]
+	known := bsig != "" && had && psig != ""
+	restarted := known && psig != bsig
+	heur := 0
 	cur := map[TrafficKey]bool{}
 	for _, p := range peers {
 		k := TrafficKey{c, p.pub}
 		var dx, dt int64
 		has := false
 		if pv, ok := st.prev[k]; ok {
-			if p.rx < pv[0] || p.tx < pv[1] {
+			if restarted || p.rx < pv[0] || p.tx < pv[1] {
 				dx, dt = p.rx, p.tx // сброс счётчика: перезапуск
 			} else {
 				dx, dt = p.rx-pv[0], p.tx-pv[1]
 			}
 			has = true
+			if !known {
+				heur++
+			}
 		} else if st.seen[c] {
 			dx, dt, has = p.rx, p.tx, true // peer добавлен после прошлого снимка
 		}
@@ -257,18 +282,21 @@ func (st *trafficState) apply(l *TrafficLog, ts int64, c string, peers []statsPe
 	if st.seen[c] {
 		l.addCov(day, c, 1)
 	}
+	l.Heuristic += heur
 	st.seen[c] = true
+	st.sig[c] = bsig
 }
 
 func (l *TrafficLog) parseRaw(raw string, maxGen int64) {
 	lines := strings.Split(raw, "\n")
 	first := true
-	st := &trafficState{prev: map[TrafficKey][2]int64{}, seen: map[string]bool{}}
+	st := &trafficState{prev: map[TrafficKey][2]int64{}, seen: map[string]bool{}, sig: map[string]string{}}
 	var (
 		inb   bool
 		bts   int64
 		bc    string
 		bn    int64
+		bsig  string
 		peers []statsPeer
 	)
 	// open — блок начат и не закрыт: если за ним идёт что-то ещё, это
@@ -307,11 +335,14 @@ func (l *TrafficLog) parseRaw(raw string, maxGen int64) {
 		switch f[0] {
 		case "S":
 			broken()
-			if len(f) == 4 && reStatsCtr.MatchString(f[2]) {
+			if (len(f) == 4 || len(f) == 6 && reStatsSig.MatchString(f[4]) && reStatsSig.MatchString(f[5])) && reStatsCtr.MatchString(f[2]) {
 				t, e1 := statsNum(f[1])
 				n, e2 := statsNum(f[3])
 				if e1 == nil && e2 == nil {
-					inb, open, bts, bc, bn, peers = true, true, t, f[2], n, nil
+					inb, open, bts, bc, bn, peers, bsig = true, true, t, f[2], n, nil, ""
+					if len(f) == 6 && f[4] != "-" && f[5] != "-" {
+						bsig = f[4] + " " + f[5]
+					}
 					continue
 				}
 			}
@@ -337,7 +368,7 @@ func (l *TrafficLog) parseRaw(raw string, maxGen int64) {
 			if inb && len(f) == 4 && f[2] == bc && reStatsNum.MatchString(f[1]) && reStatsNum.MatchString(f[3]) {
 				t, _ := statsNum(f[1])
 				if n, _ := statsNum(f[3]); t == bts && n == bn && int64(len(peers)) == bn {
-					st.apply(l, bts, bc, peers)
+					st.apply(l, bts, bc, bsig, peers)
 					if t := time.Unix(bts, 0); t.After(l.LastSnapshot) {
 						l.LastSnapshot = t
 					}
@@ -576,7 +607,7 @@ func (s *Session) statsRun(script string) (string, error) {
 
 // StatsStatus — установлен ли сборщик (только чтение).
 func (s *Session) StatsStatus() CollectorStatus {
-	out, err := s.run("sh -s", []byte(statsStatusScript()))
+	out, err := s.statsRun(statsStatusScript())
 	if err != nil {
 		return CollectorStatus{State: CollectorUnknown, Err: err}
 	}
@@ -611,7 +642,7 @@ func (s *Session) StatsUninstall() error {
 // ReadTraffic читает накопленные данные. Ошибка — данных не знаем (не
 // «нет данных»): вызывающий не строит таблицу.
 func (s *Session) ReadTraffic() (*TrafficLog, error) {
-	out, err := s.run("sh -s", []byte(statsReadScript()))
+	out, err := s.statsRun(statsReadScript())
 	if err != nil {
 		return nil, fmt.Errorf("чтение статистики: %w", err)
 	}
