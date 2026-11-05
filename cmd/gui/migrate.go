@@ -128,6 +128,10 @@ var migClose = func(s *core.Session) { s.Close() }
 // сервер не должен висеть без видимого признака): «Отмена» окон переноса,
 // смена источника, выход из программы, конец переноса.
 func (u *ui) closeMigDst() {
+	if u.toHostLogin != nil { // пароль входа нового сервера (режим по IP)
+		u.toHostLogin.Wipe()
+		u.toHostLogin = nil
+	}
 	if u.migDst != nil {
 		migClose(u.migDst)
 		u.migDst = nil

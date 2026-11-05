@@ -684,3 +684,140 @@ func TestGUIToHostReviewLayout(t *testing.T) {
 		f.shot(t, fmt.Sprintf("tohost-choices-%.0fx%.0f", sz.Width, sz.Height), nil)
 	}
 }
+
+// TestGUIToHostIssueKeyOutcomes — четыре исхода проверки ключа (ревью #71
+// H1): отвергнут и не совпал — файла нет, причина названа; не удалось
+// проверить — файл есть с оговоркой; проверен — файл есть.
+// Подмена: убрать ветку «отвергнут» — роняет.
+func TestGUIToHostIssueKeyOutcomes(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		err   error
+		file  bool
+		text  string
+		never string
+	}{
+		{"проверен", nil, true, "Ключ проверен", "проверить не удалось"},
+		{"не совпал", fmt.Errorf("%w: порт", core.ErrAdminKeyMismatch), false, "собранный ключ не совпал", "записан в файл"},
+		{"пароль отвергнут", fmt.Errorf("%w", core.ErrAdminKeyAuthRejected), false, "не принял пароль из ключа", "проверить не удалось"},
+		{"проверить не удалось", errors.New("сеть недоступна"), true, "Ключ проверить не удалось (это не «ключ плохой» и не «ключ хороший»)", "Ключ проверен"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newTHFixture(t)
+			f.verifyErr = c.err
+			st := &toHostState{host: migTestDstHost, port: "22", user: "root", dst: f.dstSess(migTestDstHost, "22")}
+			path, lines := toHostIssueKey(st, []string{"amnezia-awg"}, core.NewSecret([]byte(thKeyPw)), time.Now())
+			txt := strings.Join(lines, "\n")
+			ents, _ := os.ReadDir(f.keyDir)
+			if (len(ents) == 1) != c.file || (path != "") != c.file {
+				t.Errorf("файл: %d, путь %q", len(ents), path)
+			}
+			if !strings.Contains(txt, c.text) || strings.Contains(txt, c.never) {
+				t.Errorf("текст:\n%s", txt)
+			}
+			if strings.Contains(txt, thKeyPw) {
+				t.Error("пароль в тексте")
+			}
+		})
+	}
+}
+
+// TestToHostKeyAllowed — ключ при отмене выдаётся, только если перенос к
+// ней уже полностью выполнен (ревью #71 L2).
+func TestToHostKeyAllowed(t *testing.T) {
+	done := []core.RestoreOutcome{{State: core.RestoreDone}}
+	for _, c := range []struct {
+		name string
+		o    toHostOutcome
+		want bool
+	}{
+		{"без согласия", toHostOutcome{res: okInstall("a"), applied: true, outs: done}, false},
+		{"обычно", toHostOutcome{consent: true, res: okInstall("a")}, true},
+		{"установка не готова", toHostOutcome{consent: true}, false},
+		{"отмена до переноса", toHostOutcome{consent: true, canceled: true, res: okInstall("a")}, false},
+		{"отмена, перенос выполнен", toHostOutcome{consent: true, canceled: true, res: okInstall("a"), applied: true, outs: done}, true},
+		{"отмена, перенос без итога", toHostOutcome{consent: true, canceled: true, res: okInstall("a"), applied: true}, false},
+	} {
+		if got := toHostKeyAllowed(c.o); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+}
+
+// TestGUIToHostCancelButtonsAndClose — надпись «Прервать» не обещает
+// «неизвестно» (ревью #71 M1); крестик во время установки — «закрыть
+// нельзя», «Продолжить установку» сбрасывает флаг закрытия (M3); во время
+// переноса клиентов «Отмена» погашена с причиной (M2).
+func TestGUIToHostCancelButtonsAndClose(t *testing.T) {
+	if strings.Contains(toHostCancelYes, "неизвестно") || !strings.Contains(toHostCancelYes, "клиентов не переносить") ||
+		!strings.Contains(toHostCancelWarn, "клиентов переносить НЕ будет") {
+		t.Errorf("кнопка не согласована с предупреждением: %q", toHostCancelYes)
+	}
+	f := newTHFixture(t)
+	f.keysOut = core.KeysAccepted
+	gate, seen := make(chan struct{}), make(chan struct{})
+	var once, gateOnce sync.Once
+	release := func() { gateOnce.Do(func() { close(gate) }) }
+	toHostBeforeInstall = func() { once.Do(func() { close(seen) }); <-gate }
+	agate, aseen := make(chan struct{}), make(chan struct{})
+	var aonce, agateOnce sync.Once
+	arelease := func() { agateOnce.Do(func() { close(agate) }) }
+	t.Cleanup(func() { release(); arelease(); toHostBeforeInstall = nil })
+	inner := toHostApply
+	toHostApply = func(ctx context.Context, src, dst *core.Session, b *core.Backup, l core.BackupLayer, x, a bool, now time.Time, p core.ProgressFunc) (string, []core.RestoreOutcome, error) {
+		aonce.Do(func() { close(aseen) })
+		<-agate
+		return inner(ctx, src, dst, b, l, x, a, now, p)
+	}
+	f.startHost(t)
+	v := f.fill(t, false, "")
+	test.Tap(v.apply)
+	<-seen
+	pv := f.u.op
+	// крестик во время установки
+	f.u.closeIntercept()
+	if f.u.closeAfterOp || !strings.Contains(f.allText(), progressCloseWriting) {
+		t.Errorf("крестик во время установки: closeAfterOp=%v", f.u.closeAfterOp)
+	}
+	// просили закрыть, но человек выбрал «Продолжить установку»
+	f.u.closeAfterOp = true
+	test.Tap(pv.cancel)
+	test.Tap(buttonByText(t, f.u.win.Canvas().Overlays().Top(), toHostCancelNo))
+	if f.u.closeAfterOp || pv.cancel.Disabled() {
+		t.Errorf("«Продолжить установку»: closeAfterOp=%v, отмена погашена=%v", f.u.closeAfterOp, pv.cancel.Disabled())
+	}
+	release()
+	<-aseen
+	if !pv.cancel.Disabled() || pv.note.Text != toHostNoCancelApply {
+		t.Errorf("во время переноса клиентов «Отмена» не погашена: %q", pv.note.Text)
+	}
+	test.Tap(pv.cancel)
+	if strings.Contains(texts(f.u.win.Canvas().Overlays().Top()), toHostCancelTitle) {
+		t.Error("во время переноса открылось «Прервать?»")
+	}
+	arelease()
+	waitGUIGoroutines(t)
+	if f.applied != 1 || !strings.Contains(f.allText(), "ПЕРЕНЕСЕНО — все контейнеры") {
+		t.Errorf("перенос не завершён:\n%s", f.allText())
+	}
+	if strings.Contains(f.allText(), "Программа не закрыта") {
+		t.Error("ложное «Программа не закрыта» после «Продолжить установку»")
+	}
+}
+
+// TestGUIToHostLoginPwWipedOnClose — пароль входа затирается при закрытии
+// программы на шаге «Просмотр» (ревью #71 L1).
+func TestGUIToHostLoginPwWipedOnClose(t *testing.T) {
+	f := newTHFixture(t)
+	f.startHost(t)
+	f.password(t, thLoginPw)
+	p := f.u.toHostLogin
+	if p == nil || string(p.Bytes()) != thLoginPw {
+		t.Fatal("пароля входа нет — сцена ничего не значит")
+	}
+	f.u.closeWin = func() {}
+	f.u.closeWindow()
+	if b := p.Bytes(); strings.Trim(string(b), "\x00") != "" {
+		t.Error("пароль входа не затёрт при закрытии")
+	}
+}

@@ -61,7 +61,8 @@ const (
 	toHostModeLabel      = "Автокопия нового сервера:"
 	toHostOpenDirText    = "Открыть папку"
 	toHostCancelTitle    = "Прервать установку?"
-	toHostCancelYes      = "Прервать (итог — неизвестно)"
+	toHostCancelYes      = "Прервать после установки (клиентов не переносить)"
+	toHostNoCancelApply  = "Идёт запись клиентов на новый сервер — запись клиентов прервать нельзя, дождитесь итога."
 	toHostCancelNo       = "Продолжить установку"
 	toHostCancelWarn     = "Установку прервать нельзя: она дойдёт до конца — до последнего контейнера плана (ядро не останавливает установку посреди работы). После этого программа покажет НАСТОЯЩИЙ итог установки по контейнерам (что встало, что откатилось), клиентов переносить НЕ будет и ключ vpn:// НЕ выдаст. Старый сервер не изменён."
 	toHostPwHint         = "Пароль (не отображается и не сохраняется)"
@@ -291,6 +292,7 @@ func (u *ui) toHostConnectRun(host, port, user string, pw []byte) {
 				u.migrateInfo("Перенос невозможен", "Перенос невозможен, на серверах ничего не изменено: "+core.MaskText(err.Error()))
 			default:
 				u.migDst = st.dst
+				u.toHostLogin = &st.loginPw
 				u.toHostWindow(st)
 			}
 		})
@@ -712,13 +714,26 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		o.names = append(o.names, it.Container)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	var canceled atomic.Bool
+	var canceled, applying atomic.Bool
 	u.setBusy(true)
 	var pv *progressView
-	pv = u.progressWindow("Установка Amnezia и перенос", func() {
-		// doCancel уже погасил кнопку: вернуть её, если человек передумал
+	pv = u.progressWindow("Установка Amnezia и перенос", func() {})
+	// Установка и перенос пишут на сервер: writing — закрыть программу
+	// нельзя (крестик говорит почему). «Отмена» на установке — своя: через
+	// окно с честным предупреждением; на переносе клиентов — погашена.
+	pv.writing = true
+	ask := func() {
+		if pv.cancel.Disabled() || applying.Load() {
+			return
+		}
+		pv.cancel.Disable()
 		cd := dialog.NewConfirm(toHostCancelTitle, toHostCancelWarn, func(yes bool) {
-			if !yes {
+			if !yes || applying.Load() {
+				u.closeAfterOp = false // закрытие (если просили) отменено человеком
+				if applying.Load() {
+					pv.note.SetText(toHostNoCancelApply)
+					return
+				}
 				pv.note.SetText("")
 				pv.cancel.Enable()
 				return
@@ -730,7 +745,8 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		cd.SetConfirmText(toHostCancelYes)
 		cd.SetDismissText(toHostCancelNo)
 		cd.Show()
-	})
+	}
+	pv.cancel.OnTapped, pv.cancel.onEsc = ask, ask
 	u.lastProgress = pv
 	goSafe(func() {
 		defer cancel()
@@ -741,6 +757,13 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		pv.report(core.Progress{Text: "Шаг 1 из 3: установка Amnezia на новый сервер (это может занять несколько минут)…"})
 		o.res = toHostInstall(st.dst, st.plan, core.InstallOptions{Backup: st.b, Resolve: backupResolve, PreviewAccepted: true})
 		o.canceled = canceled.Load()
+		if o.res.ReadyForRestore() {
+			applying.Store(true) // с этого места «Прервать» не принимается
+			uiDo(func() {
+				pv.cancel.Disable()
+				pv.note.SetText(toHostNoCancelApply)
+			})
+		}
 		if o.res.ReadyForRestore() && ctx.Err() == nil {
 			pv.report(core.Progress{Text: "Шаг 2 из 3: перенос клиентов на новый сервер…"})
 			o.applied = true
@@ -749,7 +772,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		// ключ — и при неудаче переноса: без него поставленный сервер не
 		// продолжить ничем (как CLI, ревью PR #70, H1б)
 		o.canceled = canceled.Load()
-		if o.consent && o.res.ReadyForRestore() && !o.canceled {
+		if toHostKeyAllowed(o) {
 			pv.report(core.Progress{Text: "Шаг 3 из 3: ключ vpn:// нового сервера…"})
 			o.keyPath, o.keyLines = toHostIssueKey(st, o.names, keyPw, time.Now())
 		}
@@ -764,6 +787,27 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 			u.refresh()
 		})
 	})
+}
+
+// toHostKeyAllowed — выдавать ли ключ: согласие, установка готова и либо
+// отмены не было, либо перенос к ней уже полностью выполнен (решение ядра,
+// ревью PR #71 L2: без ключа поставленный сервер не продолжить).
+func toHostKeyAllowed(o toHostOutcome) bool {
+	if !o.consent || !o.res.ReadyForRestore() {
+		return false
+	}
+	if !o.canceled {
+		return true
+	}
+	if !o.applied || o.err != nil || len(o.outs) == 0 {
+		return false
+	}
+	for _, x := range o.outs {
+		if x.State != core.RestoreDone {
+			return false
+		}
+	}
+	return true
 }
 
 // toHostIssueKey — сборка, проверка входом и запись ключа (фон). Путь ""
@@ -899,7 +943,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 		body = append(body, "не выдавался: согласия положить пароль в ключ не было.")
 	case !installed:
 		body = append(body, "не выдавался: установка не готова.")
-	case o.canceled:
+	case !toHostKeyAllowed(o):
 		body = append(body, "не выдавался: отменено.")
 	default:
 		body = append(body, o.keyLines...)

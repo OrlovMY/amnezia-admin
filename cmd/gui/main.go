@@ -138,6 +138,9 @@ type ui struct {
 	toHostConnShown *toHostConnView
 	toHostShown     *toHostView
 	toHostReviewed  *toHostReview
+	// toHostLogin — пароль входа нового сервера; затирается в closeMigDst
+	// (любое закрытие: «Назад», смена источника, выход, конец операции).
+	toHostLogin *core.Secret
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView
