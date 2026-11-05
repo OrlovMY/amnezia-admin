@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -237,7 +236,7 @@ func openInfo(t *testing.T, u *ui, sized func()) osmotrScene {
 func openError(t *testing.T, u *ui, sized func()) osmotrScene {
 	osmotrMain(u)
 	sized()
-	dialog.ShowError(errors.New("план устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию"), u.win)
+	u.showErrorText(errors.New("план устарел: сервер изменился, пока окно было открыто. Закройте окно и повторите операцию")) // боевой путь showError для прочих ошибок
 	return scenePopup(t, u)
 }
 
@@ -250,12 +249,6 @@ var (
 		"подпись:Конфиг готов", "изображение:", "прокрутка:", "кнопка:Сохранить ещё в…", "кнопка:Закрыть",
 	}
 	invActionTail = []string{"кнопка:Показать изменения", "подпись:", "кнопка:Отмена"}
-	// fyneIconOverflow — значок стандартного диалога Fyne (dialog.ShowError,
-	// ShowInformation) — большая бледная картинка ЗА текстом в правом верхнем
-	// углу, по замыслу Fyne выходит за рамку на 4 т. Наша разметка тут ни
-	// при чём; разрешено поимённо полной строкой, как любая находка.
-	fyneIconOverflow = osmotrKnown{id: "ЗАМЫСЕЛ FYNE (значок стандартного диалога за текстом)",
-		size: "", match: "изображение «»: сверху 4.0, справа 4.0"}
 )
 
 var moreForms = []osmotrForm{
@@ -295,35 +288,31 @@ var moreForms = []osmotrForm{
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
-			"кнопка:Применить", "подпись:", "кнопка:Закрыть"}},
+			"кнопка:Применить", "подпись:", "кнопка:Копировать", "кнопка:Закрыть"}},
 	{name: "(д) предупреждение (приложение Amnezia)", open: openRace, width: 452,
 		inventory: []string{"подпись:" + firstLine(guiview.WarningTitle()), "подпись:" + firstLine(guiview.WarningBody()),
 			"кнопка:" + guiview.WarnContinueLabel(), "кнопка:" + guiview.WarnCancelLabel()}},
 	{name: "(е) неизвестный сервер", open: openHostKeyPrompt, width: 472,
 		inventory: []string{"подпись:Неизвестный сервер", "подпись:Сервер: 203.0.113.10:22…",
-			"кнопка:Доверять и запомнить", "кнопка:Отмена"}},
+			"кнопка:Копировать", "кнопка:Доверять и запомнить", "кнопка:Отмена"}},
 	{name: "(е) ключ сервера изменился", open: openHostKeyChanged(false), width: 472,
-		inventory: []string{"подпись:Ключ сервера изменился", "подпись:Сервер 203.0.113.10:22.…", "кнопка:Закрыть"}},
+		inventory: []string{"подпись:Ключ сервера изменился", "подпись:Сервер 203.0.113.10:22.…", "кнопка:Копировать", "кнопка:Закрыть"}},
 	{name: "(е) ключ сервера изменился, из хранилища", open: openHostKeyChanged(true), width: 472,
 		inventory: []string{"подпись:Ключ сервера изменился", "подпись:Сервер 203.0.113.10:22.…",
-			"кнопка:Забыть ключ сервера…", "кнопка:Закрыть"}},
+			"кнопка:Копировать", "кнопка:Забыть ключ сервера…", "кнопка:Закрыть"}},
 	// Три абзаца, рамка 472 (ревью UX-01, 29.09.2026; было 229 т. столбиком).
 	{name: "(е) забыть ключ сервера", open: openForgetHostKey, width: 472,
 		inventory: []string{"подпись:Забыть ключ сервера?", "подпись:Забыть ключ сервера 203.0.113.10:22?",
 			"подпись:" + firstLine("Будет стёрт сохранённый отпечаток — в хранилище и в known_hosts."),
 			"подпись:" + firstLine("Делайте это, только если сами переустанавливали сервер."),
 			"кнопка:Забыть", "кнопка:Отмена"}},
-	{name: "(ж) не выбран пользователь", open: openInfo,
-		inventory: []string{"подпись:Не выбран пользователь", "подпись:Выберите строку в таблице.", "изображение:", "кнопка:" + fyneRoleOK},
-		// Значок Fyne лежит за текстом по замыслу; с кнопкой OK он
-		// пересекается, если слово кнопки на языке системы длиннее
-		// «ОК»/«OK» (доказательство — osmotr_lang_test.go, «Okidoki»).
-		mayOverlap: []string{"|Не выбран пользователь", "|Выберите строку в таблице.", "|" + fyneRoleOK},
-		known:      []osmotrKnown{fyneIconOverflow}, fyneStd: true},
-	{name: "(ж) ошибка", open: openError,
-		inventory:  []string{"подпись:" + fyneRoleError, "подпись:План устарел: сервер изменился, пока окн…", "изображение:", "кнопка:" + fyneRoleOK},
-		mayOverlap: []string{"|План устарел: сервер изменился, пока окн…", "|" + fyneRoleOK},
-		known:      []osmotrKnown{fyneIconOverflow}, fyneStd: true},
+	// 06.11.2026: стандартные диалоги Fyne заменены своими (msg.go) —
+	// текст выделяемый, «Копировать»; значка Fyne за текстом больше нет,
+	// и его разрешение fyneIconOverflow снято; слова — наши, не Fyne.
+	{name: "(ж) не выбран пользователь", open: openInfo, width: infoDialogWidth - 8,
+		inventory: []string{"подпись:Не выбран пользователь", "подпись:Выберите строку в таблице.", "кнопка:Копировать", "кнопка:Закрыть"}},
+	{name: "(ж) ошибка", open: openError, width: infoDialogWidth - 8,
+		inventory: []string{"подпись:Ошибка", "подпись:План устарел: сервер изменился, пока окн…", "кнопка:Копировать", "кнопка:Закрыть"}},
 }
 
 func init() { osmotrForms = append(osmotrForms, moreForms...) }

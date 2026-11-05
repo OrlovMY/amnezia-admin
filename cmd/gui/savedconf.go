@@ -59,7 +59,7 @@ func (u *ui) showSavedConfig(row int, save bool) {
 	case core.SavedFound:
 		u.showFoundConfig(title, cl, sc, save)
 	case core.SavedNotFound:
-		text := widget.NewLabel(guiview.SavedNotFoundText(sc.Searched))
+		text := msgLabel(guiview.SavedNotFoundText(sc.Searched))
 		text.Wrapping = fyne.TextWrapWord
 		var d dialog.Dialog
 		box := container.NewVBox(text)
@@ -79,7 +79,7 @@ func (u *ui) showSavedConfig(row int, save bool) {
 		d.Resize(fyne.NewSize(480, 220))
 		d.Show()
 	default:
-		text := widget.NewLabel(guiview.SavedUnreadableText(sc.Why))
+		text := msgLabel(guiview.SavedUnreadableText(sc.Why))
 		text.Wrapping = fyne.TextWrapWord
 		d := dialog.NewCustom(title, "Закрыть", text, u.win)
 		d.Resize(fyne.NewSize(480, 220))
@@ -88,9 +88,9 @@ func (u *ui) showSavedConfig(row int, save bool) {
 }
 
 func (u *ui) showFoundConfig(title string, cl core.ClientEntry, sc core.SavedConfig, save bool) {
-	from := widget.NewLabel(guiview.SavedFoundText(sc))
+	from := msgLabel(guiview.SavedFoundText(sc))
 	from.Wrapping = fyne.TextWrapWord
-	check := widget.NewLabel(guiview.SavedCheckPending)
+	check := msgLabel(guiview.SavedCheckPending)
 	check.Wrapping = fyne.TextWrapWord
 	// QR — только после сверки ключа сервера (SEC-01 R1): не совпал — скрыт,
 	// показ — по явному «Всё равно показать QR».
@@ -247,7 +247,7 @@ func qrObjectNote(name, config, containerName string) (obj fyne.CanvasObject, no
 		err = fmt.Errorf("%w; серия QR AmneziaVPN не построена: %v", err, serr)
 	}
 	if err != nil {
-		l := widget.NewLabel("Не удалось построить QR-код: " + err.Error())
+		l := msgLabel("Не удалось построить QR-код: " + err.Error())
 		l.Wrapping = fyne.TextWrapWord
 		return l, ""
 	}
@@ -291,12 +291,12 @@ func newQRSeries(name string, pngs [][]byte) *qrSeries {
 	s.img.FillMode = canvas.ImageFillContain
 	s.img.ScaleMode = canvas.ImageScalePixels
 	s.img.SetMinSize(fyne.NewSize(256, 256))
-	s.pos = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	s.pos = msgLabelStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	s.prev = widget.NewButtonWithIcon("Назад", theme.NavigateBackIcon(), func() { s.show(s.idx - 1) })
 	s.next = widget.NewButtonWithIcon("Далее", theme.NavigateNextIcon(), func() { s.show(s.idx + 1) })
 	s.next.IconPlacement = widget.ButtonIconTrailingText
 	s.pos.Truncation = fyne.TextTruncateEllipsis
-	s.caption = widget.NewLabel(qrSeriesCaption)
+	s.caption = msgLabel(qrSeriesCaption)
 	s.altBtn = widget.NewButton(qrTextButton, func() {
 		s.altMode = !s.altMode
 		s.show(s.idx)

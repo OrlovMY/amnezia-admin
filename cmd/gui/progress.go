@@ -79,7 +79,7 @@ func (u *ui) closeIntercept() {
 	case v == nil:
 		u.closeWindow()
 	case v.writing:
-		dialog.NewInformation("Закрыть нельзя", progressCloseWriting, u.win).Show()
+		u.showInfo("Закрыть нельзя", progressCloseWriting)
 	default:
 		u.closeAfterOp = true
 		v.doCancel()
@@ -127,7 +127,7 @@ func (u *ui) opFinished(err error) bool {
 func (u *ui) closeNotDoneNote() {
 	if u.closeRefused {
 		u.closeRefused = false
-		dialog.NewInformation("Программа не закрыта", closeNotDone, u.win).Show()
+		u.showInfo("Программа не закрыта", closeNotDone)
 	}
 }
 

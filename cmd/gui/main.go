@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image/color"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -119,6 +118,11 @@ type ui struct {
 	refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn *widget.Button
 	// protoRow — строка «Протокол: [список] … сервер» (сторож ширины списка).
 	protoRow *fyne.Container
+	// buttonsRow — ряд кнопок; detailsBtn — «Подробнее» у протокола;
+	// protoDetailsShown — последнее окно «Подробнее» (для тестов).
+	buttonsRow        *fyne.Container
+	detailsBtn        *widget.Button
+	protoDetailsShown dialog.Dialog
 	// serverLabel — подпись сервера (обрезается многоточием; сторожа).
 	serverLabel *serverLabel
 	// serverCopy — значок «скопировать полный адрес сервера».
@@ -411,7 +415,7 @@ func hintMetrics(text string, width float32) fyne.Size {
 // контейнера постоянного размера — меняется только её ТЕКСТ, поэтому ничего
 // не едет.
 func newReservedHint(text string, width float32) *layoutHint {
-	l := widget.NewLabel("")
+	l := msgLabel("")
 	l.Wrapping = fyne.TextWrapWord
 	size := hintMetrics(text, width)
 	return &layoutHint{
@@ -431,7 +435,7 @@ func newLayoutHint(text string, width float32, anchor fyne.CanvasObject) *layout
 	th := app.Settings().Theme()
 	variant := app.Settings().ThemeVariant()
 
-	l := widget.NewLabel("")
+	l := msgLabel("")
 	l.Wrapping = fyne.TextWrapWord
 
 	// Подложка непрозрачная: под всплывашкой лежит чужой текст, и без неё
@@ -506,7 +510,7 @@ func (h *layoutHint) setOn(on bool) {
 // Именно ТЕКСТ параметром, а не «что-то заранее набранное»: иначе при
 // изменении сообщения на экране осталось бы старое (ревью SEC-01).
 func layoutNoticeLabel(text string) *widget.Label {
-	l := widget.NewLabel(text)
+	l := msgLabel(text)
 	l.Wrapping = fyne.TextWrapWord
 	if text == "" {
 		l.Hide()
@@ -604,7 +608,7 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 		keyEntry.SetText(k)
 	}
 
-	info := widget.NewLabel(status)
+	info := msgLabel(status)
 	info.Wrapping = fyne.TextWrapWord
 
 	var connectBtn *widget.Button
@@ -617,11 +621,11 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 		u.attemptConnect(key, nil, connectBtn, info)
 	})
 
-	title := widget.NewLabelWithStyle("Amnezia Admin", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	title := msgLabelStyle("Amnezia Admin", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	// Строка версии под заголовком (Г3 PR-6а) — вариант на ревью UI-01;
 	// альтернатива: вписать version.String() прямо в текст title.
-	versionLabel := widget.NewLabelWithStyle(version.String(), fyne.TextAlignCenter, fyne.TextStyle{})
-	hint := widget.NewLabel("Нужен админский ключ — внутри него SSH-доступ к серверу.\nПользовательский (share) ключ не подойдёт.")
+	versionLabel := msgLabelStyle(version.String(), fyne.TextAlignCenter, fyne.TextStyle{})
+	hint := msgLabel("Нужен админский ключ — внутри него SSH-доступ к серверу.\nПользовательский (share) ключ не подойдёт.")
 	hint.Wrapping = fyne.TextWrapWord
 
 	// Подсказка про раскладку под полем ключа. Признак здесь свой:
@@ -634,7 +638,7 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 	// известен ДО сборки формы — подпись сразу окончательна и ничего не сдвинет.
 	layoutNotice := layoutNoticeLabel(forceEnglishLayout())
 
-	form := container.NewVBox(title, versionLabel, hint, keyHint.box, layoutNotice, connectBtn, info)
+	form := container.NewVBox(title, versionLabel, hint, keyHint.box, layoutNotice, connectBtn, withCopy(info))
 
 	if vaultBlock := u.savedVaultsBlock(connectBtn, info); vaultBlock != nil {
 		form.Add(vaultBlock)
@@ -654,14 +658,14 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 	if listErr != nil {
 		// A1б, признак 2: прежде отказ чтения каталога давал пустой список,
 		// и экран выглядел так, будто сохранённых ключей нет вовсе.
-		l := widget.NewLabel(guiview.VaultListUnreadable(listErr))
+		l := msgLabel(guiview.VaultListUnreadable(listErr))
 		l.Wrapping = fyne.TextWrapWord
 		return l
 	}
 	if len(vaults) == 0 {
 		return nil
 	}
-	label := widget.NewLabel("Или загрузить из сохранённых:")
+	label := msgLabel("Или загрузить из сохранённых:")
 	// Подписи без своего .avlt (ключ удалили руками) — убрать: адрес
 	// сервера не должен лежать на диске без нужды. В список они и так не
 	// попадают (он строится по .avlt), поэтому сбой удаления — только в
@@ -733,7 +737,7 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	pinEntry := widget.NewEntry()
 	pinEntry.Password = true
 	pinEntry.SetPlaceHolder("Пин-код")
-	statusLabel := widget.NewLabel("")
+	statusLabel := msgLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
 	// Выделяемая (раунд 4 долгов, AU-UX Low): в тексте о закрытом вводе —
 	// полный путь throttle.json, 170+ знаков; человек копирует его, а не
@@ -992,11 +996,11 @@ func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, i
 	statusScroll := container.NewVScroll(statusLabel)
 	statusScroll.SetMinSize(fyne.NewSize(0, pinStatusHeight))
 	content := container.NewVBox(
-		widget.NewLabel(label),
+		msgLabel(label),
 		pinEntry,
 		pinHint.box,
 		layoutNotice,
-		statusScroll,
+		container.NewBorder(nil, nil, nil, container.NewVBox(copyButton(statusLabel)), statusScroll),
 		openBtn,
 		retryBtn,
 	)
@@ -1209,7 +1213,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 				if u.status != nil {
 					u.status.SetText(labelNotice)
 				}
-				dialog.ShowInformation("Подпись сервера исправлена", labelNotice, u.win)
+				u.showInfo("Подпись сервера исправлена", labelNotice)
 			}
 		})
 	})
@@ -1335,12 +1339,12 @@ func (u *ui) hostKeyPrompt(host, fingerprint string) bool {
 // showHostKeyPrompt — сам диалог hostKeyPrompt, без ожидания ответа: так его
 // открывает и прибор осмотра (osmotr_more_test.go), не блокируясь на канале.
 func (u *ui) showHostKeyPrompt(host, fingerprint string, result chan<- bool) {
-	body := widget.NewLabel(fmt.Sprintf(
+	body := msgLabel(fmt.Sprintf(
 		"Сервер: %s\nОтпечаток ключа: %s\n\nСверьте отпечаток с тем, что показывает сервер (например, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub).",
 		host, fingerprint,
 	))
 	body.Wrapping = fyne.TextWrapWord
-	d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", body, func(ok bool) {
+	d := dialog.NewCustomConfirm("Неизвестный сервер", "Доверять и запомнить", "Отмена", withCopy(body), func(ok bool) {
 		result <- ok
 	}, u.win)
 	d.Resize(fyne.NewSize(480, 240))
@@ -1361,14 +1365,14 @@ func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath str
 		// Low) — слова текста С3 не менялись, только разбивка строк для
 		// читаемости; длинные SHA256:… в одну строку с преамбулой сливались
 		// визуально.
-		body := widget.NewLabel(fmt.Sprintf(
+		body := msgLabel(fmt.Sprintf(
 			"Сервер %s.\nСохранённый отпечаток: %s\nПолученный: %s\nТак бывает после переустановки сервера. "+
 				"Если вы его не переустанавливали — возможна подмена: не подключайтесь.",
 			host, knownFp, presentedFp,
 		))
 		body.Wrapping = fyne.TextWrapWord
 
-		content := container.NewVBox(body)
+		content := container.NewVBox(withCopy(body))
 		var d dialog.Dialog
 		// forgetClicked различает "закрыто нажатием «Забыть ключ сервера…»"
 		// (пин ещё нужен — его использует confirmForgetHostKey сразу после
@@ -1420,7 +1424,7 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 	// сами переустанавливали» — терялось в конце. Самый опасный диалог
 	// программы: решение о доверии ключу сервера необратимо.
 	para := func(s string, style fyne.TextStyle) *widget.Label {
-		l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, style)
+		l := msgLabelStyle(s, fyne.TextAlignLeading, style)
 		l.Wrapping = fyne.TextWrapWord
 		return l
 	}
@@ -1491,7 +1495,7 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 
 func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
 	fyne.Do(func() {
-		info.SetText(msg)
+		info.SetText(core.MaskText(msg))
 		btn.Enable()
 	})
 }
@@ -1511,12 +1515,12 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	pinRepeat := widget.NewEntry()
 	pinRepeat.Password = true
 	bindCheck := widget.NewCheck("Привязать к этой учётке Windows (файл нельзя перенести на другой ПК или учётную запись)", nil)
-	bindHint := canvas.NewText("Рекомендуется: украденный файл будет бесполезен на другом компьютере.", color.NRGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff})
-	bindHint.TextSize = theme.CaptionTextSize()
-	statusLabel := widget.NewLabel("")
+	bindHint := msgLabelStyle("Рекомендуется: украденный файл будет бесполезен на другом компьютере.", fyne.TextAlignLeading, fyne.TextStyle{})
+	bindHint.Importance = widget.LowImportance
+	statusLabel := msgLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
-	mismatchLabel := canvas.NewText("Пины не совпадают", color.NRGBA{R: 0xd9, G: 0x2d, B: 0x20, A: 0xff})
-	mismatchLabel.TextStyle = fyne.TextStyle{Bold: true}
+	mismatchLabel := msgLabelStyle("Пины не совпадают", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	mismatchLabel.Importance = widget.DangerImportance
 	mismatchLabel.Hide()
 
 	var d dialog.Dialog
@@ -1644,7 +1648,7 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	pinRepeat.OnSubmitted = func(string) { submit() }
 
 	content := container.NewVBox(
-		widget.NewLabel("Сохранить этот ключ для быстрого подключения в следующий раз?"),
+		msgLabel("Сохранить этот ключ для быстрого подключения в следующий раз?"),
 		widget.NewForm(
 			widget.NewFormItem("Метка", labelEntry),
 			widget.NewFormItem("Пин-код", pinEntry),
@@ -1654,9 +1658,11 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 		layoutNotice,
 		mismatchLabel,
 		bindCheck,
-		bindHint,
+		compactHint(bindHint),
 		statusLabel,
-		saveBtn,
+		// «Копировать» строки состояния — в ряду кнопки, а не отдельной строкой:
+		// диалог на минимальном окне не должен вырасти (осмотр (б)).
+		container.NewBorder(nil, nil, nil, copyButton(statusLabel), saveBtn),
 	)
 	d = dialog.NewCustom("Сохранить ключ?", "Не сохранять", content, u.win)
 	d.Resize(fyne.NewSize(460, 360))
@@ -1674,7 +1680,7 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 func (u *ui) mainScreen() fyne.CanvasObject {
 	// status и table должны существовать до protoSelect:
 	// SetSelectedIndex вызывает callback, который делает refresh()
-	u.status = widget.NewLabel("")
+	u.status = msgLabel("")
 	u.status.Wrapping = fyne.TextWrapWord
 	u.buildTable()
 
@@ -1755,14 +1761,102 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// протоколов — по ширине самого длинного (короткого) пункта, прижат
 	// влево, а не на всю строку. Подпись сервера — справа во второй строке:
 	// так первая строка (кнопки) не раздвигает минимум окна.
+	// «Подробнее» (пожелание владельца 05.11): порт, подсеть, версия
+	// параметров, контейнер и транспорт текущего протокола.
+	u.detailsBtn = widget.NewButtonWithIcon(protoDetailsLabel, theme.InfoIcon(), func() { u.showProtoDetails() })
 	u.protoRow = container.NewBorder(nil, nil,
-		container.NewHBox(widget.NewLabel("Протокол:"), container.New(&selectWidthLayout{sel: &u.protoSelect.Select}, u.protoSelect)),
+		container.NewHBox(msgLabel("Протокол:"), container.New(&selectWidthLayout{sel: &u.protoSelect.Select}, u.protoSelect), u.detailsBtn),
 		u.serverCopy, server)
-	top := container.NewVBox(
-		container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn),
-		u.protoRow,
-	)
-	return container.NewBorder(top, u.status, nil, nil, u.table)
+	u.buttonsRow = container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn)
+	// Широкое окно — кнопки, протокол и сервер одной строкой; узкое — двумя,
+	// как прежде (mainLayout, пожелание владельца 05.11).
+	return container.New(&mainLayout{server: server}, u.buttonsRow, u.protoRow, withCopy(u.status), u.table)
+}
+
+// protoDetailsLabel — подпись кнопки «Подробнее» у протокола.
+const protoDetailsLabel = "Подробнее"
+
+// mainLayout — раскладка главного экрана: objects = кнопки, строка
+// протокола, строка состояния, таблица.
+//
+// Узкое окно — ровно прежняя Border(VBox(кнопки, протокол), состояние, таблица).
+// Широкое — кнопки и строка протокола в одну строку, таблица получает её
+// высоту. Порог — вся строка помещается с ПОЛНОЙ подписью сервера: минимум
+// подписи сервера — одно многоточие, и без этого одна строка включалась бы,
+// оставляя от адреса «С…» (было бы хуже, чем две строки).
+// MinSize — узкий вариант: минимум окна не меняется.
+type mainLayout struct{ server *serverLabel }
+
+// wideThreshold — ширина, с которой раскладка — одна строка.
+func (l mainLayout) wideThreshold(objs []fyne.CanvasObject) float32 {
+	w := objs[0].MinSize().Width + theme.Padding() + objs[1].MinSize().Width
+	if l.server != nil {
+		full := fyne.MeasureText(l.server.Text, theme.TextSize(), l.server.TextStyle).Width + 2*theme.InnerPadding()
+		if extra := full - l.server.MinSize().Width; extra > 0 {
+			w += extra
+		}
+	}
+	return w
+}
+
+func (l mainLayout) wide(objs []fyne.CanvasObject, width float32) bool {
+	return width >= l.wideThreshold(objs)
+}
+
+func (l mainLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	pad := theme.Padding()
+	b, p, s := objs[0].MinSize(), objs[1].MinSize(), objs[2].MinSize()
+	var y float32
+	if l.wide(objs, size.Width) {
+		h := fyne.Max(b.Height, p.Height)
+		objs[0].Move(fyne.NewPos(0, 0))
+		objs[0].Resize(fyne.NewSize(b.Width, h))
+		objs[1].Move(fyne.NewPos(b.Width+pad, 0))
+		objs[1].Resize(fyne.NewSize(size.Width-b.Width-pad, h))
+		y = h + pad
+	} else {
+		objs[0].Move(fyne.NewPos(0, 0))
+		objs[0].Resize(fyne.NewSize(size.Width, b.Height))
+		objs[1].Move(fyne.NewPos(0, b.Height+pad))
+		objs[1].Resize(fyne.NewSize(size.Width, p.Height))
+		y = b.Height + pad + p.Height + pad
+	}
+	objs[2].Resize(fyne.NewSize(size.Width, s.Height))
+	s = objs[2].MinSize() // подпись с переносом пересчитывает высоту по ширине
+	objs[2].Move(fyne.NewPos(0, size.Height-s.Height))
+	objs[2].Resize(fyne.NewSize(size.Width, s.Height))
+	objs[3].Move(fyne.NewPos(0, y))
+	objs[3].Resize(fyne.NewSize(size.Width, fyne.Max(0, size.Height-s.Height-pad-y)))
+}
+
+func (mainLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	pad := theme.Padding()
+	w, h := float32(0), float32(0)
+	for _, o := range objs {
+		m := o.MinSize()
+		w = fyne.Max(w, m.Width)
+		h += m.Height
+	}
+	return fyne.NewSize(w, h+3*pad)
+}
+
+// showProtoDetails — окно «Подробнее» текущего протокола. Файл конфигурации
+// читается с сервера (только чтение) вне потока интерфейса; каждое поле —
+// значение, «не применяется» или «не удалось узнать: причина».
+func (u *ui) showProtoDetails() {
+	if u.cur == nil || u.sess == nil {
+		u.protoDetailsShown = u.showInfo(protoDetailsLabel, "Протокол не выбран — подробностей нет.")
+		return
+	}
+	c, sess := *u.cur, u.sess
+	u.detailsBtn.Disable()
+	goSafe(func() {
+		d := sess.ReadProtoDetails(&c)
+		uiDo(func() {
+			u.detailsBtn.Enable()
+			u.protoDetailsShown = u.showInfo(guiview.ProtoDetailsTitle(c), guiview.ProtoDetailsText(d))
+		})
+	})
 }
 
 // serverLabel — подпись сервера справа во второй строке: обрезается
@@ -2130,6 +2224,55 @@ func newClientTable(length func() (int, int), create func() fyne.CanvasObject,
 func (t *clientTable) MouseUp(e *desktop.MouseEvent) {
 	t.Table.MouseUp(e)
 	t.Table.DragEnd()
+}
+
+// TypedKey — PgUp/PgDn на страницу, Home — в начало, End — в конец списка
+// (пожелание владельца 05.11; widget.Table знает только стрелки и пробел).
+//
+// Ход делается ТЕМИ ЖЕ шагами, что стрелки (Table.TypedKey с KeyUp/KeyDown):
+// фокус таблицы — неэкспортированное поле, и только так он сдвигается
+// честно — следующая стрелка или пробел (выбор строки) идут от новой
+// позиции, а таблица сама прокручивается к ней. Шагов больше, чем строк, не
+// бывает: на краю стрелка ничего не делает.
+func (t *clientTable) TypedKey(e *fyne.KeyEvent) {
+	rows := 0
+	if t.Length != nil {
+		rows, _ = t.Length()
+	}
+	step := func(k fyne.KeyName, n int) {
+		for i := 0; i < n; i++ {
+			t.Table.TypedKey(&fyne.KeyEvent{Name: k})
+		}
+	}
+	switch e.Name {
+	case fyne.KeyPageDown:
+		step(fyne.KeyDown, t.pageRows())
+	case fyne.KeyPageUp:
+		step(fyne.KeyUp, t.pageRows())
+	case fyne.KeyHome:
+		step(fyne.KeyUp, rows)
+	case fyne.KeyEnd:
+		step(fyne.KeyDown, rows)
+	default:
+		t.Table.TypedKey(e)
+	}
+}
+
+// pageRows — сколько строк данных видно в таблице (не меньше одной):
+// высота таблицы без строки заголовков, делённая на высоту строки.
+func (t *clientTable) pageRows() int {
+	if t.CreateCell == nil {
+		return 1
+	}
+	rowH := t.CreateCell().MinSize().Height + theme.Padding()
+	if rowH <= 0 {
+		return 1
+	}
+	n := int((t.Size().Height - rowH) / rowH)
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // mouseEventInTableCoords — копия события с Position, пересчитанной из
@@ -2859,7 +3002,7 @@ func newDiffGrid(diff string) *widget.TextGrid {
 // план в фоне, сам диалог подтверждения — модальное окно, и статус главного
 // экрана (u.status) им закрыт и не виден пользователю.
 func newPlanStatusLabel() *widget.Label {
-	l := widget.NewLabel("")
+	l := msgLabel("")
 	l.Wrapping = fyne.TextWrapWord
 	return l
 }
@@ -2882,7 +3025,7 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	tblGrid := newDiffGrid(tblDiff)
 
 	// Пояснение к плану (Н-4, раунд 5) — в предпросмотре сразу, до «Применить».
-	statusLabel := widget.NewLabel(plan.Note())
+	statusLabel := msgLabel(plan.Note())
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	var d dialog.Dialog
@@ -2952,14 +3095,14 @@ func (u *ui) showDiffWindow(title string, plan *core.Plan, onApplied func(*core.
 	// стороны по умолчанию (ScrollBoth) — низ и правый край доступны.
 	content := container.NewBorder(
 		nil,
-		container.NewVBox(applyBtn, statusLabel),
+		container.NewVBox(applyBtn, withCopy(statusLabel)),
 		nil, nil,
 		container.NewVSplit(
 			container.NewBorder(
-				widget.NewLabelWithStyle(plan.ConfPath(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				msgLabelStyle(plan.ConfPath(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 				nil, nil, nil, container.NewScroll(wgGrid)),
 			container.NewBorder(
-				widget.NewLabelWithStyle(plan.Container.Dir+"/clientsTable", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+				msgLabelStyle(plan.Container.Dir+"/clientsTable", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 				nil, nil, nil, container.NewScroll(tblGrid)),
 		),
 	)
@@ -2977,7 +3120,7 @@ func (u *ui) showError(err error) {
 	if !ok {
 		// AL-01: граница показа — UUID клиентов XRay и прочие секреты
 		// маскируются (core.MaskText), как в CLI.
-		dialog.ShowError(errors.New(core.MaskText(err.Error())), u.win)
+		u.showErrorText(err)
 		return
 	}
 	showWriteOutcomeDialog(u, t, err)
@@ -2987,10 +3130,9 @@ func (u *ui) showError(err error) {
 // подробностями в прокрутке (выделяемый), «Закрыть». Отдельно от showError,
 // чтобы сторож запаса ширины строил ровно этот диалог для каждого текста.
 func showWriteOutcomeDialog(u *ui, t writeoutcome.Text, err error) {
-	msg := widget.NewLabel(core.MaskText(writeoutcome.Message(t, err)))
+	msg := msgLabel(core.MaskText(writeoutcome.Message(t, err)))
 	msg.Wrapping = fyne.TextWrapWord
-	msg.Selectable = true
-	d := dialog.NewCustom(t.Title, "Закрыть", container.NewVScroll(msg), u.win)
+	d := dialog.NewCustom(t.Title, "Закрыть", container.NewBorder(nil, nil, nil, container.NewVBox(copyButton(msg)), container.NewVScroll(msg)), u.win)
 	d.Resize(fyne.NewSize(writeErrorDialogWidth, writeErrorDialogHeight))
 	d.Show()
 }
@@ -3055,7 +3197,7 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 		return
 	}
 
-	body := widget.NewLabel(guiview.WarningBody())
+	body := msgLabel(guiview.WarningBody())
 	body.Wrapping = fyne.TextWrapWord
 
 	var d dialog.Dialog
@@ -3081,8 +3223,8 @@ func (u *ui) confirmRaceWarning(op guiview.Op, do func()) {
 
 func (u *ui) addDialog() {
 	if !u.cur.Managed() {
-		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()), u.win)
+		u.showInfo("Недоступно",
+			fmt.Sprintf("Создание пользователей для %s не поддерживается.", u.cur.Title()))
 		return
 	}
 	if u.needClientHostGate() {
@@ -3215,12 +3357,12 @@ const awg2ConfigDialogWidth = 760
 func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	qrObj, qrNote := qrObjectNote(nu.Name, nu.QRText(), nu.Container)
 
-	savedLabel := widget.NewLabel("")
+	savedLabel := msgLabel("")
 	savedLabel.Wrapping = fyne.TextWrapWord
 
 	// Одноразовая подсказка о смене места (ревью UX-01): скрыта, пока не
 	// окажется, что каталог заведён этим самым сохранением.
-	moveHint := widget.NewLabel(core.FirstSaveHint)
+	moveHint := msgLabel(core.FirstSaveHint)
 	moveHint.Wrapping = fyne.TextWrapWord
 	moveHint.Hide()
 
@@ -3239,12 +3381,12 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	// из core (ревью SEC-01, второй круг: половины разъехались — в CLI совет
 	// был, в GUI только dialog.ShowError). Своё у GUI — только КАК
 	// перевыпустить: кнопкой «Перевыпустить» в главном окне.
-	failHint := widget.NewLabel(core.SaveFailedAdvice(nu.Name) + " Это делает кнопка «Перевыпустить» в главном окне.")
+	failHint := msgLabel(core.SaveFailedAdvice(nu.Name) + " Это делает кнопка «Перевыпустить» в главном окне.")
 	failHint.Wrapping = fyne.TextWrapWord
 	failHint.Hide()
 	// AU-UX П1 (раунд 6): ошибка ОС с полным путём — 3–4 строки; она идёт
 	// ПОСЛЕ совета, иначе совет уезжал под прокрутку на 1194×517.
-	failDetail := widget.NewLabel("")
+	failDetail := msgLabel("")
 	failDetail.Wrapping = fyne.TextWrapWord
 	failDetail.Hide()
 
@@ -3297,7 +3439,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		}
 	}
 
-	hint := widget.NewLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
+	hint := msgLabel("Отсканируйте QR в приложении AmneziaWG на телефоне или импортируйте файл.")
 	if nu.Link != "" {
 		hint.SetText("QR — ссылка vless://: отсканируйте её в приложении Amnezia на телефоне или импортируйте файл .json.")
 	}
@@ -3314,7 +3456,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 	hint.Wrapping = fyne.TextWrapWord
 	// PR-W3 (Р3-2): строка честности amnezia-awg2 — при каждой выдаче;
 	// пустая Note — метки нет.
-	noteLabel := widget.NewLabel(nu.Note)
+	noteLabel := msgLabel(nu.Note)
 	noteLabel.Wrapping = fyne.TextWrapWord
 	if nu.Note == "" {
 		noteLabel.Hide()
@@ -3336,7 +3478,7 @@ func (u *ui) showConfigDialog(nu *core.NewUser, verb string) {
 		savedLabel,
 		failHint,
 		failDetail,
-		widget.NewLabelWithStyle(configDoneText(nu, verb), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		msgLabelStyle(configDoneText(nu, verb), fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		moveHint,
 		hint,
 	))
@@ -3420,13 +3562,13 @@ func scrollToEnd(outer *fyne.Container, s *container.Scroll) {
 
 func (u *ui) renameSelected() {
 	if !u.cur.Managed() {
-		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Title()), u.win)
+		u.showInfo("Недоступно",
+			fmt.Sprintf("Переименование пользователей для %s не поддерживается.", u.cur.Title()))
 		return
 	}
 	idx := u.selectedRow
 	if idx < 0 || idx >= len(u.clients) {
-		dialog.ShowInformation("Не выбран пользователь", "Выберите строку в таблице.", u.win)
+		u.showInfo("Не выбран пользователь", "Выберите строку в таблице.")
 		return
 	}
 	victim := u.clients[idx]
@@ -3512,13 +3654,13 @@ func (u *ui) renameSelected() {
 
 func (u *ui) toggleSelected() {
 	if !u.cur.Managed() {
-		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Title()), u.win)
+		u.showInfo("Недоступно",
+			fmt.Sprintf("Управление пользователями для %s не поддерживается.", u.cur.Title()))
 		return
 	}
 	idx := u.selectedRow
 	if idx < 0 || idx >= len(u.clients) {
-		dialog.ShowInformation("Не выбран пользователь", "Выберите строку в таблице.", u.win)
+		u.showInfo("Не выбран пользователь", "Выберите строку в таблице.")
 		return
 	}
 	victim := u.clients[idx]
@@ -3597,7 +3739,7 @@ func (u *ui) toggleSelected() {
 		})
 	})
 	// Д4 (осмотр 29.09.2026): без переноса ключ раздувал рамку — как Д3.
-	card := widget.NewLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), core.KeyText(u.cur, victim.ClientID)))
+	card := msgLabel(fmt.Sprintf("Пользователь: %s\nКлюч: %s", victim.Name(), core.KeyText(u.cur, victim.ClientID)))
 	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
 		card,
@@ -3613,13 +3755,13 @@ func (u *ui) toggleSelected() {
 
 func (u *ui) regenerateSelected() {
 	if !u.cur.Managed() {
-		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Title()), u.win)
+		u.showInfo("Недоступно",
+			fmt.Sprintf("Перевыпуск конфигов для %s не поддерживается.", u.cur.Title()))
 		return
 	}
 	idx := u.selectedRow
 	if idx < 0 || idx >= len(u.clients) {
-		dialog.ShowInformation("Не выбран пользователь", "Выберите строку в таблице.", u.win)
+		u.showInfo("Не выбран пользователь", "Выберите строку в таблице.")
 		return
 	}
 	victim := u.clients[idx]
@@ -3628,7 +3770,7 @@ func (u *ui) regenerateSelected() {
 	}
 	if victim.EnabledState() == core.EnabledUnknown {
 		// У1: включён ли — неизвестно; до вопроса, а не после него
-		dialog.ShowError(core.EnabledUnknownError(victim), u.win)
+		u.showErrorText(core.EnabledUnknownError(victim))
 		return
 	}
 	if u.needClientHostGate() {
@@ -3691,7 +3833,7 @@ func (u *ui) regenerateSelected() {
 		})
 	})
 	// Д5 (осмотр 29.09.2026): фраза без переноса раздувала рамку до 847 т.
-	question := widget.NewLabel(fmt.Sprintf("Перевыпустить конфиг пользователя «%s»? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
+	question := msgLabel(fmt.Sprintf("Перевыпустить конфиг пользователя «%s»? Старый конфиг перестанет работать, пользователю нужно установить новый.", victim.Name()))
 	question.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
 		question,
@@ -3712,13 +3854,13 @@ var errProtoSwitched = errors.New("протокол переключён, пок
 
 func (u *ui) deleteSelected() {
 	if !u.cur.Managed() {
-		dialog.ShowInformation("Недоступно",
-			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Title()), u.win)
+		u.showInfo("Недоступно",
+			fmt.Sprintf("Удаление пользователей для %s не поддерживается.", u.cur.Title()))
 		return
 	}
 	idx := u.selectedRow
 	if idx < 0 || idx >= len(u.clients) {
-		dialog.ShowInformation("Не выбран пользователь", "Выберите строку в таблице.", u.win)
+		u.showInfo("Не выбран пользователь", "Выберите строку в таблице.")
 		return
 	}
 	victim := u.clients[idx]
@@ -3811,7 +3953,7 @@ func (u *ui) deleteSelected() {
 	// подтвердить можно раньше ответа, появилось бы вторым выходом.
 	okBtn.Disable()
 	diffBtn.Disable()
-	activity := widget.NewLabel("Узнаю, подключался ли клиент...")
+	activity := msgLabel("Узнаю, подключался ли клиент...")
 	activity.Wrapping = fyne.TextWrapWord
 	if core.IsXRay(cur) {
 		// XRay: статистики нет — запроса нет, и карточка ничего не
@@ -3841,7 +3983,7 @@ func (u *ui) deleteSelected() {
 	// Д3 (осмотр 25.09.2026): без переноса ключ из широких знаков раздувал
 	// рамку с 452 до 570.8 т. TextWrapWord в Fyne рвёт слово, которое длиннее
 	// строки, по знакам — ключ без пробелов переносится, имя — по словам.
-	card := widget.NewLabel(msg)
+	card := msgLabel(msg)
 	card.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(
 		card,

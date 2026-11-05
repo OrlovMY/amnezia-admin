@@ -285,7 +285,7 @@ func (u *ui) backupResult(path string, b *core.Backup, err error) dialog.Dialog 
 	default:
 		lines = append(lines, "", "Копия записана: "+path)
 	}
-	objs := []fyne.CanvasObject{wrapLabel(strings.Join(lines, "\n"), false)}
+	objs := []fyne.CanvasObject{withCopy(wrapLabel(strings.Join(lines, "\n"), false))}
 	if err == nil {
 		objs = append(objs, widget.NewButtonWithIcon(backupCopyPathText, theme.ContentCopyIcon(), func() {
 			u.copyToClipboard(path, "Путь к копии скопирован в буфер обмена")
@@ -585,7 +585,7 @@ func (u *ui) restoreResult(auto string, outs []core.RestoreOutcome, err error) d
 		enc := u.restoreLayer != nil && u.restoreLayer.Name() == core.PasswordLayerName
 		text = strings.Join(core.RestoreOutcomeLines(auto, enc, outs), "\n")
 	}
-	d := dialog.NewCustom("Итог восстановления", "Закрыть", container.NewVScroll(wrapLabel(text, false)), u.win)
+	d := dialog.NewCustom("Итог восстановления", "Закрыть", container.NewVScroll(withCopy(wrapLabel(text, false))), u.win)
 	sizeDialog(d, fyne.NewSize(640, 420))
 	d.Show()
 	return d

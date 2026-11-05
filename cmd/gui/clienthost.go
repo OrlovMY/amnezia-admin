@@ -111,7 +111,7 @@ func (u *ui) recheckSavedClientHost(next func()) {
 				return
 			}
 			u.clientHostRecheckTx = chk.Text()
-			lbl := widget.NewLabel("Адрес для клиентов " + name + " сохранён ранее.\n\n" + chk.Text() + "\n\nВсё равно выдать конфиг с этим именем?")
+			lbl := msgLabel("Адрес для клиентов " + name + " сохранён ранее.\n\n" + chk.Text() + "\n\nВсё равно выдать конфиг с этим именем?")
 			lbl.Wrapping = fyne.TextWrapWord
 			u.clientHostRecheckDl = dialog.NewCustomConfirm("Сохранённое имя не подтверждено", "Использовать", "Нет", lbl, func(ok bool) {
 				if ok {
@@ -128,14 +128,14 @@ func (u *ui) recheckSavedClientHost(next func()) {
 func (u *ui) clientHostDialog(next func()) *clientHostView {
 	v := &clientHostView{}
 	ip := u.sess.Creds.Host
-	expl := widget.NewLabel(fmt.Sprintf(
+	expl := msgLabel(fmt.Sprintf(
 		"В админском ключе адрес сервера — IP %s. Конфиг клиента с IP при переезде сервера придётся перевыпускать каждому клиенту. "+
 			"С DNS-именем достаточно перевести DNS на новый сервер.\n\n"+
 			"Укажите имя, которое указывает на этот сервер (например vpn.example.com). Программа проверит, что имя ведёт сюда.", ip))
 	expl.Wrapping = fyne.TextWrapWord
 	v.entry = widget.NewEntry()
 	v.entry.SetPlaceHolder("vpn.example.com")
-	v.status = widget.NewLabel("")
+	v.status = msgLabel("")
 	v.status.Wrapping = fyne.TextWrapWord
 
 	done := func(set core.ClientHostSetting) {
@@ -166,7 +166,7 @@ func (u *ui) clientHostDialog(next func()) *clientHostView {
 				if chk.Status == core.ClientHostUnknown {
 					title = "Имя проверить не удалось"
 				}
-				lbl := widget.NewLabel(chk.Text() + "\n\nВсё равно использовать это имя в конфигах клиентов?")
+				lbl := msgLabel(chk.Text() + "\n\nВсё равно использовать это имя в конфигах клиентов?")
 				lbl.Wrapping = fyne.TextWrapWord
 				v.confirm = dialog.NewCustomConfirm(title, "Использовать", "Нет", lbl, func(ok bool) {
 					if ok {
@@ -215,7 +215,7 @@ func (u *ui) clientHostPinDialog(set core.ClientHostSetting, next func()) dialog
 	pin := widget.NewEntry()
 	pin.Password = true
 	pin.SetPlaceHolder("Пин-код")
-	st := widget.NewLabel("Чтобы программа запомнила выбор для этого сервера, введите пин-код хранилища. «Не запоминать» — выбор действует до закрытия программы.")
+	st := msgLabel("Чтобы программа запомнила выбор для этого сервера, введите пин-код хранилища. «Не запоминать» — выбор действует до закрытия программы.")
 	st.Wrapping = fyne.TextWrapWord
 	path := u.vaultPath
 	var d dialog.Dialog

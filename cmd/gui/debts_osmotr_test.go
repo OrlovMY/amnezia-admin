@@ -338,7 +338,7 @@ func init() {
 		osmotrForm{name: "(д) изменения: отключение, неизвестно, peer убран", open: openDiffDisableRecordOnly, width: 692,
 			inventory: []string{"подпись:" + firstLine(`Изменения перед применением: отключение "Alice"`),
 				"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
-				"кнопка:Применить", "подпись:" + firstLine(core.NoteDisableRecordOnly), "кнопка:Закрыть"}},
+				"кнопка:Применить", "подпись:" + firstLine(core.NoteDisableRecordOnly), "кнопка:Копировать", "кнопка:Закрыть"}},
 		osmotrForm{name: "(г) главное окно, включён ли клиент — неизвестно", open: openMainEnabledUnknown,
 			inventory: invMainWithStatus("Пользователей: 3 · трафик и активность — с момента перезапуска сервера")},
 		osmotrForm{name: "(г) главное окно, причина «?» в строке состояния", open: openMainLongStatus,

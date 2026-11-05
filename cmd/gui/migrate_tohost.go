@@ -185,7 +185,7 @@ func (u *ui) toHostConnect(host, port, user, keysWhy string) *toHostConnView {
 	v.pw.SetPlaceHolder(toHostPwHint)
 	v.why = wrapLabel("", true)
 	v.reason = wrapLabel("", true)
-	form := container.New(layout.NewFormLayout(), widget.NewLabel("Адрес:"), v.host, widget.NewLabel("Порт SSH:"), v.port, widget.NewLabel("Пользователь:"), v.user)
+	form := container.New(layout.NewFormLayout(), msgLabel("Адрес:"), v.host, msgLabel("Порт SSH:"), v.port, msgLabel("Пользователь:"), v.user)
 	sections := []fyne.CanvasObject{
 		wrapLabel("Новый сервер — чистый: Amnezia на нём ещё нет, ключа vpn:// у него нет. Программа войдёт по SSH (ключами этого компьютера, а если не выйдет — по паролю; пароль используется один раз и не сохраняется — кроме случая, когда вы на следующем шаге разрешите положить его в ключ vpn://), "+
 			"проверит сервер, покажет план установки и всё, что изменится, и только после вашего подтверждения поставит Amnezia и перенесёт клиентов. Старый сервер только читается.", false),
@@ -559,7 +559,7 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 		sections = append(sections, restartSections()...)
 		v.xrayRadio = widget.NewRadioGroup([]string{migrateXRayRestart, migrateXRaySkip}, func(string) { update() })
 		v.xrayRadio.Horizontal = true
-		pinned = append(pinned, container.NewBorder(nil, nil, widget.NewLabelWithStyle(restoreXRayHint, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.xrayRadio))
+		pinned = append(pinned, container.NewBorder(nil, nil, msgLabelStyle(restoreXRayHint, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.xrayRadio))
 	}
 	v.pw, v.pw2 = widget.NewPasswordEntry(), widget.NewPasswordEntry()
 	v.pw.SetPlaceHolder(fmt.Sprintf("Пароль автокопии (не короче %d символов)", core.BackupPasswordMin))
@@ -585,7 +585,7 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 	if core.KeepAwakeSupported {
 		noSleep = toHostNoSleepWin
 	}
-	pinned = append(pinned, container.NewBorder(nil, nil, widget.NewLabelWithStyle(toHostModeLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.mode), pwRow, keyRow, wrapLabel(noSleep, true), v.reason)
+	pinned = append(pinned, container.NewBorder(nil, nil, msgLabelStyle(toHostModeLabel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.mode), pwRow, keyRow, wrapLabel(noSleep, true), v.reason)
 	v.pinned = pinned
 	var cw confirmWin
 	cw = u.confirmWindowPinned(toHostWinTitle, sections, pinned, toHostApplyText, true, func() { u.toHostRun(st, v) }, 900)
@@ -744,7 +744,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 			return
 		}
 		pv.cancel.Disable()
-		cd := dialog.NewConfirm(toHostCancelTitle, toHostCancelWarn, func(yes bool) {
+		cd := u.newConfirm(toHostCancelTitle, toHostCancelWarn, func(yes bool) {
 			if !yes || applying.Load() {
 				u.closeAfterOp = false // закрытие (если просили) отменено человеком
 				if applying.Load() {
@@ -758,7 +758,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 			canceled.Store(true)
 			pv.note.SetText("Отмена принята: установка идёт до конца, затем — её итог; клиенты переноситься не будут.")
 			cancel()
-		}, u.win)
+		})
 		cd.SetConfirmText(toHostCancelYes)
 		cd.SetDismissText(toHostCancelNo)
 		cd.Show()
@@ -1019,7 +1019,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	if len(o.notes) > 0 {
 		body = append(append(body, ""), o.notes...)
 	}
-	objs := []fyne.CanvasObject{hl, wrapLabel(strings.Join(body, "\n"), false)}
+	objs := []fyne.CanvasObject{hl, withCopy(wrapLabel(strings.Join(body, "\n"), false))}
 	if o.keyPath != "" {
 		dir := filepath.Dir(o.keyPath)
 		objs = append(objs, widget.NewButtonWithIcon(toHostOpenDirText, theme.FolderOpenIcon(), func() {

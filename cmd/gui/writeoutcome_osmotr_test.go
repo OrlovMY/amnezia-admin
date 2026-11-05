@@ -82,7 +82,7 @@ func init() {
 		tx, _ := writeoutcome.Describe(pr3KindErr(c.kind))
 		osmotrForms = append(osmotrForms, osmotrForm{
 			name: "(з) исход записи: " + c.name, open: openWriteOutcome(c.prep), width: writeErrorDialogWidth - 8, // рамка уже Resize на 8 т., как у всех диалогов прибора
-			inventory: []string{"подпись:" + firstLine(tx.Title), "прокрутка:", "кнопка:Закрыть"},
+			inventory: []string{"подпись:" + firstLine(tx.Title), "прокрутка:", "кнопка:Копировать", "кнопка:Закрыть"},
 		})
 	}
 	// Окно изменений после исхода с самой длинной строкой статуса (без
@@ -96,7 +96,7 @@ func init() {
 			name: "(д) изменения после исхода: " + c.name, open: openApplyOutcome(c.prep), width: 692,
 			inventory: []string{"подпись:" + firstLine(`Изменения перед применением: добавление "Mallory"`),
 				"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
-				"кнопка:Применить", "подпись:" + firstLine(guiview.ApplyStatus(tx)), "кнопка:Закрыть"},
+				"кнопка:Применить", "подпись:" + firstLine(guiview.ApplyStatus(tx)), "кнопка:Копировать", "кнопка:Закрыть"},
 		})
 	}
 }
@@ -108,7 +108,7 @@ func init() {
 	tx, _ := writeoutcome.Describe(core.ErrSudoDenied)
 	osmotrForms = append(osmotrForms, osmotrForm{
 		name: "(з) исход записи: не хватает прав", open: openSudoDenied, width: writeErrorDialogWidth - 8,
-		inventory: []string{"подпись:" + firstLine(tx.Title), "прокрутка:", "кнопка:Закрыть"},
+		inventory: []string{"подпись:" + firstLine(tx.Title), "прокрутка:", "кнопка:Копировать", "кнопка:Закрыть"},
 	})
 }
 

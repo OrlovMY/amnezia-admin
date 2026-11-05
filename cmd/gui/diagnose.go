@@ -182,10 +182,10 @@ func (u *ui) showDiagDialog(rep core.DiagReport) *diagView {
 			secs = append(secs, wrapLabel("• "+c, false))
 		}
 		secs = append(secs, wrapLabel(diagManualIntro, true))
-		v.cmds = widget.NewLabelWithStyle(strings.TrimRight(core.FixCommandsText(v.plan), "\n"), fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+		v.cmds = msgLabelStyle(strings.TrimRight(core.FixCommandsText(v.plan), "\n"), fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
 		v.cmds.Wrapping = fyne.TextWrapBreak
 		secs = append(secs, v.cmds)
-		v.copied = widget.NewLabel("")
+		v.copied = msgLabel("")
 		v.copy = widget.NewButtonWithIcon(diagCopyText, theme.ContentCopyIcon(), func() {
 			u.copyToClipboard(core.FixCommandsText(v.plan), diagCopiedText)
 			v.copied.SetText(diagCopiedText)
