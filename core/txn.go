@@ -178,9 +178,6 @@ func (p *Plan) Diff() (wgDiff, tblDiff string) {
 // в продукте быть не должно — иначе человек решит, что это разные состояния.
 const hiddenPlaceholder = "<скрыто>"
 
-// reVpnKeyAnywhere — ключ vpn:// в свободном тексте: всё тело base64url.
-var reVpnKeyAnywhere = regexp.MustCompile(`(?i)vpn://[A-Za-z0-9_\-+/=]+`)
-
 // secretKeyNames — список имён секретов, из которого строятся ВСЕ регулярки
 // маскировки пакета core: и построчные для Plan.Diff() (maskSecrets,
 // maskTableSecrets), и свободнотекстовая для sshRunner.Run (maskFreeText).
@@ -647,10 +644,6 @@ func maskFreeText(s string) string {
 	// UUID — учётные данные клиента XRay (AL-01): в свободном тексте
 	// маскируется любой UUID целиком, независимо от имени поля.
 	s = reUUIDAnywhere.ReplaceAllString(s, hiddenPlaceholder)
-	// Ключ vpn:// (пароль root или приватный SSH-ключ) — тело целиком
-	// (аудит AU PR #63, H1: ключ, вставленный первым аргументом, печатался
-	// в «неизвестная команда»; прежде MaskText его не трогал вовсе).
-	s = reVpnKeyAnywhere.ReplaceAllString(s, "vpn://"+hiddenPlaceholder)
 	return reFreeTextSecret.ReplaceAllStringFunc(s, func(m string) string {
 		g := reFreeTextSecret.FindStringSubmatch(m)
 		name, sep, val := g[1], g[2], g[3]
