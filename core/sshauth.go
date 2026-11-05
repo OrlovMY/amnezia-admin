@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -288,7 +287,7 @@ var ErrExtraPrompt = errors.New("сервер задал после пароля
 type ExtraPromptError struct{ Prompt string }
 
 func (e *ExtraPromptError) Error() string {
-	return fmt.Sprintf("сервер задал после пароля ещё вопрос: %q — не поддерживается, пароль повторно не отправлен", e.Prompt)
+	return fmt.Sprintf("сервер задал после пароля ещё вопрос: %q — не поддерживается, пароль повторно не отправлен", truncRunes(e.Prompt, 80))
 }
 func (e *ExtraPromptError) Unwrap() error { return ErrExtraPrompt }
 
@@ -459,15 +458,13 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 			settleKeys()
 			return nil, att, &AuthError{Keys: att, PasswordTried: pw != nil, Err: err}
 		}
-		transport := ce.Kind == ConnectDropped || ce.Kind == ConnectNetwork ||
-			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed)
-		if transport && len(signers) > 0 && att.Outcome != KeysUndetermined {
-			// Вывод о ключах сделан по ходу входа, но вход оборвался не по
-			// аутентификации (например сбой чтения внутри проверки ключа:
-			// x/crypto идёт к паролю, а запись пароля падает уже на
-			// мёртвом соединении). Вывод недостоверен — снимаем его.
+		if len(signers) > 0 && att.Outcome != KeysUndetermined {
+			// Вывод о ключах сделан по ходу входа, но вход прервался не по
+			// аутентификации: обрыв связи, нарушение протокола, неизвестный
+			// сбой (отмена человеком сюда не доходит — это authFail выше).
+			// Вывод недостоверен — снимаем его (ревью-5 PR #64, M-G).
 			att.Outcome = KeysUndetermined
-			att.Notes = append(att.Notes, "связь оборвалась во время входа — вывод о ключах недостоверен")
+			att.Notes = append(att.Notes, "вход прервался не по аутентификации — вывод о ключах недостоверен")
 		}
 		return nil, att, ce
 	}
@@ -482,4 +479,13 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	}
 	creds := &ServerCreds{Host: host, Port: port, User: user} // пароль не хранится
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: fp}, att, nil
+}
+
+// truncRunes — строка от сервера в тексте ошибки не длиннее n рун.
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
