@@ -195,3 +195,17 @@ func compactHint(l *msgText) fyne.CanvasObject {
 	l.SizeName = theme.SizeNameCaptionText
 	return container.NewThemeOverride(l, compactTheme{})
 }
+
+// resultBody — тело окна итога: текст (с заголовком head, если есть) в
+// прокрутке, а кнопки — «Копировать» текста и действия actions — ВНЕ
+// прокрутки, внизу. Кнопки видны всегда, при любых метриках шрифта: на
+// macOS шрифт крупнее, и кнопка внутри прокрутки уходила за край окна
+// (CI PR #72, TestBackupWindowsVisible 972×517).
+func resultBody(head fyne.CanvasObject, l *msgText, actions ...fyne.CanvasObject) fyne.CanvasObject {
+	var top fyne.CanvasObject = l
+	if head != nil {
+		top = container.NewVBox(head, l)
+	}
+	row := container.NewHBox(append(append([]fyne.CanvasObject{}, actions...), layout.NewSpacer(), copyButton(l))...)
+	return container.NewBorder(nil, row, nil, nil, container.NewVScroll(top))
+}
