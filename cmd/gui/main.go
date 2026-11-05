@@ -133,6 +133,10 @@ type ui struct {
 	migDst *core.Session
 	// migShown — окно подтверждения переноса (для тестов).
 	migShown *migrateView
+	// toHostConnShown / toHostShown — окна режима «новый чистый сервер»
+	// (migrate_tohost.go; для тестов).
+	toHostConnShown *toHostConnView
+	toHostShown     *toHostView
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView

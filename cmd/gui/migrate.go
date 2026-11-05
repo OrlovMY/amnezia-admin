@@ -140,32 +140,54 @@ var migrateConnect = func(creds *core.ServerCreds, pol core.HostKeyPolicy) (*cor
 	return core.ConnectWithHostKey(creds, pol)
 }
 
-// migrateAsk — первый шаг: ключ vpn:// нового сервера.
+// migrateAsk — первый шаг: какой новый сервер. Режимы: «Сервер с Amnezia
+// (ключ vpn://)» — как было (выбран по умолчанию), и «Новый чистый сервер
+// (по IP/имени)» — migrate_tohost.go.
 func (u *ui) migrateAsk() *escButton {
 	if u.busy || u.sess == nil {
 		return nil
 	}
 	e := widget.NewPasswordEntry() // ключ содержит пароль/SSH-ключ: не показывать
 	e.SetPlaceHolder("vpn://…")
+	keyHint := wrapLabel("Ключ нового сервера:", true)
 	var ok *escButton
+	mode := widget.NewRadioGroup([]string{migrateModeKey, migrateModeHost}, nil)
+	mode.Required = true
 	cw := u.confirmWindowBtn(migrateAskTitle, []fyne.CanvasObject{
-		wrapLabel("Источник — сервер, к которому вы сейчас подключены (только чтение). Цель — НОВЫЙ сервер: вставьте его ключ vpn://. "+
+		wrapLabel("Источник — сервер, к которому вы сейчас подключены (только чтение). Цель — НОВЫЙ сервер. "+
 			"Данные старого сервера пойдут на новый напрямую, из памяти, без записи копии на диск. Перед заменой программа сохранит на диск автокопию нового сервера.", false),
-		wrapLabel("Ключ нового сервера:", true), e,
+		wrapLabel("Новый сервер:", true), mode,
+		keyHint, e,
 	}, migrateAskNext, false, func() {
+		if mode.Selected == migrateModeHost {
+			e.SetText("")
+			u.toHostConnect("", "22", "root", "")
+			return
+		}
 		key := e.Text
 		e.SetText("")
 		u.migrateStart(key)
 	}, 640)
 	ok = cw.ok
-	ok.Disable()
-	e.OnChanged = func(s string) {
-		if strings.TrimSpace(s) == "" {
-			ok.Disable()
+	update := func() {
+		host := mode.Selected == migrateModeHost
+		if host {
+			keyHint.Hide()
+			e.Hide()
 		} else {
-			ok.Enable()
+			keyHint.Show()
+			e.Show()
 		}
+		if host || mode.Selected == migrateModeKey && strings.TrimSpace(e.Text) != "" {
+			ok.Enable()
+		} else {
+			ok.Disable()
+		}
+		cw.refit()
 	}
+	e.OnChanged = func(string) { update() }
+	mode.OnChanged = func(string) { update() }
+	mode.SetSelected(migrateModeKey) // как было: режим ключа
 	u.focusField(e)
 	return ok
 }
