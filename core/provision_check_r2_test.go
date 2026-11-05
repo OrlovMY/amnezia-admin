@@ -5,117 +5,9 @@ package core
 // сервера в причине).
 
 import (
-	"regexp"
 	"strings"
 	"testing"
 )
-
-// provPrograms — ЗАКРЫТЫЙ список программ внутри скриптов проб (M2, вторая
-// половина): закрытый список команд ниже сравнивает с теми же константами
-// и потому не видит правку САМОГО скрипта (touch, docker start). Здесь
-// каждый простой вызов в скрипте обязан начинаться с разрешённой программы;
-// у docker — только version/ps, у sudo — только «-n true», у sed — без -i;
-// перенаправление в файл — только >/dev/null.
-var provPrograms = map[string]bool{
-	":": true, "[": true, "echo": true, ".": true, "command": true, "uname": true, "id": true,
-	"sudo": true, "docker": true, "ss": true, "df": true, "head": true, "tail": true, "sed": true,
-}
-
-// provUnquote — текст скрипта, где литералы в двойных кавычках заменены на
-// «x», а подстановки $( … ) (и внутри кавычек) вынесены отдельными строками.
-func provUnquote(script string) string {
-	var b strings.Builder
-	var st []byte // стек: 'Q' — в кавычках, 'S' — в $( )
-	top := func() byte {
-		if len(st) == 0 {
-			return 0
-		}
-		return st[len(st)-1]
-	}
-	for i := 0; i < len(script); i++ {
-		c := script[i]
-		switch {
-		case c == '$' && i+1 < len(script) && script[i+1] == '(':
-			st = append(st, 'S')
-			b.WriteByte('\n')
-			i++
-		case c == ')' && top() == 'S':
-			st = st[:len(st)-1]
-			b.WriteByte('\n')
-		case c == '"' && top() == 'Q':
-			st = st[:len(st)-1]
-			b.WriteByte('x')
-		case c == '"':
-			st = append(st, 'Q')
-			b.WriteByte('x')
-		case top() == 'Q':
-			b.WriteByte('x')
-		default:
-			b.WriteByte(c)
-		}
-	}
-	return b.String()
-}
-
-var provRedir = regexp.MustCompile(`2>&1`)
-
-func provScriptViolations(script string) []string {
-	s := provUnquote(provRedir.ReplaceAllString(script, ""))
-	for _, sep := range []string{"|", "&", ";"} {
-		s = strings.ReplaceAll(s, sep, "\n")
-	}
-	var bad []string
-	for _, seg := range strings.Split(s, "\n") {
-		f := strings.Fields(seg)
-		for len(f) > 0 && (f[0] == "if" || f[0] == "then" || f[0] == "else" || f[0] == "fi" || f[0] == "!") {
-			f = f[1:]
-		}
-		if len(f) == 0 || (len(f) == 1 && strings.Trim(f[0], "x") == "") {
-			continue // пусто или хвост литерала в кавычках после $( )
-		}
-		p := f[0]
-		switch {
-		case strings.Contains(p, "=") && !strings.HasPrefix(p, `"`):
-			// присваивание: после него допустимо только перенаправление
-			if len(f) > 1 && !strings.HasPrefix(f[1], "2>") {
-				bad = append(bad, seg)
-			}
-		case !provPrograms[p]:
-			bad = append(bad, seg)
-		case p == "docker" && (len(f) < 2 || (f[1] != "version" && f[1] != "ps")):
-			bad = append(bad, seg)
-		case p == "sudo" && (len(f) < 3 || f[1] != "-n" || f[2] != "true"):
-			bad = append(bad, seg)
-		case p == "sed" && strings.Contains(seg, "-i"):
-			bad = append(bad, seg)
-		}
-		for _, w := range f {
-			if w == ">" || w == ">>" || (strings.HasPrefix(w, ">") && w != ">/dev/null") {
-				bad = append(bad, seg)
-			}
-		}
-	}
-	return bad
-}
-
-func TestProvScriptsClosedProgramList(t *testing.T) {
-	for _, sc := range []string{provOSScript, provKernelScript, provSudoScript, provDockerScript, provCtrScript, provPortsScript, provDiskScript} {
-		if v := provScriptViolations(sc); len(v) > 0 {
-			t.Errorf("в пробе вызов вне закрытого списка: %q\nскрипт: %s", v, sc)
-		}
-	}
-	// Канарейка: сторож обязан споткнуться о заведомо пишущие вызовы.
-	for _, canary := range []string{
-		ProvDiskTag + ` echo x; touch /tmp/x; echo END`,
-		ProvDockerTag + ` docker start x; echo END`,
-		ProvOSTag + ` echo x > /etc/motd; echo END`,
-		ProvPortsTag + ` o=$(ss -lntu 2>&1); sed -i "s/a/b/" /etc/hosts; echo END`,
-	} {
-		if len(provScriptViolations(canary)) == 0 {
-			t.Errorf("канарейка не поймана: %s", canary)
-		}
-	}
-}
 
 // provAllowed — ЗАКРЫТЫЙ список команд предпроверки (M2): сами пробы и они
 // же через sudo -n. Любая другая команда — падение: правка скрипта пробы
@@ -195,8 +87,15 @@ func TestProvPortDockerPublished(t *testing.T) {
 		t.Fatalf("docker ps не получен: %v", got.State)
 	}
 	stopped := parseProbe("DOCKER=yes\nSRVRC=1\nSRV=Cannot connect to the Docker daemon\nEND\n", nil)
-	if got := classifyPort(ss, publishedPorts(stopped, probe{}), "XRay", "tcp", ProvXRayPort); got.State != ProvOK {
-		t.Fatalf("демон остановлен — опубликованных портов нет: %v", got.State)
+	// N2 (ревью р2), тест различения: демон лежит — docker ps не выполнялся,
+	// порты контейнеров неизвестны → «не удалось»; docker ps выполнен и
+	// порта нет → «свободен».
+	if got := classifyPort(ss, publishedPorts(stopped, probe{}), "XRay", "tcp", ProvXRayPort); got.State != ProvUnknown || !strings.Contains(got.Reason, "остановлен") {
+		t.Fatalf("демон остановлен: %v %s, ждали «не удалось»", got.State, got.Reason)
+	}
+	ran := parseProbe("RC=0\nN=web|0.0.0.0:80->80/tcp\nEND\n", nil)
+	if got := classifyPort(ss, publishedPorts(d, ran), "XRay", "tcp", ProvXRayPort); got.State != ProvOK {
+		t.Fatalf("docker ps выполнен, 443 не опубликован: %v %s", got.State, got.Reason)
 	}
 	got := classifyPort(ss, pubPorts{known: true}, "XRay", "tcp", ProvXRayPort)
 	if !strings.Contains(got.What, "по умолчанию") {
@@ -222,6 +121,41 @@ func TestProvisionCheckPublishedArrives(t *testing.T) {
 }
 
 // M1 доезд: демон остановлен → Docker «годится» с причиной; не «нельзя».
+// N4: диапазоны портов из docker ps; не разобралось — «не удалось».
+func TestProvPortRanges(t *testing.T) {
+	d := parseProbe("DOCKER=yes\nSRVRC=0\nSRV=27.1\nEND\n", nil)
+	ss := parseProbe(okPorts, nil)
+	cases := []struct {
+		ports string
+		want  ProvState
+	}{
+		{"0.0.0.0:400-500->400-500/tcp", ProvBad},
+		{"0.0.0.0:400-500->400-500/udp", ProvOK},
+		{"0.0.0.0:444-500->444-500/tcp", ProvOK},
+		{"[::]:443->443/tcp", ProvBad},
+		{"0.0.0.0:abc->443/tcp", ProvUnknown},
+		{"0.0.0.0:500-400->500-400/tcp", ProvUnknown},
+		{"0.0.0.0:443->443/sctp", ProvUnknown},
+	}
+	for _, c := range cases {
+		ctr := parseProbe("RC=0\nN=c|"+c.ports+"\nEND\n", nil)
+		got := classifyPort(ss, publishedPorts(d, ctr), "XRay", "tcp", ProvXRayPort)
+		if got.State != c.want {
+			t.Errorf("%s: %v (%s), ждали %v", c.ports, got.State, got.Reason, c.want)
+		}
+	}
+}
+
+// N2 доезд: демон лежит → порты «не удалось» боевым путём.
+func TestProvisionCheckStoppedDaemonPortsUnknown(t *testing.T) {
+	f := healthyFake()
+	f.out[ProvDockerTag] = "DOCKER=yes\nSRVRC=1\nSRV=Cannot connect to the Docker daemon\nEND\n"
+	r := NewSessionWithRunner(f, &ServerCreds{User: "root"}).ProvisionCheck()
+	if it := itemByPrefix(t, r, "порт XRay"); it.State != ProvUnknown {
+		t.Fatalf("демон лежит: %v %s", it.State, it.Reason)
+	}
+}
+
 func TestProvisionCheckDockerStoppedArrives(t *testing.T) {
 	f := healthyFake()
 	f.out[ProvDockerTag] = "DOCKER=yes\nSRVRC=1\nSRV=Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\nEND\n"

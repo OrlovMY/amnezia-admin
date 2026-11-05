@@ -104,10 +104,12 @@ func (r ProvisionReport) Verdict() ProvVerdict {
 
 // Порты протоколов ПО УМОЛЧАНИЮ (порт выбирается при установке, проверяется
 // только умолчание — в выводе так и сказано). В коде протоколов core портов
-// по умолчанию нет (порт всегда читается с сервера). Источник — приложение
-// amnezia-client, client/protocols/protocols_defs.h (namespace protocols::awg
-// defaultPort "55424", protocols::xray defaultPort "443"). ПО ПАМЯТИ, С
-// ИСХОДНИКОМ НЕ СВЕРЕНО — сверить при ревью/приёмке.
+// по умолчанию нет (порт всегда читается с сервера). Источник СВЕРЕН
+// 05.11.2026: amnezia-vpn/amnezia-client, ветка dev, коммит
+// ac175c8a8147cfe56f98c8372ec17ea2ba00bb02, файл
+// client/core/utils/constants/protocolConstants.h:
+// строка 270 — protocols::awg defaultPort "55424";
+// строка 62 — protocols::xray defaultPort "443".
 const (
 	ProvAWGPort  = 55424
 	ProvXRayPort = 443
@@ -382,17 +384,41 @@ func srvText(s string) string {
 // список получить не удалось.
 type pubPorts struct {
 	known bool
+	why   string            // почему не known
 	set   map[string]string // "tcp:443" → имя контейнера
+	// ranges — опубликованные диапазоны (docker ps: 400-500->400-500/tcp).
+	ranges []pubRange
+}
+
+type pubRange struct {
+	proto    string
+	from, to int
+	name     string
+}
+
+// busy — кем занят proto:port ("" — никем).
+func (pp pubPorts) busy(proto string, port int) string {
+	if n := pp.set[proto+":"+strconv.Itoa(port)]; n != "" {
+		return n
+	}
+	for _, r := range pp.ranges {
+		if r.proto == proto && port >= r.from && port <= r.to {
+			return r.name
+		}
+	}
+	return ""
 }
 
 func publishedPorts(d, c probe) pubPorts {
 	switch {
 	case d.ok && d.get("DOCKER") == "no":
-		return pubPorts{known: true} // Docker нет — и опубликованных портов нет
+		return pubPorts{known: true} // Docker нет — и опубликованных портов нет (измерено: command -v docker)
 	case dockerStopped(d):
-		return pubPorts{known: true} // демон не работает — порты не опубликованы
+		// Ревью р2, N2: демон лежит — docker ps не выполнялся; контейнеры с
+		// restart: always опубликуют порты, когда установщик поднимет демон.
+		return pubPorts{why: "демон Docker остановлен — порты его контейнеров неизвестны"}
 	case !dockerUsable(d) || !c.ok || c.get("RC") != "0":
-		return pubPorts{}
+		return pubPorts{why: "список портов контейнеров Docker (docker ps) получить не удалось — ss их может не видеть"}
 	}
 	pp := pubPorts{known: true, set: map[string]string{}}
 	for _, line := range c.kv["N"] {
@@ -404,7 +430,22 @@ func publishedPorts(d, c probe) pubPorts {
 			}
 			_, proto, _ := strings.Cut(ctr, "/")
 			hp := host[strings.LastIndexByte(host, ':')+1:]
-			pp.set[proto+":"+hp] = strings.TrimSpace(name)
+			name = strings.TrimSpace(name)
+			lo, hi, isRange := strings.Cut(hp, "-")
+			a, err1 := strconv.Atoi(lo)
+			b, err2 := a, error(nil)
+			if isRange {
+				b, err2 = strconv.Atoi(hi)
+			}
+			if err1 != nil || err2 != nil || b < a || (proto != "tcp" && proto != "udp") {
+				// N4: не разобрали — не «свободно», а «не знаем».
+				return pubPorts{why: "порты контейнеров Docker не разобраны («" + srvText(strings.TrimSpace(part)) + "»)"}
+			}
+			if isRange {
+				pp.ranges = append(pp.ranges, pubRange{proto, a, b, name})
+			} else {
+				pp.set[proto+":"+strconv.Itoa(a)] = name
+			}
 		}
 	}
 	return pp
@@ -464,8 +505,8 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 	switch {
 	// Опубликованный контейнером порт — измеренное «занят», даже если ss
 	// не ответил: docker ps его видит.
-	case pub.set[key] != "":
-		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.set[key]) + " — освободите его или выберите другой порт при установке"}
+	case pub.busy(proto, port) != "":
+		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — освободите его или выберите другой порт при установке"}
 	case !p.ok:
 		return notRan(what, p)
 	case p.has("SS"):
@@ -482,7 +523,11 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		return ProvItem{what, ProvBad, "порт занят другой программой — освободите его или выберите другой порт при установке"}
 	case !pub.known:
 		// ss не видит порты контейнеров с выключенным docker-proxy.
-		return unk(what, "по ss свободен, но список портов контейнеров Docker (docker ps) получить не удалось — ss их может не видеть")
+		why := pub.why
+		if why == "" {
+			why = "порты контейнеров Docker неизвестны"
+		}
+		return unk(what, "по ss свободен, но "+why)
 	}
 	return ProvItem{what, ProvOK, "свободен (по ss и docker ps; ss не видит порты контейнеров с выключенным docker-proxy, их сверили по docker ps)"}
 }
