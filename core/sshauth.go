@@ -18,6 +18,8 @@ package core
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,13 @@ const (
 	// KeysUnavailable — предъявить нечего: ни агента с ключами, ни файлов
 	// ключей без парольной фразы. Причины — в KeyAttempt.Notes.
 	KeysUnavailable
+	// KeysNotAllowed — ключи были, но сервер не предложил метод publickey
+	// (например PubkeyAuthentication no): ключи серверу не показывались, и
+	// говорить «отвергнуты» нельзя.
+	KeysNotAllowed
+	// KeysSignFailed — сервер был готов принять ключ, но подпись не
+	// получилась (агент отказал, заблокирован, требует подтверждения).
+	KeysSignFailed
 )
 
 func (o KeyOutcome) String() string {
@@ -48,7 +57,11 @@ func (o KeyOutcome) String() string {
 	case KeysRejected:
 		return "сервер отверг все предъявленные ключи"
 	case KeysUnavailable:
-		return "ключей для входа нет"
+		return "ключей для входа нет или агент недоступен"
+	case KeysNotAllowed:
+		return "сервер не принимает вход по ключу — ключи ему не предъявлялись"
+	case KeysSignFailed:
+		return "сервер готов был принять ключ, но подписать им не удалось (агент отказал?)"
 	default:
 		return "проверка ключей не состоялась"
 	}
@@ -194,6 +207,75 @@ func collectSigners(src AuthSource) (signers []ssh.Signer, att KeyAttempt, close
 	return signers, att, closeFn
 }
 
+// keyRec — что на самом деле произошло с ключами во время рукопожатия:
+// вызывался ли метод publickey (значит, сервер его предложил), была ли
+// попытка подписи и чем закончилась.
+type keyRec struct {
+	offeredToServer bool
+	signOK          int
+	signErr         error
+}
+
+// recSigner — обёртка ключа, записывающая исход подписи. Подпись
+// запрашивается x/crypto только ПОСЛЕ того, как сервер сказал «этот ключ
+// годится» (validateKey), поэтому ошибка подписи ≠ «сервер отверг».
+type recSigner struct {
+	ssh.Signer
+	rec *keyRec
+}
+
+func (r recSigner) note(sig *ssh.Signature, err error) (*ssh.Signature, error) {
+	if err != nil {
+		if r.rec.signErr == nil {
+			r.rec.signErr = err
+		}
+	} else {
+		r.rec.signOK++
+	}
+	return sig, err
+}
+
+func (r recSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
+	return r.note(r.Signer.Sign(rand, data))
+}
+
+// recAlgSigner — то же для AlgorithmSigner (ключи из файлов и агента в
+// x/crypto реализуют его; без него терялся бы выбор rsa-sha2-*).
+type recAlgSigner struct {
+	recSigner
+	as ssh.AlgorithmSigner
+}
+
+func (r recAlgSigner) SignWithAlgorithm(rand io.Reader, data []byte, algo string) (*ssh.Signature, error) {
+	return r.note(r.as.SignWithAlgorithm(rand, data, algo))
+}
+
+func wrapSigner(s ssh.Signer, rec *keyRec) ssh.Signer {
+	base := recSigner{Signer: s, rec: rec}
+	if as, ok := s.(ssh.AlgorithmSigner); ok {
+		return recAlgSigner{recSigner: base, as: as}
+	}
+	return base
+}
+
+// ErrKbdInteractive — сервер задал в keyboard-interactive не один вопрос о
+// пароле (например код 2FA): пароль туда не отправляется.
+var ErrKbdInteractive = errors.New("сервер спрашивает не только пароль (keyboard-interactive: несколько вопросов или видимый ввод, возможно второй фактор) — пароль не отправлен")
+
+// keysVerdict — исход по ключам из ФАКТОВ рукопожатия, когда вход по
+// ключу не состоялся. Порядок: ошибка подписи (сервер ключ одобрял) →
+// метод не предлагался → предложен и отвергнут.
+func keysVerdict(rec *keyRec) KeyOutcome {
+	switch {
+	case rec.signErr != nil:
+		return KeysSignFailed
+	case !rec.offeredToServer:
+		return KeysNotAllowed
+	default:
+		return KeysRejected
+	}
+}
+
 // ConnectNew — вход на новый сервер (без vpn://): ключи агента и файлов,
 // затем пароль. Ключ хоста — по pol (как ConnectWithHostKey).
 //
@@ -201,19 +283,29 @@ func collectSigners(src AuthSource) (signers []ssh.Signer, att KeyAttempt, close
 // почему понадобился пароль. Отказ аутентификации — *AuthError; прочее
 // (сеть, ключ хоста) — *ConnectError.
 func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Session, KeyAttempt, error) {
+	if strings.TrimSpace(pol.KnownHostsPath) == "" {
+		return nil, KeyAttempt{}, fmt.Errorf("HostKeyPolicy.KnownHostsPath обязателен")
+	}
 	signers, att, closeAgent := collectSigners(src)
 	defer closeAgent()
 
+	rec := &keyRec{}
 	var pw []byte
 	pwAsked := false
 	defer func() { clear(pw) }()
+	settleKeys := func() {
+		if len(signers) > 0 && att.Outcome == KeysUndetermined {
+			att.Outcome = keysVerdict(rec)
+			if rec.signErr != nil {
+				att.Notes = append(att.Notes, "подпись: "+rec.signErr.Error())
+			}
+		}
+	}
 	getPw := func() (string, error) {
 		if !pwAsked {
 			pwAsked = true
-			if len(signers) > 0 {
-				// До пароля доходит, только если ключи не прошли.
-				att.Outcome = KeysRejected
-			}
+			// До пароля доходит, только если ключи не дали войти.
+			settleKeys()
 			p, err := src.Password(att)
 			if err != nil {
 				clear(p)
@@ -232,21 +324,30 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 
 	var auths []ssh.AuthMethod
 	if len(signers) > 0 {
-		auths = append(auths, ssh.PublicKeys(signers...))
+		wrapped := make([]ssh.Signer, len(signers))
+		for i, s := range signers {
+			wrapped[i] = wrapSigner(s, rec)
+		}
+		auths = append(auths, ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			rec.offeredToServer = true
+			return wrapped, nil
+		}))
 	}
 	if src.Password != nil {
 		auths = append(auths,
 			ssh.PasswordCallback(getPw),
-			ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
-				ans := make([]string, len(questions))
-				for i := range questions {
-					p, err := getPw()
-					if err != nil {
-						return nil, err
-					}
-					ans[i] = p
+			ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+				if len(questions) == 0 {
+					return nil, nil
 				}
-				return ans, nil
+				if len(questions) != 1 || echos[0] {
+					return nil, ErrKbdInteractive
+				}
+				p, err := getPw()
+				if err != nil {
+					return nil, err
+				}
+				return []string{p}, nil
 			}),
 		)
 	}
@@ -257,18 +358,21 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	client, fp, err := dialWithHostKey(host, port, user, auths, pol)
 	if err != nil {
 		ce := ClassifyConnectError(err)
-		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword)
-		if authFail && len(signers) > 0 && att.Outcome == KeysUndetermined {
-			// Пароля не было, ключи предъявлены и не приняты.
-			att.Outcome = KeysRejected
-		}
+		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive)
 		if authFail {
+			settleKeys()
 			return nil, att, &AuthError{Keys: att, PasswordTried: pw != nil, Err: err}
 		}
 		return nil, att, ce
 	}
-	if len(signers) > 0 && !pwAsked {
+	switch {
+	case len(signers) == 0:
+	case !pwAsked && rec.signOK > 0:
 		att.Outcome = KeysAccepted
+	case !pwAsked:
+		// Вошли без ключа и без пароля (сервер пустил по «none» или
+		// keyboard-interactive без вопросов): про ключи сказать нечего.
+		att.Notes = append(att.Notes, "сервер впустил без проверки ключа")
 	}
 	creds := &ServerCreds{Host: host, Port: port, User: user} // пароль не хранится
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: fp}, att, nil

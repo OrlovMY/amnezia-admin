@@ -34,6 +34,13 @@ type fakeAuthServer struct {
 
 func startFakeAuthServer(t *testing.T, allowKeys []ssh.PublicKey, allowPassword string) *fakeAuthServer {
 	t.Helper()
+	return startFakeAuthServerConf(t, allowKeys, allowPassword, nil)
+}
+
+// startFakeAuthServerConf — то же, mut правит ServerConfig перед запуском
+// (убрать метод publickey, оставить только keyboard-interactive…).
+func startFakeAuthServerConf(t *testing.T, allowKeys []ssh.PublicKey, allowPassword string, mut func(*ssh.ServerConfig)) *fakeAuthServer {
+	t.Helper()
 	hk := mustHostKey(t)
 	fs := &fakeAuthServer{hostKey: hk, allowKeys: map[string]bool{}}
 	for _, k := range allowKeys {
@@ -52,6 +59,9 @@ func startFakeAuthServer(t *testing.T, allowKeys []ssh.PublicKey, allowPassword 
 			}
 			return nil, errors.New("пароль не принят")
 		},
+	}
+	if mut != nil {
+		mut(conf)
 	}
 	conf.AddHostKey(hk)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -141,6 +151,7 @@ type authScenario struct {
 	serverKey bool // сервер принимает этот ключ
 	serverPw  string
 	clientPw  string
+	noPubkey  bool // сервер не предлагает publickey (PubkeyAuthentication no)
 }
 
 func runScenario(t *testing.T, sc authScenario) (*Session, KeyAttempt, *pwSource, error) {
@@ -154,7 +165,11 @@ func runScenario(t *testing.T, sc authScenario) (*Session, KeyAttempt, *pwSource
 			allow = append(allow, k)
 		}
 	}
-	srv := startFakeAuthServer(t, allow, sc.serverPw)
+	var mut func(*ssh.ServerConfig)
+	if sc.noPubkey {
+		mut = func(c *ssh.ServerConfig) { c.PublicKeyCallback = nil }
+	}
+	srv := startFakeAuthServerConf(t, allow, sc.serverPw, mut)
 	ps := &pwSource{pw: sc.clientPw}
 	sess, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: ps.fn}, trustPolicy(t))
 	if sess != nil {
@@ -175,6 +190,7 @@ func TestConnectNewDistinguishesThreeOutcomes(t *testing.T) {
 		{authScenario{name: "ключ принят", keyInDir: true, serverKey: true, clientPw: sshPw}, KeysAccepted, 0, false},
 		{authScenario{name: "ключи отвергнуты, пароль принят", keyInDir: true, serverPw: sshPw, clientPw: sshPw}, KeysRejected, 1, false},
 		{authScenario{name: "ключей нет, пароль принят", serverPw: sshPw, clientPw: sshPw}, KeysUnavailable, 1, false},
+		{authScenario{name: "сервер не принимает ключи, пароль принят", keyInDir: true, serverKey: true, noPubkey: true, serverPw: sshPw, clientPw: sshPw}, KeysNotAllowed, 1, false},
 		{authScenario{name: "всё отвергнуто", keyInDir: true, serverPw: "другой", clientPw: sshPw}, KeysRejected, 1, true},
 	}
 	seen := map[KeyOutcome]bool{}
@@ -205,8 +221,8 @@ func TestConnectNewDistinguishesThreeOutcomes(t *testing.T) {
 			seen[att.Outcome] = true
 		})
 	}
-	if len(seen) != 3 {
-		t.Fatalf("различимых исходов %d, want 3: %v", len(seen), seen)
+	if len(seen) != 4 {
+		t.Fatalf("различимых исходов %d, want 4: %v", len(seen), seen)
 	}
 }
 
@@ -320,5 +336,68 @@ func TestConnectNewPasswordNotInOutput(t *testing.T) {
 		if leaksPassword(s) {
 			t.Fatalf("пароль попал в вывод: %s", s)
 		}
+	}
+}
+
+// TestConnectNewPasswordDeclined — человек отказался вводить пароль (колбэк
+// вернул пустой срез): *AuthError с исходом по ключам, PasswordTried=false,
+// а не общий *ConnectError.
+func TestConnectNewPasswordDeclined(t *testing.T) {
+	_, att, ps, err := runScenario(t, authScenario{keyInDir: true, serverPw: sshPw, clientPw: ""})
+	var ae *AuthError
+	if !errors.As(err, &ae) || ae.PasswordTried || !errors.Is(err, ErrNoPassword) {
+		t.Fatalf("ожидался *AuthError(ErrNoPassword) без пароля, got %T %v", err, err)
+	}
+	if att.Outcome != KeysRejected || ps.calls != 1 {
+		t.Fatalf("Outcome=%v calls=%d, want KeysRejected и 1", att.Outcome, ps.calls)
+	}
+}
+
+// TestConnectNewKbdInteractive — keyboard-interactive: один скрытый вопрос →
+// пароль; два вопроса (второй фактор) → пароль НЕ отправлен и не спрошен.
+func TestConnectNewKbdInteractive(t *testing.T) {
+	kbd := func(qs []string, echos []bool) func(*ssh.ServerConfig) {
+		return func(c *ssh.ServerConfig) {
+			c.PasswordCallback = nil
+			c.KeyboardInteractiveCallback = func(_ ssh.ConnMetadata, ch ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+				ans, err := ch("", "", qs, echos)
+				if err != nil {
+					return nil, err
+				}
+				if len(ans) == 1 && ans[0] == sshPw {
+					return nil, nil
+				}
+				return nil, errors.New("нет")
+			}
+		}
+	}
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	srv := startFakeAuthServerConf(t, nil, "", kbd([]string{"Password: "}, []bool{false}))
+	ps := &pwSource{pw: sshPw}
+	sess, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if err != nil {
+		t.Fatalf("один вопрос: %v", err)
+	}
+	_ = sess.Client.Close()
+
+	srv2 := startFakeAuthServerConf(t, nil, "", kbd([]string{"Password: ", "Verification code: "}, []bool{false, false}))
+	ps2 := &pwSource{pw: sshPw}
+	_, _, err = ConnectNew("127.0.0.1", srv2.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps2.fn}, trustPolicy(t))
+	var ae *AuthError
+	if !errors.As(err, &ae) || !errors.Is(err, ErrKbdInteractive) || ps2.calls != 0 {
+		t.Fatalf("два вопроса: err=%v calls=%d, want *AuthError(ErrKbdInteractive) и пароль не спрошен", err, ps2.calls)
+	}
+}
+
+// TestConnectNewEmptyKnownHostsBeforeKeys — политика проверяется до сбора
+// ключей: пустой KnownHostsPath — ошибка без чтения каталога ключей.
+func TestConnectNewEmptyKnownHostsBeforeKeys(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	writeKey(t, dir, "id_ed25519", "")
+	_, att, err := ConnectNew("127.0.0.1", "1", "root", AuthSource{KeyDir: dir}, HostKeyPolicy{})
+	if err == nil || len(att.Offered) != 0 || att.Outcome != KeysUndetermined {
+		t.Fatalf("err=%v att=%#v, want ошибка до сбора ключей", err, att)
 	}
 }

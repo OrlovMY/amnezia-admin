@@ -5,6 +5,7 @@ package core
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +19,17 @@ import (
 // startTestAgent — ssh-agent в памяти на Unix-сокете во временном каталоге
 // (короткий путь: на macOS предел длины пути сокета ~104 байта).
 func startTestAgent(t *testing.T) (sock string, pub ssh.PublicKey) {
+	return startTestAgentOpt(t, false)
+}
+
+// refusingAgent — агент, который ключи показывает, а подписывать отказывается.
+type refusingAgent struct{ agent.Agent }
+
+func (refusingAgent) Sign(ssh.PublicKey, []byte) (*ssh.Signature, error) {
+	return nil, errors.New("агент отказал в подписи")
+}
+
+func startTestAgentOpt(t *testing.T, refuse bool) (sock string, pub ssh.PublicKey) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "ag")
 	if err != nil {
@@ -33,6 +45,10 @@ func startTestAgent(t *testing.T) (sock string, pub ssh.PublicKey) {
 	if err := kr.Add(agent.AddedKey{PrivateKey: priv}); err != nil {
 		t.Fatal(err)
 	}
+	var serve agent.Agent = kr
+	if refuse {
+		serve = refusingAgent{kr}
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +60,7 @@ func startTestAgent(t *testing.T) (sock string, pub ssh.PublicKey) {
 			if err != nil {
 				return
 			}
-			go func() { defer c.Close(); _ = agent.ServeAgent(kr, c) }()
+			go func() { defer c.Close(); _ = agent.ServeAgent(serve, c) }()
 		}
 	}()
 	s, err := ssh.NewSignerFromKey(priv)
@@ -83,5 +99,22 @@ func TestConnectNewAgentUnreachable(t *testing.T) {
 	defer sess.Client.Close()
 	if att.Outcome != KeysUnavailable || !strings.Contains(strings.Join(ps.got.Notes, ";"), "агент: недоступен") {
 		t.Fatalf("att = %#v, want KeysUnavailable с причиной «агент недоступен»", ps.got)
+	}
+}
+
+// TestConnectNewAgentSignRefused — сервер ключ одобрил, агент не подписал:
+// исход KeysSignFailed, не «сервер отверг ключи».
+func TestConnectNewAgentSignRefused(t *testing.T) {
+	sock, pub := startTestAgentOpt(t, true)
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	srv := startFakeAuthServer(t, []ssh.PublicKey{pub}, sshPw)
+	ps := &pwSource{pw: sshPw}
+	sess, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Client.Close()
+	if att.Outcome != KeysSignFailed || ps.got.Outcome != KeysSignFailed {
+		t.Fatalf("Outcome=%v (колбэк %v), want KeysSignFailed", att.Outcome, ps.got.Outcome)
 	}
 }
