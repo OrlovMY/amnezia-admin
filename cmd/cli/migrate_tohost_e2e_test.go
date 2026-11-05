@@ -63,6 +63,15 @@ func (t *e2eTarget) Run(cmd string, stdin []byte) (string, error) {
 		return ok("1\n")
 	case strings.Contains(cmd, "docker inspect"):
 		return ok("true/0\ntrue/0\n")
+	case strings.Contains(in, "pidof xray"):
+		return ok("PID=yes\nLISTEN=yes\n")
+	case strings.Contains(in, "server.json.tmp <<EOF"):
+		// скрипт server.json: ключи XRay генерирует контейнер — подставляем
+		// ключи «установки» поддельного сервера.
+		body := in[strings.Index(in, "<<EOF\n")+6 : strings.LastIndex(in, "EOF\n")]
+		uuid, _ := t.srv.File(fakesrv.XRayDir + "/xray_uuid.key")
+		body = strings.NewReplacer("$U", strings.TrimSpace(string(uuid)), "$K", e2eXRayPriv, "$S", "0123abcd").Replace(body)
+		t.srv.SetFile(fakesrv.XRayDir+"/server.json", []byte(body))
 	case strings.Contains(cmd, `cat > "$t"`) && strings.Contains(in, "docker run -d"):
 		c := reE2ECtr.FindString(in)
 		t.installed = append(t.installed, c)
@@ -88,11 +97,31 @@ func e2eEmptyAWG2(t *testing.T) *fakesrv.Server {
 	return s
 }
 
-func newE2E(t *testing.T) (*thEnv, *e2eTarget, *fakesrv.Server) {
+// e2eXRayPriv — приватный ключ Reality «установки» (32 байта, base64url).
+const e2eXRayPriv = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+
+// e2eEmptyXRay — сервер amnezia-xray «до установки»: контейнера нет,
+// clientsTable пуст; server.json напишет шаг установки.
+func e2eEmptyXRay() *fakesrv.Server {
+	s := fakesrv.NewXRay("master")
+	s.SetFile(fakesrv.XRayDir+"/clientsTable", []byte("[]"))
+	s.Configure(func(x *fakesrv.Server) { x.Names = nil })
+	return s
+}
+
+func newE2E(t *testing.T) (*thEnv, *e2eTarget, *fakesrv.Server) { return newE2EKind(t, "awg2") }
+
+func newE2EKind(t *testing.T, kind string) (*thEnv, *e2eTarget, *fakesrv.Server) {
 	e := newTHEnv(t)
-	src := fakesrv.NewAWG2()
-	src.SetFile(migAwg+"wireguard_psk.key", []byte("OLD-PSK\n"))
-	tgt := &e2eTarget{prov: healthyProvCLI(), srv: e2eEmptyAWG2(t)}
+	var src *fakesrv.Server
+	tgt := &e2eTarget{prov: healthyProvCLI()}
+	if kind == "xray" {
+		src, tgt.srv = fakesrv.NewXRay("master"), e2eEmptyXRay()
+	} else {
+		src = fakesrv.NewAWG2()
+		src.SetFile(migAwg+"wireguard_psk.key", []byte("OLD-PSK\n"))
+		tgt.srv = e2eEmptyAWG2(t)
+	}
 	e.dst = &thRec{f: provCLIFake{}} // не используется
 	migrateDial = func(c *core.ServerCreds, _ core.HostKeyPolicy) (*core.Session, error) {
 		s := core.NewSessionWithRunner(src, c)
@@ -168,5 +197,83 @@ func TestToHostEndToEndNoLayerStopsBeforeInstall(t *testing.T) {
 	code := runMigrateToHost(context.Background(), strings.NewReader(""), &out, &errOut, false, o, time.Unix(1700000000, 0))
 	if code != 2 || len(tgt.steps) != 0 || len(tgt.installed) != 0 {
 		t.Fatalf("код %d, шагов установки %d\n%s\n%s", code, len(tgt.steps), out.String(), errOut.String())
+	}
+}
+
+// Ревью PR #70-2 L1: стоп по адресу насквозь — без -address-changes
+// настоящая копия (адрес выдачи — IP источника) останавливает ДО установки.
+func TestToHostEndToEndAddressStopsBeforeInstall(t *testing.T) {
+	_, tgt, _ := newE2E(t)
+	var out, errOut bytes.Buffer
+	o := toHostOpts{srcKey: thSrcKey(t), host: thHost, port: "22", user: "root", knownHostsPath: filepath.Join(t.TempDir(), "kh"),
+		mf: migrateFlags{apply: true, noPw: true}, noAgent: true}
+	code := runMigrateToHost(context.Background(), strings.NewReader("y\ny\n"), &out, &errOut, true, o, time.Unix(1700000000, 0))
+	if code != 4 || len(tgt.steps) != 0 || !strings.Contains(out.String(), "ДО УСТАНОВКИ") {
+		t.Fatalf("код %d, шагов %d\n%s\n%s", code, len(tgt.steps), out.String(), errOut.String())
+	}
+}
+
+// Ревью PR #70-2 L1: XRay насквозь — настоящие Install (server.json из
+// копии) и перенос клиентов XRay.
+func TestToHostEndToEndXRay(t *testing.T) {
+	e, tgt, _ := newE2EKind(t, "xray")
+	var out, errOut bytes.Buffer
+	o := toHostOpts{srcKey: thSrcKey(t), host: thHost, port: "22", user: "root", knownHostsPath: filepath.Join(t.TempDir(), "kh"),
+		mf: migrateFlags{apply: true, noPw: true, addrOK: true}, noAgent: true}
+	code := runMigrateToHost(context.Background(), strings.NewReader("y\ny\n"), &out, &errOut, true, o, time.Unix(1700000000, 0))
+	if code != 0 || len(tgt.installed) != 1 || tgt.installed[0] != "amnezia-xray" {
+		t.Fatalf("код %d, установлено %v\n%s\n%s", code, tgt.installed, out.String(), errOut.String())
+	}
+	tbl, _ := tgt.srv.File(fakesrv.XRayDir + "/clientsTable")
+	if !strings.Contains(string(tbl), "Alice") || !strings.Contains(string(tbl), "Bob") {
+		t.Fatalf("клиенты XRay не перенесены: %s", tbl)
+	}
+	if !strings.Contains(out.String(), "XRay на новом сервере будет перезапущен") || len(e.keyFiles()) != 1 {
+		t.Fatalf("нет вопроса про XRay или ключа:\n%s", out.String())
+	}
+}
+
+// Аудит AU-1 M2: повтор по напечатанной подсказке на том же сервере после
+// переноса (клиенты уже есть) без терминала не останавливается на тех же
+// вопросах; без -replace-users из подсказки — остановился бы.
+func TestToHostContinueHintReplays(t *testing.T) {
+	_, tgt, src := newE2E(t)
+	var out bytes.Buffer
+	o := toHostOpts{srcKey: thSrcKey(t), host: thHost, port: "22", user: "root", knownHostsPath: filepath.Join(t.TempDir(), "kh"),
+		mf: migrateFlags{apply: true, noPw: true, addrOK: true}, noAgent: true}
+	if code := runMigrateToHost(context.Background(), strings.NewReader("y\ny\n"), &out, &out, true, o, time.Unix(1700000000, 0)); code != 0 {
+		t.Fatalf("первый запуск: %d\n%s", code, out.String())
+	}
+	sh, _ := continueHint(o, "/tmp/k.vpn.txt", true)
+	mf := migrateFlags{yes: true}
+	for _, tok := range strings.Fields(sh) {
+		switch tok {
+		case "-apply":
+			mf.apply = true
+		case "-address-changes":
+			mf.addrOK = true
+		case "-replace-users":
+			mf.replaceUsers = true
+		case "-no-password":
+			mf.noPw = true
+		case "-skip-xray":
+			mf.skipXRay = true
+		}
+	}
+	replay := func(f migrateFlags) int {
+		s := core.NewSessionWithRunner(src, &core.ServerCreds{Host: "198.51.100.7", Port: "22", User: "root"})
+		s.HostKeyFingerprint = "SHA256:src"
+		d := core.NewSessionWithRunner(tgt, &core.ServerCreds{Host: thHost, Port: "22", User: "root"})
+		d.HostKeyFingerprint = "SHA256:dst"
+		var b bytes.Buffer
+		return runMigrate(context.Background(), strings.NewReader(""), &b, &b, false, s, d, f, time.Unix(1700000100, 0))
+	}
+	if code := replay(mf); code != 0 {
+		t.Fatalf("повтор по подсказке остановился: %d (подсказка: %s)", code, sh)
+	}
+	no := mf
+	no.replaceUsers = false
+	if code := replay(no); code == 0 {
+		t.Fatal("без -replace-users повтор не остановился — тест ничего не доказывает")
 	}
 }

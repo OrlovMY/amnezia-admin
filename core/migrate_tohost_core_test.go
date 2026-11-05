@@ -54,6 +54,31 @@ func TestVerifyAdminKeyAuthRejectedVsNetwork(t *testing.T) {
 	}
 }
 
+// Ревью PR #70-2 M1: пустой список клиентов XRay допустим ТОЛЬКО при
+// корректной в остальном форме — строгий разбор, не «запасной».
+func TestProtocolParamsXRayEmptyClientsStrict(t *testing.T) {
+	empty := strings.Replace(xraySrcJSON("443"), `{"id":"`+fkUUID+`","flow":"xtls-rprx-vision"}`, "", 1)
+	if !strings.Contains(empty, `"clients":[]`) {
+		t.Fatalf("образец не с пустым списком: %s", empty)
+	}
+	p, err := ProtocolParamsFromServer("amnezia-xray", []byte(empty))
+	if err != nil || p["port"] != "443" || p["site"] != "www.example.com" {
+		t.Fatalf("пустой список корректной формы: %v %v", p, err)
+	}
+	bad := strings.Replace(empty, `"decryption":"none"`, `"decryption":"none","fallbacks":[]`, 1)
+	if _, err := ProtocolParamsFromServer("amnezia-xray", []byte(bad)); !errors.Is(err, ErrAdminKeyNoProtocolParams) {
+		t.Fatalf("пустой список + неизвестное поле: %v", err)
+	}
+	bad = strings.Replace(empty, `"security":"reality"`, `"security":"tls"`, 1)
+	if _, err := ProtocolParamsFromServer("amnezia-xray", []byte(bad)); !errors.Is(err, ErrAdminKeyNoProtocolParams) {
+		t.Fatalf("пустой список + не reality: %v", err)
+	}
+	// Обычный разбор (перенос) пустой список по-прежнему не принимает.
+	if _, err := parseXRayServer([]byte(empty)); err == nil {
+		t.Fatal("parseXRayServer принял пустой список клиентов")
+	}
+}
+
 // AdminKeyContainersFromServer на поддельном сервере: параметры с сервера
 // (подсеть — адрес сети), XRay без клиентов — оговорка, нет контейнера —
 // ошибка с именем.

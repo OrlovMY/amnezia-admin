@@ -18,7 +18,7 @@
 //	amnezia-admin diagnose -key vpn://... [-fix [-yes]]
 //	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
-//	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-host IP|имя [-to-port 22] [-to-user root] [-to-hostkey SHA256:...] [-key-out файл] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-yes]
+//	amnezia-admin migrate (-key-file файл | -key vpn://ИСТОЧНИКА...) -to-host IP|имя [-to-port 22] [-to-user root] [-to-hostkey SHA256:...] [-key-out файл] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin provision-check -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...]
 //	amnezia-admin version
 //	amnezia-admin check
@@ -1031,7 +1031,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	toHost := fs.String("to-host", "", "migrate: IP или DNS-имя ЧИСТОГО нового сервера (вместо -to-key): вход ключами ПК, не вышло — пароль с терминала; ставит Amnezia и переносит; коды: 0 перенесено, 1 не перенесено/нельзя, 2 ошибка использования/подключения/не подтверждено, 4 остановлено проверкой/неизвестно; исход выдачи ключа vpn:// код не меняет (у -to-key ошибка подключения — 1, здесь — 2)")
 	toPort := fs.String("to-port", "22", "migrate -to-host: порт SSH нового сервера")
 	toUser := fs.String("to-user", "root", "migrate -to-host: пользователь SSH нового сервера")
-	keyOut := fs.String("key-out", "", "migrate -to-host: файл для нового ключа vpn:// (права 0600; по умолчанию — каталог данных пользователя, «Ключи доступа»)")
+	keyOut := fs.String("key-out", "", "migrate -to-host: файл для нового ключа vpn:// (на Linux/macOS права 0600, на Windows — права каталога; по умолчанию — каталог данных пользователя, «Ключи доступа»)")
+	keyFile := fs.String("key-file", "", "ключ vpn:// из файла вместо -key (ключ не попадает в командную строку процесса); взаимоисключающий с -key")
+	toKeyFile := fs.String("to-key-file", "", "migrate, provision-check: ключ vpn:// цели из файла вместо -to-key; взаимоисключающий с -to-key")
 	statsFrom := fs.String("from", "", "stats: начало периода ГГГГ-ММ-ДД (UTC)")
 	statsTo := fs.String("to", "", "stats: конец периода ГГГГ-ММ-ДД (UTC), включительно")
 	statsCSV := fs.String("csv", "", "stats: выгрузить в CSV для Excel (разделитель «;»)")
@@ -1060,6 +1062,34 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return 1
 	}
 
+	// -key-file / -to-key-file (аудит AU-1, M1): ключ из файла, не из argv.
+	{
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		usage := 1
+		if cmd == "provision-check" {
+			usage = exitProvUsage
+		}
+		for _, kf := range []struct {
+			fileFlag, keyFlag, path string
+			dst                     *string
+		}{{"key-file", "key", *keyFile, key}, {"to-key-file", "to-key", *toKeyFile, toKey}} {
+			if !set[kf.fileFlag] {
+				continue
+			}
+			if set[kf.keyFlag] {
+				fmt.Fprintln(stderr, "-"+kf.fileFlag+" и -"+kf.keyFlag+" взаимоисключающие — ключ задаётся одним способом.")
+				return usage
+			}
+			v, err := readKeyFile(kf.path, stderr)
+			if err != nil {
+				fmt.Fprintln(stderr, "-"+kf.fileFlag+": "+err.Error())
+				return usage
+			}
+			*kf.dst = v
+		}
+	}
+
 	// provision-check — предпроверка цели перед установкой (provision.go).
 	if cmd == "provision-check" {
 		set := map[string]bool{}
@@ -1082,12 +1112,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		mf := migrateFlags{apply: *apply, addrOK: *addrChanges, skipXRay: *skipXRay, replaceUsers: *replaceUsers, yes: *yes, pwFile: *pwFile, noPw: *noPw}
 		if set["to-host"] {
-			if set["to-key"] {
+			if set["to-key"] || set["to-key-file"] {
 				fmt.Fprintln(stderr, "migrate: -to-host и -to-key взаимоисключающие — цель задаётся одним способом.")
 				return exitToHostUsage
 			}
 			return runMigrateToHost(ctx, stdin, stdout, stderr, stdinIsTTY(), toHostOpts{
-				srcKey: *key, srcHostkey: *hostkey, host: *toHost, port: *toPort, user: *toUser,
+				srcKey: *key, srcKeyFile: *keyFile, srcHostkey: *hostkey, host: *toHost, port: *toPort, user: *toUser,
 				hostkey: *toHostkey, keyOut: *keyOut, knownHostsPath: knownHostsPath,
 				clientHost: *clientHost, clientHostOK: *clientHostOK, mf: mf}, time.Now())
 		}

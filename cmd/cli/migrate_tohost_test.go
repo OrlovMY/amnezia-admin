@@ -421,8 +421,30 @@ func TestToHostMigrateStoppedStillIssuesKey(t *testing.T) {
 	if code != 4 || len(files) != 1 {
 		t.Fatalf("код %d, файлов %d\n%s\n%s", code, len(files), out, errOut)
 	}
-	if !strings.Contains(out, "Источник не изменён") || !strings.Contains(out, "-to-key \"$(cat '"+files[0]+"')\"") {
+	if !strings.Contains(out, "Источник не изменён") || !strings.Contains(out, "-to-key-file "+shQuote(files[0])) ||
+		!strings.Contains(out, "-to-key-file "+psQuote(files[0])) {
 		t.Fatalf("нет состояния/команды продолжения:\n%s", out)
+	}
+	// Аудит AU-1 M1/M2: ключ — только файлом, без подстановок оболочки; все
+	// флаги повтора.
+	var hint []string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "amnezia-admin migrate") {
+			hint = append(hint, l)
+		}
+	}
+	if len(hint) != 2 {
+		t.Fatalf("строк подсказки %d:\n%s", len(hint), out)
+	}
+	for _, bad := range []string{"$(cat", "Get-Content", "vpn://", "-to-key ", "-key vpn"} {
+		if strings.Contains(strings.Join(hint, "\n"), bad) || strings.Contains(out, "$(cat") || strings.Contains(out, "Get-Content") {
+			t.Fatalf("в подсказке %q:\n%s", bad, out)
+		}
+	}
+	for _, need := range []string{"-replace-users", "-no-password", "-apply", "-key-file"} {
+		if !strings.Contains(out, need) {
+			t.Fatalf("в подсказке нет %s:\n%s", need, out)
+		}
 	}
 	data, _ := os.ReadFile(files[0])
 	if bad := leaks(out+errOut, thPw, strings.TrimSpace(string(data))); len(bad) > 0 {
@@ -479,5 +501,82 @@ func TestToHostKeyOutFallback(t *testing.T) {
 	files := e.keyFiles()
 	if code != 0 || len(files) != 1 || !strings.Contains(outB.String(), files[0]) {
 		t.Fatalf("код %d, файлов %d\n%s\n%s", code, len(files), outB.String(), errB.String())
+	}
+}
+
+// Ревью PR #70-2 L2: путь с апострофом экранируется для sh и PowerShell.
+func TestToHostContinueHintQuoting(t *testing.T) {
+	p := "/home/o'brien/k ey.txt"
+	o := toHostOpts{srcKeyFile: "C:\\Users\\d'Arc\\src.txt", mf: migrateFlags{pwFile: "/x/it's.pw", skipXRay: true}}
+	sh, ps := continueHint(o, p, true)
+	if !strings.Contains(sh, `-to-key-file '/home/o'\''brien/k ey.txt'`) || !strings.Contains(ps, `-to-key-file '/home/o''brien/k ey.txt'`) {
+		t.Fatalf("экранирование пути ключа:\nsh: %s\nps: %s", sh, ps)
+	}
+	if !strings.Contains(sh, `-password-file '/x/it'\''s.pw'`) || !strings.Contains(ps, `-key-file 'C:\Users\d''Arc\src.txt'`) {
+		t.Fatalf("экранирование прочих путей:\nsh: %s\nps: %s", sh, ps)
+	}
+	for _, f := range []string{"-address-changes", "-replace-users", "-skip-xray", "-apply"} {
+		if !strings.Contains(sh, f) || !strings.Contains(ps, f) {
+			t.Fatalf("нет %s: %s", f, sh)
+		}
+	}
+}
+
+// Аудит AU-1 M1: -key-file / -to-key-file — ключ из файла, взаимоисключение
+// с -key / -to-key, содержимое не в тексте ошибки.
+func TestKeyFileFlags(t *testing.T) {
+	dir := t.TempDir()
+	kh := filepath.Join(dir, "kh")
+	kf := filepath.Join(dir, "k.txt")
+	if err := os.WriteFile(kf, []byte("  vpn://AAAA-not-a-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := readKeyFile(kf, io.Discard); err != nil || k != "vpn://AAAA-not-a-key" {
+		t.Fatalf("readKeyFile: %q %v", k, err)
+	}
+	for _, c := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"migrate", "-key-file", kf, "-key", "vpn://x", "-to-host", thHost}, 1},
+		{[]string{"migrate", "-key-file", kf, "-to-key-file", kf, "-to-key", "vpn://y"}, 1},
+		{[]string{"migrate", "-key-file", kf, "-to-key-file", kf, "-to-host", thHost}, 2},
+		{[]string{"migrate", "-key-file", filepath.Join(dir, "нет.txt"), "-to-host", thHost}, 1},
+	} {
+		code, out, errOut := cliRun(t, kh, "", c.args...)
+		if code != c.code || strings.Contains(out+errOut, "AAAA-not-a-key") {
+			t.Errorf("%v: код %d (ждали %d)\n%s%s", c.args, code, c.code, out, errOut)
+		}
+	}
+}
+
+// Аудит AU-1 M3: перенос сделан, ключа нет — совет, как управлять дальше.
+func TestToHostNoKeyAdvice(t *testing.T) {
+	e := newTHEnv(t)
+	code, out, _ := e.run(true, "n\ny\n", migrateFlags{apply: true, noPw: true})
+	if code != 0 || len(e.keyFiles()) != 0 || !strings.Contains(out, "Команды amnezia-admin работают только по ключу") {
+		t.Fatalf("код %d\n%s", code, out)
+	}
+}
+
+// Аудит AU-1 L1/L2/L4: на Windows не обещаем 0600; совет о файле ключа;
+// vpn:// в -to-host — свой текст.
+func TestToHostKeyFileTexts(t *testing.T) {
+	txt := keyFilePermText(filepath.Join(t.TempDir(), "k"))
+	if runtime.GOOS == "windows" {
+		if strings.Contains(txt, "права 0600 —") || !strings.Contains(txt, "по правам каталога") {
+			t.Fatalf("Windows: %s", txt)
+		}
+	} else if !strings.Contains(txt, "0600") {
+		t.Fatalf("unix: %s", txt)
+	}
+	e := newTHEnv(t)
+	_, out, _ := e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true})
+	if !strings.Contains(out, "удалите файл") {
+		t.Fatalf("нет совета о файле ключа:\n%s", out)
+	}
+	code, _, errOut := cliRun(t, filepath.Join(t.TempDir(), "kh"), "", "migrate", "-key", "vpn://x", "-to-host", "vpn://AAAA")
+	if code != 2 || !strings.Contains(errOut, "-to-key-file") {
+		t.Fatalf("vpn:// в -to-host: %d %s", code, errOut)
 	}
 }

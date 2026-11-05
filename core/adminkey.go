@@ -285,18 +285,13 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 			}
 		}
 	case "amnezia-xray":
-		srv, err := parseXRayServer(conf)
-		switch {
-		case err == nil:
-			p["port"], p["site"] = srv.port, srv.serverName
-		case xrayNoClients(conf):
-			// Разборщик server.json отказывает при пустом списке клиентов
-			// (flow новых неизвестен) — для ключа flow не нужен: порт и SNI
-			// берутся прямо (ревью PR #69, R3).
-			p["port"], p["site"] = xrayPortSNI(conf)
-		default:
+		// Строгий разбор; пустой список клиентов допустим — flow для ключа
+		// не нужен (ревью PR #70-2, M1; R3).
+		srv, err := parseXRayServerEmptyOK(conf)
+		if err != nil {
 			return nil, fmt.Errorf("%w: контейнер %q, server.json: %v", ErrAdminKeyNoProtocolParams, container, err)
 		}
+		p["port"], p["site"] = srv.port, srv.serverName
 		p["transport_proto"] = "tcp"
 	default:
 		return nil, fmt.Errorf("ключ: контейнер %q не из списка известных", container)
@@ -408,7 +403,7 @@ func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyCon
 				return nil, nil, fmt.Errorf("ключ: контейнер %q, server.json не прочитан: %w", n, rerr)
 			}
 			conf = []byte(raw)
-			if xrayNoClients(conf) {
+			if srv, perr := parseXRayServerEmptyOK(conf); perr == nil && len(srv.ids) == 0 {
 				notes = append(notes, XRayNoClientsNote)
 			}
 		} else {
@@ -429,41 +424,3 @@ func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyCon
 
 // XRayNoClientsNote — оговорка: XRay поставлен, но клиентов в нём нет.
 const XRayNoClientsNote = "XRay: на сервере нет ни одного клиента XRay — ключ даёт управление сервером, но подключаться по XRay пока некому; клиента можно добавить в приложении Amnezia или командой add"
-
-// xrayInbound0 — inbounds[0] server.json как объект (nil — формы нет).
-func xrayInbound0(conf []byte) map[string]any {
-	var root map[string]any
-	if json.Unmarshal(conf, &root) != nil {
-		return nil
-	}
-	ib, _ := root["inbounds"].([]any)
-	if len(ib) != 1 {
-		return nil
-	}
-	in, _ := ib[0].(map[string]any)
-	return in
-}
-
-// xrayNoClients — в server.json список клиентов ЕСТЬ и он пуст (измерено,
-// а не «не разобрали»).
-func xrayNoClients(conf []byte) bool {
-	in := xrayInbound0(conf)
-	st, _ := in["settings"].(map[string]any)
-	cl, ok := st["clients"].([]any)
-	return ok && len(cl) == 0
-}
-
-// xrayPortSNI — порт и первый serverName; не найдено — пусто (обязательные
-// поля проверит missingProtocolParams).
-func xrayPortSNI(conf []byte) (port, sni string) {
-	in := xrayInbound0(conf)
-	if n, ok := in["port"].(float64); ok && n >= 1 && n <= 65535 && n == float64(int(n)) {
-		port = strconv.Itoa(int(n))
-	}
-	ss, _ := in["streamSettings"].(map[string]any)
-	rs, _ := ss["realitySettings"].(map[string]any)
-	if names, _ := rs["serverNames"].([]any); len(names) > 0 {
-		sni, _ = names[0].(string)
-	}
-	return port, sni
-}
