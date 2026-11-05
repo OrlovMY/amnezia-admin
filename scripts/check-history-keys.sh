@@ -52,7 +52,9 @@ set -euo pipefail
 
 # Записано 29.09.2026 (A6) по `git log --all -p` на 787137c. Все 14 —
 # синтетика из core/runner_mask_test.go и одна строка сообщения коммита.
-KNOWN_HEADERS=14
+# 05.11.2026 (перед v0.5.1): +3 из internal/canary/k4k5_test.go (a565217,
+# 02.10) — тела «b3BlbnNzaC1rZXktdjEAAAAA», «ZZZZ», «YYYY», синтетика.
+KNOWN_HEADERS=17
 
 scan() {
 	awk '
