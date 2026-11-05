@@ -20,7 +20,8 @@ package core
 //     amnezia-xray → "xray".
 //
 // Ключ несёт пароль root или приватный SSH-ключ — это секрет (CLAUDE.md):
-// результат — Secret, тексты ошибок ни ключа, ни пароля не содержат.
+// результат — AdminKey (печать и JSON — только сводка), тексты ошибок ни
+// ключа, ни пароля не содержат.
 
 import (
 	"bytes"
@@ -29,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // adminKeyFormatVersion — serverConfigUtils::currentConfigFormatVersion
@@ -46,10 +48,15 @@ var (
 	// ErrAdminKeyMismatch — ключ разобран, но его содержимое не совпало с
 	// ожидаемым (VerifyAdminKey). Отличается от «проверить не удалось».
 	ErrAdminKeyMismatch = errors.New("содержимое ключа не совпало с ожидаемым")
+	// ErrAdminKeyNoProtocolParams — у контейнера нет обязательных параметров
+	// протокола. Пустой {} приложение приняло бы молча (порт, obfuscation —
+	// пустые строки) — это «значение по умолчанию вместо ответа».
+	ErrAdminKeyNoProtocolParams = errors.New("нет параметров протокола — ключ не выдаётся")
 )
 
 // AdminKeyContainer — контейнер в составе ключа. Protocol — параметры
-// протокола (как их хранит приложение); nil — пустой объект. Ключ
+// протокола (как их хранит приложение); ОБЯЗАТЕЛЬНЫ поля из
+// protocolRequired, брать их — ProtocolParamsFromServer. Ключ
 // last_config убирается, как это делает приложение (clearClientConfig).
 type AdminKeyContainer struct {
 	Name     string
@@ -122,6 +129,9 @@ func adminKeyJSON(in AdminKeyInput) ([]byte, error) {
 			return nil, fmt.Errorf("ключ: контейнер %q указан дважды", c.Name)
 		}
 		seen[c.Name] = true
+		if miss := missingProtocolParams(c.Name, c.Protocol); len(miss) > 0 {
+			return nil, fmt.Errorf("%w: контейнер %q, нет %s", ErrAdminKeyNoProtocolParams, c.Name, strings.Join(miss, ", "))
+		}
 		p := map[string]any{}
 		for k, v := range c.Protocol {
 			if k != "last_config" {
@@ -151,19 +161,122 @@ func adminKeyJSON(in AdminKeyInput) ([]byte, error) {
 // BuildAdminKey — админский vpn:// (как «Поделиться → полный доступ»
 // приложения). Пароль кладётся только с согласия (PasswordConsent);
 // пустой пароль — отказ: ключ без способа входа не выдаётся.
-func BuildAdminKey(in AdminKeyInput) (Secret, error) {
+func BuildAdminKey(in AdminKeyInput) (AdminKey, error) {
 	if !in.PasswordConsent {
-		return Secret{}, ErrAdminKeyNoConsent
+		return AdminKey{}, ErrAdminKeyNoConsent
 	}
 	if in.Password.Len() == 0 {
-		return Secret{}, ErrAdminKeyNoPassword
+		return AdminKey{}, ErrAdminKeyNoPassword
 	}
 	js, err := adminKeyJSON(in)
 	if err != nil {
-		return Secret{}, err
+		return AdminKey{}, err
 	}
 	enc := base64.RawURLEncoding.EncodeToString(qCompress(js))
-	return NewSecret([]byte("vpn://" + enc)), nil
+	return AdminKey{s: NewSecret([]byte("vpn://" + enc))}, nil
+}
+
+// AdminKey — выданный админский vpn:// (несёт пароль root или PEM).
+// Отдельный тип, а не Secret: у Secret MarshalJSON отдаёт содержимое
+// (нужно файлу копии), а ключ не раскрывается НИ ОДНИМ способом печати
+// или сериализации — только явным Reveal().
+type AdminKey struct{ s Secret }
+
+// Reveal — текст ключа vpn:// целиком. Только для выдачи человеку
+// (файл 0600, буфер обмена, QR) — не для журналов и ошибок.
+func (k AdminKey) Reveal() string { return string(k.s.Bytes()) }
+
+// Len — длина ключа в байтах (0 — ключа нет).
+func (k AdminKey) Len() int { return k.s.Len() }
+
+func (k AdminKey) String() string {
+	return fmt.Sprintf("[ключ vpn:// скрыт, %d байт]", k.Len())
+}
+func (k AdminKey) GoString() string { return k.String() }
+
+// Format — любой глагол fmt (%v %s %q %x %#v…) печатает только сводку.
+func (k AdminKey) Format(f fmt.State, _ rune) { fmt.Fprint(f, k.String()) }
+
+// MarshalJSON — сводка без содержимого; восстановить ключ из JSON нельзя.
+func (k AdminKey) MarshalJSON() ([]byte, error) { return json.Marshal(k.String()) }
+
+// MarshalText — то же для encoding (yaml, xml, ключи map в JSON).
+func (k AdminKey) MarshalText() ([]byte, error) { return []byte(k.String()), nil }
+
+// protocolRequired — поля параметров протокола, которые приложение
+// 5.1.0.6 читает через toString() БЕЗ умолчаний (ac175c8):
+// AwgServerConfig::fromJson (awgProtocolConfig.cpp:164-196),
+// WireGuardServerConfig::fromJson (wireGuardProtocolConfig.cpp:43-56),
+// XrayServerConfig::fromJson (xrayProtocolConfig.cpp:301-311).
+// Имена — configKeys.h:14,46,63,66,80-90. Для awg2 обязательны S3/S4:
+// по ним awgVersionOf (awgProtocolConfig.cpp:40-65) отличает AWG2 от AWG1.
+var protocolRequired = map[string][]string{
+	"amnezia-awg":       {"port", "transport_proto", "subnet_address", "Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"},
+	"amnezia-awg2":      {"port", "transport_proto", "subnet_address", "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"},
+	"amnezia-wireguard": {"port", "transport_proto", "subnet_address"},
+	"amnezia-xray":      {"port", "transport_proto", "site"},
+}
+
+// protocolOptional — поля, которые переносятся из конфигурации сервера,
+// если они там есть (AWG 1.5/2: I1…I5).
+var protocolOptional = []string{"I1", "I2", "I3", "I4", "I5", "subnet_cidr"}
+
+// missingProtocolParams — обязательные поля, которых нет или которые не
+// непустая строка (число приложение через toString() прочтёт как "").
+func missingProtocolParams(container string, p map[string]any) []string {
+	var miss []string
+	for _, k := range protocolRequired[container] {
+		if s, ok := p[k].(string); !ok || strings.TrimSpace(s) == "" {
+			miss = append(miss, k)
+		}
+	}
+	return miss
+}
+
+// ProtocolParamsFromServer — параметры протокола для ключа из
+// конфигурации, прочитанной с установленного сервера: awg0.conf/wg0.conf
+// (amnezia-awg, amnezia-awg2, amnezia-wireguard) или server.json
+// (amnezia-xray). Берутся только поля из закрытого списка — приватный
+// ключ сервера и пиры в ключ не попадают. Нет обязательного поля —
+// ErrAdminKeyNoProtocolParams с перечнем, а не неполный набор.
+func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, error) {
+	p := map[string]any{}
+	switch container {
+	case "amnezia-awg", "amnezia-awg2", "amnezia-wireguard":
+		iface := parseWgConf(string(conf)).iface
+		p["transport_proto"] = "udp"
+		if v := iface["ListenPort"]; v != "" {
+			p["port"] = v
+		}
+		if a := strings.TrimSpace(strings.Split(iface["Address"], ",")[0]); a != "" {
+			ip, cidr, _ := strings.Cut(a, "/")
+			p["subnet_address"] = ip
+			if cidr != "" {
+				p["subnet_cidr"] = cidr
+			}
+		}
+		if container != "amnezia-wireguard" {
+			for _, k := range append(append([]string{}, protocolRequired[container][3:]...), protocolOptional[:5]...) {
+				if v := iface[k]; v != "" {
+					p[k] = v
+				}
+			}
+		}
+	case "amnezia-xray":
+		srv, err := parseXRayServer(conf)
+		if err != nil {
+			return nil, fmt.Errorf("%w: контейнер %q, server.json: %v", ErrAdminKeyNoProtocolParams, container, err)
+		}
+		p["port"] = srv.port
+		p["transport_proto"] = "tcp"
+		p["site"] = srv.serverName
+	default:
+		return nil, fmt.Errorf("ключ: контейнер %q не из списка известных", container)
+	}
+	if miss := missingProtocolParams(container, p); len(miss) > 0 {
+		return nil, fmt.Errorf("%w: контейнер %q, в конфигурации сервера нет %s", ErrAdminKeyNoProtocolParams, container, strings.Join(miss, ", "))
+	}
+	return p, nil
 }
 
 // VerifyAdminKey — проверка выданного ключа: разобрать тем же разборщиком,
@@ -174,11 +287,11 @@ func BuildAdminKey(in AdminKeyInput) (Secret, error) {
 // Три исхода: nil — проверено; errors.Is(err, ErrAdminKeyMismatch) — ключ
 // НЕ тот; любая другая ошибка — проверить не удалось (сеть, отпечаток,
 // вход) — это не «ключ плохой» и не «ключ хороший».
-func VerifyAdminKey(key Secret, want AdminKeyInput, expectedFingerprint, knownHostsPath string) error {
+func VerifyAdminKey(key AdminKey, want AdminKeyInput, expectedFingerprint, knownHostsPath string) error {
 	if expectedFingerprint == "" {
 		return errors.New("проверка ключа: отпечаток сервера не задан — без закрепления не проверяем")
 	}
-	cfg, err := DecodeVpnKey(string(key.Bytes()))
+	cfg, err := DecodeVpnKey(key.Reveal())
 	if err != nil {
 		return fmt.Errorf("%w: ключ не разбирается", ErrAdminKeyMismatch)
 	}
@@ -196,19 +309,26 @@ func VerifyAdminKey(key Secret, want AdminKeyInput, expectedFingerprint, knownHo
 	case creds.Password != string(want.Password.Bytes()):
 		return fmt.Errorf("%w: пароль", ErrAdminKeyMismatch)
 	}
-	var got []string
+	var got []map[string]any
 	if arr, ok := cfg["containers"].([]any); ok {
 		for _, c := range arr {
 			m, _ := c.(map[string]any)
-			got = append(got, Str(m, "container"))
+			got = append(got, m)
 		}
 	}
 	if len(got) != len(want.Containers) {
 		return fmt.Errorf("%w: число контейнеров %d, ожидалось %d", ErrAdminKeyMismatch, len(got), len(want.Containers))
 	}
 	for i, c := range want.Containers {
-		if got[i] != c.Name {
-			return fmt.Errorf("%w: контейнер №%d %q, ожидался %q", ErrAdminKeyMismatch, i+1, got[i], c.Name)
+		if Str(got[i], "container") != c.Name {
+			return fmt.Errorf("%w: контейнер №%d, ожидался %q", ErrAdminKeyMismatch, i+1, c.Name)
+		}
+		proto, _ := adminKeyProto(c.Name)
+		p, _ := got[i][proto].(map[string]any)
+		for _, k := range protocolRequired[c.Name] {
+			if s, ok := p[k].(string); !ok || s != c.Protocol[k] {
+				return fmt.Errorf("%w: контейнер %q, параметр %s", ErrAdminKeyMismatch, c.Name, k)
+			}
 		}
 	}
 	if Str(cfg, "defaultContainer") != want.DefaultContainer {
