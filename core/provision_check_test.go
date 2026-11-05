@@ -83,7 +83,7 @@ func TestProvClassifyTable(t *testing.T) {
 	dC := classifyDocker
 	awgC := func(p probe) ProvItem { return classifyPort(p, pubPorts{known: true}, "AWG", "udp", ProvAWGPort) }
 	xC := func(p probe) ProvItem { return classifyPort(p, pubPorts{known: true}, "XRay", "tcp", ProvXRayPort) }
-	diC := classifyDisk
+	diC := func(p probe) ProvItem { return classifyDisk(p, probe{}) }
 	ctrC := func(p probe) ProvItem {
 		return classifyContainers(parseProbe("DOCKER=yes\nSRVRC=0\nSRV=27.1\nEND\n", nil), p)
 	}

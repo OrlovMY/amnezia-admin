@@ -28,12 +28,12 @@ func TestProvDiskWhere(t *testing.T) {
 		{"DockerRootDir измерен", diskOut("CHAIN=/var/lib/docker\nDRRC=0\nDROOT=/data/docker\nDFPATH=/data/docker\n", big), ProvOK, "DockerRootDir"},
 		{"DockerRootDir назван, мерили другое", diskOut("CHAIN=/var/lib/docker\nDRRC=0\nDROOT=/data/docker\nDFPATH=/var/lib/docker\n", big), ProvUnknown, "/data/docker"},
 		{"DockerRootDir пуст", diskOut("CHAIN=/\nDRRC=0\nDROOT=\nDFPATH=/\n", big), ProvUnknown, "каталог данных"},
-		{"демон лежит — цепочка с пометкой", diskOut("CHAIN=/var/lib/docker\nDRRC=1\nDROOT=Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\nDFPATH=/var/lib/docker\n", big), ProvOK, "остановлен"},
+		{"демон лежит — цепочка с пометкой", diskOut("CHAIN=/var/lib/docker\nDRRC=1\nDROOT=Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\nDJFILE=none\nDFPATH=/var/lib/docker\n", big), ProvOK, "остановлен"},
 		{"нет прав на docker info", diskOut("CHAIN=/var/lib/docker\nDRRC=1\nDROOT=permission denied while trying to connect\nDFPATH=/var/lib/docker\n", big), ProvUnknown, "прочитать не удалось"},
 		{"путь не напечатан", diskOut("", big), ProvUnknown, "определить не удалось"},
 	}
 	for _, c := range cases {
-		got := classifyDisk(parseProbe(c.out, nil))
+		got := classifyDisk(parseProbe(c.out, nil), probe{})
 		if got.State != c.want || !strings.Contains(got.Reason, c.in) {
 			t.Errorf("%s: %v (%s), ждали %v и «%s»", c.name, got.State, got.Reason, c.want, c.in)
 		}

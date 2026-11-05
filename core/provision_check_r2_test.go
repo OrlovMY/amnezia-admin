@@ -17,7 +17,7 @@ func provAllowed() map[string]bool {
 	for _, c := range []string{
 		provCmd(provOSScript), provCmd(provKernelScript), provCmd(provSudoScript),
 		provCmd(provDockerScript), provCmd(provCtrScript), provCmd(provPortsScript),
-		provCmd(provDiskScript), diagHostCmd(),
+		provCmd(provDiskScript), diagHostCmd(), provCmd(provDiskAtScript("/srv/docker")),
 	} {
 		m[c] = true
 		m["sudo -n "+c] = true

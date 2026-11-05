@@ -164,6 +164,8 @@ func provArgvOK(a []string) bool {
 		return eq("ss", "-lntu")
 	case "df":
 		return len(a) == 3 && a[1] == "-Pk" && a[2] == "$p"
+	case "cat":
+		return eq("cat", "/etc/docker/daemon.json")
 	case "head", "tail":
 		return len(a) == 3 && a[1] == "-n" && a[2] == "1"
 	case "sed":
@@ -176,7 +178,7 @@ func provArgvOK(a []string) bool {
 }
 
 // provVarNames — имена переменных, которые скрипты проб вправе присваивать.
-var provVarNames = map[string]bool{"u": true, "o": true, "p": true, "c": true, "r": true, "rc": true}
+var provVarNames = map[string]bool{"u": true, "o": true, "p": true, "c": true, "r": true, "rc": true, "j": true}
 
 var provKeywords = map[string]bool{"if": true, "then": true, "else": true, "fi": true, "elif": true, "!": true}
 
@@ -250,6 +252,8 @@ func TestProvScriptsClosedProgramList(t *testing.T) {
 		` echo x</etc/shadow`,
 		` PATH=/tmp; ss -lntu`,
 		` IFS=x`,
+		` j=$(cat /etc/shadow)`,
+		` cat /etc/docker/daemon.json >/etc/docker/x`,
 		` r=$(docker info --format "{{.DockerRootDir}}" >/tmp/f)`,
 	} {
 		if len(provScriptViolations(canary)) == 0 {
