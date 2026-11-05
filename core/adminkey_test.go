@@ -395,3 +395,18 @@ func TestVerifyAdminKey(t *testing.T) {
 		t.Fatalf("отказ входа: %v", err)
 	}
 }
+
+// Аудит AU PR #69, L1: входная структура с паролем в JSON не попадает.
+func TestAdminKeyInputNotMarshaled(t *testing.T) {
+	in := AdminKeyInput{Host: "h", User: "root", Password: NewSecret([]byte("hunter2-L1-marker"))}
+	for name, f := range map[string]func() ([]byte, error){
+		"json":        func() ([]byte, error) { return json.Marshal(in) },
+		"json-ptr":    func() ([]byte, error) { return json.Marshal(&in) },
+		"json-nested": func() ([]byte, error) { return json.Marshal(struct{ X AdminKeyInput }{in}) },
+	} {
+		b, err := f()
+		if err == nil || strings.Contains(string(b), "aHVudGVy") || strings.Contains(string(b), "hunter2") {
+			t.Errorf("%s: err=%v out=%q", name, err, b)
+		}
+	}
+}

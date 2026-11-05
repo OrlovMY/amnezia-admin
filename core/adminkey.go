@@ -79,6 +79,17 @@ type AdminKeyInput struct {
 	DNS1, DNS2       string
 }
 
+// errAdminKeyInputJSON — AdminKeyInput не сериализуется: в нём пароль root
+// или приватный ключ (Secret.MarshalJSON раскрывает содержимое — так нужно
+// файлу копии). Аудит AU PR #69, L1.
+var errAdminKeyInputJSON = errors.New("AdminKeyInput не сериализуется: в нём пароль")
+
+// MarshalJSON — отказ: входные данные ключа в JSON не попадают никогда.
+func (AdminKeyInput) MarshalJSON() ([]byte, error) { return nil, errAdminKeyInputJSON }
+
+// MarshalText — отказ по той же причине.
+func (AdminKeyInput) MarshalText() ([]byte, error) { return nil, errAdminKeyInputJSON }
+
 // adminKeyProto — ключ протокола контейнера (ContainerUtils::defaultProtocol).
 // Закрытый список: незнакомый контейнер — отказ, а не угаданный протокол.
 func adminKeyProto(container string) (string, bool) {
