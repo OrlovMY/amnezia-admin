@@ -60,7 +60,9 @@ func TestResultWindowsFitBigFont(t *testing.T) {
 				{"итог восстановления", func() { u.restoreResult("/tmp/a.aabk", outs, nil) }},
 				{"итог переноса", func() { u.migrateResult("/tmp/a.aabk", false, outs, nil) }},
 				{"итог переноса, ошибка", func() { u.migrateResult("", false, nil, errors.New("обрыв связи")) }},
-				{"сообщение", func() { u.showInfo("Недоступно", "Создание пользователей для XRay не поддерживается.") }},
+				{"сообщение", func() {
+					u.showInfo("Недоступно", "Создание пользователей для XRay не поддерживается.")
+				}},
 			}
 			for _, f := range forms {
 				f.open()
