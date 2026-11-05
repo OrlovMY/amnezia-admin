@@ -58,7 +58,14 @@ type InstallContainerResult struct {
 	Step     string // последний начатый шаг
 	Reason   string
 	Rollback RollbackState
+	// RollbackLeft — что по измерению осталось после отката (контейнер, том).
+	RollbackLeft []string
 }
+
+// MeasuredMatchText — подпись измеренного совпадения. Измеряются семейство
+// параметров, порт и подсеть; версию бинаря сравнивать не с чем — она не
+// обещается (ревью PR 5 M2).
+const MeasuredMatchText = "поставлен; совпадает с копией по семейству параметров, порту и подсети; версия бинаря не закреплена и не измерялась"
 
 // Verdict — подпись исхода для человека (печатать вместе с Reason).
 func (r InstallContainerResult) Verdict() string {
@@ -66,7 +73,7 @@ func (r InstallContainerResult) Verdict() string {
 	case InstallInstalled:
 		switch r.Measured {
 		case CompatMatch:
-			return "поставлен и измерен: совпадает с копией"
+			return MeasuredMatchText
 		case CompatMismatch:
 			return "поставлен, но измерение НЕ совпало с копией"
 		}
@@ -103,6 +110,8 @@ type InstallResult struct {
 }
 
 // ReadyForRestore — каждый контейнер поставлен И измерен как совпадающий.
+// Адрес выдачи (Measure.NeedAddressConfirm) здесь НЕ учитывается: его
+// подтверждение перед Restore — обязанность потребителя.
 func (r InstallResult) ReadyForRestore() bool {
 	if r.Refused != "" || r.Stop || len(r.Containers) == 0 || r.Measure == nil {
 		return false
@@ -121,6 +130,7 @@ func (r InstallResult) Lines() []string {
 	var out []string
 	if r.Refused != "" {
 		out = append(out, "Установка не начата: "+r.Refused)
+		return append(out, skippedLines(r.Skipped)...)
 	}
 	for _, c := range r.Containers {
 		l := c.Container + ": " + c.Verdict()
@@ -131,19 +141,26 @@ func (r InstallResult) Lines() []string {
 		case RollbackDone:
 			l += " (снят откатом)"
 		case RollbackFailed:
-			l += " (откат НЕ удался: контейнер остался на сервере)"
+			l += " (откат НЕ удался: на сервере остался " + strings.Join(c.RollbackLeft, ", ") +
+				" — повторная установка откажет «сервер не чистый»)"
 		case RollbackUnknown:
 			l += " (откат не подтверждён)"
 		}
 		out = append(out, l)
 	}
-	for _, s := range r.Skipped {
-		out = append(out, "Не ставится: "+s.Container+" — "+s.Reason)
-	}
+	out = append(out, skippedLines(r.Skipped)...)
 	if r.Stop {
 		out = append(out, "Перенос клиентов остановлен: "+r.StopReason)
 	} else if r.ReadyForRestore() {
 		out = append(out, "Все контейнеры поставлены и совпадают с копией — можно переносить клиентов.")
+	}
+	return out
+}
+
+func skippedLines(sk []InstallSkip) []string {
+	var out []string
+	for _, s := range sk {
+		out = append(out, "Не ставится: "+s.Container+" — "+s.Reason)
 	}
 	return out
 }
@@ -199,8 +216,11 @@ func execInCmd(ctr, inner string) string {
 // Docker не установлен — пустой список (ok=true).
 func (s *Session) listNames(what string) ([]string, bool) {
 	q := `sudo -n docker ps -a --format "{{.Names}}"`
-	if what == "volume" {
+	switch what {
+	case "volume":
 		q = `sudo -n docker volume ls --format "{{.Name}}"`
+	case "image":
+		q = `sudo -n docker images --format "{{.Repository}}"`
 	}
 	cmd := `sh -c 'if ! command -v docker >/dev/null 2>&1; then echo ` + instRC + `0; exit 0; fi; ` + q + `; echo ` + instRC + `$?'`
 	st, body, _ := s.instStep(cmd, nil)
@@ -539,13 +559,16 @@ func Install(sess *Session, plan InstallPlan, opt InstallOptions) InstallResult 
 
 	// Цель обязана быть чистой: снос существующего — отдельный шаг с
 	// подтверждением и копией цели (решение владельца), здесь — отказ.
+	// Образы — тоже: откат делает `docker rmi <имя>` и не должен снести
+	// существовавший до запуска (ревью PR 5 L1).
 	ctrs, ok1 := sess.listNames("container")
 	vols, ok2 := sess.listNames("volume")
-	if !ok1 || !ok2 {
-		return refuse("не удалось узнать, есть ли на сервере контейнеры и тома Amnezia — чистота цели не проверена")
+	imgs, ok3 := sess.listNames("image")
+	if !ok1 || !ok2 || !ok3 {
+		return refuse("не удалось узнать, есть ли на сервере контейнеры, тома и образы Amnezia — чистота цели не проверена")
 	}
 	var dirty []string
-	for _, n := range append(ctrs, vols...) {
+	for _, n := range append(append(ctrs, vols...), imgs...) {
 		if strings.HasPrefix(n, "amnezia-") {
 			dirty = append(dirty, n)
 		}
@@ -689,13 +712,11 @@ func (s *Session) installOne(cs *containerScripts, r *InstallContainerResult, cr
 	steps = append(steps,
 		step{name: "clientsTable", cmd: execInCmd(c, `sh -c "mkdir -p `+cs.dataDir+` && cat > `+cs.dataDir+`/clientsTable"`), stdin: "[]"},
 		step{name: "docker restart", cmd: rcTail("sudo -n docker restart " + c)},
-		step{name: "контейнер запущен", cmd: rcTail(`sudo -n docker inspect -f "{{.State.Running}}" ` + c),
-			check: func(b string) string {
-				if strings.TrimSpace(b) != "true" {
-					return "контейнер после перезапуска не работает"
-				}
-				return ""
-			}},
+		// Два замера через паузу: контейнер в цикле перезапуска может
+		// показать Running=true в момент одного замера (ревью PR 5 L3).
+		step{name: "контейнер запущен", cmd: rcTail(`i="sudo -n docker inspect -f {{.State.Running}}/{{.RestartCount}} ` + c +
+			`" && $i && sleep ` + instSettleSeconds + ` && $i`),
+			check: runningStable},
 	)
 	for _, st := range steps {
 		r.Step = st.name
@@ -722,6 +743,27 @@ func (s *Session) installOne(cs *containerScripts, r *InstallContainerResult, cr
 	return false, "", false
 }
 
+// instSettleSeconds — пауза между двумя замерами работы контейнера.
+const instSettleSeconds = "5"
+
+// runningStable — два замера «Running/RestartCount»: оба true и счётчик
+// перезапусков не вырос.
+func runningStable(b string) string {
+	f := strings.Fields(b)
+	if len(f) != 2 {
+		return "состояние контейнера не прочитано двумя замерами"
+	}
+	r1, c1, _ := strings.Cut(f[0], "/")
+	r2, c2, _ := strings.Cut(f[1], "/")
+	if r1 != "true" || r2 != "true" {
+		return "контейнер после перезапуска не работает"
+	}
+	if c1 == "" || c1 != c2 {
+		return "контейнер перезапускается сам (RestartCount " + c1 + " → " + c2 + ")"
+	}
+	return ""
+}
+
 // rollback — remove_container.sh для контейнеров, созданных в этом запуске
 // (в обратном порядке), затем ИЗМЕРЕНИЕ: остался ли контейнер.
 func (s *Session) rollback(all []*containerScripts, res *InstallResult, created []int) {
@@ -733,24 +775,40 @@ func (s *Session) rollback(all []*containerScripts, res *InstallResult, created 
 		if cs.removeVolume != "" {
 			s.instStep(rcTail("sudo -n docker volume rm "+cs.removeVolume), nil)
 		}
-		names, ok := s.listNames("container")
-		if !ok {
-			r.Outcome = InstallOutcomeUnknown
-			r.Reason += "; откат: удалён ли контейнер, узнать не удалось"
-			continue
+		// Измеряем всё, что откат обязан убрать: контейнер и (XRay) том с
+		// ключами этого запуска (ревью PR 5 M1).
+		want := map[string]string{"container": cs.item.Container}
+		if cs.removeVolume != "" {
+			want["volume"] = cs.removeVolume
 		}
-		present := false
-		for _, n := range names {
-			if n == cs.item.Container {
-				present = true
+		var left []string
+		unknown := false
+		for _, kind := range []string{"container", "volume"} {
+			name, has := want[kind]
+			if !has {
+				continue
+			}
+			names, ok := s.listNames(kind)
+			if !ok {
+				unknown = true
+				continue
+			}
+			for _, n := range names {
+				if n == name {
+					left = append(left, map[string]string{"container": "контейнер ", "volume": "том с ключами "}[kind]+n)
+				}
 			}
 		}
-		if present {
-			r.Rollback, r.Outcome = RollbackFailed, InstallOutcomeUnknown
-			continue
+		switch {
+		case len(left) > 0:
+			r.Rollback, r.Outcome, r.RollbackLeft = RollbackFailed, InstallOutcomeUnknown, left
+		case unknown:
+			r.Outcome = InstallOutcomeUnknown
+			r.Reason += "; откат: удалено ли всё, узнать не удалось"
+		default:
+			// Ничего не осталось — измерено: «не поставлен» известно, даже
+			// если шаг до отката оборвался.
+			r.Rollback, r.Outcome = RollbackDone, InstallNotInstalled
 		}
-		// Контейнера нет — измерено: «не поставлен» известно, даже если шаг
-		// до отката оборвался.
-		r.Rollback, r.Outcome = RollbackDone, InstallNotInstalled
 	}
 }

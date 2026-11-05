@@ -45,8 +45,9 @@ type InstallItem struct {
 	Reason    string // почему не Match; у Match — оговорка
 	Source    string // клетка таблицы — доказательство выбранной ревизии
 	// NeedsMeasurement — ревизия пишет параметры, но версия бинаря не
-	// закреплена (SupportScriptOnly): совместимость подтвердится только
-	// измерением (CheckTarget) после установки.
+	// закреплена (SupportScriptOnly). После установки CheckTarget измеряет
+	// ТОЛЬКО семейство параметров, порт и подсеть; версия бинаря не
+	// измеряется (сравнить её не с чем) и не обещается (ревью PR 5 M2).
 	NeedsMeasurement bool
 	// Параметры установки из копии.
 	Port      string
@@ -62,9 +63,9 @@ func (it InstallItem) Verdict() string {
 	switch {
 	case it.Compat == CompatMatch && it.NeedsMeasurement && it.Family == "XRay":
 		// Скрипты server.json не пишут (аудит AU-1 N1): он и ключи — из копии.
-		return "совпало: контейнер ставят скрипты, server.json и ключи — из копии, версия бинаря подтвердится после установки"
+		return "совпало: контейнер ставят скрипты, server.json и ключи — из копии, версия бинаря не закреплена и не измеряется"
 	case it.Compat == CompatMatch && it.NeedsMeasurement:
-		return "совпало по скриптам, версия бинаря подтвердится после установки"
+		return "совпало по скриптам, версия бинаря не закреплена и не измеряется"
 	case it.Compat == CompatMatch:
 		return "совпало"
 	case it.Compat == CompatMismatch:
@@ -197,7 +198,7 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 		}
 		if s.State == provision.SupportScriptOnly {
 			it.NeedsMeasurement = true
-			notes = append(notes, "совместимость подтвердится измерением после установки: "+s.Note)
+			notes = append(notes, "после установки измеряются семейство параметров, порт и подсеть; версия бинаря не закреплена и не измеряется: "+s.Note)
 		}
 		it.Reason = strings.Join(notes, ". ")
 		return it

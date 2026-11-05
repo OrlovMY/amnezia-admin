@@ -52,10 +52,12 @@ type instFake struct {
 	calls      []instCall
 	// measureConf — подмена awg0.conf при измерении (пусто — как в копии).
 	measureConf string
+	imgs        map[string]bool
+	inspectOut  string // ответ двух замеров; пусто — стабильно работает
 }
 
 func newInstFake() *instFake {
-	return &instFake{ctrs: map[string]bool{}, vols: map[string]bool{}, files: map[string]string{}}
+	return &instFake{ctrs: map[string]bool{}, vols: map[string]bool{}, imgs: map[string]bool{}, files: map[string]string{}}
 }
 
 var reCtrName = regexp.MustCompile(`amnezia-(awg2|awg|wireguard|xray)\b`)
@@ -70,6 +72,8 @@ func stepKey(cmd, in string) string {
 		return "list"
 	case strings.Contains(cmd, "docker volume ls"):
 		return "volumes"
+	case strings.Contains(cmd, "docker images"):
+		return "images"
 	case strings.Contains(cmd, "docker volume rm"):
 		return "volrm:" + c
 	case strings.Contains(cmd, "docker version"):
@@ -129,6 +133,8 @@ func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 		return instOK(strings.Join(keys(f.ctrs), "\n") + "\n"), nil
 	case "volumes":
 		return instOK(strings.Join(keys(f.vols), "\n") + "\n"), nil
+	case "images":
+		return instOK(strings.Join(keys(f.imgs), "\n") + "\n"), nil
 	case "volrm":
 		for v := range f.vols {
 			if strings.Contains(cmd, v) {
@@ -162,7 +168,10 @@ func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 		f.files[c+":"+xrayDir+"/"+xrayConfFile] = body
 		return instOK(""), nil
 	case "inspect":
-		return instOK("true\n"), nil
+		if f.inspectOut != "" {
+			return instOK(f.inspectOut), nil
+		}
+		return instOK("true/0\ntrue/0\n"), nil
 	case "install_docker", "prepare", "dockerfile", "build", "start", "clientsTable", "restart":
 		return instOK(""), nil
 	}
@@ -210,7 +219,7 @@ func installWrites(keys []string) []string {
 	var w []string
 	for _, k := range keys {
 		switch k {
-		case "list", "volumes", "dockerver", "?":
+		case "list", "volumes", "images", "dockerver", "?":
 		default:
 			if !strings.HasPrefix(k, "inspect:") {
 				w = append(w, k)
@@ -221,7 +230,7 @@ func installWrites(keys []string) []string {
 }
 
 var happyOrder = []string{
-	"list", "volumes", "install_docker", "dockerver",
+	"list", "volumes", "images", "install_docker", "dockerver",
 	"prepare:amnezia-awg2", "dockerfile:amnezia-awg2", "build:amnezia-awg2", "run:amnezia-awg2",
 	"configure:amnezia-awg2", "start:amnezia-awg2", "clientsTable:amnezia-awg2", "restart:amnezia-awg2", "inspect:amnezia-awg2",
 	"prepare:amnezia-xray", "dockerfile:amnezia-xray", "build:amnezia-xray", "run:amnezia-xray",
@@ -369,7 +378,7 @@ func TestXRayServerScriptRejects(t *testing.T) {
 func TestInstallFailEachStep(t *testing.T) {
 	var steps []string
 	for _, k := range happyOrder {
-		if k != "list" && k != "volumes" {
+		if k != "list" && k != "volumes" && k != "images" {
 			steps = append(steps, k)
 		}
 	}
