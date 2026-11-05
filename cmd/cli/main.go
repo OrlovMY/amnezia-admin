@@ -988,6 +988,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return runBackupInfo(stdout, stderr, args[1:])
 	}
 
+	// help и неизвестная команда — до разбора флагов и до требования ключа:
+	// раньше список команд печатался только ПОСЛЕ подключения к серверу, и
+	// без ключа человек получал «Не задан ключ» вместо списка.
+	if cmd == "help" || cmd == "-h" || cmd == "-help" || cmd == "--help" {
+		fmt.Fprintln(stdout, "Команды: "+cliCommandList)
+		fmt.Fprintln(stdout, "Справка по флагам: amnezia-admin <команда> -h")
+		return 0
+	}
+	if !knownCLICommand(cmd) {
+		fmt.Fprintf(stderr, "неизвестная команда %q (%s)\n", cmd, cliCommandList)
+		return 1
+	}
+
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	key := fs.String("key", os.Getenv("AMNEZIA_KEY"), "админский ключ vpn://...")
@@ -1010,11 +1023,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey/show-config XRay/backup: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер); keep-ip — явно оставить IP")
 	clientHostOK := fs.Bool("client-host-confirm", false, "add/rekey: выдать конфиг с -client-host, даже если имя указывает на другие адреса или проверить его не удалось")
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
-	toKey := fs.String("to-key", os.Getenv("AMNEZIA_TO_KEY"), "migrate: ключ vpn://... НОВОГО сервера (цели); -key — источник")
-	toHostkey := fs.String("to-hostkey", "", "migrate: ожидаемый отпечаток ключа хоста цели SHA256:… (обязателен без терминала для нового сервера)")
+	toKey := fs.String("to-key", os.Getenv("AMNEZIA_TO_KEY"), "migrate: ключ vpn://... НОВОГО сервера (цели); -key — источник. provision-check: ключ проверяемого сервера (главнее -key; явный флаг главнее переменных окружения); коды provision-check: 0 можно ставить, 1 нельзя, 2 ошибка использования/подключения, 4 неизвестно")
+	toHostkey := fs.String("to-hostkey", "", "migrate, provision-check: ожидаемый отпечаток ключа хоста цели SHA256:… (обязателен без терминала для нового сервера)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
+		}
+		// provision-check: 1 занят измеренным «нельзя ставить» (ревью р1, H1)
+		// — ошибка флагов там код 2, иначе опечатка выглядела бы как ответ.
+		if cmd == "provision-check" {
+			return exitProvUsage
 		}
 		// Код 1 — обычная ошибка (флаг ошибся, а не "не подтверждено");
 		// 2 занят решением PR-5 "нет терминала и нет -yes"/"y/n ответил
@@ -1027,7 +1045,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 
 	// provision-check — предпроверка цели перед установкой (provision.go).
 	if cmd == "provision-check" {
-		return runProvisionCheckCmd(stdin, stdout, stderr, stdinIsTTY(), *key, *toKey, *hostkey, *toHostkey, knownHostsPath)
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		ks := provKeys{envKey: os.Getenv("AMNEZIA_KEY"), envToKey: os.Getenv("AMNEZIA_TO_KEY")}
+		if set["key"] {
+			ks.flagKey = *key
+		}
+		if set["to-key"] {
+			ks.flagToKey = *toKey
+		}
+		return runProvisionCheckCmd(stdin, stdout, stderr, stdinIsTTY(), ks, *hostkey, *toHostkey, knownHostsPath)
 	}
 
 	// migrate — два сервера, свой разбор ключей и подключение (migrate.go).
@@ -1301,7 +1328,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | migrate | provision-check | diagnose)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (%s)", cmd, cliCommandList)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))

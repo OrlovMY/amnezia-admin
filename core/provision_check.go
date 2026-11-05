@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ProvState — исход одного пункта предпроверки.
@@ -101,9 +102,12 @@ func (r ProvisionReport) Verdict() ProvVerdict {
 	return ProvVerdictYes
 }
 
-// Порты протоколов по умолчанию. В коде протоколов core портов по умолчанию
-// нет (порт всегда читается с сервера); значения — умолчания приложения
-// Amnezia: AmneziaWG — 55424/udp, XRay (VLESS Reality) — 443/tcp.
+// Порты протоколов ПО УМОЛЧАНИЮ (порт выбирается при установке, проверяется
+// только умолчание — в выводе так и сказано). В коде протоколов core портов
+// по умолчанию нет (порт всегда читается с сервера). Источник — приложение
+// amnezia-client, client/protocols/protocols_defs.h (namespace protocols::awg
+// defaultPort "55424", protocols::xray defaultPort "443"). ПО ПАМЯТИ, С
+// ИСХОДНИКОМ НЕ СВЕРЕНО — сверить при ревью/приёмке.
 const (
 	ProvAWGPort  = 55424
 	ProvXRayPort = 443
@@ -131,7 +135,7 @@ const (
 	provKernelScript = ProvKernelTag + ` echo "KERNEL=$(uname -r)"; echo "ARCH=$(uname -m)"; echo END`
 	provSudoScript   = ProvSudoTag + ` u=$(id -u); echo "UID=$u"; if [ "$u" != 0 ]; then if command -v sudo >/dev/null 2>&1; then o=$(sudo -n true 2>&1); echo "SUDORC=$?"; echo "SUDOERR=$(echo "$o" | head -n 1)"; else echo SUDO=none; fi; fi; echo END`
 	provDockerScript = ProvDockerTag + ` if command -v docker >/dev/null 2>&1; then echo DOCKER=yes; o=$(docker version --format "{{.Server.Version}}" 2>&1); echo "SRVRC=$?"; echo "SRV=$(echo "$o" | head -n 1)"; else echo DOCKER=no; fi; echo END`
-	provCtrScript    = ProvCtrTag + ` o=$(docker ps -a --format "{{.Names}}" 2>&1); echo "RC=$?"; echo "$o" | sed "s/^/N=/"; echo END`
+	provCtrScript    = ProvCtrTag + ` o=$(docker ps -a --format "{{.Names}}|{{.Ports}}" 2>&1); echo "RC=$?"; echo "$o" | sed "s/^/N=/"; echo END`
 	provPortsScript  = ProvPortsTag + ` if command -v ss >/dev/null 2>&1; then o=$(ss -lntu 2>&1); echo "SSRC=$?"; echo "$o" | sed "s/^/L=/"; else echo SS=none; fi; echo END`
 	provDiskScript   = ProvDiskTag + ` p=/; if [ -d /var/lib/docker ]; then p=/var/lib/docker; fi; echo "DFPATH=$p"; o=$(df -Pk "$p" 2>&1); echo "DFRC=$?"; echo "$o" | tail -n 1 | sed "s/^/DF=/"; echo END`
 )
@@ -173,9 +177,10 @@ func (s *Session) ProvisionCheck() ProvisionReport {
 	}
 	r.Items = append(r.Items, classifyContainers(dP, cP))
 	pP := s.provProbe(provPortsScript, nil)
+	pub := publishedPorts(dP, cP)
 	r.Items = append(r.Items,
-		classifyPort(pP, "порт AmneziaWG", "udp", ProvAWGPort),
-		classifyPort(pP, "порт XRay", "tcp", ProvXRayPort))
+		classifyPort(pP, pub, "порт AmneziaWG", "udp", ProvAWGPort),
+		classifyPort(pP, pub, "порт XRay", "tcp", ProvXRayPort))
 	r.Items = append(r.Items, classifyDisk(s.provProbe(provDiskScript, nil)))
 	return r
 }
@@ -309,7 +314,7 @@ func classifySudo(p probe) ProvItem {
 	case p.get("SUDORC") == "0":
 		return ProvItem{what, ProvOK, "sudo без пароля работает"}
 	case p.get("SUDORC") != "":
-		return ProvItem{what, ProvBad, "не root и sudo без пароля не разрешён: " + p.get("SUDOERR")}
+		return ProvItem{what, ProvBad, "не root и sudo без пароля не разрешён: " + srvText(p.get("SUDOERR"))}
 	}
 	return unk(what, "проверить sudo не удалось")
 }
@@ -321,7 +326,7 @@ func dockerUsable(p probe) bool {
 
 func classifyDocker(p probe) ProvItem {
 	const what = "Docker"
-	srv := strings.TrimSpace(p.get("SRV"))
+	srv := srvText(strings.TrimSpace(p.get("SRV")))
 	switch {
 	case !p.ok:
 		return notRan(what, p)
@@ -333,12 +338,76 @@ func classifyDocker(p probe) ProvItem {
 		return ProvItem{what, ProvOK, "версия " + srv + ", демон работает"}
 	case deniedIn(srv):
 		return unk(what, "Docker установлен, а спросить демон не хватило прав: "+srv)
-	case strings.Contains(srv, "Cannot connect to the Docker daemon") || strings.Contains(srv, "Is the docker daemon running"):
-		return ProvItem{what, ProvBad, "Docker установлен, демон не работает: " + srv}
+	// Решение ядра (ревью р1, M1): остановленный демон — поправимо, официальный
+	// установщик сам делает systemctl enable --now docker. Не «нельзя».
+	case dockerStopped(p):
+		return ProvItem{what, ProvOK, "Docker установлен, демон остановлен — официальный установщик запустит его (" + srv + ")"}
 	case srv == "":
 		return unk(what, "Docker установлен, демон не ответил (пустой вывод)")
 	}
 	return unk(what, "Docker установлен, состояние демона непонятно: "+srv)
+}
+
+// dockerStopped — Docker установлен, демон измеренно не запущен.
+func dockerStopped(p probe) bool {
+	srv := p.get("SRV")
+	return p.ok && p.get("DOCKER") == "yes" && p.get("SRVRC") != "0" &&
+		(strings.Contains(srv, "Cannot connect to the Docker daemon") || strings.Contains(srv, "Is the docker daemon running"))
+}
+
+// srvMax — сколько рун текста сервера попадает в причину.
+const srvMax = 200
+
+// srvText — текст сервера для причины: управляющие символы (в т.ч. ESC
+// терминальных последовательностей) заменяются пробелом, длина обрезается.
+func srvText(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == srvMax {
+			b.WriteString("…")
+			break
+		}
+		if unicode.IsControl(r) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
+// pubPorts — порты, опубликованные контейнерами Docker (docker ps): ss их не
+// видит, если docker-proxy выключен (правила iptables). known=false —
+// список получить не удалось.
+type pubPorts struct {
+	known bool
+	set   map[string]string // "tcp:443" → имя контейнера
+}
+
+func publishedPorts(d, c probe) pubPorts {
+	switch {
+	case d.ok && d.get("DOCKER") == "no":
+		return pubPorts{known: true} // Docker нет — и опубликованных портов нет
+	case dockerStopped(d):
+		return pubPorts{known: true} // демон не работает — порты не опубликованы
+	case !dockerUsable(d) || !c.ok || c.get("RC") != "0":
+		return pubPorts{}
+	}
+	pp := pubPorts{known: true, set: map[string]string{}}
+	for _, line := range c.kv["N"] {
+		name, ports, _ := strings.Cut(line, "|")
+		for _, part := range strings.Split(ports, ",") {
+			host, ctr, ok := strings.Cut(strings.TrimSpace(part), "->")
+			if !ok {
+				continue // порт только объявлен (EXPOSE), не опубликован
+			}
+			_, proto, _ := strings.Cut(ctr, "/")
+			hp := host[strings.LastIndexByte(host, ':')+1:]
+			pp.set[proto+":"+hp] = strings.TrimSpace(name)
+		}
+	}
+	return pp
 }
 
 func classifyContainers(d, c probe) ProvItem {
@@ -351,10 +420,11 @@ func classifyContainers(d, c probe) ProvItem {
 	case !c.ok:
 		return notRan(what, c)
 	case c.get("RC") != "0":
-		return unk(what, "docker ps не выполнился: "+strings.Join(c.kv["N"], " "))
+		return unk(what, "docker ps не выполнился: "+srvText(strings.Join(c.kv["N"], " ")))
 	}
 	var found []string
 	for _, n := range c.kv["N"] {
+		n, _, _ = strings.Cut(n, "|")
 		if n = strings.TrimSpace(n); strings.HasPrefix(n, "amnezia-") {
 			found = append(found, n)
 		}
@@ -388,25 +458,33 @@ func listenPorts(lines []string) (map[string]bool, int) {
 	return m, n
 }
 
-func classifyPort(p probe, name, proto string, port int) ProvItem {
-	what := fmt.Sprintf("%s %d/%s", name, port, proto)
+func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem {
+	what := fmt.Sprintf("%s %d/%s (порт по умолчанию)", name, port, proto)
+	key := proto + ":" + strconv.Itoa(port)
 	switch {
+	// Опубликованный контейнером порт — измеренное «занят», даже если ss
+	// не ответил: docker ps его видит.
+	case pub.set[key] != "":
+		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.set[key]) + " — освободите его или выберите другой порт при установке"}
 	case !p.ok:
 		return notRan(what, p)
 	case p.has("SS"):
 		return unk(what, "утилиты ss на сервере нет — занятость портов не проверить")
 	case p.get("SSRC") != "0":
-		return unk(what, "ss не выполнился: "+strings.Join(p.kv["L"], " "))
+		return unk(what, "ss не выполнился: "+srvText(strings.Join(p.kv["L"], " ")))
 	}
 	m, n := listenPorts(p.kv["L"])
 	switch {
 	case n == 0:
 		// На живом сервере слушает хотя бы sshd: пустой список — не «свободно».
 		return unk(what, "ss не показал ни одного прослушиваемого сокета (даже SSH) — данным не верим")
-	case m[proto+":"+strconv.Itoa(port)]:
+	case m[key]:
 		return ProvItem{what, ProvBad, "порт занят другой программой — освободите его или выберите другой порт при установке"}
+	case !pub.known:
+		// ss не видит порты контейнеров с выключенным docker-proxy.
+		return unk(what, "по ss свободен, но список портов контейнеров Docker (docker ps) получить не удалось — ss их может не видеть")
 	}
-	return ProvItem{what, ProvOK, "свободен"}
+	return ProvItem{what, ProvOK, "свободен (по ss и docker ps; ss не видит порты контейнеров с выключенным docker-proxy, их сверили по docker ps)"}
 }
 
 func classifyDisk(p probe) ProvItem {
@@ -415,7 +493,7 @@ func classifyDisk(p probe) ProvItem {
 	case !p.ok:
 		return notRan(what, p)
 	case p.get("DFRC") != "0":
-		return unk(what, "df не выполнился: "+p.get("DF"))
+		return unk(what, "df не выполнился: "+srvText(p.get("DF")))
 	}
 	f := strings.Fields(p.get("DF"))
 	if len(f) < 4 {

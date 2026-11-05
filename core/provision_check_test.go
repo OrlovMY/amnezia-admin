@@ -81,8 +81,8 @@ func TestProvClassifyTable(t *testing.T) {
 	apC := classifyProvAppArmor
 	suC := classifySudo
 	dC := classifyDocker
-	awgC := func(p probe) ProvItem { return classifyPort(p, "AWG", "udp", ProvAWGPort) }
-	xC := func(p probe) ProvItem { return classifyPort(p, "XRay", "tcp", ProvXRayPort) }
+	awgC := func(p probe) ProvItem { return classifyPort(p, pubPorts{known: true}, "AWG", "udp", ProvAWGPort) }
+	xC := func(p probe) ProvItem { return classifyPort(p, pubPorts{known: true}, "XRay", "tcp", ProvXRayPort) }
 	diC := classifyDisk
 	ctrC := func(p probe) ProvItem {
 		return classifyContainers(parseProbe("DOCKER=yes\nSRVRC=0\nSRV=27.1\nEND\n", nil), p)
@@ -102,7 +102,7 @@ func TestProvClassifyTable(t *testing.T) {
 		// sshRunner при ошибке возвращает и накопленный stdout: полный вывод
 		// с ошибкой — всё равно «не удалось», а не «годится».
 		{"os fail with output", osC, okOS, fail, ProvUnknown},
-		{"ports fail with output", func(p probe) ProvItem { return classifyPort(p, "XRay", "tcp", ProvXRayPort) }, okPorts, fail, ProvUnknown},
+		{"ports fail with output", func(p probe) ProvItem { return classifyPort(p, pubPorts{known: true}, "XRay", "tcp", ProvXRayPort) }, okPorts, fail, ProvUnknown},
 		{"os empty", osC, "", nil, ProvUnknown},
 		{"os no END", osC, "ID=ubuntu\nVERSION_ID=24.04\n", nil, ProvUnknown},
 
@@ -136,7 +136,7 @@ func TestProvClassifyTable(t *testing.T) {
 
 		{"docker absent", dC, okDocker, nil, ProvOK},
 		{"docker running", dC, "DOCKER=yes\nSRVRC=0\nSRV=27.1.1\nEND\n", nil, ProvOK},
-		{"docker daemon down", dC, "DOCKER=yes\nSRVRC=1\nSRV=Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\nEND\n", nil, ProvBad},
+		{"docker daemon down", dC, "DOCKER=yes\nSRVRC=1\nSRV=Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\nEND\n", nil, ProvOK}, // M1: установщик запустит
 		{"docker denied", dC, "DOCKER=yes\nSRVRC=1\nSRV=permission denied while trying to connect\nEND\n", nil, ProvUnknown},
 		{"docker blank", dC, "DOCKER=yes\nSRVRC=0\nSRV=\nEND\n", nil, ProvUnknown},
 		{"docker fail", dC, "", fail, ProvUnknown},
@@ -218,13 +218,7 @@ func TestProvisionCheckArrives(t *testing.T) {
 	if v := r.Verdict(); v != ProvVerdictYes {
 		t.Fatalf("здоровый сервер: %v; %+v", v, r.Items)
 	}
-	for _, c := range f.cmds {
-		for _, bad := range []string{" rm ", "apparmor_parser -R", "docker run", "docker rm", "systemctl start", "apt", " > "} {
-			if strings.Contains(c, bad) {
-				t.Errorf("предпроверка выполнила изменяющую команду %q: %s", bad, c)
-			}
-		}
-	}
+	assertProvReadOnly(t, f.cmds)
 
 	for _, tag := range []string{ProvOSTag, ProvKernelTag, DiagHostTag, ProvSudoTag, ProvDockerTag, ProvPortsTag, ProvDiskTag} {
 		f := healthyFake()

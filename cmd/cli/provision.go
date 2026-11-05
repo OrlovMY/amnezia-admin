@@ -24,17 +24,43 @@ const (
 	exitProvUnknown = exitRestoreStopped // 4
 )
 
-// runProvisionCheckCmd — разбор ключа цели и подключение. Ключ — -to-key
-// (как цель у migrate), иначе -key; отпечаток — -to-hostkey, иначе -hostkey.
-func runProvisionCheckCmd(in io.Reader, w, errOut io.Writer, isTTY bool, key, toKey, hostkey, toHostkey, knownHostsPath string) int {
-	key, toKey = strings.TrimSpace(key), strings.TrimSpace(toKey)
-	if key != "" && toKey != "" && key != toKey {
+// provKeys — откуда может прийти ключ. flag* — только ЯВНО заданные флаги
+// (не умолчания из окружения).
+type provKeys struct {
+	flagKey, flagToKey, envKey, envToKey string
+}
+
+// pick — ключ и его источник. Порядок (ревью р1, L1): явный -to-key, явный
+// -key, AMNEZIA_TO_KEY, AMNEZIA_KEY. Явный флаг главнее окружения: у
+// пользователя migrate обе переменные выставлены и разные — это не ошибка.
+// Ошибка — только два ЯВНЫХ разных флага.
+func (k provKeys) pick() (key, from string, conflict bool) {
+	fk, ftk := strings.TrimSpace(k.flagKey), strings.TrimSpace(k.flagToKey)
+	switch {
+	case fk != "" && ftk != "" && fk != ftk:
+		return "", "", true
+	case ftk != "":
+		return ftk, "-to-key", false
+	case fk != "":
+		return fk, "-key", false
+	case strings.TrimSpace(k.envToKey) != "":
+		return strings.TrimSpace(k.envToKey), "AMNEZIA_TO_KEY", false
+	case strings.TrimSpace(k.envKey) != "":
+		return strings.TrimSpace(k.envKey), "AMNEZIA_KEY", false
+	}
+	return "", "", false
+}
+
+// runProvisionCheckCmd — выбор ключа цели и подключение; отпечаток —
+// -to-hostkey, иначе -hostkey.
+func runProvisionCheckCmd(in io.Reader, w, errOut io.Writer, isTTY bool, ks provKeys, hostkey, toHostkey, knownHostsPath string) int {
+	k, from, conflict := ks.pick()
+	if conflict {
 		fmt.Fprintln(errOut, "provision-check проверяет один сервер: заданы -key и -to-key с разными ключами. Оставьте один.")
 		return exitProvUsage
 	}
-	k := toKey
-	if k == "" {
-		k = key
+	if k != "" {
+		fmt.Fprintln(w, "Ключ проверяемого сервера взят из "+from+".")
 	}
 	if k == "" {
 		fmt.Fprintln(errOut, "Не задан ключ проверяемого сервера: -to-key vpn://... (или -key; переменные AMNEZIA_TO_KEY / AMNEZIA_KEY)")
