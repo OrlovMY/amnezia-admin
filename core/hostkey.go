@@ -159,7 +159,7 @@ func ConnectWithHostKey(creds *ServerCreds, pol HostKeyPolicy) (*Session, error)
 		)
 	}
 
-	client, acceptedFp, err := dialWithHostKey(creds.Host, creds.Port, creds.User, auths, pol)
+	client, acceptedFp, err := dialWithHostKey(creds.Host, creds.Port, creds.User, auths, nil, pol)
 	if err != nil {
 		// Вид отказа — для человека (connecterr.go); исходная ошибка
 		// доступна через Unwrap.
@@ -172,7 +172,10 @@ func ConnectWithHostKey(creds *ServerCreds, pol HostKeyPolicy) (*Session, error)
 // ключа хоста по политике pol, таймаут, ssh.Dial. Ошибку возвращает
 // НЕклассифицированной — классифицирует вызывающий (ConnectNew сначала
 // отделяет отказ аутентификации со своим исходом по ключам).
-func dialWithHostKey(host, port, user string, auths []ssh.AuthMethod, pol HostKeyPolicy) (*ssh.Client, string, error) {
+//
+// authCb — необязательный ssh.ClientConfig.AuthCallback (ConnectNew следит
+// через него за частичным успехом); ConnectWithHostKey передаёт nil.
+func dialWithHostKey(host, port, user string, auths []ssh.AuthMethod, authCb ssh.ClientAuthCallback, pol HostKeyPolicy) (*ssh.Client, string, error) {
 	if strings.TrimSpace(pol.KnownHostsPath) == "" {
 		return nil, "", fmt.Errorf("HostKeyPolicy.KnownHostsPath обязателен")
 	}
@@ -180,6 +183,7 @@ func dialWithHostKey(host, port, user string, auths []ssh.AuthMethod, pol HostKe
 	conf := &ssh.ClientConfig{
 		User:            user,
 		Auth:            auths,
+		AuthCallback:    authCb,
 		HostKeyCallback: hostKeyCallback(pol, &acceptedFp),
 		Timeout:         15 * time.Second,
 	}

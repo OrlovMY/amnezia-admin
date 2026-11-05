@@ -73,11 +73,18 @@ type KeyAttempt struct {
 	Outcome KeyOutcome
 	Offered []string // "агент: SHA256:…", "файл id_ed25519: SHA256:…"
 	Notes   []string // причины пропуска источников
+	// Provisional — вывод предварительный: так KeyAttempt выглядит в
+	// колбэке пароля, когда вход ещё не завершён (транспортный сбой может
+	// его отменить). В итоговом KeyAttempt от ConnectNew — false.
+	Provisional bool
 }
 
 // Reason — объяснение для человека.
 func (a KeyAttempt) Reason() string {
 	s := a.Outcome.String()
+	if a.Provisional {
+		s = "по-видимому, " + s
+	}
 	if len(a.Notes) > 0 {
 		s += " (" + strings.Join(a.Notes, "; ") + ")"
 	}
@@ -268,6 +275,10 @@ func wrapSigner(s ssh.Signer, rec *keyRec) ssh.Signer {
 // спрашивает скрытый ввод: это второй фактор, пароль повторно не уходит.
 var ErrSecondFactor = errors.New("сервер спрашивает второй фактор (после пароля снова скрытый вопрос) — не поддерживается, пароль повторно не отправлен")
 
+// ErrPasswordRejected — пароль уже отправлен и не принят, а сервер
+// предлагает ещё метод с вопросом: повторно пароль не отправляется.
+var ErrPasswordRejected = errors.New("пароль не подошёл")
+
 var ErrKbdInteractive = errors.New("сервер спрашивает не только пароль (keyboard-interactive: несколько вопросов или видимый ввод, возможно второй фактор) — пароль не отправлен")
 
 // keysVerdict — исход по ключам из ФАКТОВ рукопожатия, когда вход по
@@ -300,7 +311,26 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	rec := &keyRec{}
 	var pw []byte
 	pwAsked := false
-	pwSent := false // пароль уже ушёл серверу в этом соединении
+	pwSent := false  // пароль уже ушёл серверу в этом соединении
+	partial := false // сервер сообщил частичный успех (нужен ещё метод)
+	// methodSeq — номер попытки метода: AuthCallback зовётся между
+	// попытками. pwSeq — в какой попытке ушёл пароль.
+	methodSeq, pwSeq := 0, -1
+	authCb := func(ctx *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
+		methodSeq++
+		partial = len(ctx.PartialSuccessMethods) > 0
+		return nil, nil // выбор метода — обычный
+	}
+	// afterPw — пароль уже ушёл, а сервер спрашивает снова. Второй фактор —
+	// если это продолжение ТОЙ ЖЕ попытки (keyboard-interactive задал ещё
+	// вопрос, не ответив отказом) или после частичного успеха; иначе пароль
+	// просто не подошёл и сервер предлагает другой метод.
+	afterPw := func() error {
+		if partial || methodSeq == pwSeq {
+			return ErrSecondFactor
+		}
+		return ErrPasswordRejected
+	}
 	defer func() { clear(pw) }()
 	settleKeys := func() {
 		if len(signers) > 0 && att.Outcome == KeysUndetermined {
@@ -315,7 +345,9 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 			pwAsked = true
 			// До пароля доходит, только если ключи не дали войти.
 			settleKeys()
-			p, err := src.Password(att)
+			q := att
+			q.Provisional = true
+			p, err := src.Password(q)
 			if err != nil {
 				clear(p)
 				return "", err
@@ -346,11 +378,11 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 		auths = append(auths,
 			ssh.PasswordCallback(func() (string, error) {
 				if pwSent {
-					return "", ErrSecondFactor
+					return "", afterPw()
 				}
 				p, err := getPw()
 				if err == nil {
-					pwSent = true
+					pwSent, pwSeq = true, methodSeq
 				}
 				return p, err
 			}),
@@ -362,13 +394,13 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 					return nil, ErrKbdInteractive
 				}
 				if pwSent {
-					return nil, ErrSecondFactor
+					return nil, afterPw()
 				}
 				p, err := getPw()
 				if err != nil {
 					return nil, err
 				}
-				pwSent = true
+				pwSent, pwSeq = true, methodSeq
 				return []string{p}, nil
 			}),
 		)
@@ -377,13 +409,21 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 		return nil, att, &AuthError{Keys: att, Err: errors.New("нет ни ключей, ни пароля")}
 	}
 
-	client, fp, err := dialWithHostKey(host, port, user, auths, pol)
+	client, fp, err := dialWithHostKey(host, port, user, auths, authCb, pol)
 	if err != nil {
 		ce := ClassifyConnectError(err)
-		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor)
+		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor) || errors.Is(err, ErrPasswordRejected)
 		if authFail {
 			settleKeys()
 			return nil, att, &AuthError{Keys: att, PasswordTried: pw != nil, Err: err}
+		}
+		if len(signers) > 0 && att.Outcome != KeysUndetermined {
+			// Вывод о ключах сделан по ходу входа, но вход оборвался не по
+			// аутентификации (например сбой чтения внутри проверки ключа:
+			// x/crypto идёт к паролю, а запись пароля падает уже на
+			// мёртвом соединении). Вывод недостоверен — снимаем его.
+			att.Outcome = KeysUndetermined
+			att.Notes = append(att.Notes, "связь оборвалась во время входа — вывод о ключах недостоверен")
 		}
 		return nil, att, ce
 	}

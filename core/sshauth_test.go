@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -30,6 +31,9 @@ type fakeAuthServer struct {
 	port      string
 	hostKey   ssh.Signer
 	allowKeys map[string]bool
+	// dropOnPubkey — рвать TCP-соединение, как только клиент спросил про
+	// ключ (сбой транспорта внутри validateKey у клиента).
+	dropOnPubkey atomic.Bool
 }
 
 func startFakeAuthServer(t *testing.T, allowKeys []ssh.PublicKey, allowPassword string) *fakeAuthServer {
@@ -77,7 +81,16 @@ func startFakeAuthServerConf(t *testing.T, allowKeys []ssh.PublicKey, allowPassw
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				sc, chans, reqs, err := ssh.NewServerConn(c, conf)
+				cc := conf
+				if fs.dropOnPubkey.Load() {
+					cp := *conf
+					cp.PublicKeyCallback = func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+						_ = c.Close()
+						return nil, errors.New("обрыв")
+					}
+					cc = &cp
+				}
+				sc, chans, reqs, err := ssh.NewServerConn(c, cc)
 				if err != nil {
 					return
 				}
@@ -472,5 +485,113 @@ func TestConnectNewNoClientAuthUndetermined(t *testing.T) {
 	defer sess.Client.Close()
 	if att.Outcome != KeysUndetermined || ps.calls != 0 || !strings.Contains(strings.Join(att.Notes, ";"), "без проверки ключа") {
 		t.Fatalf("att=%#v calls=%d, want KeysUndetermined с примечанием", att, ps.calls)
+	}
+}
+
+// twoMethodServer — сервер с password и keyboard-interactive. partialOK:
+// верный пароль даёт частичный успех, дальше keyboard-interactive просит код
+// (второй фактор). Иначе обычный отказ пароля, kbd тоже перечислен.
+func twoMethodServer(partialOK bool, kbdAnswers *[][]string) func(*ssh.ServerConfig) {
+	code := func(_ ssh.ConnMetadata, ch ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+		ans, err := ch("", "", []string{"Verification code: "}, []bool{false})
+		if err != nil {
+			return nil, err
+		}
+		*kbdAnswers = append(*kbdAnswers, ans)
+		return nil, errors.New("код неверен")
+	}
+	return func(c *ssh.ServerConfig) {
+		c.PublicKeyCallback = nil
+		c.PasswordCallback = func(_ ssh.ConnMetadata, p []byte) (*ssh.Permissions, error) {
+			if partialOK && string(p) == sshPw {
+				return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{KeyboardInteractiveCallback: code}}
+			}
+			return nil, errors.New("пароль не принят")
+		}
+		c.KeyboardInteractiveCallback = code
+	}
+}
+
+// TestConnectNewWrongPasswordNotSecondFactor — различение: неверный пароль на
+// сервере с password+keyboard-interactive — «пароль не подошёл», а не
+// «второй фактор»; доезд: верный пароль + частичный успех → ErrSecondFactor.
+func TestConnectNewWrongPasswordNotSecondFactor(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	for _, partialOK := range []bool{false, true} {
+		t.Run(fmt.Sprint("частичный=", partialOK), func(t *testing.T) {
+			var kbd [][]string
+			srv := startFakeAuthServerConf(t, nil, "", twoMethodServer(partialOK, &kbd))
+			ps := &pwSource{pw: sshPw}
+			_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+			var ae *AuthError
+			if !errors.As(err, &ae) || !ae.PasswordTried {
+				t.Fatalf("ожидался *AuthError с паролем, got %v", err)
+			}
+			if got := errors.Is(err, ErrSecondFactor); got != partialOK {
+				t.Fatalf("ErrSecondFactor=%v, want %v (err %v)", got, partialOK, err)
+			}
+			if !partialOK && !errors.Is(err, ErrPasswordRejected) {
+				t.Fatalf("неверный пароль: want ErrPasswordRejected, got %v", err)
+			}
+			if len(kbd) != 0 || leaksPassword(err.Error()) {
+				t.Fatalf("пароль ушёл во второй вопрос или в текст: kbd=%d", len(kbd))
+			}
+		})
+	}
+}
+
+// TestConnectNewKbdThenPassword — keyboard-interactive дал частичный успех,
+// затем сервер просит password: пароль второй раз не уходит (ErrSecondFactor
+// из PasswordCallback).
+func TestConnectNewKbdThenPassword(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	pwCalls := 0
+	srv := startFakeAuthServerConf(t, nil, "", func(c *ssh.ServerConfig) {
+		c.PublicKeyCallback = nil
+		c.PasswordCallback = nil
+		c.KeyboardInteractiveCallback = func(_ ssh.ConnMetadata, ch ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			ans, err := ch("", "", []string{"Password: "}, []bool{false})
+			if err != nil || len(ans) != 1 || ans[0] != sshPw {
+				return nil, errors.New("нет")
+			}
+			return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
+				PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+					pwCalls++
+					return nil, errors.New("нет")
+				},
+			}}
+		}
+	})
+	ps := &pwSource{pw: sshPw}
+	_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if !errors.Is(err, ErrSecondFactor) || pwCalls != 0 {
+		t.Fatalf("err=%v pwCalls=%d, want ErrSecondFactor и пароль второй раз не отправлен", err, pwCalls)
+	}
+}
+
+// TestConnectNewDropDuringKeyCheck — соединение рвётся, когда сервер
+// проверяет ключ: вывод «сервер отверг ключи», сделанный по ходу (в колбэке
+// пароля он помечен как предварительный), в итоге снимается →
+// KeysUndetermined с примечанием.
+func TestConnectNewDropDuringKeyCheck(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	writeKey(t, dir, "id_ed25519", "")
+	srv := startFakeAuthServer(t, nil, sshPw)
+	srv.dropOnPubkey.Store(true)
+	ps := &pwSource{pw: sshPw}
+	_, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: ps.fn}, trustPolicy(t))
+	if err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		t.Fatalf("обрыв не должен выглядеть отказом аутентификации: %v", err)
+	}
+	if att.Outcome != KeysUndetermined || !strings.Contains(strings.Join(att.Notes, ";"), "вывод о ключах недостоверен") {
+		t.Fatalf("att=%#v, want KeysUndetermined с примечанием", att)
+	}
+	if ps.calls > 0 && !ps.got.Provisional {
+		t.Fatal("в колбэке пароля вывод не помечен предварительным")
 	}
 }
