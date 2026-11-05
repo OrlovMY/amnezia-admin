@@ -105,6 +105,14 @@ func TestInstallStepTimeout(t *testing.T) {
 	if res.ReadyForRestore() || !res.Stop {
 		t.Error("не остановлено")
 	}
+	// Аудит L5: после срыва к серверу не обращаемся — молчащий шаг последний.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, c := range f.calls {
+		if c.key == f.drop && i != len(f.calls)-1 {
+			t.Errorf("после срыва ушло ещё %d команд(ы), первая: %s", len(f.calls)-1-i, f.calls[i+1].key)
+		}
+	}
 }
 
 // M2: keepalive — три пропуска подряд закрывают связь; ответы — нет.
