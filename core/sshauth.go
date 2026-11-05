@@ -457,6 +457,7 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 
 	client, fp, err := dialWithHostKey(host, port, user, auths, authCb, pol)
 	if err != nil {
+		err = scrubPassword(err, pw)
 		ce := ClassifyConnectError(err)
 		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor) || errors.Is(err, ErrPasswordRejected) ||
 			errors.Is(err, ErrExtraPrompt) || errors.Is(err, ErrPasswordCancelled)
@@ -486,3 +487,27 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	creds := &ServerCreds{Host: host, Port: port, User: user} // пароль не хранится
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: fp}, att, nil
 }
+
+// scrubPassword — граница ConnectNew: отправленный пароль вычищается из
+// текста ошибки. Текст ошибки x/crypto может нести строку от сервера
+// (SSH_MSG_DISCONNECT «ssh: disconnect, reason N: …»), а враждебный сервер,
+// уже получивший пароль, способен вернуть его там (аудит AU PR #64, L-4).
+// errors.Is/As работают по-прежнему: исходная ошибка доступна через Unwrap.
+func scrubPassword(err error, pw []byte) error {
+	if err == nil || len(pw) == 0 {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, string(pw)) {
+		return err
+	}
+	return &scrubbedError{msg: strings.ReplaceAll(msg, string(pw), hiddenPlaceholder), err: err}
+}
+
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }

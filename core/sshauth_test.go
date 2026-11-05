@@ -689,3 +689,17 @@ func TestConnectNewServerTextNotInError(t *testing.T) {
 		t.Fatalf("отмена не распознаётся: %v", ae)
 	}
 }
+
+// Аудит AU PR #64, L-4: сервер, получивший пароль, возвращает его в тексте
+// разрыва — в ошибке ConnectNew пароля нет, а распознавание ошибки прежнее.
+func TestScrubPasswordFromServerText(t *testing.T) {
+	inner := errors.New("ssh: disconnect, reason 2: got pa55-L4-marker thanks")
+	err := scrubPassword(&ConnectError{Kind: ConnectDropped, Err: inner}, []byte("pa55-L4-marker"))
+	if strings.Contains(err.Error(), "pa55-L4-marker") {
+		t.Fatalf("пароль в тексте ошибки: %q", err.Error())
+	}
+	var ce *ConnectError
+	if !errors.As(err, &ce) || ce.Kind != ConnectDropped || !errors.Is(err, inner) {
+		t.Fatalf("распознавание ошибки потеряно: %T %v", err, err)
+	}
+}
