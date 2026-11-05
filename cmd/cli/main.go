@@ -18,6 +18,7 @@
 //	amnezia-admin diagnose -key vpn://... [-fix [-yes]]
 //	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
+//	amnezia-admin provision-check -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -1024,6 +1025,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return 1
 	}
 
+	// provision-check — предпроверка цели перед установкой (provision.go).
+	if cmd == "provision-check" {
+		return runProvisionCheckCmd(stdin, stdout, stderr, stdinIsTTY(), *key, *toKey, *hostkey, *toHostkey, knownHostsPath)
+	}
+
 	// migrate — два сервера, свой разбор ключей и подключение (migrate.go).
 	if cmd == "migrate" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -1295,7 +1301,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		}
 		err = showConfig(stdout, sess, cur, *name, *printConf, *printUnverified)
 	default:
-		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | migrate | diagnose)", cmd)
+		err = fmt.Errorf("неизвестная команда %q (decode | list | add | del | rename | toggle | rekey | show-config | backup | backup-info | restore | migrate | provision-check | diagnose)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, errText(err, func(x string) string { return x }))
