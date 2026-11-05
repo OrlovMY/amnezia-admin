@@ -122,10 +122,10 @@ func msgViolations(name string, src []byte) ([]string, error) {
 				if !ok {
 					return true
 				}
-				// x.Label.SetText(…) — вызов встроенной подписи мимо
-				// msgText.SetText: обход маски (ревью-1 M1).
-				if in, ok := sel.X.(*ast.SelectorExpr); ok && in.Sel.Name == "Label" && filepath.Base(name) != "msg.go" {
-					bad(x, "вызов .Label."+sel.Sel.Name+" — обход маски msgText.SetText")
+				// Bind/Unbind — текст подписи из привязки данных мимо
+				// msgText.SetText (ревью-2 L5).
+				if (sel.Sel.Name == "Bind" || sel.Sel.Name == "Unbind") && filepath.Base(name) != "msg.go" {
+					bad(x, "вызов ."+sel.Sel.Name+" — текст мимо маски msgText.SetText")
 				}
 				pkg, ok := sel.X.(*ast.Ident)
 				if !ok || !guardedPkgs[pkg.Name] {
@@ -143,6 +143,19 @@ func msgViolations(name string, src []byte) ([]string, error) {
 				}
 				if msgAllowedCtors[full] == "" {
 					bad(x, full+" не в закрытом списке конструкторов")
+				}
+			case *ast.SelectorExpr:
+				// ЛЮБОЕ обращение к встроенной .Label вне msg.go — вызов,
+				// &l.Label, присваивание, передача — обход маски (ревью-1
+				// M1, ревью-2 L5). widget.Label (тип) — не обращение;
+				// строковые поля .Label чужих структур — закрытый список.
+				if x.Sel.Name == "Label" && filepath.Base(name) != "msg.go" {
+					if id, ok := x.X.(*ast.Ident); ok && id.Name == "widget" {
+						return true
+					}
+					if !labelFieldAllowed[selectorString(x)] {
+						bad(x, "обращение к ."+selectorString(x)+" — встроенная подпись мимо маски msgText")
+					}
 				}
 			case *ast.CompositeLit:
 				if s := exprString(x.Type); s == "widget.Label" || s == "canvas.Text" || s == "widget.RichText" {
@@ -168,6 +181,23 @@ func msgViolations(name string, src []byte) ([]string, error) {
 		})
 	}
 	return out, nil
+}
+
+// labelFieldAllowed — поля с именем Label, которые не подпись: строка
+// метки хранилища (core.VaultPayload.Label).
+var labelFieldAllowed = map[string]bool{"vc.payload.Label": true}
+
+// selectorString — цепочка a.b.c целиком ("" — не цепочка имён).
+func selectorString(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		if s := selectorString(x.X); s != "" {
+			return s + "." + x.Sel.Name
+		}
+	}
+	return ""
 }
 
 func exprString(e ast.Expr) string {
@@ -231,6 +261,8 @@ func TestMessagesOnlySelectable(t *testing.T) {
 		"встроенная Label":       `type myLbl struct { widget.Label }`,
 		"псевдоним":              "import w \"fyne.io/fyne/v2/widget\"\nfunc f() { _ = w.NewLabel(\"x\") }",
 		".Text = мимо маски":     `func f(l *msgText) { l.Text = "vpn://x" }`,
+		"&l.Label":               `func f(l *msgText) { p := &l.Label; p.SetText("vpn://x") }`,
+		"Bind":                   `func f(l *msgText) { l.Bind(binding.NewString()) }`,
 		".Label.SetText":         `func f(l *msgText) { l.Label.SetText("vpn://x") }`,
 	}
 	for name, body := range canaries {
