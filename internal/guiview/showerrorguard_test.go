@@ -52,10 +52,18 @@ func findShowError(fset *token.FileSet, f *ast.File) []string {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "ShowError" {
+			if !ok {
 				return true
 			}
-			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "dialog" {
+			// 06.11.2026: безликий диалог ошибки — u.showErrorText (msg.go,
+			// выделяемый текст и «Копировать»), заменивший dialog.ShowError.
+			// Считаются оба: прямой dialog.ShowError запрещён и сторожем
+			// TestMessagesOnlySelectable, но здесь он по-прежнему находка.
+			if sel.Sel.Name == "showErrorText" {
+				found = append(found, fd.Name.Name)
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "dialog" && sel.Sel.Name == "ShowError" {
 				found = append(found, fd.Name.Name)
 			}
 			return true
@@ -138,6 +146,7 @@ func (u *ui) showError(err error) { dialog.ShowError(err, u.win) }
 func (u *ui) addDialog() { if err != nil { dialog.ShowError(err, u.win) } }
 func (u *ui) newWritePath() { go func() { dialog.ShowError(err, u.win) }() }
 func (u *ui) fine() { u.showError(err); other.ShowError(err) }
+func (u *ui) renameSelected() { u.showErrorText(err) }
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "planted.go", src, 0)
@@ -145,7 +154,7 @@ func (u *ui) fine() { u.showError(err); other.ShowError(err) }
 		t.Fatal(err)
 	}
 	got := strings.Join(findShowError(fset, f), ",")
-	if want := "showError,addDialog,newWritePath"; got != want {
+	if want := "showError,addDialog,newWritePath,renameSelected"; got != want {
 		t.Fatalf("подсадка: найдено %q, ожидалось %q", got, want)
 	}
 }

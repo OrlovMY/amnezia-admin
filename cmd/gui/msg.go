@@ -8,6 +8,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -58,16 +59,22 @@ func withCopy(l *widget.Label) fyne.CanvasObject {
 	return container.NewBorder(nil, nil, nil, container.NewVBox(copyButton(l)), l)
 }
 
+// withCopyBelow — сообщение l во всю ширину и «Копировать» под ним справа
+// (диалоги сообщений: кнопка сбоку отнимала у текста треть ширины).
+func withCopyBelow(l *widget.Label) fyne.CanvasObject {
+	return container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), copyButton(l)), nil, nil, l)
+}
+
 // infoDialogWidth — ширина диалога сообщения: текст переносится по словам,
 // без ширины выделяемая подпись схлопнулась бы в столбик.
-const infoDialogWidth = 460
+const infoDialogWidth = 520
 
 // showInfo — диалог сообщения (замена dialog.ShowInformation): выделяемый
 // текст и «Копировать». Текст проходит границу маскировки.
 func (u *ui) showInfo(title, text string) dialog.Dialog {
 	l := msgLabel(core.MaskText(text))
 	l.Wrapping = fyne.TextWrapWord
-	d := dialog.NewCustom(title, "Закрыть", withCopy(l), u.win)
+	d := dialog.NewCustom(title, "Закрыть", withCopyBelow(l), u.win)
 	d.Resize(fyne.NewSize(infoDialogWidth, d.MinSize().Height))
 	d.Show()
 	return d
@@ -87,7 +94,7 @@ func (u *ui) showErrorText(err error) dialog.Dialog {
 // newConfirm — подтверждение (замена dialog.NewConfirm) с выделяемым
 // текстом; не показывается, вызывающий сам вызывает Show.
 func (u *ui) newConfirm(title, text string, cb func(bool)) *dialog.ConfirmDialog {
-	return dialog.NewCustomConfirm(title, "Да", "Нет", withCopy(wrapped(msgLabel(core.MaskText(text)))), cb, u.win)
+	return dialog.NewCustomConfirm(title, "Да", "Нет", withCopyBelow(wrapped(msgLabel(core.MaskText(text)))), cb, u.win)
 }
 
 // wrapped — перенос по словам для подписи l (для цепочек вызова).
@@ -96,13 +103,17 @@ func wrapped(l *widget.Label) *widget.Label {
 	return l
 }
 
-// compactTheme — текущая тема приложения без внутреннего отступа подписи.
+// compactTheme — текущая тема приложения без внутреннего отступа подписи и
+// с серым цветом текста (цвет подсказки-заглушки темы).
 // Тема берётся в момент запроса, а не при сборке: смена светлой/тёмной и
 // боевая тема программы проходят насквозь.
 type compactTheme struct{}
 
 func (compactTheme) cur() fyne.Theme { return fyne.CurrentApp().Settings().Theme() }
 func (t compactTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
+	if n == theme.ColorNameForeground {
+		n = theme.ColorNamePlaceHolder // серый, как прежний canvas.Text подсказки
+	}
 	return t.cur().Color(n, v)
 }
 func (t compactTheme) Font(s fyne.TextStyle) fyne.Resource     { return t.cur().Font(s) }

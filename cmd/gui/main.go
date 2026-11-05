@@ -1516,7 +1516,6 @@ func (u *ui) offerSaveKey(key, defaultLabel, hostKeyFingerprint string) {
 	pinRepeat.Password = true
 	bindCheck := widget.NewCheck("Привязать к этой учётке Windows (файл нельзя перенести на другой ПК или учётную запись)", nil)
 	bindHint := msgLabelStyle("Рекомендуется: украденный файл будет бесполезен на другом компьютере.", fyne.TextAlignLeading, fyne.TextStyle{})
-	bindHint.Importance = widget.LowImportance
 	statusLabel := msgLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
 	mismatchLabel := msgLabelStyle("Пины не совпадают", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -2237,7 +2236,10 @@ func (t *clientTable) MouseUp(e *desktop.MouseEvent) {
 func (t *clientTable) TypedKey(e *fyne.KeyEvent) {
 	rows := 0
 	if t.Length != nil {
-		rows, _ = t.Length()
+		// без колонок фокусу некуда встать — шагов нет
+		if r, cols := t.Length(); cols > 0 {
+			rows = r
+		}
 	}
 	step := func(k fyne.KeyName, n int) {
 		for i := 0; i < n; i++ {

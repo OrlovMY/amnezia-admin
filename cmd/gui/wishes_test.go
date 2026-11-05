@@ -3,6 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -187,6 +190,9 @@ func TestMainWideOneRow(t *testing.T) {
 	u.win.Resize(fyne.NewSize(900, 600))
 	frame := 900 - u.win.Content().Size().Width // поля канвы вокруг содержимого
 	at := measure(thr+frame, 600)
+	if w := u.serverLabel.Size().Width; w+0.5 < full {
+		t.Errorf("на пороге одной строки подпись сервера обрезана: %.1f < %.1f", w, full)
+	}
 	below := measure(thr+frame-1, 600)
 	if at.protoY != at.btnY || below.protoY == below.btnY {
 		t.Errorf("порог %.1f не держится: на пороге одной строкой=%v, на пиксель уже=%v", thr, at.protoY == at.btnY, below.protoY == below.btnY)
@@ -264,4 +270,40 @@ func TestTableKeysPageHomeEnd(t *testing.T) {
 			t.Errorf("шаг %d (%s): строка %d, ждали %d", i, s.k, got, s.want)
 		}
 	}
+}
+
+// TestWishesShots — снимки для отчёта (только при OSMOTR_DIR): главное окно
+// узкое и широкое, окно «Подробнее» (прочитано / не удалось узнать).
+func TestWishesShots(t *testing.T) {
+	dir := os.Getenv("OSMOTR_DIR")
+	if dir == "" {
+		t.Skip("снимки — только при OSMOTR_DIR")
+	}
+	save := func(u *ui, name string) {
+		f, err := os.Create(filepath.Join(dir, name+".png"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := png.Encode(f, u.win.Canvas().Capture()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sz := range []fyne.Size{{Width: 900, Height: 600}, {Width: 1400, Height: 700}, {Width: 1600, Height: 700}} {
+		u := osmotrUI(t, theme.VariantLight)
+		osmotrMain(u)
+		u.status.SetText("Пользователей: 3 · трафик и активность — с момента перезапуска сервера")
+		u.win.Resize(sz)
+		save(u, fmt.Sprintf("после-главное-%.0fx%.0f", sz.Width, sz.Height))
+	}
+	u := detailsUI(t, fakesrv.New(), "amnezia-awg")
+	u.win.Resize(fyne.NewSize(900, 600))
+	detailsText(t, u)
+	save(u, "после-подробнее-прочитано")
+	srv := fakesrv.New()
+	srv.FailRead = map[string]error{"/opt/amnezia/awg/wg0.conf": errors.New("i/o timeout")}
+	u = detailsUI(t, srv, "amnezia-awg")
+	u.win.Resize(fyne.NewSize(900, 600))
+	detailsText(t, u)
+	save(u, "после-подробнее-не-удалось")
 }
