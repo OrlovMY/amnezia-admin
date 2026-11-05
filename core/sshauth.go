@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -128,7 +130,9 @@ func (e *AuthError) Unwrap() error { return e.Err }
 
 func (e *AuthError) Error() string {
 	s := "Сервер не принял вход. Ключи: " + e.Keys.Reason()
-	if e.PasswordTried {
+	if e.PasswordTried && (errors.Is(e.Err, ErrSecondFactor) || errors.Is(e.Err, ErrExtraPrompt)) {
+		s += "; пароль отправлен, но сервер спросил ещё"
+	} else if e.PasswordTried {
 		s += "; пароль не подошёл"
 	} else {
 		s += "; пароль не предъявлялся"
@@ -269,12 +273,31 @@ func wrapSigner(s ssh.Signer, rec *keyRec) ssh.Signer {
 	return base
 }
 
-// ErrKbdInteractive — сервер задал в keyboard-interactive не один вопрос о
-// пароле (например код 2FA): пароль туда не отправляется.
-// ErrSecondFactor — пароль уже отправлен в этом соединении, а сервер снова
-// спрашивает скрытый ввод: это второй фактор, пароль повторно не уходит.
-var ErrSecondFactor = errors.New("сервер спрашивает второй фактор (после пароля снова скрытый вопрос) — не поддерживается, пароль повторно не отправлен")
+// ErrSecondFactor — пароль принят ЧАСТИЧНО (сервер сообщил частичный успех
+// password/keyboard-interactive) и требует ещё метод: второй фактор, пароль
+// повторно не уходит.
+var ErrSecondFactor = errors.New("пароль принят, но сервер требует второй фактор — не поддерживается, пароль повторно не отправлен")
 
+// ErrExtraPrompt — в той же попытке keyboard-interactive после пароля сервер
+// задал ДРУГОЙ вопрос (код, «Current password:» истёкшего пароля…). Что это —
+// не утверждаем; текст вопроса — в *ExtraPromptError.
+var ErrExtraPrompt = errors.New("сервер задал после пароля ещё вопрос — не поддерживается, пароль повторно не отправлен")
+
+// ExtraPromptError — ErrExtraPrompt с текстом вопроса сервера (пароля в нём
+// нет: это приглашение, присланное сервером).
+type ExtraPromptError struct{ Prompt string }
+
+func (e *ExtraPromptError) Error() string {
+	return fmt.Sprintf("сервер задал после пароля ещё вопрос: %q — не поддерживается, пароль повторно не отправлен", e.Prompt)
+}
+func (e *ExtraPromptError) Unwrap() error { return ErrExtraPrompt }
+
+// ErrPasswordCancelled — колбэк пароля вернул ошибку (человек нажал
+// «Отмена» и т.п.): это отказ от входа, а не обрыв связи.
+var ErrPasswordCancelled = errors.New("ввод пароля отменён")
+
+// ErrKbdInteractive — сервер задал в keyboard-interactive не один вопрос о
+// пароле или видимый ввод: пароль туда не отправляется.
 // ErrPasswordRejected — пароль уже отправлен и не принят, а сервер
 // предлагает ещё метод с вопросом: повторно пароль не отправляется.
 var ErrPasswordRejected = errors.New("пароль не подошёл")
@@ -311,29 +334,46 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	rec := &keyRec{}
 	var pw []byte
 	pwAsked := false
-	pwSent := false  // пароль уже ушёл серверу в этом соединении
-	partial := false // сервер сообщил частичный успех (нужен ещё метод)
+	pwSent := false      // пароль уже ушёл серверу в этом соединении
+	partial := false     // частичный успех пароля (password/keyboard-interactive)
+	keysPartial := false // частичный успех ключа: ключ принят, нужен ещё метод
+	pwPrompt := ""       // приглашение, на которое ушёл пароль (keyboard-interactive)
 	// methodSeq — номер попытки метода: AuthCallback зовётся между
 	// попытками. pwSeq — в какой попытке ушёл пароль.
 	methodSeq, pwSeq := 0, -1
 	authCb := func(ctx *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
 		methodSeq++
-		partial = len(ctx.PartialSuccessMethods) > 0
+		partial = slices.Contains(ctx.PartialSuccessMethods, "password") || slices.Contains(ctx.PartialSuccessMethods, "keyboard-interactive")
+		keysPartial = slices.Contains(ctx.PartialSuccessMethods, "publickey")
 		return nil, nil // выбор метода — обычный
 	}
-	// afterPw — пароль уже ушёл, а сервер спрашивает снова. Второй фактор —
-	// если это продолжение ТОЙ ЖЕ попытки (keyboard-interactive задал ещё
-	// вопрос, не ответив отказом) или после частичного успеха; иначе пароль
-	// просто не подошёл и сервер предлагает другой метод.
-	afterPw := func() error {
-		if partial || methodSeq == pwSeq {
+	// afterPw — пароль уже ушёл, а сервер спрашивает снова (prompt — текст
+	// вопроса keyboard-interactive, "" для метода password).
+	//   - та же попытка, тот же вопрос → переспрос: пароль не подошёл;
+	//   - та же попытка, другой вопрос → ErrExtraPrompt с текстом вопроса
+	//     (код, смена пароля — не угадываем);
+	//   - новая попытка после частичного успеха пароля → второй фактор;
+	//   - иначе пароль не подошёл, сервер предлагает другой метод.
+	afterPw := func(key, shown string) error {
+		switch {
+		case methodSeq == pwSeq && key == pwPrompt:
+			return ErrPasswordRejected
+		case methodSeq == pwSeq:
+			return &ExtraPromptError{Prompt: shown}
+		case partial:
 			return ErrSecondFactor
+		default:
+			return ErrPasswordRejected
 		}
-		return ErrPasswordRejected
 	}
 	defer func() { clear(pw) }()
 	settleKeys := func() {
 		if len(signers) > 0 && att.Outcome == KeysUndetermined {
+			if keysPartial {
+				att.Outcome = KeysAccepted
+				att.Notes = append(att.Notes, "ключ принят, но сервер требует ещё метод входа")
+				return
+			}
 			att.Outcome = keysVerdict(rec)
 			if rec.signErr != nil {
 				att.Notes = append(att.Notes, "подпись: "+rec.signErr.Error())
@@ -350,7 +390,7 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 			p, err := src.Password(q)
 			if err != nil {
 				clear(p)
-				return "", err
+				return "", fmt.Errorf("%w: %w", ErrPasswordCancelled, err)
 			}
 			if len(p) == 0 {
 				return "", ErrNoPassword
@@ -378,7 +418,7 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 		auths = append(auths,
 			ssh.PasswordCallback(func() (string, error) {
 				if pwSent {
-					return "", afterPw()
+					return "", afterPw("", "")
 				}
 				p, err := getPw()
 				if err == nil {
@@ -386,21 +426,22 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 				}
 				return p, err
 			}),
-			ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+			ssh.KeyboardInteractive(func(_, instruction string, questions []string, echos []bool) ([]string, error) {
 				if len(questions) == 0 {
 					return nil, nil
 				}
 				if len(questions) != 1 || echos[0] {
 					return nil, ErrKbdInteractive
 				}
+				prompt := instruction + "\n" + questions[0]
 				if pwSent {
-					return nil, afterPw()
+					return nil, afterPw(prompt, questions[0])
 				}
 				p, err := getPw()
 				if err != nil {
 					return nil, err
 				}
-				pwSent, pwSeq = true, methodSeq
+				pwSent, pwSeq, pwPrompt = true, methodSeq, prompt
 				return []string{p}, nil
 			}),
 		)
@@ -412,12 +453,15 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	client, fp, err := dialWithHostKey(host, port, user, auths, authCb, pol)
 	if err != nil {
 		ce := ClassifyConnectError(err)
-		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor) || errors.Is(err, ErrPasswordRejected)
+		authFail := ce.Kind == ConnectAuthRejected || errors.Is(err, ErrNoPassword) || errors.Is(err, ErrKbdInteractive) || errors.Is(err, ErrSecondFactor) || errors.Is(err, ErrPasswordRejected) ||
+			errors.Is(err, ErrExtraPrompt) || errors.Is(err, ErrPasswordCancelled)
 		if authFail {
 			settleKeys()
 			return nil, att, &AuthError{Keys: att, PasswordTried: pw != nil, Err: err}
 		}
-		if len(signers) > 0 && att.Outcome != KeysUndetermined {
+		transport := ce.Kind == ConnectDropped || ce.Kind == ConnectNetwork ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed)
+		if transport && len(signers) > 0 && att.Outcome != KeysUndetermined {
 			// Вывод о ключах сделан по ходу входа, но вход оборвался не по
 			// аутентификации (например сбой чтения внутри проверки ключа:
 			// x/crypto идёт к паролю, а запись пароля падает уже на

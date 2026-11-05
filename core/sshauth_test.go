@@ -435,8 +435,9 @@ func kbdRounds(rounds [][]string, echos [][]bool, got *[][]string) func(*ssh.Ser
 	}
 }
 
-// TestConnectNewKbdSecondFactor — второй раунд со скрытым вопросом после
-// пароля: пароль во второй раунд не уходит, отказ ErrSecondFactor.
+// TestConnectNewKbdSecondFactor — в той же попытке после пароля другой
+// скрытый вопрос: пароль во второй раунд не уходит, ErrExtraPrompt с текстом
+// вопроса (без утверждения «второй фактор»).
 func TestConnectNewKbdSecondFactor(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	var got [][]string
@@ -444,8 +445,9 @@ func TestConnectNewKbdSecondFactor(t *testing.T) {
 		[][]string{{"Password: "}, {"Verification code: "}}, [][]bool{{false}, {false}}, &got))
 	ps := &pwSource{pw: sshPw}
 	_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
-	if !errors.Is(err, ErrSecondFactor) {
-		t.Fatalf("err = %v, want ErrSecondFactor", err)
+	var xp *ExtraPromptError
+	if !errors.As(err, &xp) || xp.Prompt != "Verification code: " || errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("err = %v, want ExtraPromptError «Verification code: » (не ErrSecondFactor)", err)
 	}
 	if len(got) != 1 || len(got[0]) != 1 || got[0][0] != sshPw {
 		t.Fatalf("ответы сервера = %d раундов, want ровно один с паролем", len(got))
@@ -593,5 +595,80 @@ func TestConnectNewDropDuringKeyCheck(t *testing.T) {
 	}
 	if ps.calls > 0 && !ps.got.Provisional {
 		t.Fatal("в колбэке пароля вывод не помечен предварительным")
+	}
+}
+
+// TestConnectNewKbdSamePromptAgain — в той же попытке сервер снова спросил
+// «Password: » (переспрос после неверного): «пароль не подошёл», а не
+// «ещё вопрос»/«второй фактор»; пароль второй раз не уходит.
+func TestConnectNewKbdSamePromptAgain(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	var got [][]string
+	srv := startFakeAuthServerConf(t, nil, "", kbdRounds(
+		[][]string{{"Password: "}, {"Password: "}}, [][]bool{{false}, {false}}, &got))
+	ps := &pwSource{pw: sshPw}
+	_, _, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: t.TempDir(), Password: ps.fn}, trustPolicy(t))
+	if !errors.Is(err, ErrPasswordRejected) || errors.Is(err, ErrExtraPrompt) || errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("err = %v, want ErrPasswordRejected", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("пароль ушёл %d раз, want 1", len(got))
+	}
+}
+
+// TestConnectNewPasswordCallbackCancelled — колбэк пароля вернул ошибку
+// («Отмена»), сервер только с password: *AuthError, исход KeysRejected
+// сохраняется, примечания про обрыв связи нет.
+func TestConnectNewPasswordCallbackCancelled(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	writeKey(t, dir, "id_ed25519", "")
+	srv := startFakeAuthServer(t, nil, sshPw) // по умолчанию: publickey (отказ) + password
+	cancel := func(KeyAttempt) ([]byte, error) { return nil, errors.New("отменено") }
+	_, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: cancel}, trustPolicy(t))
+	var ae *AuthError
+	if !errors.As(err, &ae) || !errors.Is(err, ErrPasswordCancelled) || ae.PasswordTried {
+		t.Fatalf("err = %T %v, want *AuthError(ErrPasswordCancelled)", err, err)
+	}
+	if att.Outcome != KeysRejected || strings.Contains(strings.Join(att.Notes, ";"), "оборвалась") {
+		t.Fatalf("att = %#v, want KeysRejected без примечания об обрыве", att)
+	}
+}
+
+// TestConnectNewKeyPartialThenWrongPassword — ключ дал частичный успех,
+// затем пароль не подошёл и сервер предложил keyboard-interactive: «пароль не
+// подошёл» (частичный успех был у ключа, не у пароля); ключ — принят.
+func TestConnectNewKeyPartialThenWrongPassword(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	k := writeKey(t, dir, "id_ed25519", "")
+	var kbd [][]string
+	srv := startFakeAuthServerConf(t, nil, "", func(c *ssh.ServerConfig) {
+		c.PasswordCallback = nil
+		c.PublicKeyCallback = func(_ ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Permissions, error) {
+			if !bytes.Equal(pk.Marshal(), k.Marshal()) {
+				return nil, errors.New("нет")
+			}
+			return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
+				PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+					return nil, errors.New("пароль не принят")
+				},
+				KeyboardInteractiveCallback: func(_ ssh.ConnMetadata, ch ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+					ans, err := ch("", "", []string{"Password: "}, []bool{false})
+					if err == nil {
+						kbd = append(kbd, ans)
+					}
+					return nil, errors.New("нет")
+				},
+			}}
+		}
+	})
+	ps := &pwSource{pw: sshPw}
+	_, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: ps.fn}, trustPolicy(t))
+	if !errors.Is(err, ErrPasswordRejected) || errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("err = %v, want ErrPasswordRejected", err)
+	}
+	if att.Outcome != KeysAccepted || len(kbd) != 0 {
+		t.Fatalf("Outcome=%v kbd=%d, want KeysAccepted и пароль в kbd не ушёл", att.Outcome, len(kbd))
 	}
 }
