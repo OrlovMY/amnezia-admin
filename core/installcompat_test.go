@@ -34,7 +34,7 @@ func TestPlanInstallFamilies(t *testing.T) {
 		{"1.5 — Partial не Match", wgCtr("amnezia-awg2", "1.5", VersionKnown), CompatMismatch, "", false},
 		{"старый AWG", wgCtr("amnezia-awg", "старый AWG", VersionKnown), CompatMatch, provision.Rev5106, true},
 		{"WireGuard", wgCtr("amnezia-wireguard", "WireGuard", VersionKnown), CompatMatch, provision.Rev5106, true},
-		{"не тот контейнер", wgCtr("amnezia-wireguard", "2", VersionKnown), CompatMismatch, "", false},
+		{"не тот контейнер — таблицы разошлись", wgCtr("amnezia-wireguard", "2", VersionKnown), CompatUnknown, "", false},
 		// «данных нет»
 		{"версия не known, хотя Version задано", wgCtr("amnezia-awg2", "2", VersionUnknown), CompatUnknown, "", false},
 		{"семейство вне таблицы", wgCtr("amnezia-awg2", "4.0", VersionKnown), CompatUnknown, "", false},

@@ -59,6 +59,9 @@ type InstallItem struct {
 // печатается голым «совпало»: совпадение только по скриптам.
 func (it InstallItem) Verdict() string {
 	switch {
+	case it.Compat == CompatMatch && it.NeedsMeasurement && it.Family == "XRay":
+		// Скрипты server.json не пишут (аудит AU-1 N1): он и ключи — из копии.
+		return "совпало: контейнер ставят скрипты, server.json и ключи — из копии, версия бинаря подтвердится после установки"
 	case it.Compat == CompatMatch && it.NeedsMeasurement:
 		return "совпало по скриптам, версия бинаря подтвердится после установки"
 	case it.Compat == CompatMatch:
@@ -80,8 +83,10 @@ type InstallPlan struct {
 	Skipped []InstallSkip
 }
 
-// Ready — все контейнеры совместимы; иначе установка — стоп. Пустой план
-// не готов. Skipped НЕ учитываются: потребитель обязан назвать их целиком
+// Ready — все контейнеры совместимы ПО СКРИПТАМ; иначе установка — стоп.
+// Где у контейнера NeedsMeasurement, совместимость подтверждается только
+// измерением после установки — это сводит NeedsMeasurement() плана, и
+// потребитель обязан печатать его вместе с Ready. Пустой план не готов. Skipped НЕ учитываются: потребитель обязан назвать их целиком
 // (контейнер и причину) — они не будут поставлены.
 func (p InstallPlan) Ready() bool {
 	if len(p.Items) == 0 {
@@ -95,8 +100,20 @@ func (p InstallPlan) Ready() bool {
 	return true
 }
 
+// NeedsMeasurement — хоть один контейнер плана совместим только по
+// скриптам: «готов» без оговорки печатать нельзя (аудит AU-1 M2).
+func (p InstallPlan) NeedsMeasurement() bool {
+	for _, it := range p.Items {
+		if it.NeedsMeasurement {
+			return true
+		}
+	}
+	return false
+}
+
 // PlanInstall — по каждому контейнеру копии: ревизия и вердикт. prefs —
-// порядок ревизий (nil — DefaultRevisionPreference).
+// порядок ревизий (nil — DefaultRevisionPreference). Пустой не-nil prefs —
+// не проверена ни одна ревизия: Unknown, а не Mismatch (аудит AU-1 M1).
 func PlanInstall(b *Backup, prefs []string) InstallPlan {
 	if prefs == nil {
 		prefs = DefaultRevisionPreference
@@ -132,16 +149,27 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 		return unknown("в копии нет порта")
 	}
 	if bc.Version == "XRay" {
-		if len(bc.Files) == 0 {
-			return unknown("в копии нет server.json")
+		// По имени и статусу, не по позиции (аудит AU-1 L2).
+		var conf *BackupFile
+		for i := range bc.Files {
+			if bc.Files[i].Name == xrayConfFile {
+				conf = &bc.Files[i]
+				break
+			}
 		}
-		srv, err := parseXRayServer(bc.Files[0].Data.Bytes())
+		if conf == nil || conf.Status != FileSaved {
+			return unknown("в копии нет сохранённого server.json")
+		}
+		srv, err := parseXRayServer(conf.Data.Bytes())
 		if err != nil {
 			return unknown("server.json копии не разобран — транспорт и SNI неизвестны")
 		}
 		it.Transport, it.SNI = "tcp/reality", srv.serverName
 	} else if bc.Subnet == "" {
 		return unknown("в копии нет подсети")
+	}
+	if len(prefs) == 0 {
+		return unknown("не проверена ни одна ревизия скриптов (список ревизий пуст)")
 	}
 	sawUnknown, why := false, ""
 	for _, rev := range prefs {
@@ -155,6 +183,9 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 			why += fmt.Sprintf("; %s: %s", rev, s.State)
 			continue
 		case s.Container != bc.Name:
+			// Расхождение таблицы контейнеров core и provision — «данных
+			// нет», а не «не ставит» (аудит AU-1 L3).
+			sawUnknown = true
 			why += fmt.Sprintf("; %s: ставит %s, а не %s", rev, s.Container, bc.Name)
 			continue
 		}
