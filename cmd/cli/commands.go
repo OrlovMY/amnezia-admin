@@ -9,7 +9,7 @@ import "strings"
 var cliCommands = []string{
 	"decode", "list", "add", "del", "rename", "toggle", "rekey", "show-config",
 	"backup", "backup-info", "restore", "migrate", "provision-check", "diagnose",
-	"version", "check",
+	"version", "check", "stats",
 }
 
 var cliCommandList = strings.Join(cliCommands, " | ")

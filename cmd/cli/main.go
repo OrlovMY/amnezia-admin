@@ -1027,7 +1027,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
 	toKey := fs.String("to-key", os.Getenv("AMNEZIA_TO_KEY"), "migrate: ключ vpn://... НОВОГО сервера (цели); -key — источник. provision-check: ключ проверяемого сервера (главнее -key; явный флаг главнее переменных окружения); коды provision-check: 0 можно ставить, 1 нельзя, 2 ошибка использования/подключения, 4 неизвестно")
 	toHostkey := fs.String("to-hostkey", "", "migrate, provision-check: ожидаемый отпечаток ключа хоста цели SHA256:… (обязателен без терминала для нового сервера)")
-	if err := fs.Parse(args[1:]); err != nil {
+	statsFrom := fs.String("from", "", "stats: начало периода ГГГГ-ММ-ДД (UTC)")
+	statsTo := fs.String("to", "", "stats: конец периода ГГГГ-ММ-ДД (UTC), включительно")
+	statsCSV := fs.String("csv", "", "stats: выгрузить в CSV для Excel (разделитель «;»)")
+	statsBy := fs.String("by", "", "stats -csv: day | month — строки по суткам или месяцам (по умолчанию — за весь период)")
+	// stats status|install|uninstall — действие идёт до флагов.
+	flagArgs := args[1:]
+	statsSub := ""
+	if cmd == "stats" && len(flagArgs) > 0 && !strings.HasPrefix(flagArgs[0], "-") {
+		statsSub, flagArgs = flagArgs[0], flagArgs[1:]
+	}
+	if err := fs.Parse(flagArgs); err != nil {
 		if err == flag.ErrHelp {
 			return 0
 		}
@@ -1152,6 +1162,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	}
 
 	switch cmd {
+	case "stats":
+		return runStats(stdin, stdout, stderr, isTTY, *yes, sess, sess, containers, statsSub,
+			statsFlags{from: *statsFrom, to: *statsTo, csv: *statsCSV, by: *statsBy})
 	case "backup":
 		// Ctrl+C — то же, что «Отмена»: копия не сохраняется, временный
 		// файл удаляется
