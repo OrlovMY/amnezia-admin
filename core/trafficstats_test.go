@@ -520,6 +520,12 @@ exit 2
 	e.write("date", `#!/bin/sh
 cat "$(dirname "$0")/now"
 `)
+	// timeout — подставной: на macOS утилиты нет (CI), на серверах Linux есть;
+	// сами сроки проверяются отдельно (TestStatsTimeouts).
+	e.write("timeout", `#!/bin/sh
+shift
+exec "$@"
+`)
 	e.write("started", "2024-10-01T00:00:00.000000001Z\n")
 	e.write("boot_id", "0f0e0d0c-0b0a-0908-0706-050403020100\n")
 	s := StatsCollectorScript()
