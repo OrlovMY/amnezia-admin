@@ -54,7 +54,7 @@ func testUI(t *testing.T) *ui {
 		},
 		peerStats: map[string]core.PeerStat{testKey: {LastHandshake: testSeen, RxBytes: 1200000, TxBytes: 900000}},
 		canManage: true,
-		status:    widget.NewLabel(""),
+		status:    msgLabel(""),
 	}
 	t.Cleanup(func() { u.win.Close() })
 	u.buildTable()
@@ -231,7 +231,7 @@ func TestLeftClickReallySelectsRow(t *testing.T) {
 	if cell == nil {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране нет ячейки с именем клиента")
 	}
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(cell)
+	pos := absPos(cell)
 	center := fyne.NewPos(pos.X+cell.Size().Width/2, pos.Y+cell.Size().Height/2)
 
 	u.selectedRow = -1

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -25,7 +26,7 @@ import (
 func labelsIn(o fyne.CanvasObject) []*widget.Label {
 	var out []*widget.Label
 	walkObjects(o, func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok {
+		if l, ok := asLabel(o); ok {
 			out = append(out, l)
 		}
 	})
@@ -306,4 +307,44 @@ func TestWishesShots(t *testing.T) {
 	u.win.Resize(fyne.NewSize(900, 600))
 	detailsText(t, u)
 	save(u, "после-подробнее-не-удалось")
+}
+
+// labelOf — подпись-сообщение (*msgText) как её widget.Label: приборы
+// тестов узнают подписи по *widget.Label, а с ревью-1 M1 все подписи GUI —
+// msgText. Остальное — как есть.
+func labelOf(o fyne.CanvasObject) fyne.CanvasObject {
+	if m, ok := o.(*msgText); ok {
+		labelHosts.Store(&m.Label, m)
+		return &m.Label
+	}
+	return o
+}
+
+// asLabel — o как подпись (widget.Label или msgText).
+func asLabel(o fyne.CanvasObject) (*widget.Label, bool) {
+	l, ok := labelOf(o).(*widget.Label)
+	return l, ok
+}
+
+// labelHosts — widget.Label, отданная labelOf, → её msgText: драйвер
+// узнаёт объект по тождеству, и позицию надо спрашивать у самой msgText.
+var labelHosts sync.Map
+
+// absPos — абсолютная позиция объекта (подпись-сообщение — по её msgText).
+func absPos(o fyne.CanvasObject) fyne.Position {
+	if l, ok := o.(*widget.Label); ok {
+		if h, ok := labelHosts.Load(l); ok {
+			o = h.(*msgText)
+		}
+	}
+	return fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+}
+
+// hostOf — объект на экране для подписи, отданной labelOf (её msgText);
+// прочее — как есть. Для сравнений по тождеству и поиска родителя.
+func hostOf(l *widget.Label) fyne.CanvasObject {
+	if h, ok := labelHosts.Load(l); ok {
+		return h.(*msgText)
+	}
+	return l
 }

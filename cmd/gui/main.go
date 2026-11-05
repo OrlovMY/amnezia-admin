@@ -81,7 +81,7 @@ type ui struct {
 	statsFailed bool
 
 	table       *clientTable
-	status      *widget.Label
+	status      *msgText
 	protoSelect *markSelect
 	selectedRow int
 
@@ -345,7 +345,7 @@ func forceEnglishLayout() string {
 // widget.Label, ни одного из пяти интерфейсов мыши, и живёт он ВНУТРИ дерева
 // формы, а не поверх канвы: закрылась форма — исчез и он.
 type layoutHint struct {
-	label *widget.Label
+	label *msgText
 	pop   *fyne.Container   // всплывашка; nil у резерва
 	box   fyne.CanvasObject // это кладётся в форму
 	size  fyne.Size         // размер всплывашки (у резерва — размер места)
@@ -509,7 +509,7 @@ func (h *layoutHint) setOn(on bool) {
 //
 // Именно ТЕКСТ параметром, а не «что-то заранее набранное»: иначе при
 // изменении сообщения на экране осталось бы старое (ревью SEC-01).
-func layoutNoticeLabel(text string) *widget.Label {
+func layoutNoticeLabel(text string) *msgText {
 	l := msgLabel(text)
 	l.Wrapping = fyne.TextWrapWord
 	if text == "" {
@@ -653,7 +653,7 @@ func (u *ui) connectScreenWithStatus(status string) (fyne.CanvasObject, *widget.
 // файла-подписи рядом (core.VaultNames: имя, заданное человеком, или
 // описание из ключа vpn://, или адрес). «Сервер N» — только у файлов, для
 // которых подписи нет (сохранены до этой правки и ещё ни разу не открыты).
-func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyne.CanvasObject {
+func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *msgText) fyne.CanvasObject {
 	vaults, listErr := core.ListVaults(core.DefaultVaultDir())
 	if listErr != nil {
 		// A1б, признак 2: прежде отказ чтения каталога давал пустой список,
@@ -730,7 +730,7 @@ func (u *ui) savedVaultsBlock(connectBtn *widget.Button, info *widget.Label) fyn
 // удаление throttle.json или откат его резервной копии по-прежнему сбрасывает
 // счётчик попыток — это anti-casual слой, не защита от целенаправленной
 // атаки на файловую систему.
-func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, info *widget.Label) {
+func (u *ui) showVaultPinDialog(path, label string, connectBtn *widget.Button, info *msgText) {
 	vaultDir := pinVaultDir()
 	vaultName := filepath.Base(path)
 
@@ -1084,7 +1084,7 @@ type vaultCtx struct {
 // (offerSaveKey). vc != nil — ключ открыт из хранилища: ExpectedFingerprint
 // берётся из vc.payload.HostKeyFingerprint, а после первого подключения (там,
 // где это поле было пусто) отпечаток дописывается в файл.
-func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
+func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button, info *msgText) {
 	connectBtn.Disable()
 	info.SetText("Декодирую ключ и подключаюсь по SSH...")
 
@@ -1359,7 +1359,7 @@ func (u *ui) showHostKeyPrompt(host, fingerprint string, result chan<- bool) {
 // nil (ключ введён вручную, хранилища нет) — кнопки "Забыть ключ сервера…"
 // нет: принять сменившийся ключ нельзя в любом случае (правка 4.5 PQ-01),
 // а "забыть" в CLI/без-хранилища не заводится (SEC-01).
-func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
+func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *msgText) {
 	fyne.Do(func() {
 		// Каждый отпечаток на своей строке (ревью PR-4-Б, круг 1, UI-01
 		// Low) — слова текста С3 не менялись, только разбивка строк для
@@ -1413,7 +1413,7 @@ func (u *ui) hostKeyChangedDialog(host, knownFp, presentedFp, knownHostsPath str
 // 2-3 в С3-позиция-ядра.md). Если пин уже обнулён (например, повторный клик
 // после того, как первая попытка уже его использовала) — просит открыть
 // хранилище заново, ForgetHostKey с пустым пином не зовём.
-func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *widget.Label) {
+func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, connectBtn *widget.Button, info *msgText) {
 	if vc == nil || vc.pin == nil || *vc.pin == "" {
 		info.SetText("Пин уже сброшен — откройте сохранённый ключ ещё раз и подключитесь заново.")
 		return
@@ -1423,7 +1423,7 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 	// строк, адрес «хост:порт» рвался посередине, а главное — «только если
 	// сами переустанавливали» — терялось в конце. Самый опасный диалог
 	// программы: решение о доверии ключу сервера необратимо.
-	para := func(s string, style fyne.TextStyle) *widget.Label {
+	para := func(s string, style fyne.TextStyle) *msgText {
 		l := msgLabelStyle(s, fyne.TextAlignLeading, style)
 		l.Wrapping = fyne.TextWrapWord
 		return l
@@ -1493,7 +1493,7 @@ func (u *ui) confirmForgetHostKey(host, knownHostsPath string, vc *vaultCtx, con
 	forget.Show()
 }
 
-func (u *ui) connectFail(btn *widget.Button, info *widget.Label, msg string) {
+func (u *ui) connectFail(btn *widget.Button, info *msgText, msg string) {
 	fyne.Do(func() {
 		info.SetText(core.MaskText(msg))
 		btn.Enable()
@@ -1839,6 +1839,9 @@ func (mainLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w, h+3*pad)
 }
 
+// protoDetailsRead — чтение подробностей (шов теста паники).
+var protoDetailsRead = func(s *core.Session, c *core.Container) core.ProtoDetails { return s.ReadProtoDetails(c) }
+
 // showProtoDetails — окно «Подробнее» текущего протокола. Файл конфигурации
 // читается с сервера (только чтение) вне потока интерфейса; каждое поле —
 // значение, «не применяется» или «не удалось узнать: причина».
@@ -1850,11 +1853,20 @@ func (u *ui) showProtoDetails() {
 	c, sess := *u.cur, u.sess
 	u.detailsBtn.Disable()
 	goSafe(func() {
-		d := sess.ReadProtoDetails(&c)
-		uiDo(func() {
-			u.detailsBtn.Enable()
-			u.protoDetailsShown = u.showInfo(guiview.ProtoDetailsTitle(c), guiview.ProtoDetailsText(d))
-		})
+		var d core.ProtoDetails
+		read := false
+		// Кнопка включается в defer — и при панике чтения (ревью-1 L2);
+		// окно показывается, только если чтение дошло до конца.
+		defer func() {
+			uiDo(func() {
+				u.detailsBtn.Enable()
+				if read {
+					u.protoDetailsShown = u.showInfo(guiview.ProtoDetailsTitle(c), guiview.ProtoDetailsText(d))
+				}
+			})
+		}()
+		d = protoDetailsRead(sess, &c)
+		read = true
 	})
 }
 
@@ -3003,7 +3015,7 @@ func newDiffGrid(diff string) *widget.TextGrid {
 // подтверждения (UX-01, ревью, Medium): пока «Показать изменения» строит
 // план в фоне, сам диалог подтверждения — модальное окно, и статус главного
 // экрана (u.status) им закрыт и не виден пользователю.
-func newPlanStatusLabel() *widget.Label {
+func newPlanStatusLabel() *msgText {
 	l := msgLabel("")
 	l.Wrapping = fyne.TextWrapWord
 	return l

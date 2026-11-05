@@ -19,7 +19,6 @@ import (
 // вертикальная прокрутка диалога (QR и подпись — над ней).
 func configInfoScroll(t *testing.T, pop fyne.CanvasObject) *container.Scroll {
 	t.Helper()
-	d := fyne.CurrentApp().Driver()
 	var best *container.Scroll
 	var walk func(o fyne.CanvasObject)
 	walk = func(o fyne.CanvasObject) {
@@ -27,7 +26,7 @@ func configInfoScroll(t *testing.T, pop fyne.CanvasObject) *container.Scroll {
 			return
 		}
 		if s, ok := o.(*container.Scroll); ok && s.Direction == container.ScrollVerticalOnly {
-			if best == nil || d.AbsolutePositionForObject(s).Y > d.AbsolutePositionForObject(best).Y {
+			if best == nil || absPos(s).Y > absPos(best).Y {
 				best = s
 			}
 		}
@@ -44,8 +43,8 @@ func configInfoScroll(t *testing.T, pop fyne.CanvasObject) *container.Scroll {
 
 // textLineHeight — прирост высоты надписи на одну строку.
 func textLineHeight() float32 {
-	one := widget.NewLabel("Ag").MinSize().Height
-	two := widget.NewLabel("Ag\nAg").MinSize().Height
+	one := msgLabel("Ag").MinSize().Height
+	two := msgLabel("Ag\nAg").MinSize().Height
 	return two - one
 }
 
@@ -86,10 +85,9 @@ func measureConfigDialog(t *testing.T, form string, size fyne.Size) configDialog
 	if got := c.Size(); got != size {
 		t.Fatalf("окно %v, а не %v", got, size)
 	}
-	dr := fyne.CurrentApp().Driver()
 	for _, text := range []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"} {
 		b := findButton(t, s.root, text)
-		p := dr.AbsolutePositionForObject(b)
+		p := absPos(b)
 		bs := b.Size()
 		if p.X < 0 || p.Y < 0 || p.X+bs.Width > size.Width+0.5 || p.Y+bs.Height > size.Height+0.5 ||
 			bs.Height < b.MinSize().Height-0.5 || bs.Width < b.MinSize().Width-0.5 {

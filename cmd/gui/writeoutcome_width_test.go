@@ -39,7 +39,7 @@ func TestWriteOutcomeTitleFits(t *testing.T) {
 		frame := pop.Content.Size().Width
 		var title *widget.Label
 		walkObjects(pop, func(o fyne.CanvasObject) {
-			if l, ok := o.(*widget.Label); ok && l.Text == tx.Title {
+			if l, ok := asLabel(o); ok && l.Text == tx.Title {
 				title = l
 			}
 		})

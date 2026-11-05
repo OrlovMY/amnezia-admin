@@ -362,7 +362,7 @@ type migrateView struct {
 	// pinned — обязательные элементы в закреплённой панели (вне прокрутки);
 	// reason — почему «Перенести» погашена (или что всё подтверждено).
 	pinned []fyne.CanvasObject
-	reason *widget.Label
+	reason *msgText
 }
 
 func (v *migrateView) layer() core.BackupLayer {

@@ -29,8 +29,8 @@ type progressView struct {
 	d      dialog.Dialog
 	bar    *widget.ProgressBar
 	inf    *widget.ProgressBarInfinite
-	label  *widget.Label
-	note   *widget.Label
+	label  *msgText
+	note   *msgText
 	cancel *escButton
 	// writing — началась запись на сервер (отмена и закрытие программы
 	// недоступны)

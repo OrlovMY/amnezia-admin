@@ -10,7 +10,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -30,7 +29,7 @@ func diagUI(t *testing.T, m *fakesrv.DiagModel) (*ui, *fakesrv.Server) {
 	}
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
-	u := &ui{win: test.NewWindow(nil), sess: sess, containers: cs, status: widget.NewLabel(""), selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
+	u := &ui{win: test.NewWindow(nil), sess: sess, containers: cs, status: msgLabel(""), selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
 	t.Cleanup(func() { u.win.Close() })
 	u.cur = &u.containers[0]
 	u.warnSess = guiview.AfterWarned(u.warnServerID())
@@ -90,7 +89,7 @@ func TestDiagDialogFixAndCopy(t *testing.T) {
 	}
 	var txt []string
 	walkObjects(topPopup(t, u.win.Canvas()), func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok {
+		if l, ok := asLabel(o); ok {
 			txt = append(txt, l.Text)
 		}
 	})

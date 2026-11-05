@@ -33,7 +33,7 @@ func qrErrLabel(root fyne.CanvasObject) *widget.Label {
 		if found != nil || o == nil || !o.Visible() {
 			return
 		}
-		if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
+		if l, ok := asLabel(o); ok && strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
 			found = l
 			return
 		}
@@ -74,9 +74,8 @@ func TestQRErrorReadable(t *testing.T) {
 					if !strings.Contains(l.Text, "слишком большой") || !strings.Contains(l.Text, fmt.Sprint(core.QRMaxBytes)) {
 						t.Errorf("причина не названа размерами: %q", l.Text)
 					}
-					d := fyne.CurrentApp().Driver()
-					lp, ls := d.AbsolutePositionForObject(l), l.Size()
-					cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
+					lp, ls := absPos(l), l.Size()
+					cp, cs := absPos(pop.Content), pop.Content.Size()
 					t.Logf("надпись %.1f×%.1f (мин. %.1f×%.1f), y %.1f..%.1f, диалог y %.1f..%.1f",
 						ls.Width, ls.Height, l.MinSize().Width, l.MinSize().Height, lp.Y, lp.Y+ls.Height, cp.Y, cp.Y+cs.Height)
 					if ls.Width < qrErrMinWidth {

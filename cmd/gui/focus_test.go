@@ -110,7 +110,7 @@ func TestPinDialogFocusesPinEntry(t *testing.T) {
 	// же виджетов тестом идут без синхронизации, и -race справедливо
 	// показывает гонку. Ждём по счётчику goSafe, а не временем.
 	t.Cleanup(func() { waitGUIGoroutines(t) })
-	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
@@ -148,7 +148,7 @@ func TestSaveKeyDialogFocusesLabelEntry(t *testing.T) {
 func TestAddDialogFocusesNameEntry(t *testing.T) {
 	u := focusTestUI(t)
 	u.cur = &core.Container{Proto: "awg", Support: core.SupportYes}
-	u.status = widget.NewLabel("")
+	u.status = msgLabel("")
 	u.addDialog()
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
@@ -166,7 +166,7 @@ func TestAddDialogFocusesNameEntry(t *testing.T) {
 func TestRenameDialogFocusesNameEntry(t *testing.T) {
 	u := focusTestUI(t)
 	u.cur = &core.Container{Proto: "awg", Support: core.SupportYes}
-	u.status = widget.NewLabel("")
+	u.status = msgLabel("")
 	u.canManage = true
 	u.clients = []core.ClientEntry{{ClientID: "id-1", UserData: map[string]any{"clientName": "Ноутбук"}}}
 	u.selectedRow = 0

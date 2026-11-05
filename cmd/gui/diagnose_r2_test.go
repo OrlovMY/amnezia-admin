@@ -22,7 +22,7 @@ func diagPopupText(t *testing.T, u *ui) string {
 	t.Helper()
 	var txt []string
 	walkObjects(topPopup(t, u.win.Canvas()), func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok {
+		if l, ok := asLabel(o); ok {
 			txt = append(txt, l.Text)
 		}
 	})

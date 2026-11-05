@@ -118,7 +118,7 @@ func (r *osmotrReport) valid() bool { return len(r.missing) == 0 && len(r.extra)
 
 // osmotrClassify — чем объект является для осмотра. stop — внутрь не идём.
 func osmotrClassify(o fyne.CanvasObject, labels map[fyne.CanvasObject]string) (kind, name string, stop bool) {
-	switch x := o.(type) {
+	switch x := labelOf(o).(type) {
 	case *widget.Label:
 		return "подпись", firstLine(x.Text), true
 	case *serverLabel:
@@ -705,7 +705,7 @@ func openPin(layoutFail bool) func(t *testing.T, u *ui, sized func()) osmotrScen
 		t.Cleanup(func() { waitGUIGoroutines(t) })
 		u.showConnectScreen("")
 		sized()
-		u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+		u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 		// Ответ о сетевом времени (его нет) приходит из горутины; в тестовом
 		// драйвере он правил бы диалог одновременно с кадром. Кадр показа —
 		// ПОСЛЕ ответа: изменение «Проверка подключения…» → «Подключения к
@@ -795,8 +795,8 @@ var (
 		"поле многострочное:Вставьте админский ключ vpn://...",
 		"всплывашка:подсказка про раскладку",
 		"кнопка:Подключиться",
-		"кнопка:Копировать", // строка состояния копируется (06.11)
-		"подпись:",          // строка состояния (пуста)
+		// «Копировать» у пустой строки состояния скрыта (ревью-1 L1)
+		"подпись:", // строка состояния (пуста)
 	}
 	invVault   = []string{"подпись:Или загрузить из сохранённых:", "кнопка:Сервер 1"}
 	invFail    = []string{"подпись:" + firstLine(wantLayoutSwitchFailed)}
@@ -814,7 +814,7 @@ var (
 		"подпись:" + firstLine(wantPinLayoutHint),
 		"галка:Привязать к этой учётке Windows (файл не…",
 		"подпись:Рекомендуется: украденный файл будет бес…",
-		"подпись:", "кнопка:Копировать", // строка состояния
+		"подпись:", // строка состояния (пуста — «Копировать» скрыта)
 		"кнопка:Сохранить", "кнопка:Не сохранять",
 	}
 	invAdd = []string{
@@ -834,8 +834,8 @@ var (
 		"подпись:Сервер: root@203.0.113.10", "подпись:Протокол:", "список:Выберите протокол",
 		"кнопка:Обновить", "кнопка:Создать", "кнопка:Переименовать", "кнопка:Вкл/Выкл",
 		"кнопка:Перевыпустить", "кнопка:Удалить", "кнопка:Копия", "кнопка:значок копирования адреса", "таблица:",
-		"кнопка:Подробнее", "кнопка:Копировать", // 06.11: «Подробнее» у протокола, копирование строки состояния
-		"подпись:", // строка состояния — последней (invMainWithStatus)
+		"кнопка:Подробнее", // 06.11; «Копировать» у пустой строки состояния скрыта
+		"подпись:",         // строка состояния — последней (invMainWithStatus)
 	}
 )
 
@@ -1078,7 +1078,7 @@ func TestOsmotrCanaryAllowanceNotWider(t *testing.T) {
 			t.Fatal("канарейка ничего не значит: у ряда кнопок нет столбца")
 		}
 		for range 10 {
-			col.Add(widget.NewLabel(""))
+			col.Add(msgLabel(""))
 		}
 	}, "вылезание: подпись «»: снизу")
 }
@@ -1118,16 +1118,16 @@ func TestOsmotrCanarySqueezedHint(t *testing.T) {
 	gateCanary(t, formByName(t, "(б) пин-код, подсказка вкл"), "стартовый", func(t *testing.T, s osmotrScene) {
 		var hint *widget.Label
 		walkVisible(s.root, func(o fyne.CanvasObject) {
-			if l, ok := o.(*widget.Label); ok && l.Text == wantPinLayoutHint {
+			if l, ok := asLabel(o); ok && l.Text == wantPinLayoutHint {
 				hint = l
 			}
 		})
 		if hint == nil {
 			t.Fatal("канарейка ничего не значит: подсказка не показана")
 		}
-		box := findParent(s.root, hint)
+		box := findParent(s.root, hostOf(hint))
 		full := hintMetrics(wantPinLayoutHint, pinDialogWidth)
-		replaceIn(t, s.root, box, container.NewGridWrap(fyne.NewSize(full.Width, full.Height/2), hint))
+		replaceIn(t, s.root, box, container.NewGridWrap(fyne.NewSize(full.Width, full.Height/2), hostOf(hint)))
 	}, "сжатие: подпись «Похоже, включена не английская раскладка")
 }
 
@@ -1150,7 +1150,7 @@ func TestOsmotrCanaryNoticeWithoutWrap(t *testing.T) {
 	gateCanary(t, formByName(t, "(б) пин-код, отказ раскладки"), "стартовый", func(t *testing.T, s osmotrScene) {
 		var n *widget.Label
 		walkVisible(s.root, func(o fyne.CanvasObject) {
-			if l, ok := o.(*widget.Label); ok && l.Text == wantLayoutSwitchFailed {
+			if l, ok := asLabel(o); ok && l.Text == wantLayoutSwitchFailed {
 				n = l
 			}
 		})
@@ -1309,7 +1309,7 @@ func TestOsmotrCanaryDeleteCardWithoutWrap(t *testing.T) {
 	gateCanary(t, formByName(t, "(в) удаление, клиента нет в статистике"), "стартовый", func(t *testing.T, s osmotrScene) {
 		var l *widget.Label
 		walkVisible(s.root, func(o fyne.CanvasObject) {
-			if w, ok := o.(*widget.Label); ok && strings.HasPrefix(w.Text, "Имя: ") {
+			if w, ok := asLabel(o); ok && strings.HasPrefix(w.Text, "Имя: ") {
 				l = w
 			}
 		})

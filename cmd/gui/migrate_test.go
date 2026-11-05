@@ -470,7 +470,7 @@ func TestGUIMigrateClosesTargetOnSourceChange(t *testing.T) {
 	}
 	warm.Close()
 	f.u.showConnectScreen("")
-	btn, info := widget.NewButton("", nil), widget.NewLabel("")
+	btn, info := widget.NewButton("", nil), msgLabel("")
 	f.u.attemptConnect(key, nil, btn, info)
 	waitGUIGoroutines(t)
 	if f.u.sess == nil || f.u.sess.Creds.Host != host {

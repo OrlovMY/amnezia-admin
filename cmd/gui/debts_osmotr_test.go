@@ -67,7 +67,7 @@ func openMainEnabledUnknown(t *testing.T, u *ui, sized func()) osmotrScene {
 
 func invMainWithStatus(status string) []string {
 	inv := append([]string(nil), invMain...)
-	inv[len(inv)-1] = "подпись:" + firstLine(status) // последняя — строка состояния
+	inv = append(inv[:len(inv)-1], "кнопка:Копировать", "подпись:"+firstLine(status)) // последняя — строка состояния; с текстом «Копировать» видна
 	return inv
 }
 
@@ -117,7 +117,7 @@ func openPinThrottleUnknown(long bool) func(t *testing.T, u *ui, sized func()) o
 		t.Cleanup(func() { waitGUIGoroutines(t) })
 		u.showConnectScreen("")
 		sized()
-		u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+		u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 		waitGUIGoroutines(t)
 		c := u.win.Canvas()
 		pop := topPopup(t, c)
@@ -282,7 +282,7 @@ func TestDebtsPinClosedHeadFirst(t *testing.T) {
 	// Раунд 4 (AU-UX Low): подпись с путём выделяемая — путь копируется.
 	var lbl *widget.Label
 	walkObjects(topPopup(t, u.win.Canvas()), func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok && l.Text == status {
+		if l, ok := asLabel(o); ok && l.Text == status {
 			lbl = l
 		}
 	})

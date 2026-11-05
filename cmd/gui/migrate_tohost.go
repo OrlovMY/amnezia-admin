@@ -168,8 +168,8 @@ func toHostValidate(host, port, user string) string {
 type toHostConnView struct {
 	d                    dialog.Dialog
 	host, port, user, pw *widget.Entry
-	why                  *widget.Label // почему спрашивается пароль ("" — не спрашивается)
-	reason               *widget.Label
+	why                  *msgText // почему спрашивается пароль ("" — не спрашивается)
+	reason               *msgText
 	ok                   *escButton
 }
 
@@ -412,7 +412,7 @@ type toHostView struct {
 	pw, pw2   *widget.Entry
 	consent   *widget.Check
 	keyPw     *widget.Entry // nil — вход был по паролю, он и пойдёт в ключ
-	reason    *widget.Label
+	reason    *msgText
 	pinned    []fyne.CanvasObject
 	text      string
 }
@@ -432,7 +432,7 @@ type toHostReview struct {
 	d      dialog.Dialog
 	next   *escButton
 	back   *escButton
-	reason *widget.Label
+	reason *msgText
 	text   string
 }
 

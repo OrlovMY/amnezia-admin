@@ -135,8 +135,8 @@ type saveView struct {
 	ok      *escButton
 	mode    *widget.RadioGroup // с паролем / без пароля — без выбора по умолчанию
 	pw, pw2 *widget.Entry
-	warn    *widget.Label
-	hint    *widget.Label
+	warn    *msgText
+	hint    *msgText
 }
 
 const (

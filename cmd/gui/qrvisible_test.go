@@ -42,16 +42,15 @@ func qrVisibleHeight(pop *widget.PopUp) (visible, full float32, where string, fo
 	if img == nil {
 		return 0, 0, "", false
 	}
-	d := fyne.CurrentApp().Driver()
-	ip, is := d.AbsolutePositionForObject(img), img.Size()
+	ip, is := absPos(img), img.Size()
 	top, bottom := ip.Y, ip.Y+is.Height
 	clipTop, clipBottom := float32(-1e9), float32(1e9)
 	where = "рамка диалога"
-	cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
+	cp, cs := absPos(pop.Content), pop.Content.Size()
 	clipTop, clipBottom = cp.Y, cp.Y+cs.Height
 	for i := len(parents) - 1; i >= 0; i-- {
 		if sc, ok := parents[i].(*container.Scroll); ok {
-			sp := d.AbsolutePositionForObject(sc)
+			sp := absPos(sc)
 			clipTop, clipBottom = max(clipTop, sp.Y), min(clipBottom, sp.Y+sc.Size().Height)
 			where = "прокрутка"
 			break
@@ -72,13 +71,12 @@ func qrVisibleWidth(pop *widget.PopUp, canvasW float32) (visible, full float32, 
 	if img == nil {
 		return 0, 0, false
 	}
-	d := fyne.CurrentApp().Driver()
-	ip, is := d.AbsolutePositionForObject(img), img.Size()
-	cp, cs := d.AbsolutePositionForObject(pop.Content), pop.Content.Size()
+	ip, is := absPos(img), img.Size()
+	cp, cs := absPos(pop.Content), pop.Content.Size()
 	clipL, clipR := max(cp.X, 0), min(cp.X+cs.Width, canvasW)
 	for i := len(parents) - 1; i >= 0; i-- {
 		if sc, ok := parents[i].(*container.Scroll); ok {
-			sp := d.AbsolutePositionForObject(sc)
+			sp := absPos(sc)
 			clipL, clipR = max(clipL, sp.X), min(clipR, sp.X+sc.Size().Width)
 			break
 		}

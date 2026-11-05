@@ -51,7 +51,7 @@ func awg2NoteSpan(t *testing.T, root fyne.CanvasObject) (top, bottom, vTop, vBot
 		if s, ok := o.(*container.Scroll); ok {
 			sc = s
 		}
-		if l, ok := o.(*widget.Label); ok && l.Text == core.AWG2ConfigNote {
+		if l, ok := asLabel(o); ok && l.Text == core.AWG2ConfigNote {
 			note, scroll = l, sc
 			return
 		}
@@ -63,15 +63,14 @@ func awg2NoteSpan(t *testing.T, root fyne.CanvasObject) (top, bottom, vTop, vBot
 	if note == nil {
 		t.Fatal("проверка ничего не значит: строки честности в окне нет")
 	}
-	d := fyne.CurrentApp().Driver()
-	top = d.AbsolutePositionForObject(note).Y
+	top = absPos(note).Y
 	bottom = top + note.Size().Height
 	area := root
 	where = "диалог"
 	if scroll != nil {
 		area, where = scroll, "прокрутка"
 	}
-	vTop = d.AbsolutePositionForObject(area).Y
+	vTop = absPos(area).Y
 	vBottom = vTop + area.Size().Height
 	return
 }

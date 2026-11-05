@@ -23,8 +23,8 @@ func TestCopyButtonInMainRow(t *testing.T) {
 	if findParent(u.win.Content(), cp) != findParent(u.win.Content(), del) {
 		t.Error("«Копия» не в общем ряду кнопок")
 	}
-	pc := fyne.CurrentApp().Driver().AbsolutePositionForObject(cp)
-	pd := fyne.CurrentApp().Driver().AbsolutePositionForObject(del)
+	pc := absPos(cp)
+	pd := absPos(del)
 	if pc.Y != pd.Y || pc.X <= pd.X {
 		t.Errorf("«Копия» не рядом с «Удалить» в одном ряду: %v %v", pc, pd)
 	}

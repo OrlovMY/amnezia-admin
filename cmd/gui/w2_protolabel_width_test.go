@@ -108,7 +108,7 @@ func TestProtoLabelFits(t *testing.T) {
 			// MinSize усечённого текста мала (многоточие) — меряем ПОЛНУЮ ширину строки
 			need := fyne.MeasureText(label, theme.TextSize(), fyne.TextStyle{}).Width
 			have := text.Size().Width
-			pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(sel)
+			pos := absPos(sel)
 			right, win := pos.X+sel.Size().Width, u.win.Canvas().Size().Width
 			t.Logf("[%s] %q: текст %.1f т., отведено %.1f т., поле %.1f т., правый край %.1f из %.1f",
 				size, label, need, have, sel.Size().Width, right, win)

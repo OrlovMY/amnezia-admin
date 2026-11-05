@@ -86,7 +86,7 @@ func refreshedUISorted(t *testing.T, sess *core.Session, c *core.Container, prep
 		win:         test.NewWindow(nil),
 		sess:        sess,
 		containers:  []core.Container{*c},
-		status:      widget.NewLabel(""),
+		status:      msgLabel(""),
 		selectedRow: -1,
 	}
 	t.Cleanup(func() { u.win.Close() })
@@ -220,7 +220,7 @@ func deleteCardText(t *testing.T, u *ui, g *gatedRunner, name string) []string {
 	var texts []string
 	var walk func(o fyne.CanvasObject)
 	walk = func(o fyne.CanvasObject) {
-		switch w := o.(type) {
+		switch w := labelOf(o).(type) {
 		case *widget.Label:
 			texts = append(texts, w.Text)
 			return

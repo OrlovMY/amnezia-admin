@@ -33,7 +33,7 @@ func xrayUI(t *testing.T) (*ui, *fakesrv.Server) {
 	}
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
-	u := &ui{win: test.NewWindow(nil), sess: sess, containers: cs, status: widget.NewLabel(""), selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
+	u := &ui{win: test.NewWindow(nil), sess: sess, containers: cs, status: msgLabel(""), selectedRow: -1, warnFreq: guiview.WarnOncePerRun}
 	t.Cleanup(func() { u.win.Close() })
 	u.cur = &u.containers[0]
 	u.warnSess = guiview.AfterWarned(u.warnServerID())
@@ -306,21 +306,21 @@ func TestXRayGUIConfirmFocusEsc(t *testing.T) {
 			}
 			win := u.win.Canvas().Size()
 			for _, b := range []*escButton{cancel, ok} {
-				p := fyne.CurrentApp().Driver().AbsolutePositionForObject(b)
+				p := absPos(b)
 				if p.X < 0 || p.Y < 0 || p.X+b.Size().Width > win.Width+0.5 || p.Y+b.Size().Height > win.Height+0.5 || b.Size().Height < 1 {
 					t.Errorf("кнопка %q не видна целиком: %v %v в окне %v", b.Text, p, b.Size(), win)
 				}
 			}
-			pc := fyne.CurrentApp().Driver().AbsolutePositionForObject(cancel)
-			po := fyne.CurrentApp().Driver().AbsolutePositionForObject(ok)
+			pc := absPos(cancel)
+			po := absPos(ok)
 			if pc.Y != po.Y || po.X <= pc.X {
 				t.Errorf("кнопки не рядом в одном ряду: %v %v", pc, po)
 			}
 			// AU-UX р2: раздел о перезапуске виден целиком при открытии
 			body := labelByText(t, pop, guiview.XRayRestartBody())
 			scroll := scrollOf(t, pop)
-			bp := fyne.CurrentApp().Driver().AbsolutePositionForObject(body)
-			sp := fyne.CurrentApp().Driver().AbsolutePositionForObject(scroll)
+			bp := absPos(body)
+			sp := absPos(scroll)
 			if bp.Y < sp.Y-0.5 || bp.Y+body.Size().Height > sp.Y+scroll.Size().Height+0.5 {
 				t.Errorf("раздел о перезапуске не виден целиком: %v+%v в прокрутке %v+%v", bp, body.Size(), sp, scroll.Size())
 			}
@@ -374,7 +374,7 @@ func labelByText(t *testing.T, root fyne.CanvasObject, text string) *widget.Labe
 	t.Helper()
 	var found *widget.Label
 	walkObjects(root, func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok && l.Text == text {
+		if l, ok := asLabel(o); ok && l.Text == text {
 			found = l
 		}
 	})

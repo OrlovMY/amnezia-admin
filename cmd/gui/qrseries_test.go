@@ -131,11 +131,11 @@ func TestQRSeriesSavedConfig(t *testing.T) {
 		t.Fatalf("на месте QR %T, ждали серию", o)
 	}
 	// Третье состояние: контейнер неизвестен — честная надпись, не пустота.
-	if l, ok := qrObject(nu.Name, nu.Config, "").(*widget.Label); !ok || !strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
+	if l, ok := asLabel(qrObject(nu.Name, nu.Config, "")); !ok || !strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
 		t.Fatalf("без контейнера ждали надпись, получили %T", l)
 	}
 	// Серию не построить (XRay) — надпись называет обе причины.
-	l, ok := qrObject(nu.Name, nu.Config, "amnezia-xray").(*widget.Label)
+	l, ok := asLabel(qrObject(nu.Name, nu.Config, "amnezia-xray"))
 	if !ok || !strings.Contains(l.Text, "слишком большой") || !strings.Contains(l.Text, "серия QR AmneziaVPN не построена") ||
 		strings.Contains(l.Text, "PrivateKey") {
 		t.Fatalf("надпись: %v", l)
@@ -163,7 +163,7 @@ func TestSavedQRContainerTable(t *testing.T) {
 				t.Fatalf("серия=%v, ждали %v (%T)", ok, c.series, o)
 			}
 			if !c.series {
-				if l, ok := o.(*widget.Label); !ok || !strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
+				if l, ok := asLabel(o); !ok || !strings.HasPrefix(l.Text, "Не удалось построить QR-код") {
 					t.Fatalf("ждали честную надпись, получили %T", o)
 				}
 			}
@@ -197,7 +197,7 @@ func walkLabels(root fyne.CanvasObject, f func(*widget.Label)) {
 		if o == nil || !o.Visible() {
 			return
 		}
-		if l, ok := o.(*widget.Label); ok {
+		if l, ok := asLabel(o); ok {
 			f(l)
 		}
 		switch x := o.(type) {

@@ -211,7 +211,7 @@ func openHostKeyChanged(vault bool) func(t *testing.T, u *ui, sized func()) osmo
 			vc = &vaultCtx{pin: &pin}
 		}
 		u.hostKeyChangedDialog("203.0.113.10:22", osmotrFP, "SHA256:AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqK",
-			"known_hosts", vc, widget.NewButton("", nil), widget.NewLabel(""))
+			"known_hosts", vc, widget.NewButton("", nil), msgLabel(""))
 		return scenePopup(t, u)
 	}
 }
@@ -221,7 +221,7 @@ func openForgetHostKey(t *testing.T, u *ui, sized func()) osmotrScene {
 	sized()
 	pin := "x"
 	u.confirmForgetHostKey("203.0.113.10:22", "known_hosts", &vaultCtx{pin: &pin},
-		widget.NewButton("", nil), widget.NewLabel(""))
+		widget.NewButton("", nil), msgLabel(""))
 	return scenePopup(t, u)
 }
 
@@ -288,7 +288,7 @@ var moreForms = []osmotrForm{
 	{name: "(д) изменения перед применением", open: openDiff, width: 692,
 		inventory: []string{"подпись:" + firstLine(`Изменения перед применением: удаление "Alice"`),
 			"подпись:/opt/amnezia/awg/wg0.conf", "прокрутка:", "подпись:/opt/amnezia/awg/clientsTable", "прокрутка:",
-			"кнопка:Применить", "подпись:", "кнопка:Копировать", "кнопка:Закрыть"}},
+			"кнопка:Применить", "подпись:", "кнопка:Закрыть"}},
 	{name: "(д) предупреждение (приложение Amnezia)", open: openRace, width: 452,
 		inventory: []string{"подпись:" + firstLine(guiview.WarningTitle()), "подпись:" + firstLine(guiview.WarningBody()),
 			"кнопка:" + guiview.WarnContinueLabel(), "кнопка:" + guiview.WarnCancelLabel()}},

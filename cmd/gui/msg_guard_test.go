@@ -58,11 +58,17 @@ var msgAllowedCtors = map[string]string{
 	"dialog.NewFileSave":             "выбор файла",
 }
 
+// textAssignHomes — где разрешено присваивать поле .Text: конструктор
+// подписи-сообщения (маска там же) и конструкторы своих виджетов, чей
+// текст — не сообщение (подпись сервера, кнопка с Esc).
+var textAssignHomes = map[string]bool{"msg.go:newMsgText": true, "main.go:newServerLabel": true, "xray.go:newEscButton": true}
+
 // msgLabelHomes — где разрешено строить подпись: файл и функция.
 var msgLabelHomes = map[string]bool{"msg.go:msgLabel": true, "msg.go:msgLabelStyle": true}
 
 // embedAllowed — свои типы со встроенной widget.Label (не через msgLabel).
 var embedAllowed = map[string]string{
+	"msgText":       "сама подпись-сообщение (msg.go): выделение и маска",
 	"serverLabel":   "подпись сервера: нажатие копирует адрес",
 	"tappableLabel": "заголовок колонки таблицы",
 	"tableCell":     "ячейка таблицы: «Копировать значение/строку» в меню",
@@ -116,6 +122,11 @@ func msgViolations(name string, src []byte) ([]string, error) {
 				if !ok {
 					return true
 				}
+				// x.Label.SetText(…) — вызов встроенной подписи мимо
+				// msgText.SetText: обход маски (ревью-1 M1).
+				if in, ok := sel.X.(*ast.SelectorExpr); ok && in.Sel.Name == "Label" && filepath.Base(name) != "msg.go" {
+					bad(x, "вызов .Label."+sel.Sel.Name+" — обход маски msgText.SetText")
+				}
 				pkg, ok := sel.X.(*ast.Ident)
 				if !ok || !guardedPkgs[pkg.Name] {
 					return true
@@ -138,6 +149,13 @@ func msgViolations(name string, src []byte) ([]string, error) {
 					bad(x, "литерал "+s+" — подпись мимо msgLabel")
 				}
 			case *ast.AssignStmt:
+				for _, l := range x.Lhs {
+					// Текст подписи — только через msgText.SetText (маска в
+					// одной точке, ревью-1 M1). Присваивание .Text — обход.
+					if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "Text" && !textAssignHomes[filepath.Base(name)+":"+fn] {
+						bad(x, "присваивание .Text мимо msgText.SetText — текст не проходит маску")
+					}
+				}
 				for i, l := range x.Lhs {
 					if sel, ok := l.(*ast.SelectorExpr); ok && sel.Sel.Name == "Selectable" && i < len(x.Rhs) {
 						if id, ok := x.Rhs[i].(*ast.Ident); !ok || id.Name != "true" {
@@ -212,6 +230,8 @@ func TestMessagesOnlySelectable(t *testing.T) {
 		"Selectable = false":     `func f(l *L) { l.Selectable = false }`,
 		"встроенная Label":       `type myLbl struct { widget.Label }`,
 		"псевдоним":              "import w \"fyne.io/fyne/v2/widget\"\nfunc f() { _ = w.NewLabel(\"x\") }",
+		".Text = мимо маски":     `func f(l *msgText) { l.Text = "vpn://x" }`,
+		".Label.SetText":         `func f(l *msgText) { l.Label.SetText("vpn://x") }`,
 	}
 	for name, body := range canaries {
 		src := "package main\n" + body + "\n"

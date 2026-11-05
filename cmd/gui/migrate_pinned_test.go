@@ -66,7 +66,7 @@ func TestGUIMigratePinnedVisible(t *testing.T) {
 	var side *widget.Label
 	var viewport fyne.CanvasObject
 	walkObjects(top, func(o fyne.CanvasObject) {
-		if l, ok := o.(*widget.Label); ok && strings.Contains(l.Text, "Цель (сюда будет записано)") && side == nil {
+		if l, ok := asLabel(o); ok && strings.Contains(l.Text, "Цель (сюда будет записано)") && side == nil {
 			side = l
 		}
 	})
@@ -76,7 +76,7 @@ func TestGUIMigratePinnedVisible(t *testing.T) {
 	walkObjects(top, func(o fyne.CanvasObject) {
 		if sc, ok := o.(*container.Scroll); ok && viewport == nil {
 			walkObjects(sc.Content, func(x fyne.CanvasObject) {
-				if x == side {
+				if x == hostOf(side) {
 					viewport = sc
 				}
 			})
@@ -98,8 +98,8 @@ func TestGUIMigratePinnedVisible(t *testing.T) {
 			widest = w.Width
 		}
 	}
-	sp, ss := drv.AbsolutePositionForObject(side), side.Size()
-	vp, vs := drv.AbsolutePositionForObject(viewport), viewport.Size()
+	sp, ss := absPos(side), side.Size()
+	vp, vs := absPos(viewport), viewport.Size()
 	t.Logf("строки сторон: ширина строки без переноса %.0f; (%.0f,%.0f) %.0fx%.0f, без переноса %.0f; область (%.0f,%.0f) %.0fx%.0f", widest, sp.X, sp.Y, ss.Width, ss.Height, unwrapped, vp.X, vp.Y, vs.Width, vs.Height)
 	if ss.Height > unwrapped+0.5 {
 		t.Errorf("строки сторон переносятся: высота %.0f, в одну линию на строку %.0f", ss.Height, unwrapped)
@@ -108,7 +108,7 @@ func TestGUIMigratePinnedVisible(t *testing.T) {
 		t.Errorf("строки сторон не помещаются в видимую область прокрутки: низ %.0f, область до %.0f", sp.Y+ss.Height, vp.Y+vs.Height)
 	}
 	for name, o := range must {
-		p, s := drv.AbsolutePositionForObject(o), o.Size()
+		p, s := absPos(o), o.Size()
 		t.Logf("%s: (%.0f,%.0f) %.0fx%.0f, в прокрутке: %v", name, p.X, p.Y, s.Width, s.Height, scroll[o])
 		if !o.Visible() || scroll[o] {
 			t.Errorf("%s: виден=%v, внутри прокрутки=%v", name, o.Visible(), scroll[o])

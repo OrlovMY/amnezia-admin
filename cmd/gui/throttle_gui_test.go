@@ -81,7 +81,7 @@ func TestPinDialogParallelFailuresAllCounted(t *testing.T) {
 			t.Cleanup(w.Close)
 			u := &ui{win: w, selectedRow: -1}
 			u.showConnectScreen("")
-			u.showVaultPinDialog(path, "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+			u.showVaultPinDialog(path, "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 			waitGUIGoroutines(t)
 			b := buttonByText(t, topPopup(t, w.Canvas()), "Открыть")
 			if b.Disabled() {
@@ -134,7 +134,7 @@ func TestClientHostParallelFailuresAllCounted(t *testing.T) {
 // pinDialogReady — настоящий диалог пина над хранилищем в своём каталоге,
 // дождавшись первой проверки счётчика; кнопка «Открыть», кнопка входа и
 // подпись состояния входа (attemptConnect пишет в них).
-func pinDialogReady(t *testing.T) (*ui, *widget.Button, *widget.Button, *widget.Label) {
+func pinDialogReady(t *testing.T) (*ui, *widget.Button, *widget.Button, *msgText) {
 	t.Helper()
 	localNetworkTime(t)
 	dir := t.TempDir()
@@ -144,7 +144,7 @@ func pinDialogReady(t *testing.T) (*ui, *widget.Button, *widget.Button, *widget.
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	u.showConnectScreen("")
-	connectBtn, info := widget.NewButton("", nil), widget.NewLabel("")
+	connectBtn, info := widget.NewButton("", nil), msgLabel("")
 	u.showVaultPinDialog(filepath.Join(dir, "a.avlt"), "Сервер 1", connectBtn, info)
 	waitGUIGoroutines(t)
 	return u, buttonByText(t, topPopup(t, u.win.Canvas()), "Открыть"), connectBtn, info
@@ -217,7 +217,7 @@ func TestPinAcquireShowsWaitWhileLoading(t *testing.T) {
 	entered, release := blockingLoad(t)
 	u := focusTestUI(t)
 	u.showConnectScreen("")
-	u.showVaultPinDialog(filepath.Join(dir, "a.avlt"), "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(filepath.Join(dir, "a.avlt"), "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	select {
 	case <-entered:
 	case <-time.After(10 * time.Second):

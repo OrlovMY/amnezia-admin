@@ -166,7 +166,7 @@ func (b *escButton) TypedKey(e *fyne.KeyEvent) {
 }
 
 // wrapLabel — подпись с переносом по словам.
-func wrapLabel(text string, bold bool) *widget.Label {
+func wrapLabel(text string, bold bool) *msgText {
 	l := msgLabelStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: bold})
 	l.Wrapping = fyne.TextWrapWord
 	return l

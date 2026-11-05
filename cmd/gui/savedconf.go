@@ -271,8 +271,8 @@ type qrSeries struct {
 	pngs       [][]byte
 	idx        int
 	img        *canvas.Image
-	pos        *widget.Label
-	caption    *widget.Label
+	pos        *msgText
+	caption    *msgText
 	side       bool
 	prev, next *widget.Button
 	box        *fyne.Container

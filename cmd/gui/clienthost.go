@@ -30,7 +30,7 @@ var guiClientHostResolver core.Resolver = core.SystemResolver
 type clientHostView struct {
 	d       dialog.Dialog
 	entry   *widget.Entry
-	status  *widget.Label
+	status  *msgText
 	checkBt *widget.Button
 	keepBt  *widget.Button
 	// confirm — окно «имя указывает не туда / не проверено — всё равно?»

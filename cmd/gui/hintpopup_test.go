@@ -42,7 +42,7 @@ type rect struct {
 }
 
 func rectOf(o fyne.CanvasObject) rect {
-	return rect{pos: fyne.CurrentApp().Driver().AbsolutePositionForObject(o), size: o.Size()}
+	return rect{pos: absPos(o), size: o.Size()}
 }
 
 func (r rect) right() float32  { return r.pos.X + r.size.Width }
@@ -184,7 +184,7 @@ func openPinDialog(t *testing.T) (fyne.CanvasObject, fyne.Canvas) {
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	u.win.Resize(fyne.NewSize(900, 700))
-	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
 		t.Fatal("диалог пин-кода не открылся")
@@ -250,7 +250,7 @@ func coverableObjects(root, popObj fyne.CanvasObject, pop rect) []coverable {
 			return true // сама всплывашка: она не то, что она накрывает
 		}
 		name, stop := "", false
-		switch x := o.(type) {
+		switch x := labelOf(o).(type) {
 		case *widget.Label:
 			name, stop = x.Text, true
 		case *widget.Button:
@@ -515,7 +515,7 @@ func TestHintDoesNotChangeDialogHeight(t *testing.T) {
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	u.win.Resize(fyne.NewSize(900, 700))
-	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	waitGUIGoroutines(t)
 	d := u.win.Canvas().Overlays().List()[0]
 
@@ -595,7 +595,7 @@ func TestLayoutNoticeCostsNothingWhenSilent(t *testing.T) {
 		u := focusTestUI(t)
 		t.Cleanup(func() { waitGUIGoroutines(t) })
 		u.win.Resize(fyne.NewSize(900, 700))
-		u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+		u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 		waitGUIGoroutines(t)
 		d := u.win.Canvas().Overlays().List()[0]
 		return d.MinSize(), visibleTexts(d)
@@ -673,7 +673,7 @@ func TestLayoutNoticeTextFitsItsPlace(t *testing.T) {
 
 			var notice *widget.Label
 			walkVisible(d, func(o fyne.CanvasObject) {
-				if l, ok := o.(*widget.Label); ok && l.Text == wantLayoutSwitchFailed {
+				if l, ok := asLabel(o); ok && l.Text == wantLayoutSwitchFailed {
 					notice = l
 				}
 			})

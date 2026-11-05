@@ -51,7 +51,7 @@ func buttonsFullyVisible(t *testing.T, u *ui, form string) int {
 			return
 		}
 		n++
-		p := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+		p := absPos(o)
 		s := o.Size()
 		if p.X < -0.5 || p.Y < -0.5 || p.X+s.Width > win.Width+0.5 || p.Y+s.Height > win.Height+0.5 || s.Height < 1 {
 			t.Errorf("%s: кнопка %q не видна целиком: %v %v в окне %v", form, name, p, s, win)
@@ -146,8 +146,8 @@ func TestRestoreWindowFocusEsc(t *testing.T) {
 			if u.win.Canvas().Focused() != cancel {
 				t.Errorf("фокус не на «Отмена»: %T", u.win.Canvas().Focused())
 			}
-			pc := fyne.CurrentApp().Driver().AbsolutePositionForObject(cancel)
-			po := fyne.CurrentApp().Driver().AbsolutePositionForObject(ok)
+			pc := absPos(cancel)
+			po := absPos(ok)
 			if pc.Y != po.Y || po.X <= pc.X {
 				t.Errorf("кнопки не рядом в одном ряду: %v %v", pc, po)
 			}
@@ -245,7 +245,7 @@ func textFullyAvailable(t *testing.T, root fyne.CanvasObject, form string) {
 		if _, ok := o.(*container.Scroll); ok {
 			inScroll = true
 		}
-		if l, ok := o.(*widget.Label); ok && l.Wrapping != fyne.TextWrapOff && strings.TrimSpace(l.Text) != "" {
+		if l, ok := asLabel(o); ok && l.Wrapping != fyne.TextWrapOff && strings.TrimSpace(l.Text) != "" {
 			n++
 			if !inScroll && l.Size().Height+0.5 < l.MinSize().Height {
 				t.Errorf("%s: текст обрезан и вне прокрутки (высота %.1f < нужной %.1f): %.60q", form, l.Size().Height, l.MinSize().Height, l.Text)

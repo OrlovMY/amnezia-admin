@@ -40,8 +40,8 @@ type diagView struct {
 	fix    *escButton // nil — исправлять нечего
 	later  *escButton
 	copy   *widget.Button
-	copied *widget.Label
-	cmds   *widget.Label
+	copied *msgText
+	cmds   *msgText
 }
 
 // diagnoseAfterConnect — проверка в фоне после подключения (шов теста:

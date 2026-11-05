@@ -72,7 +72,7 @@ func matchesBootPredicate(o fyne.CanvasObject) bool {
 func findByBootPredicate(root fyne.CanvasObject, at fyne.Position) fyne.CanvasObject {
 	var found fyne.CanvasObject
 	walkVisible(root, func(o fyne.CanvasObject) {
-		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+		pos := absPos(o)
 		size := o.Size()
 		if at.X < pos.X || at.Y < pos.Y {
 			return
@@ -125,7 +125,7 @@ func cellCenter(t *testing.T, u *ui, text string) (fyne.CanvasObject, fyne.Posit
 	if cell == nil {
 		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране нет ячейки с текстом %q", text)
 	}
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(cell)
+	pos := absPos(cell)
 	if cell.Size().Width <= 0 || cell.Size().Height <= 0 {
 		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: ячейка %q нулевого размера", text)
 	}
@@ -150,7 +150,7 @@ func TestPrimaryClickSelectsRowByBootRule(t *testing.T) {
 
 	u.selectedRow = -1
 	ev := &fyne.PointEvent{AbsolutePosition: center}
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(target)
+	pos := absPos(target)
 	ev.Position = fyne.NewPos(center.X-pos.X, center.Y-pos.Y)
 
 	if !deliverPrimaryClick(target, ev) {
@@ -189,7 +189,7 @@ func TestPrimaryClickFocusesTableForKeyboard(t *testing.T) {
 			"проверка перестала что-либо значить")
 	}
 	ev := &fyne.PointEvent{AbsolutePosition: center}
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(target)
+	pos := absPos(target)
 	ev.Position = fyne.NewPos(center.X-pos.X, center.Y-pos.Y)
 	if !deliverPrimaryClick(target, ev) {
 		t.Fatalf("боевая цель клика %T не умеет обработать левый клик", target)
@@ -237,7 +237,7 @@ func TestTestTapCanvasIsBlindToTheCell(t *testing.T) {
 		if _, ok := o.(fyne.Tappable); !ok {
 			return
 		}
-		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+		pos := absPos(o)
 		size := o.Size()
 		if center.X < pos.X || center.Y < pos.Y {
 			return
