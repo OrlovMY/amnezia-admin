@@ -624,7 +624,7 @@ func TestConnectNewPasswordCallbackCancelled(t *testing.T) {
 	dir := t.TempDir()
 	writeKey(t, dir, "id_ed25519", "")
 	srv := startFakeAuthServer(t, nil, sshPw) // по умолчанию: publickey (отказ) + password
-	cancel := func(KeyAttempt) ([]byte, error) { return nil, errors.New("отменено") }
+	cancel := func(KeyAttempt) ([]byte, error) { return nil, errors.New("отменено leak-marker-L2") }
 	_, att, err := ConnectNew("127.0.0.1", srv.port, "root", AuthSource{KeyDir: dir, Password: cancel}, trustPolicy(t))
 	var ae *AuthError
 	if !errors.As(err, &ae) || !errors.Is(err, ErrPasswordCancelled) || ae.PasswordTried {
@@ -632,6 +632,9 @@ func TestConnectNewPasswordCallbackCancelled(t *testing.T) {
 	}
 	if att.Outcome != KeysRejected || strings.Contains(strings.Join(att.Notes, ";"), "оборвалась") {
 		t.Fatalf("att = %#v, want KeysRejected без примечания об обрыве", att)
+	}
+	if strings.Contains(err.Error(), "leak-marker-L2") {
+		t.Fatalf("текст ошибки колбэка пароля в Error(): %q", err.Error())
 	}
 }
 
@@ -670,5 +673,19 @@ func TestConnectNewKeyPartialThenWrongPassword(t *testing.T) {
 	}
 	if att.Outcome != KeysAccepted || len(kbd) != 0 {
 		t.Fatalf("Outcome=%v kbd=%d, want KeysAccepted и пароль в kbd не ушёл", att.Outcome, len(kbd))
+	}
+}
+
+// Аудит AU PR #64, L-3/L-2: ни вопрос сервера, ни текст ошибки колбэка
+// пароля не попадают в Error() — оба могут нести пароль.
+func TestConnectNewServerTextNotInError(t *testing.T) {
+	const secret = "s3cr3t-from-server"
+	xp := &ExtraPromptError{Prompt: "your password is " + secret}
+	if strings.Contains(xp.Error(), secret) {
+		t.Fatalf("вопрос сервера в Error(): %q", xp.Error())
+	}
+	ae := &AuthError{Err: ErrPasswordCancelled}
+	if !errors.Is(ae, ErrPasswordCancelled) {
+		t.Fatalf("отмена не распознаётся: %v", ae)
 	}
 }

@@ -284,10 +284,14 @@ var ErrExtraPrompt = errors.New("сервер задал после пароля
 
 // ExtraPromptError — ErrExtraPrompt с текстом вопроса сервера (пароля в нём
 // нет: это приглашение, присланное сервером).
+//
+// Prompt — данные от сервера, который уже получил пароль: враждебный сервер
+// может вернуть в нём пароль. Поэтому Error() его не печатает (аудит AU
+// PR #64, L-3); показывать человеку — только через маскировку на границе.
 type ExtraPromptError struct{ Prompt string }
 
 func (e *ExtraPromptError) Error() string {
-	return fmt.Sprintf("сервер задал после пароля ещё вопрос: %q — не поддерживается, пароль повторно не отправлен", truncRunes(e.Prompt, 80))
+	return "сервер задал после пароля ещё вопрос — не поддерживается, пароль повторно не отправлен"
 }
 func (e *ExtraPromptError) Unwrap() error { return ErrExtraPrompt }
 
@@ -389,7 +393,9 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 			p, err := src.Password(q)
 			if err != nil {
 				clear(p)
-				return "", fmt.Errorf("%w: %w", ErrPasswordCancelled, err)
+				// Текст ошибки колбэка в ошибку не идёт: колбэк держал пароль и
+				// может вернуть его в тексте (аудит AU PR #64, L-2).
+				return "", ErrPasswordCancelled
 			}
 			if len(p) == 0 {
 				return "", ErrNoPassword
@@ -479,13 +485,4 @@ func ConnectNew(host, port, user string, src AuthSource, pol HostKeyPolicy) (*Se
 	}
 	creds := &ServerCreds{Host: host, Port: port, User: user} // пароль не хранится
 	return &Session{Client: client, Creds: creds, r: sshRunner{client}, HostKeyFingerprint: fp}, att, nil
-}
-
-// truncRunes — строка от сервера в тексте ошибки не длиннее n рун.
-func truncRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
 }
