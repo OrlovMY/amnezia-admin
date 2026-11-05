@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,6 +64,8 @@ type thEnv struct {
 	migCode   int
 	install   core.InstallResult
 	verifyErr error
+	verifySeq []error // ответы проверки по очереди, затем verifyErr
+	verifyN   int
 	pwAsked   int
 	pwAnswer  string
 	keyDir    string
@@ -75,8 +78,10 @@ func newTHEnv(t *testing.T) *thEnv {
 		Measure:    &core.CompatReport{},
 	}
 	d0, d1, d2, d3, d4, d5, d6, d7, d8 := migrateDial, toHostConnectNew, toHostCollect, toHostInstall, toHostMigrate, toHostKeyContainers, toHostVerify, toHostPassword, toHostKeyDir
+	d9 := toHostResolve
 	t.Cleanup(func() {
 		migrateDial, toHostConnectNew, toHostCollect, toHostInstall, toHostMigrate, toHostKeyContainers, toHostVerify, toHostPassword, toHostKeyDir = d0, d1, d2, d3, d4, d5, d6, d7, d8
+		toHostResolve = d9
 	})
 	migrateDial = func(c *core.ServerCreds, _ core.HostKeyPolicy) (*core.Session, error) {
 		s := core.NewSessionWithRunner(provCLIFake{}, c)
@@ -117,7 +122,16 @@ func newTHEnv(t *testing.T) *thEnv {
 	toHostKeyContainers = func(*core.Session, []string) ([]core.AdminKeyContainer, []string, error) {
 		return []core.AdminKeyContainer{{Name: "amnezia-awg2", Protocol: thParams()}}, nil, nil
 	}
-	toHostVerify = func(core.AdminKey, core.AdminKeyInput, string, string) error { return e.verifyErr }
+	toHostVerify = func(core.AdminKey, core.AdminKeyInput, string, string) error {
+		e.verifyN++
+		if len(e.verifySeq) > 0 {
+			x := e.verifySeq[0]
+			e.verifySeq = e.verifySeq[1:]
+			return x
+		}
+		return e.verifyErr
+	}
+	toHostResolve = func(string) ([]net.IP, error) { return nil, errors.New("в тесте DNS нет") }
 	toHostPassword = func(io.Writer, string) ([]byte, error) {
 		e.pwAsked++
 		return []byte(e.pwAnswer), nil
@@ -228,9 +242,11 @@ func TestToHostKeyConsent(t *testing.T) {
 		stdin string
 		mf    migrateFlags
 	}{
-		{"ответ n", true, "y\nn\n", migrateFlags{apply: true, noPw: true}},
-		{"пустой ответ", true, "y\n\n", migrateFlags{apply: true, noPw: true}},
+		{"ответ n", true, "n\ny\n", migrateFlags{apply: true, noPw: true}},
+		{"пустой ответ", true, "\ny\n", migrateFlags{apply: true, noPw: true}},
 		{"-yes без терминала", false, "", migrateFlags{apply: true, noPw: true, yes: true}},
+		// M2: «y» в stdin без терминала согласием не считается.
+		{"-yes без терминала, в stdin y", false, "y\ny\ny\n", migrateFlags{apply: true, noPw: true, yes: true}},
 	} {
 		e := newTHEnv(t)
 		if !c.tty {
@@ -243,7 +259,7 @@ func TestToHostKeyConsent(t *testing.T) {
 		if n := len(e.keyFiles()); n != 0 {
 			t.Fatalf("%s: без согласия записан ключ (%d файлов)", c.name, n)
 		}
-		if !strings.Contains(out, "Ключ vpn:// не выдан") {
+		if !strings.Contains(out, "выдан не будет") {
 			t.Fatalf("%s: не сказано, что ключ не выдан:\n%s", c.name, out)
 		}
 	}
@@ -255,7 +271,7 @@ func TestToHostKeyAuthAsksPasswordForKey(t *testing.T) {
 	e := newTHEnv(t)
 	e.keyAuth, e.pwAnswer = true, ""
 	code, out, _ := e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true})
-	if code != 0 || e.pwAsked != 1 || len(e.keyFiles()) != 0 || !strings.Contains(out, "пароль не введён") {
+	if code != 0 || e.pwAsked != 1 || len(e.keyFiles()) != 0 || !strings.Contains(out, "ароль не введён") {
 		t.Fatalf("код %d, спрошен %d, файлов %d\n%s", code, e.pwAsked, len(e.keyFiles()), out)
 	}
 	if !strings.Contains(out, "по ключу ПК") {
@@ -351,11 +367,15 @@ func TestToHostExitCodes(t *testing.T) {
 		{"адрес другой", func(e *thEnv) { e.backup.IssuedAddress = core.IssuedAddress{Value: "vpn.example.org", Kind: "name"} }, true, "", ap, 4, "-address-changes", 0},
 		{"нет -yes без терминала", func(e *thEnv) { e.keyAuth = true }, false, "", ap, 2, "", 0},
 		{"установка отклонена человеком", func(*thEnv) {}, true, "n\n", ap, 2, "Отменено", 0},
-		{"установка не удалась", func(e *thEnv) { e.install.Containers[0].Measured = core.CompatMismatch }, true, "y\n", ap, 1, "НЕ перенесены", 1},
-		{"установка: не измерено", func(e *thEnv) { e.install.Measure = nil }, true, "y\n", ap, 4, "НЕ перенесены", 1},
-		{"перенос не весь", func(e *thEnv) { e.migCode = 1 }, true, "y\n", ap, 1, "не выдан", 1},
-		{"ключ не совпал", func(e *thEnv) { e.verifyErr = core.ErrAdminKeyMismatch }, true, "y\ny\n", ap, 1, "", 1},
-		{"ключ не проверен", func(e *thEnv) { e.verifyErr = errors.New("сеть") }, true, "y\ny\n", ap, 4, "проверить не удалось", 1},
+		{"установка не удалась", func(e *thEnv) { e.install.Containers[0].Measured = core.CompatMismatch }, true, "n\ny\n", ap, 1, "НЕ перенесены", 1},
+		{"установка: не измерено", func(e *thEnv) { e.install.Measure = nil }, true, "n\ny\n", ap, 4, "НЕ перенесены", 1},
+		{"перенос не весь", func(e *thEnv) { e.migCode = 1 }, true, "n\ny\n", ap, 1, "ПЕРЕНОС НЕ ЗАВЕРШЁН", 1},
+		{"перенос остановлен", func(e *thEnv) { e.migCode = 4 }, true, "n\ny\n", ap, 4, "ПЕРЕНОС НЕ ЗАВЕРШЁН", 1},
+		// L2: перенос сделан — исход ключа код не меняет.
+		{"ключ не совпал", func(e *thEnv) { e.verifyErr = core.ErrAdminKeyMismatch }, true, "y\ny\n", ap, 0, "НЕ выдан", 1},
+		{"ключ не проверен", func(e *thEnv) { e.verifyErr = errors.New("сеть") }, true, "y\ny\n", ap, 0, "проверить не удалось", 1},
+		// H1а: без терминала и без выбора слоя автокопии — 2 ДО установки.
+		{"нет -no-password без терминала", func(e *thEnv) { e.keyAuth = true }, false, "", migrateFlags{apply: true, yes: true}, 2, "Ничего не изменено", 0},
 	}
 	for _, c := range cases {
 		e := newTHEnv(t)
@@ -388,5 +408,76 @@ func TestToHostUsage(t *testing.T) {
 	}
 	if code, _, _ := cliRun(t, kh, "", "migrate", "-key", "vpn://x", "-to-key", "vpn://y", "-key-out", "f"); code != 1 {
 		t.Errorf("-key-out без -to-host: код %d", code)
+	}
+}
+
+// H1б: установка прошла, перенос остановлен — ключ всё равно выдан (при
+// согласии), напечатаны состояние и точная команда продолжения с путём.
+func TestToHostMigrateStoppedStillIssuesKey(t *testing.T) {
+	e := newTHEnv(t)
+	e.migCode = 4
+	code, out, errOut := e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true})
+	files := e.keyFiles()
+	if code != 4 || len(files) != 1 {
+		t.Fatalf("код %d, файлов %d\n%s\n%s", code, len(files), out, errOut)
+	}
+	if !strings.Contains(out, "Источник не изменён") || !strings.Contains(out, "-to-key \"$(cat '"+files[0]+"')\"") {
+		t.Fatalf("нет состояния/команды продолжения:\n%s", out)
+	}
+	data, _ := os.ReadFile(files[0])
+	if bad := leaks(out+errOut, thPw, strings.TrimSpace(string(data))); len(bad) > 0 {
+		t.Fatalf("утечка: %v", bad)
+	}
+}
+
+// H2: отказ входа по паролю из ключа — ключ НЕ пишется, причина названа,
+// пароль спрашивается заново (до 3 попыток); сеть — ключ пишется с
+// оговоркой. Различение двух исходов.
+func TestToHostKeyAuthRejected(t *testing.T) {
+	// отвергнут, затем принят со второго пароля
+	e := newTHEnv(t)
+	e.verifySeq = []error{core.ErrAdminKeyAuthRejected}
+	code, out, _ := e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true})
+	if code != 0 || len(e.keyFiles()) != 1 || e.pwAsked != 2 || e.verifyN != 2 || !strings.Contains(out, "PasswordAuthentication") {
+		t.Fatalf("повтор: код %d, файлов %d, паролей %d, проверок %d\n%s", code, len(e.keyFiles()), e.pwAsked, e.verifyN, out)
+	}
+	// отвергнут всегда — 3 попытки, ключа нет
+	e = newTHEnv(t)
+	e.verifyErr = core.ErrAdminKeyAuthRejected
+	code, out, _ = e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true})
+	if code != 0 || len(e.keyFiles()) != 0 || e.verifyN != toHostKeyAttempts || strings.Contains(out, "проверить не удалось") {
+		t.Fatalf("отказ: код %d, файлов %d, проверок %d\n%s", code, len(e.keyFiles()), e.verifyN, out)
+	}
+	// сеть — «не удалось проверить», ключ записан
+	e = newTHEnv(t)
+	e.verifyErr = errors.New("connection refused")
+	if _, out, _ := e.run(true, "y\ny\n", migrateFlags{apply: true, noPw: true}); len(e.keyFiles()) != 1 || !strings.Contains(out, "проверить не удалось") {
+		t.Fatalf("сеть: файлов %d\n%s", len(e.keyFiles()), out)
+	}
+}
+
+// M1: после неудачной установки названо, что осталось на сервере, и что
+// источник не тронут.
+func TestToHostInstallFailedSaysWhatsLeft(t *testing.T) {
+	e := newTHEnv(t)
+	e.install = core.InstallResult{Containers: []core.InstallContainerResult{{Container: "amnezia-awg2", Outcome: core.InstallInstalled,
+		Measured: core.CompatMismatch, Rollback: core.RollbackFailed, RollbackLeft: []string{"amnezia-awg2"}}}, Measure: &core.CompatReport{}}
+	code, out, _ := e.run(true, "n\ny\n", migrateFlags{apply: true, noPw: true})
+	if code != 1 || !strings.Contains(out, "осталось: amnezia-awg2") || !strings.Contains(out, "Источник не изменён") {
+		t.Fatalf("код %d\n%s", code, out)
+	}
+}
+
+// L2: -key-out не записался — ключ пишется в каталог по умолчанию, путь
+// напечатан.
+func TestToHostKeyOutFallback(t *testing.T) {
+	e := newTHEnv(t)
+	var outB, errB bytes.Buffer
+	o := toHostOpts{srcKey: thSrcKey(t), host: thHost, port: "22", user: "root", knownHostsPath: filepath.Join(t.TempDir(), "kh"),
+		mf: migrateFlags{apply: true, noPw: true}, noAgent: true, keyOut: filepath.Join(t.TempDir(), "нет-каталога", "k.txt")}
+	code := runMigrateToHost(context.Background(), strings.NewReader("y\ny\n"), &outB, &errB, true, o, time.Unix(1700000000, 0))
+	files := e.keyFiles()
+	if code != 0 || len(files) != 1 || !strings.Contains(outB.String(), files[0]) {
+		t.Fatalf("код %d, файлов %d\n%s\n%s", code, len(files), outB.String(), errB.String())
 	}
 }

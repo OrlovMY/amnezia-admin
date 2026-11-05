@@ -53,7 +53,15 @@ var (
 	// протокола. Пустой {} приложение приняло бы молча (порт, obfuscation —
 	// пустые строки) — это «значение по умолчанию вместо ответа».
 	ErrAdminKeyNoProtocolParams = errors.New("нет параметров протокола — ключ не выдаётся")
+	// ErrAdminKeyAuthRejected — сервер ответил и НЕ принял вход по ключу
+	// (пароль не подошёл или вход по паролю на сервере выключен). Это
+	// измеренное «ключ не годится», а не «проверить не удалось» (ревью
+	// PR #70, H2).
+	ErrAdminKeyAuthRejected = errors.New("сервер не принял вход по паролю из ключа (пароль не подошёл или вход по паролю на сервере выключен)")
 )
+
+// adminKeyDial — вход при проверке ключа (шов теста).
+var adminKeyDial = ConnectWithHostKey
 
 // AdminKeyContainer — контейнер в составе ключа. Protocol — параметры
 // протокола (как их хранит приложение); ОБЯЗАТЕЛЬНЫ поля из
@@ -278,12 +286,18 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 		}
 	case "amnezia-xray":
 		srv, err := parseXRayServer(conf)
-		if err != nil {
+		switch {
+		case err == nil:
+			p["port"], p["site"] = srv.port, srv.serverName
+		case xrayNoClients(conf):
+			// Разборщик server.json отказывает при пустом списке клиентов
+			// (flow новых неизвестен) — для ключа flow не нужен: порт и SNI
+			// берутся прямо (ревью PR #69, R3).
+			p["port"], p["site"] = xrayPortSNI(conf)
+		default:
 			return nil, fmt.Errorf("%w: контейнер %q, server.json: %v", ErrAdminKeyNoProtocolParams, container, err)
 		}
-		p["port"] = srv.port
 		p["transport_proto"] = "tcp"
-		p["site"] = srv.serverName
 	default:
 		return nil, fmt.Errorf("ключ: контейнер %q не из списка известных", container)
 	}
@@ -298,9 +312,10 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 // адрес/порт/пользователя/пароль/контейнеры с want и войти на сервер с
 // ЗАКРЕПЛЁННЫМ отпечатком (без вопроса человеку).
 //
-// Три исхода: nil — проверено; errors.Is(err, ErrAdminKeyMismatch) — ключ
-// НЕ тот; любая другая ошибка — проверить не удалось (сеть, отпечаток,
-// вход) — это не «ключ плохой» и не «ключ хороший».
+// Исходы: nil — проверено; ErrAdminKeyMismatch — ключ НЕ тот;
+// ErrAdminKeyAuthRejected — сервер ответил и не принял пароль из ключа
+// (измеренное «не годится»); любая другая ошибка — проверить не удалось
+// (сеть, отпечаток, обрыв) — это не «ключ плохой» и не «ключ хороший».
 func VerifyAdminKey(key AdminKey, want AdminKeyInput, expectedFingerprint, knownHostsPath string) error {
 	if expectedFingerprint == "" {
 		return errors.New("проверка ключа: отпечаток сервера не задан — без закрепления не проверяем")
@@ -348,11 +363,14 @@ func VerifyAdminKey(key AdminKey, want AdminKeyInput, expectedFingerprint, known
 	if Str(cfg, "defaultContainer") != want.DefaultContainer {
 		return fmt.Errorf("%w: контейнер по умолчанию", ErrAdminKeyMismatch)
 	}
-	sess, err := ConnectWithHostKey(creds, HostKeyPolicy{
+	sess, err := adminKeyDial(creds, HostKeyPolicy{
 		KnownHostsPath:      knownHostsPath,
 		ExpectedFingerprint: expectedFingerprint,
 	})
 	if err != nil {
+		if ce := ClassifyConnectError(err); ce != nil && ce.Kind == ConnectAuthRejected {
+			return ErrAdminKeyAuthRejected
+		}
 		return fmt.Errorf("проверка ключа: войти не удалось: %w", err)
 	}
 	sess.Close()
@@ -385,14 +403,14 @@ func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyCon
 		}
 		var conf []byte
 		if n == "amnezia-xray" {
-			raw, srv, rerr := s.readXRayConf(c)
+			raw, rerr := s.catIn(c, c.Dir+"/"+xrayConfFile)
 			if rerr != nil {
 				return nil, nil, fmt.Errorf("ключ: контейнер %q, server.json не прочитан: %w", n, rerr)
 			}
-			if len(srv.ids) == 0 {
+			conf = []byte(raw)
+			if xrayNoClients(conf) {
 				notes = append(notes, XRayNoClientsNote)
 			}
-			conf = raw
 		} else {
 			out, rerr := s.catConf(c)
 			if rerr != nil {
@@ -411,3 +429,41 @@ func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyCon
 
 // XRayNoClientsNote — оговорка: XRay поставлен, но клиентов в нём нет.
 const XRayNoClientsNote = "XRay: на сервере нет ни одного клиента XRay — ключ даёт управление сервером, но подключаться по XRay пока некому; клиента можно добавить в приложении Amnezia или командой add"
+
+// xrayInbound0 — inbounds[0] server.json как объект (nil — формы нет).
+func xrayInbound0(conf []byte) map[string]any {
+	var root map[string]any
+	if json.Unmarshal(conf, &root) != nil {
+		return nil
+	}
+	ib, _ := root["inbounds"].([]any)
+	if len(ib) != 1 {
+		return nil
+	}
+	in, _ := ib[0].(map[string]any)
+	return in
+}
+
+// xrayNoClients — в server.json список клиентов ЕСТЬ и он пуст (измерено,
+// а не «не разобрали»).
+func xrayNoClients(conf []byte) bool {
+	in := xrayInbound0(conf)
+	st, _ := in["settings"].(map[string]any)
+	cl, ok := st["clients"].([]any)
+	return ok && len(cl) == 0
+}
+
+// xrayPortSNI — порт и первый serverName; не найдено — пусто (обязательные
+// поля проверит missingProtocolParams).
+func xrayPortSNI(conf []byte) (port, sni string) {
+	in := xrayInbound0(conf)
+	if n, ok := in["port"].(float64); ok && n >= 1 && n <= 65535 && n == float64(int(n)) {
+		port = strconv.Itoa(int(n))
+	}
+	ss, _ := in["streamSettings"].(map[string]any)
+	rs, _ := ss["realitySettings"].(map[string]any)
+	if names, _ := rs["serverNames"].([]any); len(names) > 0 {
+		sni, _ = names[0].(string)
+	}
+	return port, sni
+}

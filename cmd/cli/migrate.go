@@ -27,6 +27,18 @@ type migrateFlags struct {
 	apply, addrOK, skipXRay, replaceUsers, yes bool
 	pwFile                                     string // пароль автокопии ЦЕЛИ
 	noPw                                       bool
+	// pre — ответы, данные ДО установки (migrate -to-host): слой автокопии,
+	// подтверждение замены/XRay и уже прочитанная копия источника. nil —
+	// обычный migrate -to-key, всё спрашивается здесь.
+	pre *migratePre
+}
+
+// migratePre — ответы, собранные до установки на чистый сервер.
+type migratePre struct {
+	layer     core.BackupLayer
+	warning   string
+	confirmed bool
+	source    *core.Backup
 }
 
 // bypassAddressGate — шов теста: обойти проверку адреса в CLI, чтобы убедиться,
@@ -130,7 +142,11 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	fmt.Fprintln(w)
 
 	progress := cliProgress(errOut, isTTY)
-	m, err := core.PrepareMigration(ctx, src, dst, core.MigrationOptions{ToolVersion: version.String(), Now: now, Resolve: net.LookupIP, Progress: progress})
+	mo := core.MigrationOptions{ToolVersion: version.String(), Now: now, Resolve: net.LookupIP, Progress: progress}
+	if f.pre != nil {
+		mo.Source = f.pre.source
+	}
+	m, err := core.PrepareMigration(ctx, src, dst, mo)
 	endProgress(errOut, isTTY)
 	switch {
 	case errors.Is(err, core.ErrCanceled):
@@ -195,20 +211,26 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	xrayOK := hasXRay && !f.skipXRay
 	askUsers := rp.NeedsTargetConfirm() && !f.replaceUsers
 	targetOK := !rp.NeedsTargetConfirm() || f.replaceUsers
-	if askUsers && (f.yes || !isTTY) && !bypassTargetGate {
+	if askUsers && (f.yes || !isTTY || f.pre != nil) && !bypassTargetGate {
 		fmt.Fprintln(w, replaceUsersRefuse)
 		return 2
 	}
 	// Единственное, что пишется на диск, — автокопия ЦЕЛИ: слой выбирается
 	// явно (пароль / без пароля), как у backup.
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Перед заменой программа сохранит на диск АВТОКОПИЮ ЦЕЛИ (её нынешнее состояние; источник на диск не пишется).")
-	layer, warning, code := backupLayerChoice(in, w, errOut, isTTY, f.pwFile, f.noPw)
-	if code != 0 {
-		return code
+	var layer core.BackupLayer
+	if f.pre != nil {
+		layer = f.pre.layer // выбран до установки, второй раз не спрашивается
+	} else {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Перед заменой программа сохранит на диск АВТОКОПИЮ ЦЕЛИ (её нынешнее состояние; источник на диск не пишется).")
+		l, warning, code := backupLayerChoice(in, w, errOut, isTTY, f.pwFile, f.noPw)
+		if code != 0 {
+			return code
+		}
+		layer = l
+		fmt.Fprintln(w, warning)
 	}
-	fmt.Fprintln(w, warning)
-	if !f.yes {
+	if !f.yes && (f.pre == nil || !f.pre.confirmed) {
 		if !isTTY {
 			fmt.Fprintln(errOut, "Действие не выполнено: без терминала требуется флаг -yes (для скриптов).")
 			return 2
@@ -264,7 +286,7 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 		return 1
 	}
 	printLines(w, core.MigrationOutcomeLines(auto, layer.Name() == core.PasswordLayerName, outs))
-	code = 0
+	code := 0
 	for _, o := range outs {
 		if o.State != core.RestoreDone {
 			code = 1

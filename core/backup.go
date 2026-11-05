@@ -62,6 +62,14 @@ func (s Secret) Bytes() []byte {
 	return append([]byte(nil), (*s.b)...)
 }
 
+// Wipe — затереть байты секрета нулями (копии, выданные Bytes(), не
+// затрагиваются). Пустой Secret — ничего.
+func (s Secret) Wipe() {
+	if s.b != nil {
+		clear(*s.b)
+	}
+}
+
 // Len — размер.
 func (s Secret) Len() int {
 	if s.b == nil {

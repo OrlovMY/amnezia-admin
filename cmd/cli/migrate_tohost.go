@@ -25,7 +25,13 @@ package main
 // 1 — не перенесено / нельзя (измерено); 2 — ошибка использования,
 // подключения или не подтверждено; 4 — остановлено проверкой / неизвестно.
 // Отличие от migrate -to-key: ошибка подключения к ЦЕЛИ здесь 2, а не 1 —
-// как у provision-check: 1 занят измеренным «нельзя».
+// как у provision-check: 1 занят измеренным «нельзя». Исход выдачи ключа
+// код не меняет: главный результат — перенос (ревью PR #70, L2).
+//
+// Все вопросы (слой автокопии, согласие на пароль в ключе, установка с
+// переносом, XRay) и известные заранее проверки (адрес выдачи — тем же
+// путём, что CheckTarget) — ДО установки; runMigrate получает ответы в
+// migrateFlags.pre и второй раз не спрашивает (ревью PR #70, H1).
 
 import (
 	"bufio"
@@ -75,8 +81,9 @@ var (
 	toHostKeyContainers = func(s *core.Session, names []string) ([]core.AdminKeyContainer, []string, error) {
 		return s.AdminKeyContainersFromServer(names)
 	}
-	toHostVerify   = core.VerifyAdminKey
-	toHostPassword = readPasswordTTY
+	toHostVerify                 = core.VerifyAdminKey
+	toHostResolve  core.Resolver = net.LookupIP
+	toHostPassword               = readPasswordTTY
 	// toHostKeyDir — каталог ключей по умолчанию (рядом с «Конфигурации»).
 	toHostKeyDir = func() (string, error) {
 		d, err := core.UserConfigsDir()
@@ -176,7 +183,8 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	defer src.Close()
 
 	// --- вход на новый сервер ---
-	var loginPw core.Secret // пароль входа: живёт до выдачи ключа, не сохраняется
+	var loginPw core.Secret // пароль входа: затирается сразу после вопроса о ключе
+	defer func() { loginPw.Wipe() }()
 	auth := core.AuthSource{KeyDir: o.authKeyDir, AgentSocket: o.agentFS, NoAgent: o.noAgent}
 	if isTTY {
 		auth.Password = func(keys core.KeyAttempt) ([]byte, error) {
@@ -279,50 +287,153 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 		fmt.Fprintln(w, "\nЭто сухой прогон: на серверах ничего не изменено, на диск ничего не записано. Чтобы выполнить — добавьте -apply.")
 		return 0
 	}
-	// Адрес выдачи сменится почти всегда (новый IP): узнать это до
-	// установки, а не после неё — иначе на сервере остались бы контейнеры
-	// без клиентов.
-	if !o.mf.addrOK {
-		iss := b.IssuedAddress
-		if iss.Value != host && iss.ResolvedIP != host {
-			fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН ДО УСТАНОВКИ: конфиги клиентов выданы на адрес «"+iss.Value+"», а новый сервер — «"+host+"». Если клиенты подключаются по DNS-имени, после переезда переключите DNS; повторите с флагом -address-changes.")
-			return exitToHostUnknown
+	// --- ВСЕ вопросы и известные заранее проверки — ДО установки (ревью
+	// PR #70, H1): после Install остановка оставила бы на сервере
+	// контейнеры без клиентов. ---
+	// Адрес выдачи — тем же путём, что compat.NeedAddressConfirm в CheckTarget.
+	if need, text := core.TargetAddressCheck(b, host, toHostResolve); need && !o.mf.addrOK {
+		fmt.Fprintln(w, "Адрес: "+text)
+		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН ДО УСТАНОВКИ: адрес выдачи другой или не проверен. Если клиенты подключаются по DNS-имени, после переезда переключите DNS; повторите с флагом -address-changes. Ничего не изменено.")
+		return exitToHostUnknown
+	}
+	if !o.mf.yes && !isTTY {
+		fmt.Fprintln(errOut, "Действие не выполнено: без терминала требуется флаг -yes (для скриптов). Ничего не изменено.")
+		return exitToHostUsage
+	}
+	fmt.Fprintln(w, "Перед переносом клиентов программа сохранит на диск АВТОКОПИЮ НОВОГО СЕРВЕРА (его состояние до замены; источник на диск не пишется).")
+	layer, warning, code := backupLayerChoice(in, w, errOut, isTTY, o.mf.pwFile, o.mf.noPw)
+	if code != 0 {
+		fmt.Fprintln(w, "Ничего не изменено.")
+		return code
+	}
+	fmt.Fprintln(w, warning)
+	// Согласие на пароль в ключе — только на экране; -yes его не даёт.
+	var keyPw core.Secret
+	defer func() { keyPw.Wipe() }()
+	consent := false
+	if !isTTY {
+		fmt.Fprintln(w, "Ключ vpn:// нового сервера выдан не будет: в ключ кладётся пароль "+user+", и согласие на это даётся только на экране (терминал).")
+	} else {
+		fmt.Fprintln(w, "После переноса программа может выдать ключ vpn:// нового сервера (как «полный доступ» в приложении Amnezia). В нём будет пароль "+user+"@"+host+": кто получит ключ — получит root-доступ к серверу.")
+		consent = askYes(in, w, "Положить пароль в ключ и выдать ключ после переноса? (y/n): ")
+		switch {
+		case !consent:
+			fmt.Fprintln(w, "Ключ выдан не будет (нет согласия).")
+		case loginPw.Len() > 0:
+			keyPw = core.NewSecret(loginPw.Bytes())
+		default:
+			fmt.Fprintln(w, "Вход был по ключу ПК — пароля для ключа vpn:// у программы нет.")
+			if keyPw = askKeyPassword(w, user, host); keyPw.Len() == 0 {
+				consent = false
+				fmt.Fprintln(w, "Пароль не введён — ключ выдан не будет.")
+			}
 		}
+	}
+	loginPw.Wipe() // пароль входа больше не нужен
+	hasXRay := false
+	for _, it := range plan.Items {
+		hasXRay = hasXRay || it.Container == "amnezia-xray"
+	}
+	xrayNote := ""
+	if hasXRay && !o.mf.skipXRay {
+		xrayNote = " (XRay на новом сервере будет перезапущен)"
+	}
+	if !o.mf.yes && !askYes(in, w, "Поставить Amnezia на новый сервер и перенести на него клиентов источника"+xrayNote+"? (y/n): ") {
+		fmt.Fprintln(w, "Отменено: ничего не записано.")
+		return exitToHostUsage
 	}
 
-	// --- подтверждение установки ---
-	if !o.mf.yes {
-		if !isTTY {
-			fmt.Fprintln(errOut, "Действие не выполнено: без терминала требуется флаг -yes (для скриптов).")
-			return exitToHostUsage
-		}
-		if !askYes(in, w, "Поставить Amnezia на новый сервер с перечисленными изменениями? (y/n): ") {
-			fmt.Fprintln(w, "Отменено: ничего не записано.")
-			return exitToHostUsage
-		}
-	}
-	res := toHostInstall(dst, plan, core.InstallOptions{Backup: b, Resolve: net.LookupIP, PreviewAccepted: true})
+	res := toHostInstall(dst, plan, core.InstallOptions{Backup: b, Resolve: toHostResolve, PreviewAccepted: true})
 	printLines(w, res.Lines())
 	if !res.ReadyForRestore() {
-		fmt.Fprintln(w, "Клиенты НЕ перенесены.")
+		printInstallFailed(w, res)
 		if res.Refused == "" && res.Measure == nil {
 			return exitToHostUnknown
 		}
 		return exitToHostNo
 	}
 
-	// --- перенос клиентов: тот же путь, что -to-key ---
+	// --- перенос клиентов: тот же путь, что -to-key, с ответами, данными выше ---
 	fmt.Fprintln(w)
-	if code := toHostMigrate(ctx, in, w, errOut, isTTY, src, dst, o.mf, now); code != 0 {
-		fmt.Fprintln(w, "Ключ vpn:// нового сервера не выдан: перенос не завершён.")
-		return code
+	mf := o.mf
+	mf.pre = &migratePre{layer: layer, warning: warning, confirmed: true, source: b}
+	code = toHostMigrate(ctx, in, w, errOut, isTTY, src, dst, mf, now)
+
+	// Ключ выдаётся и при неудаче переноса: без него контейнеры на новом
+	// сервере не продолжить ничем (ревью PR #70, H1б).
+	keyPath := ""
+	if consent {
+		keyPath = toHostIssueKey(w, errOut, isTTY, o, dst, host, port, user, plan, keyPw, now)
 	}
-	return toHostIssueKey(in, w, errOut, isTTY, o, dst, host, port, user, plan, &loginPw)
+	if code != 0 {
+		var names []string
+		for _, it := range plan.Items {
+			names = append(names, it.Container)
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "ПЕРЕНОС НЕ ЗАВЕРШЁН. На новом сервере поставлены контейнеры Amnezia ("+strings.Join(names, ", ")+"); клиенты перенесены не все или не перенесены (см. выше). Источник не изменён и продолжает работать.")
+		if keyPath != "" {
+			fmt.Fprintln(w, "Продолжить перенос на уже поставленный сервер (ключ источника подставьте сами):")
+			fmt.Fprintln(w, "  amnezia-admin migrate -key <ключ источника> -to-key \"$(cat '"+keyPath+"')\" -apply")
+			fmt.Fprintln(w, "  (PowerShell: -to-key (Get-Content '"+keyPath+"'))")
+		} else {
+			fmt.Fprintln(w, "Ключ нового сервера не выдан — продолжить командой migrate -to-key можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ. Повторный запуск -to-host откажет: сервер уже не чистый.")
+		}
+	}
+	return code
 }
 
-// toHostIssueKey — новый админский vpn://: согласие на пароль в ключе (на
-// экране, -yes его не даёт), сборка, проверка входом, файл 0600.
-func toHostIssueKey(in io.Reader, w, errOut io.Writer, isTTY bool, o toHostOpts, dst *core.Session, host string, port int, user string, plan core.InstallPlan, loginPw *core.Secret) int {
+// printInstallFailed — после неудачной установки: что осталось на сервере,
+// что источник не тронут, что делать (ревью PR #70, M1).
+func printInstallFailed(w io.Writer, res core.InstallResult) {
+	fmt.Fprintln(w, "Клиенты НЕ перенесены. Источник не изменён и продолжает работать.")
+	if res.Refused != "" {
+		fmt.Fprintln(w, "Установка не начиналась — на новом сервере ничего не изменено.")
+		return
+	}
+	var left []string
+	unknown := false
+	for _, c := range res.Containers {
+		switch {
+		case c.Rollback == core.RollbackDone:
+		case c.Rollback == core.RollbackFailed:
+			left = append(left, c.RollbackLeft...)
+		case c.Rollback == core.RollbackUnknown:
+			unknown = true
+			left = append(left, c.Container+" (не подтверждено)")
+		case c.Outcome == core.InstallInstalled:
+			left = append(left, c.Container)
+		}
+	}
+	switch {
+	case len(left) > 0:
+		fmt.Fprintln(w, "На новом сервере осталось: "+strings.Join(left, ", ")+". Повторный запуск -to-host откажет («сервер не чистый»); снос — в следующей версии, вручную: docker rm -f <контейнер> (и docker volume rm для тома XRay).")
+	case unknown:
+		fmt.Fprintln(w, "Что осталось на новом сервере — неизвестно; проверьте docker ps -a перед повтором.")
+	default:
+		fmt.Fprintln(w, "По измерению отката контейнеров Amnezia на новом сервере не осталось (Docker, если ставился, остался). Устраните причину и повторите.")
+	}
+}
+
+// askKeyPassword — пароль для ключа vpn:// с терминала без эха; пусто —
+// пустой Secret.
+func askKeyPassword(w io.Writer, user, host string) core.Secret {
+	b, err := toHostPassword(w, "Пароль "+user+"@"+host+" для ключа (не отображается; пусто — не выдавать ключ): ")
+	if err != nil || len(b) == 0 {
+		return core.Secret{}
+	}
+	s := core.NewSecret(b)
+	clear(b)
+	return s
+}
+
+// toHostKeyAttempts — сколько раз всего пробуется пароль для ключа.
+const toHostKeyAttempts = 3
+
+// toHostIssueKey — сборка, проверка входом и запись ключа; возвращает путь
+// файла ("" — ключ не выдан, причина напечатана). Исход ключа на код выхода
+// не влияет: перенос — главный результат (ревью PR #70, L2).
+func toHostIssueKey(w, errOut io.Writer, isTTY bool, o toHostOpts, dst *core.Session, host string, port int, user string, plan core.InstallPlan, pw core.Secret, now time.Time) string {
 	fmt.Fprintln(w)
 	var names []string
 	for _, it := range plan.Items {
@@ -331,63 +442,61 @@ func toHostIssueKey(in io.Reader, w, errOut io.Writer, isTTY bool, o toHostOpts,
 	cs, notes, err := toHostKeyContainers(dst, names)
 	if err != nil {
 		backupErr(errOut, "Ключ vpn:// не выдан: ", err)
-		return exitToHostUnknown
+		return ""
 	}
 	for _, n := range notes {
 		fmt.Fprintln(w, n)
 	}
-	if !isTTY {
-		fmt.Fprintln(w, "Ключ vpn:// не выдан: в ключ кладётся пароль "+user+", и согласие на это даётся только на экране (терминал). Перенос выполнен.")
-		return 0
-	}
-	fmt.Fprintln(w, "Новый ключ vpn:// (как «полный доступ» в приложении Amnezia) будет содержать пароль "+user+"@"+host+": кто получит ключ — получит root-доступ к серверу.")
-	if !askYes(in, w, "Положить пароль в ключ и выдать ключ? (y/n): ") {
-		fmt.Fprintln(w, "Ключ vpn:// не выдан (нет согласия). Перенос выполнен.")
-		return 0
-	}
-	pw := *loginPw
-	if pw.Len() == 0 {
-		fmt.Fprintln(w, "Вход был по ключу ПК — пароля для ключа vpn:// у программы нет.")
-		b, err := toHostPassword(w, "Пароль "+user+"@"+host+" для ключа (не отображается; пусто — не выдавать ключ): ")
-		if err != nil || len(b) == 0 {
-			fmt.Fprintln(w, "Ключ vpn:// не выдан: пароль не введён. Перенос выполнен.")
-			return 0
+	for attempt := 1; ; attempt++ {
+		in := core.AdminKeyInput{Host: host, Port: port, User: user, Password: pw, PasswordConsent: true,
+			Containers: cs, DefaultContainer: names[0], Description: host}
+		key, err := core.BuildAdminKey(in)
+		if err != nil {
+			backupErr(errOut, "Ключ vpn:// не выдан: ", err)
+			return ""
 		}
-		pw = core.NewSecret(b)
-		clear(b)
+		verr := toHostVerify(key, in, dst.HostKeyFingerprint, o.knownHostsPath)
+		switch {
+		case errors.Is(verr, core.ErrAdminKeyAuthRejected):
+			fmt.Fprintln(w, "Ключ НЕ годится: новый сервер не принял пароль из ключа — пароль не подошёл или вход по паролю на сервере выключен (PasswordAuthentication no).")
+			if !isTTY || attempt >= toHostKeyAttempts {
+				fmt.Fprintln(w, "Ключ vpn:// не выдан.")
+				return ""
+			}
+			if pw = askKeyPassword(w, user, host); pw.Len() == 0 {
+				fmt.Fprintln(w, "Ключ vpn:// не выдан: пароль не введён.")
+				return ""
+			}
+			defer pw.Wipe()
+			continue
+		case errors.Is(verr, core.ErrAdminKeyMismatch):
+			backupErr(errOut, "Ключ vpn:// НЕ выдан — собранный ключ не совпал с ожидаемым: ", verr)
+			return ""
+		case verr != nil:
+			fmt.Fprintln(w, "Ключ проверить не удалось (это не «ключ плохой» и не «ключ хороший»): "+core.MaskText(verr.Error()))
+		}
+		path, err := writeAdminKeyFile(o.keyOut, host, key, now)
+		if err != nil && strings.TrimSpace(o.keyOut) != "" {
+			backupErr(errOut, "Ключ vpn:// не записан в -key-out: ", err)
+			fmt.Fprintln(w, "Пробую каталог по умолчанию.")
+			path, err = writeAdminKeyFile("", host, key, now)
+		}
+		if err != nil {
+			backupErr(errOut, "Ключ vpn:// не записан: ", err)
+			fmt.Fprintln(w, "Ключ vpn:// не выдан: записать файл не удалось. Перенос этим не затронут.")
+			return ""
+		}
+		fmt.Fprintln(w, "Ключ vpn:// записан в файл (права 0600): "+path)
+		if verr == nil {
+			fmt.Fprintln(w, "Ключ проверен: разобран и вход на новый сервер по нему выполнен.")
+		}
+		return path
 	}
-	in2 := core.AdminKeyInput{Host: host, Port: port, User: user, Password: pw, PasswordConsent: true,
-		Containers: cs, DefaultContainer: names[0], Description: host}
-	key, err := core.BuildAdminKey(in2)
-	if err != nil {
-		backupErr(errOut, "Ключ vpn:// не выдан: ", err)
-		return exitToHostNo
-	}
-	verr := toHostVerify(key, in2, dst.HostKeyFingerprint, o.knownHostsPath)
-	verified := verr == nil
-	switch {
-	case errors.Is(verr, core.ErrAdminKeyMismatch):
-		backupErr(errOut, "Ключ vpn:// НЕ выдан — собранный ключ не совпал с ожидаемым: ", verr)
-		return exitToHostNo
-	case verr != nil:
-		fmt.Fprintln(w, "Ключ проверить не удалось (это не «ключ плохой» и не «ключ хороший»): "+core.MaskText(verr.Error()))
-	}
-	path, err := writeAdminKeyFile(o.keyOut, host, key)
-	if err != nil {
-		backupErr(errOut, "Ключ vpn:// не записан: ", err)
-		return exitToHostNo
-	}
-	fmt.Fprintln(w, "Ключ vpn:// записан в файл (права 0600): "+path)
-	if verified {
-		fmt.Fprintln(w, "Ключ проверен: разобран и вход на новый сервер по нему выполнен.")
-		return 0
-	}
-	return exitToHostUnknown
 }
 
 // writeAdminKeyFile — ключ (Reveal) в новый файл 0600; существующий файл не
 // перезаписывается. Возвращает абсолютный путь.
-func writeAdminKeyFile(keyOut, host string, key core.AdminKey) (string, error) {
+func writeAdminKeyFile(keyOut, host string, key core.AdminKey, now time.Time) (string, error) {
 	p := strings.TrimSpace(keyOut)
 	if p == "" {
 		dir, err := toHostKeyDir()
@@ -403,7 +512,7 @@ func writeAdminKeyFile(keyOut, host string, key core.AdminKey) (string, error) {
 			}
 			return '_'
 		}, host)
-		p = filepath.Join(dir, "admin-"+safe+"-"+time.Now().Format("20060102-150405")+".vpn.txt")
+		p = filepath.Join(dir, "admin-"+safe+"-"+now.Format("20060102-150405")+".vpn.txt")
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {

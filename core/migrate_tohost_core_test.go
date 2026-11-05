@@ -1,9 +1,93 @@
 package core
 
 import (
+	"encoding/json"
+	"errors"
+	"net"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"amnezia-admin/internal/fakesrv"
 )
+
+// H2 (ревью PR #70): отказ входа по паролю из ключа — измеренное «не
+// годится» (ErrAdminKeyAuthRejected), отличное и от «совпало», и от «сеть».
+// Доезд — настоящий SSH-сервер (fakesrv), а не присваивание ошибки.
+func TestVerifyAdminKeyAuthRejectedVsNetwork(t *testing.T) {
+	srv, _ := newFakeSSHServer(t, "127.0.0.1:0")
+	host, port, _ := strings.Cut(srv.Addr(), ":")
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	sess, err := ConnectWithHostKey(&ServerCreds{Host: host, Port: port, User: fakeSSHUser, Password: fakeSSHPassword},
+		HostKeyPolicy{KnownHostsPath: kh, Prompt: func(string, string) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := sess.HostKeyFingerprint
+	sess.Close()
+	p, _ := strconv.Atoi(port)
+	mk := func(pw string, port int) (AdminKey, AdminKeyInput) {
+		in := AdminKeyInput{Host: host, Port: port, User: fakeSSHUser, Password: NewSecret([]byte(pw)), PasswordConsent: true}
+		k, err := BuildAdminKey(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k, in
+	}
+	k, in := mk(fakeSSHPassword, p)
+	if err := VerifyAdminKey(k, in, fp, kh); err != nil {
+		t.Fatalf("верный пароль: %v", err)
+	}
+	k, in = mk("wrong-password", p)
+	if err := VerifyAdminKey(k, in, fp, kh); !errors.Is(err, ErrAdminKeyAuthRejected) {
+		t.Fatalf("неверный пароль: %v, ждали ErrAdminKeyAuthRejected", err)
+	}
+	// сеть: закрытый порт — НЕ «отказ входа»
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	_, cport, _ := strings.Cut(ln.Addr().String(), ":")
+	ln.Close()
+	cp, _ := strconv.Atoi(cport)
+	k, in = mk(fakeSSHPassword, cp)
+	if err := VerifyAdminKey(k, in, fp, kh); err == nil || errors.Is(err, ErrAdminKeyAuthRejected) || errors.Is(err, ErrAdminKeyMismatch) {
+		t.Fatalf("сеть: %v — ждали «проверить не удалось»", err)
+	}
+}
+
+// AdminKeyContainersFromServer на поддельном сервере: параметры с сервера
+// (подсеть — адрес сети), XRay без клиентов — оговорка, нет контейнера —
+// ошибка с именем.
+func TestAdminKeyContainersFromServer(t *testing.T) {
+	f := fakesrv.NewAWG2()
+	s := NewSessionWithRunner(f, &ServerCreds{Host: "h", Port: "22", User: "root"})
+	cs, notes, err := s.AdminKeyContainersFromServer([]string{"amnezia-awg2"})
+	if err != nil || len(cs) != 1 || len(notes) != 0 {
+		t.Fatalf("cs=%v notes=%v err=%v", cs, notes, err)
+	}
+	if cs[0].Protocol["subnet_address"] != "10.8.1.0" || cs[0].Protocol["port"] != "51820" || cs[0].Protocol["S3"] != "15" {
+		t.Fatalf("параметры: %v", cs[0].Protocol)
+	}
+	if _, _, err := s.AdminKeyContainersFromServer([]string{"amnezia-xray"}); err == nil || !strings.Contains(err.Error(), "amnezia-xray") {
+		t.Fatalf("нет контейнера: %v", err)
+	}
+	x := fakesrv.NewXRay("master")
+	sx := NewSessionWithRunner(x, &ServerCreds{Host: "h", Port: "22", User: "root"})
+	if _, notes, err := sx.AdminKeyContainersFromServer([]string{"amnezia-xray"}); err != nil || len(notes) != 0 {
+		t.Fatalf("XRay с клиентами: notes=%v err=%v", notes, err)
+	}
+	raw, _ := x.File(fakesrv.XRayDir + "/server.json")
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["inbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)["clients"] = []any{}
+	empty, _ := json.Marshal(m)
+	x.SetFile(fakesrv.XRayDir+"/server.json", empty)
+	cs, notes, err = sx.AdminKeyContainersFromServer([]string{"amnezia-xray"})
+	if err != nil || len(cs) != 1 || len(notes) != 1 || notes[0] != XRayNoClientsNote {
+		t.Fatalf("XRay без клиентов: cs=%v notes=%v err=%v", cs, notes, err)
+	}
+}
 
 // R1 (ревью PR #69): subnet_address — адрес СЕТИ, а не адрес хоста
 // интерфейса. Боевой awg0.conf несёт адрес хоста (10.8.1.1/24).
