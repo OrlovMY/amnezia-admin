@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -195,9 +197,23 @@ func (f *thFixture) password(t *testing.T, pw string) {
 }
 
 // fill — все обязательные выборы; consent/keyPw — согласие на ключ.
+// next — шаг «Просмотр» → «Далее: выборы».
+func (f *thFixture) next(t *testing.T) *toHostView {
+	t.Helper()
+	r := f.u.toHostReviewed
+	if r == nil {
+		t.Fatal("шага «Просмотр» нет")
+	}
+	if r.next.Disabled() {
+		t.Fatalf("«Далее» выключена: %s", r.reason.Text)
+	}
+	test.Tap(r.next)
+	return f.u.toHostShown
+}
+
 func (f *thFixture) fill(t *testing.T, consent bool, keyPw string) *toHostView {
 	t.Helper()
-	v := f.u.toHostShown
+	v := f.next(t)
 	if v == nil {
 		t.Fatal("окна установки нет")
 	}
@@ -243,7 +259,7 @@ func TestGUIToHostKeysThenPassword(t *testing.T) {
 	if !strings.Contains(cv.why.Text, core.KeysRejected.String()) {
 		t.Fatalf("причина пароля не по исходу ключей: %q", cv.why.Text)
 	}
-	if f.u.toHostShown != nil {
+	if f.u.toHostReviewed != nil {
 		t.Fatal("окно установки до входа")
 	}
 	f.password(t, "wrong")
@@ -251,20 +267,20 @@ func TestGUIToHostKeysThenPassword(t *testing.T) {
 		t.Errorf("неверный пароль не назван:\n%s", f.allText())
 	}
 	f.password(t, thLoginPw)
-	if f.u.toHostShown == nil {
+	if f.u.toHostReviewed == nil {
 		t.Fatalf("после верного пароля окна установки нет:\n%s", f.allText())
 	}
 	if len(f.pwGiven) != 2 || f.pwGiven[1] != thLoginPw {
 		t.Errorf("пароли в ConnectNew: %d", len(f.pwGiven))
 	}
-	if !strings.Contains(f.u.toHostShown.text, "по паролю. Ключи ПК: "+core.KeysRejected.String()) {
-		t.Errorf("строки входа нет:\n%s", f.u.toHostShown.text)
+	if !strings.Contains(f.u.toHostReviewed.text, "по паролю. Ключи ПК: "+core.KeysRejected.String()) {
+		t.Errorf("строки входа нет:\n%s", f.u.toHostReviewed.text)
 	}
 	// ключ ПК подошёл — пароль не спрашивается, поле для ключа есть
 	g := newTHFixture(t)
 	g.keysOut = core.KeysAccepted
 	g.startHost(t)
-	if g.u.toHostShown == nil || g.u.toHostShown.keyPw == nil {
+	if g.next(t) == nil || g.u.toHostShown.keyPw == nil {
 		t.Fatal("вход ключом ПК: нет окна установки или поля пароля для ключа")
 	}
 	if g.connects != 1 {
@@ -284,7 +300,7 @@ func TestGUIToHostWindowShowsAll(t *testing.T) {
 		{What: "AppArmor", State: core.ProvUnknown, Reason: "не прочитан"},
 	}}
 	f.startHost(t)
-	v := f.u.toHostShown
+	v := f.u.toHostReviewed
 	if v == nil {
 		t.Fatal("окна нет")
 	}
@@ -309,13 +325,8 @@ func TestGUIToHostWindowShowsAll(t *testing.T) {
 			t.Errorf("в окне нет %q", w)
 		}
 	}
-	if !v.apply.Disabled() || v.reason.Text != toHostReasonProv {
-		t.Errorf("«неизвестно» в предпроверке не гасит кнопку: %q", v.reason.Text)
-	}
-	v.replace.SetChecked(true)
-	v.mode.SetSelected(backupNoPassword)
-	if !v.apply.Disabled() {
-		t.Error("кнопка включилась при «неизвестно» в предпроверке")
+	if !v.next.Disabled() || !strings.Contains(v.reason.Text, "предпроверка") || !strings.Contains(v.reason.Text, toHostNextText) {
+		t.Errorf("«неизвестно» в предпроверке не гасит «Далее»: %q", v.reason.Text)
 	}
 }
 
@@ -348,11 +359,11 @@ func TestGUIToHostProvTableNotYes(t *testing.T) {
 			f.keysOut = core.KeysAccepted
 			f.prov = core.ProvisionReport{Items: c.items}
 			f.startHost(t)
-			v := f.u.toHostShown
+			v := f.u.toHostReviewed
 			if !strings.Contains(v.text, c.text) {
 				t.Errorf("нет %q:\n%s", c.text, v.text)
 			}
-			if (v.reason.Text == toHostReasonProv) != c.block {
+			if v.next.Disabled() != c.block {
 				t.Errorf("причина %q", v.reason.Text)
 			}
 		})
@@ -410,7 +421,9 @@ func TestToHostVerdictTable(t *testing.T) {
 		want migState
 	}{
 		{"пусто", toHostOutcome{}, migUnknown},
-		{"прервано, измерено плохо", toHostOutcome{canceled: true, res: bad}, migUnknown},
+		{"прервано, измерено плохо", toHostOutcome{canceled: true, res: bad}, migNotDone},
+		{"прервано, не измерено", toHostOutcome{canceled: true, res: core.InstallResult{Containers: bad.Containers}}, migUnknown},
+		{"прервано, поставлено", toHostOutcome{canceled: true, res: okInstall("a")}, migNotDone},
 		{"не удалось", toHostOutcome{res: bad}, migNotDone},
 		{"отказ", toHostOutcome{res: core.InstallResult{Refused: "x"}}, migNotDone},
 		{"поставлено, перенос не начат", toHostOutcome{res: okInstall("a")}, migNotDone},
@@ -423,23 +436,21 @@ func TestToHostVerdictTable(t *testing.T) {
 	}
 }
 
-// TestGUIToHostCancelDuringInstallIsUnknown — «Отмена» во время установки:
-// сначала честное предупреждение; «нет» — установка идёт дальше; «да» —
-// итог НЕИЗВЕСТНО, перенос клиентов не начинается.
-func TestGUIToHostCancelDuringInstallIsUnknown(t *testing.T) {
+// TestGUIToHostCancelDuringInstall — «Отмена» во время установки: сначала
+// честное предупреждение (установка дойдёт до конца); «Прервать» —
+// установка доходит до конца, итог — НАСТОЯЩИЙ по контейнерам, перенос
+// клиентов не выполняется, ключ не выдаётся (хотя согласие было),
+// подсказка — снос контейнеров или приложение Amnezia.
+func TestGUIToHostCancelDuringInstall(t *testing.T) {
 	f := newTHFixture(t)
 	f.keysOut = core.KeysAccepted
-	f.install = func() core.InstallResult {
-		return core.InstallResult{Containers: []core.InstallContainerResult{{Container: "amnezia-awg", Outcome: core.InstallNotInstalled, Rollback: core.RollbackDone}}, Measure: &core.CompatReport{}}
-	}
 	gate, seen := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	toHostBeforeInstall = func() { once.Do(func() { close(seen) }); <-gate }
-	var gateOnce sync.Once
+	var once, gateOnce sync.Once
 	release := func() { gateOnce.Do(func() { close(gate) }) }
+	toHostBeforeInstall = func() { once.Do(func() { close(seen) }); <-gate }
 	t.Cleanup(func() { release(); toHostBeforeInstall = nil })
 	f.startHost(t)
-	v := f.fill(t, false, "")
+	v := f.fill(t, true, thKeyPw)
 	test.Tap(v.apply)
 	<-seen
 	pv := f.u.op
@@ -447,21 +458,29 @@ func TestGUIToHostCancelDuringInstallIsUnknown(t *testing.T) {
 		t.Fatal("окна прогресса нет")
 	}
 	test.Tap(pv.cancel)
-	txt := f.allText()
-	if !strings.Contains(txt, "НЕИЗВЕСТНО (это не «ничего» и не «поставлено»)") {
+	if txt := f.allText(); !strings.Contains(txt, "она дойдёт до конца") {
 		t.Fatalf("нет честного предупреждения:\n%s", txt)
 	}
-	// «Да» в окне подтверждения
-	ov := f.u.win.Canvas().Overlays().Top()
-	test.Tap(buttonByText(t, ov, toHostCancelYes))
+	test.Tap(buttonByText(t, f.u.win.Canvas().Overlays().Top(), toHostCancelYes))
 	release()
 	waitGUIGoroutines(t)
-	txt = f.allText()
-	if !strings.Contains(txt, "НЕИЗВЕСТНО — установка прервана") {
-		t.Errorf("итог прерванной установки не «неизвестно»:\n%s", txt)
+	txt := f.allText()
+	for _, w := range []string{"НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере поставлена, перенос клиентов не начинался (отменено)",
+		"перенос клиентов не выполнялся (отменено)", "не выдавался: отменено", "Продолжить режимом «" + migrateModeKey + "» нельзя: ключа нового сервера нет", "docker rm -f"} {
+		if !strings.Contains(txt, w) {
+			t.Errorf("в итоге нет %q:\n%s", w, txt)
+		}
 	}
-	if f.applied != 0 {
-		t.Error("перенос клиентов после прерванной установки")
+	for _, l := range okInstall("amnezia-awg").Lines() {
+		if !strings.Contains(txt, l) {
+			t.Errorf("в итоге нет настоящего итога установки %q", l)
+		}
+	}
+	if f.installed != 1 || f.applied != 0 {
+		t.Errorf("установок %d, переносов %d", f.installed, f.applied)
+	}
+	if ents, _ := os.ReadDir(f.keyDir); len(ents) != 0 {
+		t.Error("ключ выдан после отмены")
 	}
 }
 
@@ -545,9 +564,19 @@ func TestGUIToHostCancelClosesTarget(t *testing.T) {
 	if f.u.migDst == nil {
 		t.Fatal("сессии нет")
 	}
-	test.Tap(findEsc(f.u.win.Canvas().Overlays().Top(), "Отмена"))
+	// «Назад» с выборов — к просмотру, сессия жива
+	f.next(t)
+	test.Tap(findEsc(f.u.win.Canvas().Overlays().Top(), toHostBackText))
+	if closed != 0 || f.u.migDst == nil {
+		t.Fatalf("«Назад» с выборов закрыл сессию (%d)", closed)
+	}
+	// «Назад» с просмотра — к окну адреса, сессия закрыта
+	test.Tap(f.u.toHostReviewed.back)
 	if closed != 1 || f.u.migDst != nil {
 		t.Errorf("закрыто %d раз", closed)
+	}
+	if f.u.toHostConnShown.host.Text != migTestDstHost {
+		t.Errorf("адрес не сохранён при «Назад»: %q", f.u.toHostConnShown.host.Text)
 	}
 }
 
@@ -567,7 +596,7 @@ func pinnedCase(t *testing.T, xr bool) {
 	f.keysOut = core.KeysAccepted
 	f.u.win.Resize(fyne.NewSize(900, 600))
 	f.startHost(t)
-	v := f.u.toHostShown
+	v := f.next(t)
 	v.mode.SetSelected(backupWithPassword)
 	v.consent.SetChecked(true)
 	top := f.u.win.Canvas().Overlays().Top()
@@ -612,5 +641,46 @@ func TestToHostPlanLines(t *testing.T) {
 		if !strings.Contains(txt, w) {
 			t.Errorf("нет %q:\n%s", w, txt)
 		}
+	}
+}
+
+// TestGUIToHostReviewLayout — шаг «Просмотр» на всё окно: прокрутка не
+// ниже 60% высоты на 900×600 и на широком; на шаге «Выборы» — сводка по
+// контейнеру одной строкой. Подмена: просмотр размером по fitDialog — роняет.
+func TestGUIToHostReviewLayout(t *testing.T) {
+	for _, sz := range []fyne.Size{fyne.NewSize(900, 600), fyne.NewSize(1600, 1000)} {
+		f := newTHFixtureOn(t, newMigFixtureOn(t, xrayMigServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst))
+		f.keysOut = core.KeysAccepted
+		f.u.win.Resize(sz)
+		f.startHost(t)
+		top := f.u.win.Canvas().Overlays().Top()
+		osmotrFrame(top, nil)
+		var best float32
+		walkObjects(top, func(o fyne.CanvasObject) {
+			if sc, ok := o.(*container.Scroll); ok && sc.Size().Height > best {
+				best = sc.Size().Height
+			}
+		})
+		t.Logf("просмотр %.0fx%.0f: прокрутка %.0f (%.0f%%)", sz.Width, sz.Height, best, 100*best/sz.Height)
+		if best < 0.6*sz.Height {
+			t.Errorf("%.0fx%.0f: прокрутка просмотра %.0f < 60%% высоты", sz.Width, sz.Height, best)
+		}
+		var pop fyne.CanvasObject = top
+		if pp, ok := top.(*widget.PopUp); ok {
+			pop = pp.Content
+		}
+		t.Logf("окно просмотра %.0fx%.0f", pop.Size().Width, pop.Size().Height)
+		if pop.Size().Height < 0.95*sz.Height {
+			t.Errorf("%.0fx%.0f: просмотр не на всё окно (%.0f)", sz.Width, sz.Height, pop.Size().Height)
+		}
+		f.shot(t, fmt.Sprintf("tohost-review-%.0fx%.0f", sz.Width, sz.Height), nil)
+		v := f.next(t)
+		plan := core.PlanInstall(mustBackup(t, f), nil)
+		for _, it := range plan.Items {
+			if !strings.Contains(v.text, "  "+it.Container+" [скрипты "+it.Revision+"] — "+it.Verdict()) {
+				t.Errorf("в сводке нет строки %s:\n%s", it.Container, v.text)
+			}
+		}
+		f.shot(t, fmt.Sprintf("tohost-choices-%.0fx%.0f", sz.Width, sz.Height), nil)
 	}
 }

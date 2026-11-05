@@ -597,8 +597,8 @@ func keyFilePermText(path string) string {
 	return "права 0600 — только владелец"
 }
 
-// writeAdminKeyFile — ключ (Reveal) в новый файл 0600 (на Windows — права каталога); существующий файл не
-// перезаписывается. Возвращает абсолютный путь.
+// writeAdminKeyFile — -key-out или каталог ключей по умолчанию; запись —
+// core.WriteAdminKeyFile (общая с GUI).
 func writeAdminKeyFile(keyOut, host string, key core.AdminKey, now time.Time) (string, error) {
 	p := strings.TrimSpace(keyOut)
 	if p == "" {
@@ -609,30 +609,7 @@ func writeAdminKeyFile(keyOut, host string, key core.AdminKey, now time.Time) (s
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", err
 		}
-		safe := strings.Map(func(r rune) rune {
-			if r == '.' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-				return r
-			}
-			return '_'
-		}, host)
-		p = filepath.Join(dir, "admin-"+safe+"-"+now.Format("20060102-150405")+".vpn.txt")
+		p = filepath.Join(dir, core.AdminKeyFileName(host, now))
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("файл %s уже есть — не перезаписываю", abs)
-		}
-		return "", err
-	}
-	_, werr := f.WriteString(key.Reveal() + "\n")
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		_ = os.Remove(abs)
-		return "", fmt.Errorf("запись файла %s не удалась", abs)
-	}
-	return abs, nil
+	return core.WriteAdminKeyFile(p, key)
 }

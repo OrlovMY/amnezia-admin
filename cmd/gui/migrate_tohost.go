@@ -53,7 +53,7 @@ const (
 	migrateModeHost      = "Новый чистый сервер (по IP/имени)"
 	toHostConnTitle      = "Новый чистый сервер"
 	toHostConnectText    = "Подключиться"
-	toHostWinTitle       = "Установка Amnezia и перенос"
+	toHostWinTitle       = "Шаг 2 из 2: выборы — установка Amnezia и перенос"
 	toHostApplyText      = "Установить и перенести"
 	toHostReplaceCheck   = "Понимаю: на новый сервер будет поставлена Amnezia (см. «Установка изменит»), и в неё будут записаны клиенты старого сервера"
 	toHostConsentText    = "Выдать ключ vpn:// с паролем внутри"
@@ -63,7 +63,7 @@ const (
 	toHostCancelTitle    = "Прервать установку?"
 	toHostCancelYes      = "Прервать (итог — неизвестно)"
 	toHostCancelNo       = "Продолжить установку"
-	toHostCancelWarn     = "Установку нельзя остановить посреди шага: программа остановится на ближайшей границе. Что останется на новом сервере после прерванной установки — НЕИЗВЕСТНО (это не «ничего» и не «поставлено»): проверьте сервер вручную (docker ps -a). Старый сервер не изменён."
+	toHostCancelWarn     = "Установку прервать нельзя: она дойдёт до конца — до последнего контейнера плана (ядро не останавливает установку посреди работы). После этого программа покажет НАСТОЯЩИЙ итог установки по контейнерам (что встало, что откатилось), клиентов переносить НЕ будет и ключ vpn:// НЕ выдаст. Старый сервер не изменён."
 	toHostPwHint         = "Пароль (не отображается и не сохраняется)"
 	toHostKeyPwHint      = "Пароль root для ключа vpn://"
 	toHostReasonConnHost = "«Подключиться» недоступна: укажите IP или DNS-имя (без пользователя и порта)."
@@ -78,6 +78,10 @@ const (
 	toHostReasonReplace  = "«Установить и перенести» недоступна: подтвердите установку и запись клиентов (галка выше)."
 	toHostReasonKeyPw    = "«Установить и перенести» недоступна: введите пароль для ключа или снимите галку выдачи ключа."
 	toHostReasonReady    = "Всё подтверждено — можно ставить и переносить."
+	toHostReviewTitle    = "Шаг 1 из 2: просмотр — что будет на новом сервере"
+	toHostNextText       = "Далее: выборы"
+	toHostBackText       = "Назад"
+	toHostReasonNext     = "Прочитайте план и перечень изменений; выборы и запуск — на следующем шаге."
 )
 
 // Швы теста: каждое обращение к серверу и к диску.
@@ -415,12 +419,22 @@ func (v *toHostView) layer() core.BackupLayer {
 	return nil
 }
 
-// toHostWindow — ВСЁ до кнопки: стороны, вход, предпроверка, план,
-// изменения на хосте (полный текст), адрес; обязательные выборы — в
-// закреплённой панели.
-func (u *ui) toHostWindow(st *toHostState) *toHostView {
-	v := &toHostView{}
-	u.toHostShown = v
+// toHostReview — шаг «Просмотр» (поля — для тестов).
+type toHostReview struct {
+	d      dialog.Dialog
+	next   *escButton
+	back   *escButton
+	reason *widget.Label
+	text   string
+}
+
+// toHostWindow — шаг 1 «Просмотр»: стороны, вход, предпроверка, план,
+// изменения на хосте (полный текст) — на всё окно, с прокруткой; «Назад» —
+// к окну адреса (сессия нового сервера закрывается), «Далее: выборы» — к
+// шагу 2. Далее погашена, если ставить нельзя или неизвестно.
+func (u *ui) toHostWindow(st *toHostState) *toHostReview {
+	r := &toHostReview{}
+	u.toHostReviewed = r
 	var sections []fyne.CanvasObject
 	var all []string
 	add := func(lines []string, bold bool, imp widget.Importance) {
@@ -467,11 +481,60 @@ func (u *ui) toHostWindow(st *toHostState) *toHostView {
 	if st.needAddr {
 		add([]string{"Адрес: " + st.addrText}, false, widget.MediumImportance)
 	}
-	sections = append(sections, wrapLabel(migrateAutoCopyNote, false))
+	r.text = strings.Join(all, "\n")
+	reason := ""
+	switch {
+	case verdict != core.ProvVerdictYes:
+		reason = toHostReasonProv
+	case !st.plan.Ready() || st.previewErr != nil:
+		reason = toHostReasonPlan
+	}
+	r.reason = wrapLabel(strings.Replace(reason, "«"+toHostApplyText+"»", "«"+toHostNextText+"»", 1), true)
+	if reason == "" {
+		r.reason.SetText(toHostReasonNext)
+	}
+	cw := u.confirmWindowPinned(toHostReviewTitle, sections, []fyne.CanvasObject{r.reason}, toHostNextText, false, func() { u.toHostChoices(st) }, 900)
+	r.d, r.next, r.back = cw.d, cw.ok, cw.cancel
+	r.back.SetText(toHostBackText)
+	cw.onCancel(func() { // «Назад»/Esc — к окну адреса; цель закрыта
+		st.loginPw.Wipe()
+		u.closeMigDst()
+		u.toHostConnect(st.host, st.port, st.user, "")
+	})
+	if reason != "" {
+		r.next.Disable()
+	}
+	// просмотр — на всё окно: прокрутка не по содержимому, а по окну
+	sizeDialog(r.d, u.win.Canvas().Size())
+	return r
+}
+
+// toHostSummary — краткая сводка плана: одна строка на контейнер.
+func toHostSummary(plan core.InstallPlan) []string {
+	out := []string{"Будет поставлено (подробно — на шаге «Просмотр»):"}
+	for _, it := range plan.Items {
+		l := "  " + it.Container
+		if it.Revision != "" {
+			l += " [скрипты " + it.Revision + "]"
+		}
+		out = append(out, l+" — "+it.Verdict())
+	}
+	if n := len(plan.Skipped); n > 0 {
+		out = append(out, fmt.Sprintf("  Не ставится из копии: %d (список — на шаге «Просмотр»)", n))
+	}
+	return out
+}
+
+// toHostChoices — шаг 2 «Выборы»: сводка плана и обязательные выборы в
+// закреплённой панели; «Назад» — к просмотру (сессия остаётся).
+func (u *ui) toHostChoices(st *toHostState) *toHostView {
+	v := &toHostView{}
+	u.toHostShown = v
+	summary := toHostSummary(st.plan)
+	v.text = strings.Join(summary, "\n")
+	sections := []fyne.CanvasObject{wrapLabel(v.text, false), wrapLabel(migrateAutoCopyNote, false)}
 	warn := wrapLabel("", false)
 	sections = append(sections, warn)
-	v.text = strings.Join(all, "\n")
-
 	xray := false
 	for _, it := range st.plan.Items {
 		xray = xray || it.Container == "amnezia-xray"
@@ -515,10 +578,8 @@ func (u *ui) toHostWindow(st *toHostState) *toHostView {
 	var cw confirmWin
 	cw = u.confirmWindowPinned(toHostWinTitle, sections, pinned, toHostApplyText, true, func() { u.toHostRun(st, v) }, 900)
 	v.d, v.apply = cw.d, cw.ok
-	cw.onCancel(func() {
-		st.loginPw.Wipe()
-		u.closeMigDst()
-	})
+	cw.cancel.SetText(toHostBackText)
+	cw.onCancel(func() { u.toHostWindow(st) }) // «Назад» — к просмотру
 	update = func() {
 		warn.SetText("")
 		pwRow.Hide()
@@ -539,24 +600,27 @@ func (u *ui) toHostWindow(st *toHostState) *toHostView {
 				v.keyPw.Hide()
 			}
 		}
+		btn := func(s string) string {
+			return strings.Replace(s, "«Перенести»", "«"+toHostApplyText+"»", 1)
+		}
 		reason := ""
 		switch {
-		case verdict != core.ProvVerdictYes:
+		case st.rep.Verdict() != core.ProvVerdictYes:
 			reason = toHostReasonProv
 		case !st.plan.Ready() || st.previewErr != nil:
 			reason = toHostReasonPlan
 		case !v.replace.Checked:
 			reason = toHostReasonReplace
 		case v.addrCheck != nil && !v.addrCheck.Checked:
-			reason = strings.Replace(migrateReasonAddr, "«Перенести»", "«"+toHostApplyText+"»", 1)
+			reason = btn(migrateReasonAddr)
 		case xray && v.xrayRadio.Selected == "":
-			reason = strings.Replace(migrateReasonXRay, "«Перенести»", "«"+toHostApplyText+"»", 1)
+			reason = btn(migrateReasonXRay)
 		case v.mode.Selected == "":
-			reason = strings.Replace(migrateReasonMode, "«Перенести»", "«"+toHostApplyText+"»", 1)
+			reason = btn(migrateReasonMode)
 		case pwShort:
-			reason = strings.Replace(fmt.Sprintf(migrateReasonPwShort, core.BackupPasswordMin), "«Перенести»", "«"+toHostApplyText+"»", 1)
+			reason = btn(fmt.Sprintf(migrateReasonPwShort, core.BackupPasswordMin))
 		case pwDiff:
-			reason = strings.Replace(migrateReasonPwDiff, "«Перенести»", "«"+toHostApplyText+"»", 1)
+			reason = btn(migrateReasonPwDiff)
 		case v.consent.Checked && v.keyPw != nil && v.keyPw.Text == "":
 			reason = toHostReasonKeyPw
 		}
@@ -599,15 +663,14 @@ type toHostOutcome struct {
 }
 
 // toHostVerdict — один из трёх исходов. «Неизвестно» проверяется раньше
-// остальных: прерванная установка и неизмеренная установка — НЕИЗВЕСТНО.
+// остальных: неизмеренная установка — НЕИЗВЕСТНО. «Отмена» установку не
+// прерывает (ядро её не принимает): итог установки — измеренный, как есть.
 func toHostVerdict(o toHostOutcome) (migState, string) {
 	r := o.res
 	if !r.ReadyForRestore() {
 		switch {
 		case r.Refused != "":
 			return migNotDone, "НЕ ПЕРЕНЕСЕНО — установка не начиналась, на новом сервере ничего не изменено."
-		case o.canceled:
-			return migUnknown, "НЕИЗВЕСТНО — установка прервана по «Отмена». Что осталось на новом сервере, программа не знает; это не «ничего» и не «поставлено». Проверьте сервер вручную (docker ps -a)."
 		case r.Measure == nil:
 			return migUnknown, "НЕИЗВЕСТНО — установка не измерена: программа не знает, что стоит на новом сервере. Клиенты не перенесены. Проверьте сервер вручную."
 		}
@@ -652,7 +715,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 	var canceled atomic.Bool
 	u.setBusy(true)
 	var pv *progressView
-	pv = u.progressWindow(toHostWinTitle, func() {
+	pv = u.progressWindow("Установка Amnezia и перенос", func() {
 		// doCancel уже погасил кнопку: вернуть её, если человек передумал
 		cd := dialog.NewConfirm(toHostCancelTitle, toHostCancelWarn, func(yes bool) {
 			if !yes {
@@ -661,7 +724,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 				return
 			}
 			canceled.Store(true)
-			pv.note.SetText("Прерывание… дождитесь конца текущего шага. Итог установки будет «неизвестно».")
+			pv.note.SetText("Отмена принята: установка идёт до конца, затем — её итог; клиенты переноситься не будут.")
 			cancel()
 		}, u.win)
 		cd.SetConfirmText(toHostCancelYes)
@@ -685,7 +748,8 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		}
 		// ключ — и при неудаче переноса: без него поставленный сервер не
 		// продолжить ничем (как CLI, ревью PR #70, H1б)
-		if o.consent && o.res.ReadyForRestore() {
+		o.canceled = canceled.Load()
+		if o.consent && o.res.ReadyForRestore() && !o.canceled {
 			pv.report(core.Progress{Text: "Шаг 3 из 3: ключ vpn:// нового сервера…"})
 			o.keyPath, o.keyLines = toHostIssueKey(st, o.names, keyPw, time.Now())
 		}
@@ -749,8 +813,8 @@ func toHostIssueKey(st *toHostState, names []string, pw core.Secret, now time.Ti
 	return path, lines
 }
 
-// toHostWriteKey — ключ (Reveal) в новый файл 0600 в каталоге ключей;
-// существующий не перезаписывается. Возвращает абсолютный путь.
+// toHostWriteKey — ключ в новый файл каталога ключей (core.WriteAdminKeyFile,
+// общая с CLI). Возвращает абсолютный путь.
 func toHostWriteKey(host string, key core.AdminKey, now time.Time) (string, error) {
 	dir, err := toHostKeyDir()
 	if err != nil {
@@ -759,30 +823,7 @@ func toHostWriteKey(host string, key core.AdminKey, now time.Time) (string, erro
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	safe := strings.Map(func(r rune) rune {
-		if r == '.' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-			return r
-		}
-		return '_'
-	}, host)
-	abs, err := filepath.Abs(filepath.Join(dir, "admin-"+safe+"-"+now.Format("20060102-150405")+".vpn.txt"))
-	if err != nil {
-		return "", err
-	}
-	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("файл %s уже есть — не перезаписываю", abs)
-		}
-		return "", err
-	}
-	_, werr := f.WriteString(key.Reveal() + "\n")
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		_ = os.Remove(abs)
-		return "", fmt.Errorf("запись файла %s не удалась", abs)
-	}
-	return abs, nil
+	return core.WriteAdminKeyFile(filepath.Join(dir, core.AdminKeyFileName(host, now)), key)
 }
 
 // toHostInstallFailedLines — после неудачной установки: что осталось.
@@ -842,7 +883,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	case !installed:
 		body = append(body, "не выполнялся (установка не готова).")
 	case !o.applied:
-		body = append(body, "не выполнялся (отменено).")
+		body = append(body, "перенос клиентов не выполнялся (отменено).")
 	case o.err != nil:
 		t := core.MaskText(o.err.Error())
 		if o.auto != "" && !strings.Contains(t, o.auto) {
@@ -858,16 +899,21 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 		body = append(body, "не выдавался: согласия положить пароль в ключ не было.")
 	case !installed:
 		body = append(body, "не выдавался: установка не готова.")
+	case o.canceled:
+		body = append(body, "не выдавался: отменено.")
 	default:
 		body = append(body, o.keyLines...)
 	}
 	transferred := s == migDone
 	if installed && !transferred {
 		body = append(body, "", "ПЕРЕНОС НЕ ЗАВЕРШЁН. На новом сервере поставлены контейнеры Amnezia ("+strings.Join(o.names, ", ")+"); старый сервер не изменён и продолжает работать.")
-		if o.keyPath != "" {
+		switch {
+		case o.canceled && o.keyPath == "":
+			body = append(body, "Продолжить режимом «"+migrateModeKey+"» нельзя: ключа нового сервера нет. Варианты: удалить поставленные контейнеры (docker rm -f "+strings.Join(o.names, " ")+"; для XRay и docker volume rm его тома) и повторить перенос на чистый сервер с нуля; или добавить сервер в приложение Amnezia (логин и пароль), взять из него ключ «полный доступ» и продолжить режимом «"+migrateModeKey+"».")
+		case o.keyPath != "":
 			body = append(body, "Продолжить перенос на уже поставленный сервер: «Копия…» → «"+migrateMenuText+"» → режим «"+migrateModeKey+"», вставьте ключ из файла "+o.keyPath+
 				" (или командой: amnezia-admin migrate -key-file <ключ старого сервера> -to-key-file '"+o.keyPath+"' -replace-users -apply).")
-		} else {
+		default:
 			body = append(body, "Ключ нового сервера не выдан — продолжить можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ «полный доступ»; затем режим «"+migrateModeKey+"». Повторная установка откажет: сервер уже не чистый.")
 		}
 	} else if transferred && o.keyPath == "" {

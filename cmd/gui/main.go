@@ -137,6 +137,7 @@ type ui struct {
 	// (migrate_tohost.go; для тестов).
 	toHostConnShown *toHostConnView
 	toHostShown     *toHostView
+	toHostReviewed  *toHostReview
 	// op — идущая операция копии с окном прогресса (nil — нет); closeAfterOp
 	// — закрыть программу по её завершении (AU-UX П-1).
 	op           *progressView
