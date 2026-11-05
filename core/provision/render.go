@@ -401,6 +401,18 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
+// FolderOf — папка скриптов контейнера (обратное folderContainer):
+// amnezia-awg2 → awg, amnezia-awg → awg_legacy и т.д. ok=false — контейнер
+// вне закрытого списка.
+func FolderOf(container string) (string, bool) {
+	for f, c := range folderContainer {
+		if c == container {
+			return f, true
+		}
+	}
+	return "", false
+}
+
 func sortedRuleKeys(m map[string]rule) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {

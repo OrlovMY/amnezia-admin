@@ -53,6 +53,7 @@ type InstallItem struct {
 	Subnet    string // у XRay пусто
 	Transport string // только XRay: «tcp/reality»
 	SNI       string // только XRay: serverNames
+	Flow      string // только XRay: flow клиентов копии ("" — поля нет)
 }
 
 // Verdict — подпись вердикта для человека. Match с NeedsMeasurement не
@@ -164,7 +165,7 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 		if err != nil {
 			return unknown("server.json копии не разобран — транспорт и SNI неизвестны")
 		}
-		it.Transport, it.SNI = "tcp/reality", srv.serverName
+		it.Transport, it.SNI, it.Flow = "tcp/reality", srv.serverName, srv.clientFlow
 	} else if bc.Subnet == "" {
 		return unknown("в копии нет подсети")
 	}
