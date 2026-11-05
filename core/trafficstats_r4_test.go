@@ -68,3 +68,29 @@ func TestPartialInPeriod(t *testing.T) {
 		t.Errorf("≥-интервалы по периоду: %d / %d", l.PartialIn(DayRange{day0 + 5, day0 + 5}), l.PartialIn(AllTime))
 	}
 }
+
+// TestCollectPendingWithTail — аудит Н7: журнал из одного заголовка во время
+// первого запуска и старые данные прежней установки до первого запуска —
+// «ожидается»; зависший запуск при бывших снимках — «не работает».
+func TestCollectPendingWithTail(t *testing.T) {
+	now := int64(1_800_000_000)
+	withTail := func(result, active, mono, tail string) string {
+		out := statusOut("active", result, active, now, tail)
+		return strings.Replace(out, "AA_STATUS_END\n", "ExecMainStartTimestampMonotonic="+mono+"\nAA_STATUS_END\n", 1)
+	}
+	old := tblk(now-3600, awgC, "A 1 1 0")
+	cases := []struct {
+		name string
+		out  string
+		want CollectState
+	}{
+		{"заголовок журнала, первый запуск идёт", withTail("success", "activating", "123456", "H 1"), CollectPending},
+		{"старые данные, служба не запускалась", withTail("success", "inactive", "0", old), CollectPending},
+		{"старый снимок, служба выполняется — зависла", withTail("success", "activating", "123456", old), CollectStopped},
+	}
+	for _, c := range cases {
+		if st := parseCollectorStatus(c.out); st.Collect != c.want {
+			t.Errorf("%s: %v %q, ждали %v", c.name, st.Collect, st.CollectWhy, c.want)
+		}
+	}
+}

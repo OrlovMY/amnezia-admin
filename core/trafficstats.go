@@ -773,8 +773,11 @@ func parseCollectorStatus(out string) CollectorStatus {
 		st.Collect, st.CollectWhy = CollectStopped, "достигнут предел объёма"
 	case !haveRes || !haveNow:
 		st.CollectWhy = "состояние службы прочитать не удалось"
-	case !haveTail && (unit["ExecMainStartTimestampMonotonic"] == "0" || unit["ActiveState"] == "activating"):
-		// Н4: служба ещё не запускалась — ожидание, а не «не работает».
+	case unit["ExecMainStartTimestampMonotonic"] == "0" || (unit["ActiveState"] == "activating" && !haveE):
+		// Н4/Н7: служба этой установки ещё не запускалась (старые данные
+		// прежней установки не в счёт) или идёт её первый запуск и целого
+		// снимка ещё нет — ожидание, а не «не работает». Зависший запуск
+		// при уже бывших снимках сюда не попадает: ниже — «возможно, зависла».
 		st.Collect, st.CollectWhy = CollectPending, "первого снимка ещё не было"
 		if t, ok := parseSystemdTime(unit["NextElapseUSecRealtime"]); ok {
 			st.NextRun = t
