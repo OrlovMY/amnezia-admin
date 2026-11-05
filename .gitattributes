@@ -11,3 +11,6 @@
 # Копия .aabk: сумма тела — по байтам; перевод строк git ломал бы её
 # (core.autocrlf=true). Так же, как хранилище .avlt.
 *.aabk binary
+# Вендоренные скрипты amnezia-client: SHA-256 сверяется по байтам, перевод
+# строк git менять не должен (core.autocrlf=true). Позже *.sh — перекрывает.
+core/provision/scripts/** -text
