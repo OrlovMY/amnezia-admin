@@ -354,7 +354,8 @@ func sgReadonlyArgv(ws []sgWord) []string {
 		}
 	case "systemctl":
 		if sgEq(a, "systemctl", "is-active", StatsUnit+".timer") ||
-			sgEq(a, "systemctl", "show", "-p", "Result", "-p", "ActiveState", "-p", "SubState", StatsUnit+".service") {
+			sgEq(a, "systemctl", "show", "-p", "Result", "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStartTimestampMonotonic", StatsUnit+".service") ||
+			sgEq(a, "systemctl", "show", "-p", "NextElapseUSecRealtime", StatsUnit+".timer") {
 			return nil
 		}
 	case "date":

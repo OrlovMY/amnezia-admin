@@ -16,8 +16,16 @@ import (
 )
 
 func TestStatsTimeouts(t *testing.T) {
-	if !strings.Contains(StatsServiceUnit(), "\nTimeoutStartSec=120s\n") {
-		t.Error("у oneshot-службы нет TimeoutStartSec — зависший docker остановит сбор навсегда")
+	if !strings.Contains(StatsServiceUnit(), "\nTimeoutStartSec=300s\n") {
+		t.Error("у oneshot-службы нет TimeoutStartSec=300s — зависший docker остановит сбор навсегда")
+	}
+	// Н5 раунда 4: бюджет службы покрывает худший случай. Вызовы docker в
+	// скрипте: 2 вне цикла по контейнерам и 2 внутри (на каждый контейнер).
+	if n := strings.Count(StatsCollectorScript(), "timeout 30 docker "); n != 4 {
+		t.Errorf("вызовов docker в скрипте %d — пересчитайте бюджет statsStartTimeoutSec", n)
+	}
+	if worst := 30*(2+2*len(wgFamilies)) + statsRunSlackSec; statsStartTimeoutSec() < worst {
+		t.Errorf("TimeoutStartSec %d меньше худшего случая %d", statsStartTimeoutSec(), worst)
 	}
 	sc := StatsCollectorScript()
 	docker := strings.Count(sc, "docker ")
@@ -66,7 +74,7 @@ func TestCollectState(t *testing.T) {
 		{"служба падает", statusOut("active", "exit-code", "failed", now, fresh), CollectStopped, "Result=exit-code"},
 		{"снимок старый", statusOut("active", "success", "inactive", now, old), CollectStopped, "60 мин назад"},
 		{"служба висит", statusOut("active", "success", "activating", now, old), CollectStopped, "зависла"},
-		{"снимков нет", statusOut("active", "success", "inactive", now, "-"), CollectStopped, "ещё нет"},
+		{"снимков нет", statusOut("active", "success", "inactive", now, "-"), CollectStopped, "снимков нет"},
 		{"в хвосте нет целого снимка", statusOut("active", "success", "inactive", now, "H v1 0\nF 1 - ps"), CollectStopped, "ни одного целого"},
 		{"systemctl show не ответил", statusOut("active", "", "", now, fresh), CollectUnknown, "прочитать не удалось"},
 		{"нет времени сервера", statusOut("active", "success", "inactive", 0, fresh), CollectUnknown, "прочитать не удалось"},

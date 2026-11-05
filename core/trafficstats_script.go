@@ -297,6 +297,23 @@ fi
 `, StatsDir, awkGen, statsSpecs(), awkBlock, statsRawCapBytes, statsRotateBytes, statsDailyCapBytes, awkAgg, awkCheckpoint, awkHead)
 }
 
+// Бюджет времени одного запуска (аудит AU-1, Н5). Каждый вызов docker —
+// под `timeout statsDockerTimeout`; в худшем случае все висят до конца:
+// docker ps + docker ps -a + (inspect + exec) на каждый контейнер семейства
+// WG = 30 × (2 + 2×3) = 240 с; плюс запас на awk, cat и ротацию журнала до
+// 16 МБ — statsRunSlackSec. TimeoutStartSec службы = сумма (300 с), чтобы
+// systemd не обрывал запуск, который укладывается в собственные таймауты.
+const (
+	statsDockerTimeout = 30
+	statsRunSlackSec   = 60
+)
+
+// statsStartTimeoutSec — TimeoutStartSec службы (TestStatsTimeouts сверяет
+// его с числом вызовов docker в скрипте).
+func statsStartTimeoutSec() int {
+	return statsDockerTimeout*(2+2*len(wgFamilies)) + statsRunSlackSec
+}
+
 // StatsServiceUnit — текст службы.
 func StatsServiceUnit() string {
 	return `[Unit]
@@ -306,7 +323,7 @@ After=docker.service
 [Service]
 Type=oneshot
 Nice=10
-TimeoutStartSec=120s
+TimeoutStartSec=` + fmt.Sprint(statsStartTimeoutSec()) + `s
 ExecStart=/bin/sh ` + StatsScriptPath + `
 `
 }
@@ -399,7 +416,9 @@ func statsStatusScript() string {
 		"echo \"AA_ACTIVE $(systemctl is-active " + StatsUnit + ".timer 2>/dev/null)\"\n" +
 		// Аудит AU-1, С2: «работает» — не по таймеру, а по исходу службы и
 		// свежести последнего снимка.
-		"systemctl show -p Result -p ActiveState -p SubState " + StatsUnit + ".service 2>/dev/null\n" +
+		"systemctl show -p Result -p ActiveState -p SubState -p ExecMainStartTimestampMonotonic " + StatsUnit + ".service 2>/dev/null\n" +
+		// Аудит AU-1, Н4: когда сработает таймер — для «первый снимок ожидается до …».
+		"systemctl show -p NextElapseUSecRealtime " + StatsUnit + ".timer 2>/dev/null\n" +
 		"echo \"AA_NOW $(date +%s)\"\n" +
 		"if [ -e " + StatsDir + "/snapshots.log ]; then echo AA_TAIL_BEGIN; tail -n 50 " + StatsDir + "/snapshots.log; echo; echo AA_TAIL_END; fi\n" +
 		"if [ -e " + StatsDir + "/FULL ]; then echo \"AA_FULL $(cat " + StatsDir + "/FULL)\"; fi\n" +

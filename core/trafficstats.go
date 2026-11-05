@@ -496,10 +496,16 @@ func (l *TrafficLog) Containers() []string {
 	return out
 }
 
-// Partial — сколько учтённых интервалов частично потеряно (С3).
-func (l *TrafficLog) Partial() int {
+// Partial — сколько учтённых интервалов частично потеряно (С3) за всё время.
+func (l *TrafficLog) Partial() int { return l.PartialIn(AllTime) }
+
+// PartialIn — то же в пределах периода r (аудит AU-1, Н6).
+func (l *TrafficLog) PartialIn(r DayRange) int {
 	n := 0
-	for _, m := range l.days {
+	for d, m := range l.days {
+		if !r.has(d) {
+			continue
+		}
 		for _, a := range m {
 			n += a.partial
 		}
@@ -585,6 +591,9 @@ type CollectorStatus struct {
 	// снимков нет. SnapshotAge — его возраст по часам сервера.
 	LastSnapshot time.Time
 	SnapshotAge  time.Duration
+	// NextRun — следующее срабатывание таймера (только для CollectPending;
+	// нулевое — неизвестно).
+	NextRun time.Time
 }
 
 // CollectState — идёт ли сбор.
@@ -598,7 +607,33 @@ const (
 	// CollectWorking — служба завершилась успешно И последний снимок не
 	// старше statsFreshSec.
 	CollectWorking
+	// CollectPending — установлен, служба ещё ни разу не запускалась (или
+	// первый запуск идёт сейчас) и снимков нет: не «нет», а «ещё не было
+	// попытки» (аудит AU-1, Н4). NextRun — когда сработает таймер (нулевое —
+	// неизвестно).
+	CollectPending
 )
+
+// reUnitProp — строка `systemctl show`: «Ключ=значение» (значение может
+// содержать пробелы — у дат).
+var reUnitProp = regexp.MustCompile(`^([A-Za-z]+)=(.*)$`)
+
+// parseSystemdTime — значение NextElapseUSecRealtime: «@unix» или
+// «Thu 2026-11-05 12:35:00 UTC». Пояс, кроме UTC, по сокращению не
+// угадываем — ok=false (тогда «ожидается» без времени).
+func parseSystemdTime(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if strings.HasPrefix(v, "@") {
+		if n, err := statsNum(v[1:]); err == nil {
+			return time.Unix(n, 0), true
+		}
+		return time.Time{}, false
+	}
+	if t, err := time.Parse("Mon 2006-01-02 15:04:05 UTC", v); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
 
 // statsFreshSec — снимок свежий, если не старше двух интервалов таймера.
 const statsFreshSec = 600
@@ -698,8 +733,8 @@ func parseCollectorStatus(out string) CollectorStatus {
 			}
 			continue
 		}
-		if k, v, ok := strings.Cut(line, "="); ok && len(f) == 1 {
-			unit[k] = v
+		if m := reUnitProp.FindStringSubmatch(strings.TrimRight(line, "\r")); m != nil {
+			unit[m[1]] = m[2]
 		}
 	}
 	switch {
@@ -738,10 +773,17 @@ func parseCollectorStatus(out string) CollectorStatus {
 		st.Collect, st.CollectWhy = CollectStopped, "достигнут предел объёма"
 	case !haveRes || !haveNow:
 		st.CollectWhy = "состояние службы прочитать не удалось"
+	case !haveTail && (unit["ExecMainStartTimestampMonotonic"] == "0" || unit["ActiveState"] == "activating"):
+		// Н4: служба ещё не запускалась — ожидание, а не «не работает».
+		st.Collect, st.CollectWhy = CollectPending, "первого снимка ещё не было"
+		if t, ok := parseSystemdTime(unit["NextElapseUSecRealtime"]); ok {
+			st.NextRun = t
+		}
 	case res != "success":
 		st.Collect, st.CollectWhy = CollectStopped, "последний запуск сборщика завершился с ошибкой (Result="+res+")"
 	case !haveTail:
-		st.Collect, st.CollectWhy = CollectStopped, "снимков ещё нет"
+		// Служба уже отработала успешно, а журнала нет — честное «нет».
+		st.Collect, st.CollectWhy = CollectStopped, "служба отработала, но снимков нет"
 	case !haveE:
 		st.Collect, st.CollectWhy = CollectStopped, "в последних записях журнала нет ни одного целого снимка"
 	case now-lastE > statsFreshSec:

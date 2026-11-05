@@ -66,6 +66,11 @@ func collectorText(st core.CollectorStatus) string {
 			return fmt.Sprintf("установлен, сбор работает (последний снимок %d мин назад, снимок раз в 5 минут)", int(st.SnapshotAge.Minutes()))
 		case core.CollectStopped:
 			return "установлен, но сбор НЕ работает: " + st.CollectWhy
+		case core.CollectPending:
+			if !st.NextRun.IsZero() {
+				return "установлен, первый снимок ожидается до " + st.NextRun.UTC().Format("15:04") + " UTC"
+			}
+			return "установлен, первый снимок ожидается (время срабатывания таймера неизвестно)"
 		}
 		return "установлен; идёт ли сбор — неизвестно: " + st.CollectWhy
 	case core.CollectorNotInstalled:
@@ -150,9 +155,9 @@ func statsDataNotes(out io.Writer, l *core.TrafficLog, r core.DayRange) {
 	if !any {
 		fmt.Fprintln(out, "Учтённых интервалов за период нет: нужно не меньше двух снимков в нём.")
 	}
-	if l.Partial() > 0 {
+	if n := l.PartialIn(r); n > 0 {
 		fmt.Fprintln(out, cWarn(fmt.Sprintf("Интервалов с перезапуском после перерыва в сборе: %d — трафик до перезапуска в них потерян; "+
-			"такие цифры помечены «≥» (не меньше).", l.Partial())))
+			"такие цифры помечены «≥» (не меньше).", n)))
 	}
 	if !l.LastSnapshot.IsZero() {
 		fmt.Fprintln(out, "Последний снимок: "+l.LastSnapshot.UTC().Format("2006-01-02 15:04")+" UTC")
