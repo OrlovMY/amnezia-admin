@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"amnezia-admin/core/provision"
@@ -50,14 +51,20 @@ type instFake struct {
 	fail, drop string            // ключ шага
 	dead       bool
 	calls      []instCall
+	mu         sync.Mutex
 	// measureConf — подмена awg0.conf при измерении (пусто — как в копии).
 	measureConf string
 	imgs        map[string]bool
 	inspectOut  string // ответ двух замеров; пусто — стабильно работает
+	// out — подмена ответа шага по ключу (тело без метки).
+	out          map[string]string
+	dockerBroken bool
+	failBody     string
+	block        chan struct{} // не nil — шаг drop не отвечает, пока не закрыт
 }
 
 func newInstFake() *instFake {
-	return &instFake{ctrs: map[string]bool{}, vols: map[string]bool{}, imgs: map[string]bool{}, files: map[string]string{}}
+	return &instFake{ctrs: map[string]bool{}, vols: map[string]bool{}, imgs: map[string]bool{}, files: map[string]string{}, out: map[string]string{}}
 }
 
 var reCtrName = regexp.MustCompile(`amnezia-(awg2|awg|wireguard|xray)\b`)
@@ -68,6 +75,14 @@ func instCtrOf(s string) string { return reCtrName.FindString(s) }
 func stepKey(cmd, in string) string {
 	c := instCtrOf(cmd)
 	switch {
+	case strings.Contains(cmd, "sudo -n true"):
+		return "sudocheck"
+	case strings.Contains(cmd, "ip_forward"):
+		return "ipfwd"
+	case strings.Contains(cmd, "listen-port") || strings.Contains(in, "pidof xray"):
+		return "vpn:" + c
+	case strings.Contains(cmd, "docker --version"):
+		return "dockerver"
 	case strings.Contains(cmd, "docker ps -a"):
 		return "list"
 	case strings.Contains(cmd, "docker volume ls"):
@@ -115,20 +130,46 @@ func instOK(body string) string { return body + instRC + "0\n" }
 func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 	in := string(stdin)
 	key := stepKey(cmd, in)
+	f.mu.Lock()
 	f.calls = append(f.calls, instCall{key, cmd, in})
 	if f.dead {
+		f.mu.Unlock()
 		return "", errors.New("связь оборвалась")
 	}
 	if key == f.drop {
 		f.dead = true
+		blk := f.block
+		f.mu.Unlock()
+		if blk != nil {
+			<-blk // сервер молчит
+		}
 		return "", errors.New("связь оборвалась")
 	}
+	defer f.mu.Unlock()
 	if key == f.fail {
-		return "boom\n" + instRC + "1\n", nil
+		if key == "install_docker" {
+			f.dockerBroken = true
+		}
+		return f.failBody + "boom\n" + instRC + "1\n", nil
+	}
+	if o, has := f.out[key]; has {
+		return instOK(o), nil
 	}
 	name, _, _ := strings.Cut(key, ":")
 	c := instCtrOf(key)
 	switch name {
+	case "sudocheck":
+		return instOK(""), nil
+	case "ipfwd":
+		return instOK("1\n"), nil
+	case "vpn":
+		if c == XRayContainer {
+			return instOK("PID=yes\nLISTEN=yes\n"), nil
+		}
+		return instOK("51820\n"), nil
+	case "build":
+		f.imgs[c] = true
+		return instOK(""), nil
 	case "list":
 		return instOK(strings.Join(keys(f.ctrs), "\n") + "\n"), nil
 	case "volumes":
@@ -143,7 +184,10 @@ func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 		}
 		return instOK(""), nil
 	case "dockerver":
-		return instOK("27.5.1\n"), nil
+		if f.dockerBroken {
+			return "bash: docker: command not found\n" + instRC + "127\n", nil
+		}
+		return instOK("Docker version 27.5.1, build abc\nactive\n"), nil
 	case "run":
 		f.ctrs[c] = true
 		if c == XRayContainer {
@@ -151,6 +195,7 @@ func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 		}
 		return instOK(""), nil
 	case "remove":
+		delete(f.imgs, c)
 		delete(f.ctrs, c)
 		return instOK(""), nil
 	case "configure":
@@ -172,7 +217,7 @@ func (f *instFake) Run(cmd string, stdin []byte) (string, error) {
 			return instOK(f.inspectOut), nil
 		}
 		return instOK("true/0\ntrue/0\n"), nil
-	case "install_docker", "prepare", "dockerfile", "build", "start", "clientsTable", "restart":
+	case "install_docker", "prepare", "dockerfile", "start", "clientsTable", "restart":
 		return instOK(""), nil
 	}
 	// Измерение (CheckTarget) — его собственные команды.
@@ -197,6 +242,8 @@ func keys(m map[string]bool) []string {
 }
 
 func (f *instFake) keys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []string
 	for _, c := range f.calls {
 		out = append(out, c.key)
@@ -219,9 +266,9 @@ func installWrites(keys []string) []string {
 	var w []string
 	for _, k := range keys {
 		switch k {
-		case "list", "volumes", "images", "dockerver", "?":
+		case "list", "volumes", "images", "dockerver", "sudocheck", "ipfwd", "?":
 		default:
-			if !strings.HasPrefix(k, "inspect:") {
+			if !strings.HasPrefix(k, "inspect:") && !strings.HasPrefix(k, "vpn:") {
 				w = append(w, k)
 			}
 		}
@@ -230,7 +277,7 @@ func installWrites(keys []string) []string {
 }
 
 var happyOrder = []string{
-	"list", "volumes", "images", "install_docker", "dockerver",
+	"sudocheck", "list", "volumes", "images", "install_docker", "dockerver",
 	"prepare:amnezia-awg2", "dockerfile:amnezia-awg2", "build:amnezia-awg2", "run:amnezia-awg2",
 	"configure:amnezia-awg2", "start:amnezia-awg2", "clientsTable:amnezia-awg2", "restart:amnezia-awg2", "inspect:amnezia-awg2",
 	"prepare:amnezia-xray", "dockerfile:amnezia-xray", "build:amnezia-xray", "run:amnezia-xray",
@@ -248,7 +295,7 @@ func TestInstallOrder(t *testing.T) {
 		t.Fatalf("порядок шагов:\n%v\nждали:\n%v", got, happyOrder)
 	}
 	for _, k := range got[len(happyOrder):] {
-		if k != "?" {
+		if k != "?" && k != "ipfwd" && !strings.HasPrefix(k, "vpn:") {
 			t.Errorf("после установки — только измерение (команды чтения), а пришло %q", k)
 		}
 	}
@@ -378,7 +425,7 @@ func TestXRayServerScriptRejects(t *testing.T) {
 func TestInstallFailEachStep(t *testing.T) {
 	var steps []string
 	for _, k := range happyOrder {
-		if k != "list" && k != "volumes" && k != "images" {
+		if k != "list" && k != "volumes" && k != "images" && k != "sudocheck" {
 			steps = append(steps, k)
 		}
 	}

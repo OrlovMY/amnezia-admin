@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"amnezia-admin/core/provision"
 )
@@ -60,6 +61,10 @@ type InstallContainerResult struct {
 	Rollback RollbackState
 	// RollbackLeft — что по измерению осталось после отката (контейнер, том).
 	RollbackLeft []string
+	// VPN — поднят ли туннель (Match — да, Mismatch — измерено «нет»,
+	// Unknown — не измерено); VPNWhy — почему не Match.
+	VPN    CompatState
+	VPNWhy string
 }
 
 // MeasuredMatchText — подпись измеренного совпадения. Измеряются семейство
@@ -73,7 +78,13 @@ func (r InstallContainerResult) Verdict() string {
 	case InstallInstalled:
 		switch r.Measured {
 		case CompatMatch:
-			return MeasuredMatchText
+			switch r.VPN {
+			case CompatMatch:
+				return MeasuredMatchText + "; VPN поднят"
+			case CompatMismatch:
+				return "поставлен, но VPN не поднялся: " + r.VPNWhy
+			}
+			return MeasuredMatchText + "; работа VPN не измерена"
 		case CompatMismatch:
 			return "поставлен, но измерение НЕ совпало с копией"
 		}
@@ -117,7 +128,7 @@ func (r InstallResult) ReadyForRestore() bool {
 		return false
 	}
 	for _, c := range r.Containers {
-		if c.Outcome != InstallInstalled || c.Measured != CompatMatch {
+		if c.Outcome != InstallInstalled || c.Measured != CompatMatch || c.VPN != CompatMatch {
 			return false
 		}
 	}
@@ -152,7 +163,7 @@ func (r InstallResult) Lines() []string {
 	if r.Stop {
 		out = append(out, "Перенос клиентов остановлен: "+r.StopReason)
 	} else if r.ReadyForRestore() {
-		out = append(out, "Все контейнеры поставлены и совпадают с копией — можно переносить клиентов.")
+		out = append(out, "Все контейнеры поставлены, совпадают с копией по семейству параметров, порту и подсети, VPN поднят — можно переносить клиентов.")
 	}
 	return out
 }
@@ -180,9 +191,36 @@ const (
 
 // instStep — выполнить cmd (обязан печатать метку instRC последней строкой).
 // Ошибка Runner или отсутствие метки — «неизвестно».
+// Срок шага превышен или связь признана мёртвой — дальше на этой сессии
+// ничего не выполняется: все последующие шаги «неизвестно» (аудит AU M2).
+// Срок — только у установки; прочие пути Runner не меняются.
 func (s *Session) instStep(cmd string, stdin []byte) (stepState, string, int) {
-	out, err := s.run(cmd, stdin)
-	if err != nil {
+	if s.instDead {
+		return stepUnknown, "", -1
+	}
+	type answer struct {
+		out string
+		err error
+	}
+	ch := make(chan answer, 1)
+	go func() {
+		out, err := s.run(cmd, stdin)
+		ch <- answer{out, err}
+	}()
+	t := time.NewTimer(instStepTimeout)
+	defer t.Stop()
+	var out string
+	select {
+	case a := <-ch:
+		if a.err != nil {
+			return stepUnknown, "", -1
+		}
+		out = a.out
+	case <-t.C:
+		s.instDead, s.instTimedOut = true, true
+		if s.Client != nil {
+			s.Client.Close() // зависшая команда вернётся с ошибкой
+		}
 		return stepUnknown, "", -1
 	}
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
@@ -320,7 +358,7 @@ func xrayServerScript(port, sni, flow string) (string, error) {
 		"U=$(tr -d '[:space:]' < $D/xray_uuid.key 2>/dev/null)\n" +
 		"K=$(tr -d '[:space:]' < $D/xray_private.key 2>/dev/null)\n" +
 		"S=$(tr -d '[:space:]' < $D/xray_short_id.key 2>/dev/null)\n" +
-		"if [ -z \"$U\" ] || [ -z \"$K\" ] || [ -z \"$S\" ]; then echo amnezia_admin_xray_keys=missing; exit 3; fi\n" +
+		"if [ -z \"$U\" ] || [ -z \"$K\" ] || [ -z \"$S\" ]; then echo " + xrayKeysMissing + "; exit 3; fi\n" +
 		"umask 077\n" +
 		"cat > $D/server.json.tmp <<EOF\n" + body + "EOF\n" +
 		"mv $D/server.json.tmp $D/server.json\n", nil
@@ -561,6 +599,14 @@ func Install(sess *Session, plan InstallPlan, opt InstallOptions) InstallResult 
 	// подтверждением и копией цели (решение владельца), здесь — отказ.
 	// Образы — тоже: откат делает `docker rmi <имя>` и не должен снести
 	// существовавший до запуска (ревью PR 5 L1).
+	// Права: скрипты приложения зовут sudo без -n; sudo с паролем без
+	// терминала — отказ посреди установки. Проверяем заранее (аудит AU L2).
+	switch st, _, _ := sess.instStep(rcTail(`if command -v sudo >/dev/null 2>&1; then sudo -n true; else [ "$(id -u)" = 0 ]; fi`), nil); st {
+	case stepUnknown:
+		return refuse("права на сервере проверить не удалось — ответа нет")
+	case stepFailed:
+		return refuse("нужен root или sudo без пароля: команды установки выполняются через sudo без терминала")
+	}
 	ctrs, ok1 := sess.listNames("container")
 	vols, ok2 := sess.listNames("volume")
 	imgs, ok3 := sess.listNames("image")
@@ -590,17 +636,25 @@ func Install(sess *Session, plan InstallPlan, opt InstallOptions) InstallResult 
 		return res
 	}
 
-	switch st, _, rc := sess.instStep(hostScriptCmd, []byte(installDocker)); st {
-	case stepUnknown:
-		return stop("install_docker.sh: ответа нет — связь оборвалась; установлен ли Docker, неизвестно")
-	case stepFailed:
-		return stop(fmt.Sprintf("install_docker.sh завершился с кодом %d", rc))
+	// Код install_docker.sh — код `uname`: исход берётся по факту (аудит AU
+	// L1), а вывод скрипта (хвост, через маску) — в причину.
+	if sess.Client != nil {
+		c := sess.Client
+		stopKA := keepalive(func() error {
+			_, _, err := c.SendRequest("keepalive@openssh.com", true, nil)
+			return err
+		}, func() { c.Close() }, instKeepalivePeriod, instKeepaliveMisses)
+		defer stopKA()
 	}
-	switch st, body, rc := sess.instStep(rcTail(`sudo -n docker version --format "{{.Server.Version}}"`), nil); {
+	st, idOut, _ := sess.instStep(hostScriptCmd, []byte(installDocker))
+	if st == stepUnknown {
+		return stop("install_docker.sh: " + sess.noAnswer() + "; установлен ли Docker, неизвестно")
+	}
+	switch st, body, _ := sess.instStep(rcTail(`sudo -n docker --version && sudo -n systemctl is-active docker`), nil); {
 	case st == stepUnknown:
-		return stop("проверка Docker после install_docker.sh: ответа нет")
-	case st == stepFailed || strings.TrimSpace(body) == "":
-		return stop(fmt.Sprintf("Docker после install_docker.sh не отвечает (код %d)", rc))
+		return stop("проверка Docker после install_docker.sh: " + sess.noAnswer())
+	case st == stepFailed || !strings.Contains(body, "Docker version") || !strings.HasSuffix(strings.TrimSpace(body), "active"):
+		return stop("Docker после install_docker.sh не установлен или служба не активна" + scriptTail(idOut))
 	}
 
 	var created []int // индексы контейнеров, которые создавали МЫ
@@ -653,7 +707,192 @@ func Install(sess *Session, plan InstallPlan, opt InstallOptions) InstallResult 
 		sess.rollback(all, &res, created)
 		return stop("после установки не совпало с копией: " + strings.Join(bad, ", ") + " — клиенты не переносятся")
 	}
+
+	// Работа VPN (аудит AU M1): конфигурация совпала — ещё не значит, что
+	// туннель поднят (start.sh кончается `tail -f`, контейнер Running и при
+	// упавшем awg-quick/xray).
+	fwd, fwdWhy := sess.ipForward()
+	var down, unk []string
+	for i, cs := range all {
+		r := &res.Containers[i]
+		r.VPN, r.VPNWhy = sess.vpnUp(cs)
+		if r.VPN == CompatMatch && fwd != CompatMatch {
+			r.VPN, r.VPNWhy = fwd, fwdWhy
+		}
+		switch r.VPN {
+		case CompatMismatch:
+			down = append(down, r.Container+": "+r.VPNWhy)
+		case CompatUnknown:
+			unk = append(unk, r.Container+": "+r.VPNWhy)
+		}
+	}
+	if len(down)+len(unk) > 0 {
+		sess.rollback(all, &res, created)
+		why := ""
+		if len(down) > 0 {
+			why = "VPN не поднялся — " + strings.Join(down, "; ")
+		}
+		if len(unk) > 0 {
+			if why != "" {
+				why += "; "
+			}
+			why += "работа VPN не измерена — " + strings.Join(unk, "; ")
+		}
+		return stop(why + " — клиенты не переносятся")
+	}
 	return res
+}
+
+// ---------- работа VPN ----------
+
+// vpnIface — утилита и интерфейс внутри контейнера по папке скриптов.
+var vpnIface = map[string][2]string{
+	"awg":        {"awg", "awg0"},
+	"awg_legacy": {"wg", "wg0"},
+	"wireguard":  {"wg", "wg0"},
+}
+
+// vpnUp — три состояния: Match — поднят, Mismatch — измерено «нет»,
+// Unknown — измерить не удалось.
+func (s *Session) vpnUp(cs *containerScripts) (CompatState, string) {
+	c, port := cs.item.Container, cs.item.Port
+	if t, ok := vpnIface[cs.folder]; ok {
+		st, body, _ := s.instStep(rcTail("sudo -n docker exec "+c+" "+t[0]+" show "+t[1]+" listen-port"), nil)
+		switch {
+		case st == stepUnknown:
+			return CompatUnknown, t[0] + " show: " + s.noAnswer()
+		case st == stepFailed:
+			return CompatMismatch, "интерфейса " + t[1] + " нет (" + t[0] + " show отказал)"
+		case strings.TrimSpace(body) != port:
+			return CompatMismatch, "интерфейс " + t[1] + " слушает порт «" + strings.TrimSpace(body) + "», а не " + port
+		}
+		return CompatMatch, ""
+	}
+	if cs.folder != "xray" {
+		return CompatUnknown, "способ проверки для " + c + " неизвестен"
+	}
+	probe := "if pidof xray >/dev/null 2>&1; then echo PID=yes; else echo PID=no; fi\n" +
+		"if command -v ss >/dev/null 2>&1; then L=$(ss -ltn); elif command -v netstat >/dev/null 2>&1; then L=$(netstat -ltn); else echo LISTEN=unknown; exit 0; fi\n" +
+		"if printf '%s\\n' \"$L\" | grep -q \":" + port + " \"; then echo LISTEN=yes; else echo LISTEN=no; fi\n"
+	st, body, _ := s.instStep(execInCmd(c, "sh -s"), []byte(probe))
+	if st == stepUnknown {
+		return CompatUnknown, "проверка xray: " + s.noAnswer()
+	}
+	if st == stepFailed {
+		return CompatUnknown, "проверка xray не выполнилась"
+	}
+	switch {
+	case strings.Contains(body, "PID=no"):
+		return CompatMismatch, "процесс xray не запущен"
+	case !strings.Contains(body, "PID=yes"):
+		return CompatUnknown, "жив ли процесс xray, не прочитано"
+	case strings.Contains(body, "LISTEN=no"):
+		return CompatMismatch, "порт " + port + "/tcp не слушается"
+	case strings.Contains(body, "LISTEN=yes"):
+		return CompatMatch, ""
+	}
+	return CompatUnknown, "слушается ли порт " + port + ", измерить нечем (нет ss и netstat)"
+}
+
+// ipForward — net.ipv4.ip_forward на хосте (без него клиенты не выйдут в сеть).
+func (s *Session) ipForward() (CompatState, string) {
+	st, body, _ := s.instStep(rcTail("cat /proc/sys/net/ipv4/ip_forward"), nil)
+	switch {
+	case st == stepUnknown:
+		return CompatUnknown, "ip_forward хоста: " + s.noAnswer()
+	case st == stepFailed:
+		return CompatUnknown, "ip_forward хоста не прочитан"
+	case strings.TrimSpace(body) == "1":
+		return CompatMatch, ""
+	case strings.TrimSpace(body) == "0":
+		return CompatMismatch, "на хосте net.ipv4.ip_forward = 0"
+	}
+	return CompatUnknown, "ip_forward хоста: ответ не распознан"
+}
+
+// ---------- связь ----------
+
+var (
+	// instStepTimeout — потолок одного шага (build и apt идут минутами).
+	instStepTimeout = 20 * time.Minute
+	// instKeepalivePeriod, instKeepaliveMisses — keepalive SSH на время
+	// установки: 3 пропуска подряд — связь закрывается, ждущий шаг
+	// возвращается «неизвестно».
+	instKeepalivePeriod = 15 * time.Second
+)
+
+const instKeepaliveMisses = 3
+
+// xrayKeysMissing — метка скрипта server.json: ключей нет.
+const xrayKeysMissing = "amnezia_admin_xray_keys=missing"
+
+// noAnswer — текст «ответа нет» с подсказкой при истёкшем сроке.
+func (s *Session) noAnswer() string {
+	if s.instTimedOut {
+		return fmt.Sprintf("ответа нет за %s — связь признана оборванной; команда на сервере могла продолжиться: "+
+			"проверьте docker ps -a, docker images, docker volume ls", instStepTimeout)
+	}
+	return "ответа нет — связь оборвалась"
+}
+
+// keepalive — send раз в period; misses неудач подряд (ошибка или ответа
+// нет за period) — kill. stop останавливает.
+func keepalive(send func() error, kill func(), period time.Duration, misses int) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		tk := time.NewTicker(period)
+		defer tk.Stop()
+		miss := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-tk.C:
+			}
+			res := make(chan error, 1)
+			go func() { res <- send() }()
+			var err error
+			select {
+			case err = <-res:
+			case <-time.After(period):
+				err = fmt.Errorf("нет ответа")
+			case <-done:
+				return
+			}
+			if err == nil {
+				miss = 0
+				continue
+			}
+			if miss++; miss >= misses {
+				kill()
+				return
+			}
+		}
+	}()
+	var once bool
+	return func() {
+		if !once {
+			once = true
+			close(done)
+		}
+	}
+}
+
+// scriptTail — последние строки вывода скрипта (через маску) для причины.
+func scriptTail(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return ""
+	}
+	if len(lines) > 5 {
+		lines = lines[len(lines)-5:]
+	}
+	t := maskFreeText(strings.Join(lines, " | "))
+	hint := ""
+	if strings.Contains(t, "Could not get lock") || strings.Contains(t, "dpkg was interrupted") || strings.Contains(t, "is held by process") {
+		hint = " — менеджер пакетов занят (вероятно, автообновление): дождитесь его окончания и повторите"
+	}
+	return "; вывод install_docker.sh: " + t + hint
 }
 
 // measuredOf — сводка строк CheckTarget по контейнеру: все Match — Match;
@@ -730,8 +969,11 @@ func (s *Session) installOne(cs *containerScripts, r *InstallContainerResult, cr
 		state, body, rc := s.instStep(st.cmd, in)
 		switch state {
 		case stepUnknown:
-			return true, "шаг «" + st.name + "»: ответа нет — связь оборвалась, состояние контейнера неизвестно", true
+			return true, "шаг «" + st.name + "»: " + s.noAnswer() + ", состояние контейнера неизвестно", true
 		case stepFailed:
+			if strings.Contains(body, xrayKeysMissing) {
+				return true, "шаг «" + st.name + "»: ключи XRay не сгенерированы configure_container.sh — server.json не записан", false
+			}
 			return true, fmt.Sprintf("шаг «%s» завершился с кодом %d", st.name, rc), false
 		}
 		if st.check != nil {
@@ -777,13 +1019,13 @@ func (s *Session) rollback(all []*containerScripts, res *InstallResult, created 
 		}
 		// Измеряем всё, что откат обязан убрать: контейнер и (XRay) том с
 		// ключами этого запуска (ревью PR 5 M1).
-		want := map[string]string{"container": cs.item.Container}
+		want := map[string]string{"container": cs.item.Container, "image": cs.item.Container}
 		if cs.removeVolume != "" {
 			want["volume"] = cs.removeVolume
 		}
 		var left []string
 		unknown := false
-		for _, kind := range []string{"container", "volume"} {
+		for _, kind := range []string{"container", "volume", "image"} {
 			name, has := want[kind]
 			if !has {
 				continue
@@ -795,7 +1037,7 @@ func (s *Session) rollback(all []*containerScripts, res *InstallResult, created 
 			}
 			for _, n := range names {
 				if n == name {
-					left = append(left, map[string]string{"container": "контейнер ", "volume": "том с ключами "}[kind]+n)
+					left = append(left, map[string]string{"container": "контейнер ", "volume": "том с ключами ", "image": "образ "}[kind]+n)
 				}
 			}
 		}

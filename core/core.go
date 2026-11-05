@@ -150,6 +150,10 @@ type Session struct {
 	xrayStart0, xrayStartApply string
 	xrayActs                   int
 	xrayNoRestart              bool
+
+	// instDead, instTimedOut — установка (provision_install.go): связь
+	// признана мёртвой (срок шага или keepalive); дальше — «неизвестно».
+	instDead, instTimedOut bool
 }
 
 func (s *Session) Close() {
