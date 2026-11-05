@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
 	"amnezia-admin/core/provision"
 )
@@ -10,14 +11,27 @@ import (
 // сервер», раздел 2, PR 4). Только данные и чистые функции: на серверах
 // ничего не выполняется.
 //
-// Решение владельца: ставить свежую ревизию, если она ставит СЕМЕЙСТВО
-// параметров исходного контейнера (protoVersion), иначе другую
-// закреплённую, иначе стоп.
+// Решение владельца (дословно): ставить «свежую версию, если совместима,
+// иначе такую же, как на исходном».
+//
+// Решение ядра о толковании (ревью-1 M2): ревизию скриптов, которыми был
+// поставлен исходный сервер, измерить нельзя — в копии её нет и на сервере
+// она не записывается. Поэтому «такая же, как на исходном» здесь означает
+// «ревизия, которая ставит ТО ЖЕ СЕМЕЙСТВО параметров (protoVersion), что у
+// исходного контейнера». Порядок: самая свежая закреплённая, затем другие
+// закреплённые по DefaultRevisionPreference, иначе стоп. Об откате на не
+// первую ревизию говорится в Reason.
 
-// Вердикт по контейнеру — CompatState (migrate.go): нулевое значение —
-// «не знаем», забытое присваивание не превращается ни в «да», ни в «нет».
-// Mismatch — известно, что ни одна закреплённая ревизия семейство не ставит
-// (в т.ч. ставит «без параметров семейства» — SupportPartial).
+// Вердикт — CompatState (migrate.go), но в ДРУГОМ смысле, чем в проверке
+// цели: здесь он отвечает на вопрос «есть ли закреплённая ревизия, которая
+// ставит семейство копии», а не «цель совпала с копией». Поэтому String()
+// сам по себе ничего не объясняет: потребитель печатает Verdict() и Reason.
+// Нулевое значение — «не знаем». Mismatch — известно, что ни одна
+// закреплённая ревизия семейство не ставит (в т.ч. SupportPartial).
+
+// sourceRevisionNote — одна фраза о толковании решения владельца для Reason
+// отката.
+const sourceRevisionNote = "ревизию скриптов исходного сервера измерить нельзя; взята ревизия, которая ставит то же семейство параметров"
 
 // DefaultRevisionPreference — порядок выбора: самая свежая первой.
 var DefaultRevisionPreference = []string{provision.Rev5106, provision.RevDev94b51df}
@@ -41,6 +55,20 @@ type InstallItem struct {
 	SNI       string // только XRay: serverNames
 }
 
+// Verdict — подпись вердикта для человека. Match с NeedsMeasurement не
+// печатается голым «совпало»: совпадение только по скриптам.
+func (it InstallItem) Verdict() string {
+	switch {
+	case it.Compat == CompatMatch && it.NeedsMeasurement:
+		return "совпало по скриптам, версия бинаря подтвердится после установки"
+	case it.Compat == CompatMatch:
+		return "совпало"
+	case it.Compat == CompatMismatch:
+		return "ни одна закреплённая ревизия не ставит семейство"
+	}
+	return "нет данных"
+}
+
 // InstallSkip — контейнер копии, который не ставится (не входит в копию).
 type InstallSkip struct {
 	Container, Reason string
@@ -53,7 +81,8 @@ type InstallPlan struct {
 }
 
 // Ready — все контейнеры совместимы; иначе установка — стоп. Пустой план
-// не готов.
+// не готов. Skipped НЕ учитываются: потребитель обязан назвать их целиком
+// (контейнер и причину) — они не будут поставлены.
 func (p InstallPlan) Ready() bool {
 	if len(p.Items) == 0 {
 		return false
@@ -120,7 +149,7 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 		switch {
 		case s.State == provision.SupportUnknown:
 			sawUnknown = true
-			why += fmt.Sprintf("; %s: нет данных", rev)
+			why += fmt.Sprintf("; %s: нет данных о семействе %q", rev, bc.Version)
 			continue
 		case s.State != provision.SupportYes && s.State != provision.SupportScriptOnly:
 			why += fmt.Sprintf("; %s: %s", rev, s.State)
@@ -130,10 +159,15 @@ func planContainer(bc *BackupContainer, prefs []string) InstallItem {
 			continue
 		}
 		it.Revision, it.Compat, it.Source = rev, CompatMatch, s.Source
+		var notes []string
+		if why != "" {
+			notes = append(notes, fmt.Sprintf("выбрана не самая свежая ревизия %s, отвергнуты%s; %s", rev, why, sourceRevisionNote))
+		}
 		if s.State == provision.SupportScriptOnly {
 			it.NeedsMeasurement = true
-			it.Reason = "совместимость подтвердится измерением после установки: " + s.Note
+			notes = append(notes, "совместимость подтвердится измерением после установки: "+s.Note)
 		}
+		it.Reason = strings.Join(notes, ". ")
 		return it
 	}
 	if sawUnknown {
