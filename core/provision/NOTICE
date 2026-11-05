@@ -1,0 +1,11 @@
+Каталог scripts/ содержит неизменённые копии файлов из проекта
+amnezia-client (https://github.com/amnezia-vpn/amnezia-client),
+каталог client/server_scripts/:
+
+  scripts/5.1.0.6/     — тег 5.1.0.6, коммит ac175c8a8147cfe56f98c8372ec17ea2ba00bb02
+  scripts/dev-94b51df/ — ветка dev, коммит 94b51df
+
+Авторские права принадлежат авторам amnezia-client. Файлы распространяются
+на условиях GNU General Public License v3.0 (как и этот проект, см. LICENSE
+в корне репозитория). Изменений в файлах нет: SHA-256 каждого записан в
+scripts.go и сверяется тестом.
