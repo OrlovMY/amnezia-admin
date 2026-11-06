@@ -1019,7 +1019,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	if len(o.notes) > 0 {
 		body = append(append(body, ""), o.notes...)
 	}
-	objs := []fyne.CanvasObject{hl, withCopy(wrapLabel(strings.Join(body, "\n"), false))}
+	var objs []fyne.CanvasObject
 	if o.keyPath != "" {
 		dir := filepath.Dir(o.keyPath)
 		objs = append(objs, widget.NewButtonWithIcon(toHostOpenDirText, theme.FolderOpenIcon(), func() {
@@ -1028,7 +1028,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 			}
 		}))
 	}
-	d := dialog.NewCustom("Итог установки и переноса", "Закрыть", container.NewVScroll(container.NewVBox(objs...)), u.win)
+	d := dialog.NewCustom("Итог установки и переноса", "Закрыть", resultBody(hl, wrapLabel(strings.Join(body, "\n"), false), objs...), u.win)
 	sizeDialog(d, fyne.NewSize(760, 580))
 	d.Show()
 	return d
