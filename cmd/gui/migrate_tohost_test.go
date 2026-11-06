@@ -612,7 +612,6 @@ func pinnedCase(t *testing.T, xr bool) {
 	osmotrFrame(top, nil)
 	scroll := inScroll(top)
 	cs := f.u.win.Canvas().Size()
-	drv := fyne.CurrentApp().Driver()
 	if xr && v.xrayRadio == nil {
 		t.Fatal("сцена ничего не значит: XRay нет в плане")
 	}
@@ -628,7 +627,7 @@ func pinnedCase(t *testing.T, xr bool) {
 		if scroll[o] {
 			t.Errorf("%s в прокрутке", name)
 		}
-		p, s := drv.AbsolutePositionForObject(o), o.Size()
+		p, s := absPos(o), o.Size()
 		t.Logf("%s: (%.0f,%.0f) %.0fx%.0f", name, p.X, p.Y, s.Width, s.Height)
 		if !o.Visible() || s.Height <= 0 || p.Y < 0 || p.Y+s.Height > cs.Height+0.5 || p.X+s.Width > cs.Width+0.5 {
 			t.Errorf("%s не виден в окне 900×600", name)

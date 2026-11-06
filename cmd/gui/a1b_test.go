@@ -92,11 +92,11 @@ func connectScreenTexts(t *testing.T) []string {
 func TestA1bVaultListUnknownDiffersFromNone(t *testing.T) {
 	u := focusTestUI(t)
 	vaultDirForTest(t) // каталога нет
-	if b := u.savedVaultsBlock(widget.NewButton("", nil), widget.NewLabel("")); b != nil {
+	if b := u.savedVaultsBlock(widget.NewButton("", nil), msgLabel("")); b != nil {
 		t.Fatalf("каталога нет — блок сохранённых ключей должен отсутствовать, а он есть: %T", b)
 	}
 	vaultPathIsAFile(t)
-	b := u.savedVaultsBlock(widget.NewButton("", nil), widget.NewLabel(""))
+	b := u.savedVaultsBlock(widget.NewButton("", nil), msgLabel(""))
 	if b == nil {
 		t.Fatal("каталог сохранённых ключей не прочитан, а экран выглядит так же, как без ключей — " +
 			"незнание выдано за «сохранённых ключей нет» (признак 2)")
@@ -142,7 +142,7 @@ func saveKeyThroughDialog(t *testing.T, dir string) (status, saved string) {
 		}
 	}
 	u := focusTestUI(t)
-	u.status = widget.NewLabel("")
+	u.status = msgLabel("")
 	u.offerSaveKey("vpn://не-настоящий", "A1б", "")
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {

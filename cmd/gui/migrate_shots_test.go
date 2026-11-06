@@ -33,8 +33,7 @@ func (f *migFixture) shot(t *testing.T, name string, keyLines []string) {
 	if p, ok := top.(*widget.PopUp); ok {
 		pop = p.Content
 	}
-	drv := fyne.CurrentApp().Driver()
-	ppos := drv.AbsolutePositionForObject(pop)
+	ppos := absPos(pop)
 	psz := pop.Size()
 	t.Logf("[%s] канва %.0fx%.0f; окно %.0fx%.0f в (%.0f,%.0f)", name, cs.Width, cs.Height, psz.Width, psz.Height, ppos.X, ppos.Y)
 	if ppos.X < 0 || ppos.Y < 0 || ppos.X+psz.Width > cs.Width+0.5 || ppos.Y+psz.Height > cs.Height+0.5 {
@@ -56,7 +55,7 @@ func (f *migFixture) shot(t *testing.T, name string, keyLines []string) {
 	})
 	walkObjects(top, func(o fyne.CanvasObject) {
 		var txt string
-		switch x := o.(type) {
+		switch x := labelOf(o).(type) {
 		case *escButton:
 			txt = "[" + x.Text + "]"
 		case *widget.Label:
@@ -68,7 +67,7 @@ func (f *migFixture) shot(t *testing.T, name string, keyLines []string) {
 			if !strings.Contains(txt, k) {
 				continue
 			}
-			p, s := drv.AbsolutePositionForObject(o), o.Size()
+			p, s := absPos(o), o.Size()
 			in := p.X >= ppos.X-0.5 && p.Y >= ppos.Y-0.5 && p.X+s.Width <= ppos.X+psz.Width+0.5 && p.Y+s.Height <= ppos.Y+psz.Height+0.5
 			t.Logf("[%s] «%s» (%.0f,%.0f) %.0fx%.0f, внутри окна: %v", name, firstN(k, 40), p.X, p.Y, s.Width, s.Height, in)
 		}

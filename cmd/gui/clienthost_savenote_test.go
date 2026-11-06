@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -37,7 +36,7 @@ func TestGUISaveLineCarriesEndpoint(t *testing.T) {
 			t.Cleanup(w.Close)
 			sess := core.NewSessionWithRunner(fakesrv.New(), &core.ServerCreds{Host: "203.0.113.5", User: "root"})
 			sess.ClientHost, sess.ClientHostDecided = tc.clientHost, true
-			u := &ui{win: w, selectedRow: -1, status: widget.NewLabel(""), sess: sess}
+			u := &ui{win: w, selectedRow: -1, status: msgLabel(""), sess: sess}
 			t.Cleanup(func() { waitGUIGoroutines(t) })
 			u.showConfigDialog(&core.NewUser{Name: "Carol", Config: "[Interface]\nPrivateKey = x\n"}, "создан")
 			waitGUIGoroutines(t)

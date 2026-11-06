@@ -54,7 +54,7 @@ func dragTestUI(t *testing.T) *ui {
 
 // tableOrigin — абсолютная позиция таблицы; от неё считаются все точки ниже.
 func tableOrigin(u *ui) fyne.Position {
-	return fyne.CurrentApp().Driver().AbsolutePositionForObject(u.table)
+	return absPos(u.table)
 }
 
 // hoverAt проводит курсор в точку ТЕМ ЖЕ способом, что боевой драйвер:
@@ -69,7 +69,7 @@ func hoverAt(t *testing.T, u *ui, at fyne.Position) {
 		if _, ok := o.(desktop.Hoverable); !ok {
 			return
 		}
-		pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+		pos := absPos(o)
 		size := o.Size()
 		if at.X < pos.X || at.Y < pos.Y || at.X >= pos.X+size.Width || at.Y >= pos.Y+size.Height {
 			return
@@ -81,7 +81,7 @@ func hoverAt(t *testing.T, u *ui, at fyne.Position) {
 		t.Fatalf("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: под точкой %v нет ни одного "+
 			"объекта, получающего движение мыши", at)
 	}
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(hovered)
+	pos := absPos(hovered)
 	h.MouseMoved(&desktop.MouseEvent{PointEvent: fyne.PointEvent{
 		AbsolutePosition: at,
 		Position:         fyne.NewPos(at.X-pos.X, at.Y-pos.Y),
@@ -91,7 +91,7 @@ func hoverAt(t *testing.T, u *ui, at fyne.Position) {
 // mouseEventFor — событие кнопки для объекта, с Position относительно него
 // самого, как его строит боевой драйвер.
 func mouseEventFor(o fyne.CanvasObject, at fyne.Position) *desktop.MouseEvent {
-	pos := fyne.CurrentApp().Driver().AbsolutePositionForObject(o)
+	pos := absPos(o)
 	return &desktop.MouseEvent{
 		Button: desktop.MouseButtonPrimary,
 		PointEvent: fyne.PointEvent{
@@ -290,7 +290,7 @@ func TestHeaderClickStillSorts(t *testing.T) {
 	if target == nil {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: на экране нет заголовка «Имя»")
 	}
-	at := fyne.CurrentApp().Driver().AbsolutePositionForObject(target)
+	at := absPos(target)
 	center := fyne.NewPos(at.X+target.Size().Width/2, at.Y+target.Size().Height/2)
 
 	hoverAt(t, u, center)

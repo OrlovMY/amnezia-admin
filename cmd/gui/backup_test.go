@@ -31,7 +31,7 @@ func backupUI(t *testing.T, srv *fakesrv.Server, host string) *ui {
 	backupResolve = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("203.0.113.7")}, nil }
 	t.Cleanup(func() { backupResolve = old })
 	t.Cleanup(core.SetXRayWaits(0, 0))
-	return &ui{win: w, selectedRow: -1, status: widget.NewLabel(""),
+	return &ui{win: w, selectedRow: -1, status: msgLabel(""),
 		sess: core.NewSessionWithRunner(srv, &core.ServerCreds{Host: host, User: "root"})}
 }
 
@@ -40,7 +40,7 @@ func texts(o fyne.CanvasObject) string {
 	var b strings.Builder
 	var walk func(fyne.CanvasObject)
 	walk = func(o fyne.CanvasObject) {
-		switch v := o.(type) {
+		switch v := labelOf(o).(type) {
 		case *widget.Label:
 			b.WriteString(v.Text + "\n")
 		case *widget.Button:

@@ -70,7 +70,7 @@ func TestQRSeriesCaptionOnce(t *testing.T) {
 				s := newQRSeries("x", c.pngs)
 				s.setAlt(alt)
 				if side {
-					s.setSide(widget.NewLabel("строка честности"))
+					s.setSide(msgLabel("строка честности"))
 				}
 				if c.text {
 					test.Tap(s.altBtn)
@@ -154,14 +154,13 @@ func TestTextQRFullyVisible(t *testing.T) {
 					if full < 256 || v < full-0.5 {
 						t.Errorf("текстовый QR срезан: видно %.1f из %.1f (%s)", v, full, where)
 					}
-					dr := fyne.CurrentApp().Driver()
-					ip, is := dr.AbsolutePositionForObject(qs.img), qs.img.Size()
+					ip, is := absPos(qs.img), qs.img.Size()
 					if ip.X < 0 || ip.Y < 0 || ip.X+is.Width > size.Width+0.5 || ip.Y+is.Height > size.Height+0.5 {
 						t.Errorf("текстовый QR за краем окна: %v %v в окне %v", ip, is, size)
 					}
 					for _, text := range []string{qrSeriesButton, "Сохранить ещё в…", "Скопировать путь", "Закрыть"} {
 						b := findButton(t, pop, text)
-						p, bs := dr.AbsolutePositionForObject(b), b.Size()
+						p, bs := absPos(b), b.Size()
 						if p.X < 0 || p.Y < 0 || p.X+bs.Width > size.Width+0.5 || p.Y+bs.Height > size.Height+0.5 ||
 							bs.Height < b.MinSize().Height-0.5 || bs.Width < b.MinSize().Width-0.5 {
 							t.Errorf("кнопка %q не видна целиком: %v %v в окне %v", text, p, bs, size)

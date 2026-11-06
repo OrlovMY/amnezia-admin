@@ -34,7 +34,7 @@ func writeLabel(t *testing.T, vault, js string) {
 func vaultBlockSelect(t *testing.T) (*widget.Select, *widget.Button) {
 	t.Helper()
 	u := focusTestUI(t)
-	blk := u.savedVaultsBlock(widget.NewButton("", nil), widget.NewLabel(""))
+	blk := u.savedVaultsBlock(widget.NewButton("", nil), msgLabel(""))
 	if blk == nil {
 		t.Fatal("блок сохранённых не построен")
 	}

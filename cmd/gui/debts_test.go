@@ -46,7 +46,7 @@ func pinDialogWith(t *testing.T, prep func(dir string)) (*ui, *widget.Button) {
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
 	u.showConnectScreen("")
-	u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(filepath.Join(dir, "нет.avlt"), "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	waitGUIGoroutines(t)
 	pop := topPopup(t, u.win.Canvas())
 	return u, buttonByText(t, pop, "Открыть")

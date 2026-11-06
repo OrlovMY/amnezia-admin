@@ -362,7 +362,7 @@ type migrateView struct {
 	// pinned — обязательные элементы в закреплённой панели (вне прокрутки);
 	// reason — почему «Перенести» погашена (или что всё подтверждено).
 	pinned []fyne.CanvasObject
-	reason *widget.Label
+	reason *msgText
 }
 
 func (v *migrateView) layer() core.BackupLayer {
@@ -577,7 +577,7 @@ func (u *ui) migrateResult(auto string, enc bool, outs []core.RestoreOutcome, er
 	default:
 		body = migrateSrcSafeText + "\n" + strings.Join(core.MigrationOutcomeLines(auto, enc, outs), "\n")
 	}
-	d := dialog.NewCustom("Итог переноса", "Закрыть", container.NewVScroll(container.NewVBox(hl, wrapLabel(body, false))), u.win)
+	d := dialog.NewCustom("Итог переноса", "Закрыть", resultBody(hl, wrapLabel(body, false)), u.win)
 	sizeDialog(d, fyne.NewSize(700, 580))
 	d.Show()
 	return d

@@ -43,7 +43,7 @@ func (u *ui) xrayServiceRow(cl core.ClientEntry) bool {
 	if title == "" {
 		title = core.XRayServiceName
 	}
-	dialog.ShowInformation(title, guiview.XRayServiceInfo, u.win)
+	u.showInfo(title, guiview.XRayServiceInfo)
 	return true
 }
 
@@ -166,8 +166,8 @@ func (b *escButton) TypedKey(e *fyne.KeyEvent) {
 }
 
 // wrapLabel — подпись с переносом по словам.
-func wrapLabel(text string, bold bool) *widget.Label {
-	l := widget.NewLabelWithStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: bold})
+func wrapLabel(text string, bold bool) *msgText {
+	l := msgLabelStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: bold})
 	l.Wrapping = fyne.TextWrapWord
 	return l
 }

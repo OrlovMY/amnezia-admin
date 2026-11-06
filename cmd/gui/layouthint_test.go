@@ -66,7 +66,7 @@ const typedLatinPin = "Abcdefgh1234!"
 func visibleTexts(root fyne.CanvasObject) []string {
 	var out []string
 	walkVisibleStop(root, func(o fyne.CanvasObject) bool {
-		switch x := o.(type) {
+		switch x := labelOf(o).(type) {
 		case *widget.Label:
 			out = append(out, x.Text)
 			// ВНУТРЬ подписи не спускаемся: там тот же текст, разложенный
@@ -234,7 +234,7 @@ func TestPinDialogHintsAboutLayout(t *testing.T) {
 
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
-	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
 		t.Fatal("диалог пин-кода не открылся")
@@ -386,7 +386,7 @@ func openPinDialogTexts(t *testing.T) []string {
 
 	u := focusTestUI(t)
 	t.Cleanup(func() { waitGUIGoroutines(t) })
-	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), widget.NewLabel(""))
+	u.showVaultPinDialog(t.TempDir()+"/нет.avlt", "Сервер 1", widget.NewButton("", nil), msgLabel(""))
 	over := u.win.Canvas().Overlays().List()
 	if len(over) == 0 {
 		t.Fatal("диалог пин-кода не открылся")
@@ -453,8 +453,7 @@ func TestLayoutHintDoesNotMoveButtons(t *testing.T) {
 	d := u.win.Canvas().Overlays().List()[0]
 	btn := buttonByText(t, d, "Сохранить")
 
-	drv := fyne.CurrentApp().Driver()
-	before := drv.AbsolutePositionForObject(btn)
+	before := absPos(btn)
 	if before.Y == 0 {
 		t.Fatal("проверка ПЕРЕСТАЛА ЧТО-ЛИБО ЗНАЧИТЬ: кнопка «Сохранить» не размещена на канве")
 	}
@@ -463,7 +462,7 @@ func TestLayoutHintDoesNotMoveButtons(t *testing.T) {
 	passwordEntry(t, d, 1).SetText(typedCyrillicPin)
 	d.Refresh()
 
-	if after := drv.AbsolutePositionForObject(btn); after != before {
+	if after := absPos(btn); after != before {
 		t.Errorf("после появления подсказок кнопка «Сохранить» переехала с %v на %v: "+
 			"человек печатает пароль вслепую, а кнопка уходит у него под пальцами", before, after)
 	}
@@ -487,8 +486,7 @@ func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
 	box.Resize(h.size)
 	box.Refresh()
 
-	drv := fyne.CurrentApp().Driver()
-	top := drv.AbsolutePositionForObject(box).Y
+	top := absPos(box).Y
 	var bottom float32
 	rows := 0
 	walkVisible(box, func(o fyne.CanvasObject) {
@@ -497,7 +495,7 @@ func renderedTextBottom(t *testing.T, h *layoutHint) float32 {
 			return
 		}
 		rows++
-		if b := drv.AbsolutePositionForObject(txt).Y + txt.Size().Height - top; b > bottom {
+		if b := absPos(txt).Y + txt.Size().Height - top; b > bottom {
 			bottom = b
 		}
 	})
@@ -667,11 +665,11 @@ func TestVisibleTextsIgnoresHiddenText(t *testing.T) {
 	a := test.NewApp()
 	t.Cleanup(a.Quit)
 
-	hiddenLabel := widget.NewLabel("скрытая-подпись")
+	hiddenLabel := msgLabel("скрытая-подпись")
 	hiddenLabel.Hide()
 	hiddenText := canvas.NewText("скрытый-canvas-текст", color.Black)
 	hiddenText.Hide()
-	inHiddenBox := widget.NewLabel("подпись-внутри-скрытого-контейнера")
+	inHiddenBox := msgLabel("подпись-внутри-скрытого-контейнера")
 	hiddenBox := container.NewVBox(inHiddenBox)
 	hiddenBox.Hide()
 	visible := canvas.NewText("видимый-canvas-текст", color.Black)

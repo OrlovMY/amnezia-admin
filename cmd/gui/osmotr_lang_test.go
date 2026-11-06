@@ -100,15 +100,22 @@ func applyForeignFyneWords() {
 // TestOsmotrFyneWordsAnyLanguage — ДОКАЗАТЕЛЬСТВО без английской Windows:
 // настоящий TestOsmotrForms, формы «(ж)», в дочернем процессе с чужими
 // словами Fyne — английскими («OK», «Error», как на раннерах CI) и
-// несуществующими («Okidoki», «Errare»). Обязан пройти, и в выдаче обязаны
-// быть сами чужие слова (подмена доехала). Канарейка: тот же прогон без роли
-// (буквальная опись, как до починки) обязан покраснеть на «сверх описи».
+// несуществующими («Okidoki», «Errare»).
+//
+// С 06.11.2026 (сообщения выделяемые, msg.go) стандартных диалогов Fyne в
+// программе нет — сторож TestMessagesOnlySelectable запрещает
+// dialog.ShowInformation/ShowError. Доказательство теперь обратное
+// прежнему: формы «(ж)» зелёные при ЛЮБЫХ словах Fyne и в буквальной описи
+// (без роли). Канарейка — что подмена слов доехала до дочернего процесса:
+// TestOsmotrFyneWordsProbe печатает там lang.L("OK"), и это обязано быть
+// чужое слово; без неё «зелёный при чужих словах» мог бы значить «подмена
+// не сработала».
 func TestOsmotrFyneWordsAnyLanguage(t *testing.T) {
 	if os.Getenv(osmotrFyneWordsEnv) != "" || os.Getenv(osmotrPlantEnv) != "" {
 		t.Skip("дочерний процесс")
 	}
 	run := func(words string, literal bool) (string, error) {
-		re := "^" + regexp.QuoteMeta("TestOsmotrForms") + "$/^" + regexp.QuoteMeta("(ж)")
+		re := "^(" + regexp.QuoteMeta("TestOsmotrForms") + "|TestOsmotrFyneWordsProbe)$/^" + regexp.QuoteMeta("(ж)")
 		cmd := exec.Command(os.Args[0], "-test.run", re, "-test.count=1", "-test.v")
 		cmd.Env = append(os.Environ(), osmotrFyneWordsEnv+"="+words)
 		if literal {
@@ -120,22 +127,28 @@ func TestOsmotrFyneWordsAnyLanguage(t *testing.T) {
 	for _, tc := range []struct{ words, ok, errTitle string }{
 		{"en", "OK", "Error"}, {"xx", "Okidoki", "Errare"},
 	} {
-		out, err := run(tc.words, false)
-		passes := strings.Count(out, "--- PASS: TestOsmotrForms/(ж)")
-		t.Logf("язык Fyne %q: err=%v, подтестов (ж) PASS: %d", tc.words, err, passes)
-		if err != nil || passes != 8 {
-			t.Errorf("прибор НЕ зелёный при словах Fyne %q/%q (err=%v, PASS %d из 8):\n%s", tc.ok, tc.errTitle, err, passes, out)
-		}
-		lit, lerr := run(tc.words, true)
-		want := `сверх описи ["кнопка:` + tc.ok + `"`
-		for _, l := range strings.Split(lit, "\n") {
-			if strings.Contains(l, "сверх описи") {
-				t.Log("КАНАРЕЙКА: " + strings.TrimSpace(l))
-				break
+		for _, literal := range []bool{false, true} {
+			out, err := run(tc.words, literal)
+			passes := strings.Count(out, "--- PASS: TestOsmotrForms/(ж)")
+			t.Logf("язык Fyne %q, буквально=%v: err=%v, подтестов (ж) PASS: %d", tc.words, literal, err, passes)
+			if err != nil || passes != 8 {
+				t.Errorf("прибор НЕ зелёный при словах Fyne %q/%q, буквально=%v (err=%v, PASS %d из 8):\n%s", tc.ok, tc.errTitle, literal, err, passes, out)
+			}
+			if !strings.Contains(out, osmotrProbeMark+tc.ok) {
+				t.Errorf("подмена слов Fyne %q не доехала до дочернего процесса — доказательство ничего не значит:\n%s", tc.ok, out)
 			}
 		}
-		if lerr == nil || !strings.Contains(lit, want) {
-			t.Errorf("без роли прибор не покраснел на %q (err=%v) — подмена слов не доехала, доказательство ничего не значит", want, lerr)
-		}
 	}
+}
+
+const osmotrProbeMark = "слово Fyne «OK» здесь: "
+
+// TestOsmotrFyneWordsProbe — только в дочернем процессе: печатает текущее
+// слово Fyne «OK» после подмены (канарейка доезда подмены).
+func TestOsmotrFyneWordsProbe(t *testing.T) {
+	if os.Getenv(osmotrFyneWordsEnv) == "" {
+		t.Skip("только в дочернем процессе")
+	}
+	applyForeignFyneWords()
+	t.Log(osmotrProbeMark + lang.L("OK"))
 }

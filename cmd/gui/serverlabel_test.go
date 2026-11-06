@@ -8,7 +8,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
-	"fyne.io/fyne/v2/widget"
 )
 
 // TestServerLabelLongName — решение ядра: имя сервера в 253 символа на
@@ -44,7 +43,7 @@ func TestServerLabelLongName(t *testing.T) {
 			}
 			var proto fyne.CanvasObject
 			walkObjects(u.protoRow, func(o fyne.CanvasObject) {
-				if l, ok := o.(*widget.Label); ok && l.Text == "Протокол:" {
+				if l, ok := asLabel(o); ok && l.Text == "Протокол:" {
 					proto = l
 				}
 			})

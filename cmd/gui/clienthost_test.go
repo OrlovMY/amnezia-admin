@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -25,7 +24,7 @@ func clientHostUI(t *testing.T, host string, res core.Resolver) *ui {
 	old := guiClientHostResolver
 	guiClientHostResolver = res
 	t.Cleanup(func() { guiClientHostResolver = old })
-	u := &ui{win: w, selectedRow: -1, status: widget.NewLabel(""),
+	u := &ui{win: w, selectedRow: -1, status: msgLabel(""),
 		sess: core.NewSessionWithRunner(fakesrv.New(), &core.ServerCreds{Host: host, User: "root"})}
 	u.cur = &core.Container{Name: "amnezia-awg", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
 	u.applyClientHostSetting(u.sess, core.ClientHostSetting{})

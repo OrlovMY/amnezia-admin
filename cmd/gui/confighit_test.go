@@ -42,7 +42,7 @@ func configScene(t *testing.T, state, size string) (*ui, *widget.PopUp) {
 }
 
 func absRect(o fyne.CanvasObject) rect {
-	return rect{pos: fyne.CurrentApp().Driver().AbsolutePositionForObject(o), size: o.Size()}
+	return rect{pos: absPos(o), size: o.Size()}
 }
 
 // checkConfigClicks — общая часть главной проверки и канарейки.
@@ -206,7 +206,7 @@ func TestConfigDialogNewTextInView(t *testing.T) {
 				var sc *container.Scroll
 				var l *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {
-					switch x := o.(type) {
+					switch x := labelOf(o).(type) {
 					case *container.Scroll:
 						sc = x
 					case *widget.Label:
@@ -252,7 +252,7 @@ func TestConfigSavedAcrossOSPathModels(t *testing.T) {
 				checkConfigClicks(t, pop, []string{"Сохранить ещё в…", "Скопировать путь", "Закрыть"}, t.Errorf)
 				var path *widget.Label
 				walkVisible(pop, func(o fyne.CanvasObject) {
-					if l, ok := o.(*widget.Label); ok && strings.HasPrefix(l.Text, "Конфиг сохранён: ") {
+					if l, ok := asLabel(o); ok && strings.HasPrefix(l.Text, "Конфиг сохранён: ") {
 						path = l
 					}
 				})

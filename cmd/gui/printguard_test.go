@@ -33,7 +33,7 @@ package main
 //     указателя на структуру печатает &{…} с содержимым полей — проверено
 //     координатором прогоном: &{1.2.3.4 root СЕКРЕТ-ПАРОЛЬ 22}) и не
 //     совпадает ни с одним локальным именем. Путь не гипотетический: в файле
-//     УЖЕ есть законное widget.NewLabel(fmt.Sprintf("Сервер: %s@%s",
+//     УЖЕ есть законное msgLabel(fmt.Sprintf("Сервер: %s@%s",
 //     u.sess.Creds.User, u.sess.Creds.Host)) — тот же держатель, то же
 //     форматирование, другая функция.
 //  2. ПЕРЕНОС ДЕРЖАТЕЛЯ В ЛОКАЛЬНОЕ ИМЯ — закрывает ЛОКАЛЬНЫЙ обход
@@ -413,7 +413,7 @@ func isSink(call *ast.CallExpr, jsonNames map[string]bool) string {
 		//   ParseMarkdown  (RichText);
 		//   PushWithTitle  (container.Navigation) — ВТОРОЙ АРГУМЕНТ СТАНОВИТСЯ
 		//     ЗАГОЛОВКОМ ЭКРАНА. Найден SEC-01 (круг 4) разбором container и
-		//     предъявлен прогоном: nav.PushWithTitle(widget.NewLabel("y"), key)
+		//     предъявлен прогоном: nav.PushWithTitle(msgLabel("y"), key)
 		//     проходил ЗЕЛЁНЫМ. Именно ИМЯ, а не пакет: сам пакет container
 		//     точкой вывода не объявлен и объявлен быть не может —
 		//     container.NewVBox(keyEntry) размещает поле ввода на экране, а не

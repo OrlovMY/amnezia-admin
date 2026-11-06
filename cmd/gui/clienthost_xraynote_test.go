@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -45,7 +44,7 @@ func TestGUIXRayShowConfigEndpointNote(t *testing.T) {
 			if err != nil || len(cls) == 0 {
 				t.Fatalf("клиенты: %v", err)
 			}
-			u := &ui{win: w, selectedRow: -1, status: widget.NewLabel(""), sess: sess, cur: cur}
+			u := &ui{win: w, selectedRow: -1, status: msgLabel(""), sess: sess, cur: cur}
 			u.showXRayConfig(cls[0])
 			waitGUIGoroutines(t)
 			if !strings.Contains(u.status.Text, tc.want) {
