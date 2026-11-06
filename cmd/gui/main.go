@@ -123,6 +123,10 @@ type ui struct {
 	buttonsRow        *fyne.Container
 	detailsBtn        *widget.Button
 	protoDetailsShown dialog.Dialog
+	// statsBtn — «Статистика»; statsView — открытое окно статистики (nil —
+	// не открыто; stats.go).
+	statsBtn  *widget.Button
+	statsView *statsView
 	// serverLabel — подпись сервера (обрезается многоточием; сторожа).
 	serverLabel *serverLabel
 	// serverCopy — значок «скопировать полный адрес сервера».
@@ -1742,6 +1746,10 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// с подписью сервера.
 	copyBtn := widget.NewButtonWithIcon("Копия", theme.DocumentSaveIcon(), func() { u.backupMenu() })
 	u.copyBtn = copyBtn
+	// «Статистика» (задание GUI-STATS) — в строке протокола после
+	// «Подробнее»: в ряду кнопок она раздвигала минимум окна до 978 т.
+	// (больше 900, сторож TestMainWideOneRow).
+	u.statsBtn = widget.NewButtonWithIcon(statsButtonLabel, theme.ListIcon(), func() { u.showStats() })
 
 	refreshBtn := widget.NewButtonWithIcon("Обновить", theme.ViewRefreshIcon(), func() { u.refresh() })
 	addBtn := widget.NewButtonWithIcon("Создать", theme.ContentAddIcon(), func() { u.addDialog() })
@@ -1764,7 +1772,7 @@ func (u *ui) mainScreen() fyne.CanvasObject {
 	// параметров, контейнер и транспорт текущего протокола.
 	u.detailsBtn = widget.NewButtonWithIcon(protoDetailsLabel, theme.InfoIcon(), func() { u.showProtoDetails() })
 	u.protoRow = container.NewBorder(nil, nil,
-		container.NewHBox(msgLabel("Протокол:"), container.New(&selectWidthLayout{sel: &u.protoSelect.Select}, u.protoSelect), u.detailsBtn),
+		container.NewHBox(msgLabel("Протокол:"), container.New(&selectWidthLayout{sel: &u.protoSelect.Select}, u.protoSelect), u.detailsBtn, u.statsBtn),
 		u.serverCopy, server)
 	u.buttonsRow = container.NewHBox(refreshBtn, addBtn, renameBtn, toggleBtn, regenBtn, delBtn, copyBtn)
 	// Широкое окно — кнопки, протокол и сервер одной строкой; узкое — двумя,
