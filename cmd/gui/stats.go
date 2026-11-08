@@ -233,6 +233,20 @@ type statsView struct {
 	rangeErr  error
 	periodLbl string
 
+	// Занятость (аудит AU-GUI-STATS-1, M1): reading — идёт чтение,
+	// writing — идёт установка/снятие. Кнопки включаются, только когда
+	// оба сброшены; rebuild (смена периода) их не трогает.
+	reading, writing bool
+	// gen — поколение чтения: результат чтения, начатого до последнего
+	// reload, отбрасывается (иначе на экран попали бы устаревшие цифры).
+	gen int
+	// readAt — момент чтения: от него считаются пресеты периода и в
+	// таблице, и в CSV (L2), чтобы выгрузка совпадала с экраном.
+	readAt time.Time
+	// csvInfo — итог последней выгрузки CSV; строку состояния сборщика
+	// не затирает (L1).
+	csvInfo *msgText
+
 	status     *msgText
 	notes      *msgText
 	table      *widget.Table
@@ -277,6 +291,8 @@ func newStatsView(u *ui) *statsView {
 	v.win = fyne.CurrentApp().NewWindow(statsButtonLabel + " — " + u.sess.Creds.Host)
 
 	v.status = wrapped(msgLabel(""))
+	v.csvInfo = wrapped(msgLabel(""))
+	v.csvInfo.Hide()
 	v.notes = wrapped(msgLabel(""))
 	v.refreshBtn = widget.NewButtonWithIcon("Обновить", theme.ViewRefreshIcon(), func() { v.reload() })
 	v.installBtn = widget.NewButtonWithIcon("Установить сборщик…", theme.DownloadIcon(), func() { v.confirmInstall() })
@@ -319,6 +335,7 @@ func newStatsView(u *ui) *statsView {
 
 	top := container.NewVBox(
 		withCopy(v.status),
+		v.csvInfo,
 		container.NewHBox(v.refreshBtn, v.installBtn, v.removeBtn, v.csvBtn),
 		container.NewHBox(msgLabel("Период:"), statsSelectBox(v.periodSel), msgLabel("Разбивка:"), statsSelectBox(v.groupSel)),
 		// Поля дат — отдельной строкой: в одной строке с «Период/Разбивка»
@@ -329,7 +346,8 @@ func newStatsView(u *ui) *statsView {
 	notes.SetMinSize(fyne.NewSize(0, 110))
 	v.win.SetContent(container.NewBorder(top, notes, nil, nil, v.table))
 	v.win.Resize(fyne.NewSize(900, 600))
-	v.setBusy(true)
+	v.reading = true
+	v.updateButtons()
 	return v
 }
 
@@ -426,9 +444,10 @@ func (v *statsView) sortBy(col int) {
 	v.table.Refresh()
 }
 
-// setBusy — во время чтения/записи кнопки выключены, таблица пуста.
-func (v *statsView) setBusy(busy bool) {
-	if busy {
+// updateButtons — во время чтения или записи кнопки выключены; иначе —
+// по прочитанному состоянию.
+func (v *statsView) updateButtons() {
+	if v.reading || v.writing {
 		v.refreshBtn.Disable()
 		v.installBtn.Disable()
 		v.removeBtn.Disable()
@@ -465,9 +484,12 @@ func (v *statsView) hasTable() bool {
 func (v *statsView) reload() {
 	v.loaded, v.aborted, v.log, v.readErr, v.clients = false, false, nil, nil, nil
 	v.st = core.CollectorStatus{}
+	v.gen++
+	gen := v.gen
+	v.reading = true
 	v.status.SetText("Сборщик статистики: читаю с сервера…")
 	v.rebuild()
-	v.setBusy(true)
+	v.updateButtons()
 	sess, conts := v.u.sess, v.containers
 	goSafe(func() {
 		var (
@@ -475,21 +497,28 @@ func (v *statsView) reload() {
 			l       *core.TrafficLog
 			err     error
 			clients []statsview.ContainerClients
+			now     time.Time
 			done    bool
 		)
 		defer func() {
 			uiDo(func() {
+				if gen != v.gen {
+					return // устаревшее чтение: после него начато новое
+				}
+				v.reading = false
 				if done {
 					v.st, v.log, v.readErr, v.clients, v.loaded = st, l, err, clients, true
+					v.readAt = now
 					v.status.SetText("Сборщик статистики: " + collectorText(st))
 				} else {
 					v.aborted = true
 					v.status.SetText("Сборщик статистики: чтение прервано — данных нет. Нажмите «Обновить».")
 				}
 				v.rebuild()
-				v.setBusy(false)
+				v.updateButtons()
 			})
 		}()
+		now = statsNow()
 		st = statsReadStatus(sess)
 		l, err = statsReadTraffic(sess)
 		if err == nil {
@@ -521,7 +550,7 @@ func (v *statsView) rebuild() {
 		if v.st.Full != "" {
 			notes = append(notes, "⚠ "+statsview.FullText(v.st.Full, guiHints))
 		}
-		r, label, err := statsRangeOf(v.periodSel.Selected, v.fromEntry.Text, v.toEntry.Text, statsNow())
+		r, label, err := statsRangeOf(v.periodSel.Selected, v.fromEntry.Text, v.toEntry.Text, v.readAt)
 		if err != nil {
 			v.rangeErr = err
 			notes = append(notes, "Период задан неверно: "+err.Error()+" — таблица не строится.")
@@ -556,9 +585,7 @@ func (v *statsView) rebuild() {
 	v.notes.SetText(strings.Join(notes, "\n"))
 	v.applyColumns()
 	v.table.Refresh()
-	if v.loaded {
-		v.setBusy(false)
-	}
+	v.updateButtons()
 }
 
 // showText — диалог сообщения в окне статистики (выделяемый текст).
@@ -610,7 +637,8 @@ func (v *statsView) confirmUninstall() {
 // write — установка/снятие вне потока интерфейса; исход — по состоянию,
 // перечитанному ПОСЛЕ записи (ошибка записи не значит «не записано»).
 func (v *statsView) write(what string, do func(*core.Session) error, want core.CollectorState) {
-	v.setBusy(true)
+	v.writing = true
+	v.updateButtons()
 	v.status.SetText("Сборщик статистики: " + strings.ToLower(what) + " на сервере…")
 	sess := v.u.sess
 	goSafe(func() {
@@ -632,6 +660,7 @@ func (v *statsView) write(what string, do func(*core.Session) error, want core.C
 				default:
 					v.showText(what, "Готово. Сборщик: "+collectorText(after))
 				}
+				v.writing = false
 				v.reload()
 			})
 		}()
@@ -657,15 +686,9 @@ func (v *statsView) exportCSV() {
 		v.showText("Выгрузить CSV", "Выгружать нечего: данных на экране нет.")
 		return
 	}
-	r, label, err := statsRangeOf(v.periodSel.Selected, v.fromEntry.Text, v.toEntry.Text, statsNow())
+	data, n, err := v.csvData()
 	if err != nil {
-		v.showText("Выгрузить CSV", "Период задан неверно: "+err.Error())
-		return
-	}
-	periods := statsview.Periods(v.log, r, label, statsBy(v.groupSel.Selected))
-	data, n, err := statsview.CSV(v.rows, v.log, v.st.State, periods)
-	if err != nil {
-		v.showText("Выгрузить CSV", "CSV не собран: "+err.Error())
+		v.showText("Выгрузить CSV", err.Error())
 		return
 	}
 	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
@@ -676,12 +699,34 @@ func (v *statsView) exportCSV() {
 		if w == nil {
 			return // отмена
 		}
-		v.status.SetText(statsCSVResult(w, data, n))
+		v.setCSVInfo(statsCSVResult(w, data, n))
 	}, v.win)
 	fd.SetFileName("статистика.csv")
 	fd.SetFilter(storage.NewExtensionFileFilter([]string{".csv"}))
 	v.shown = fd
 	fd.Show()
+}
+
+// csvData — CSV ровно того, что на экране: период считается от момента
+// чтения (v.readAt), а не от «сейчас» (L2).
+func (v *statsView) csvData() ([]byte, int, error) {
+	r, label, err := statsRangeOf(v.periodSel.Selected, v.fromEntry.Text, v.toEntry.Text, v.readAt)
+	if err != nil {
+		return nil, 0, fmt.Errorf("Период задан неверно: %w", err)
+	}
+	periods := statsview.Periods(v.log, r, label, statsBy(v.groupSel.Selected))
+	data, n, err := statsview.CSV(v.rows, v.log, v.st.State, periods)
+	if err != nil {
+		return nil, 0, fmt.Errorf("CSV не собран: %w", err)
+	}
+	return data, n, nil
+}
+
+// setCSVInfo — итог выгрузки отдельной строкой; строка состояния
+// сборщика остаётся как была (L1).
+func (v *statsView) setCSVInfo(msg string) {
+	v.csvInfo.SetText(msg)
+	v.csvInfo.Show()
 }
 
 // statsCSVResult — записать CSV в выбранный файл (права 0600) и вернуть

@@ -164,6 +164,10 @@ type statsFake struct {
 	err       error
 	writeErr  error // ошибка установки/снятия (after всё равно перечитывается)
 	panicRead bool  // чтение журнала обрывается аварийно (чтение прервано)
+	// blockWrite — установка/снятие ждёт закрытия канала (запись «идёт»).
+	blockWrite chan struct{}
+	// readHook — если задан, чтение журнала идёт через него.
+	readHook  func() (*core.TrafficLog, error)
 	installs  atomic.Int32
 	removes   atomic.Int32
 	statusAsk atomic.Int32
@@ -186,10 +190,19 @@ func stubStats(t *testing.T, f *statsFake) {
 		if f.panicRead {
 			runtime.Goexit() // аварийный выход горутины (как в wishes_r2_test)
 		}
+		if f.readHook != nil {
+			return f.readHook()
+		}
 		return f.log, f.err
 	}
 	statsLoadClients = func(*core.Session, *core.Container) ([]core.ClientEntry, error) { return tStatsClients(), nil }
-	statsInstall = func(*core.Session) error { f.installs.Add(1); return f.writeErr }
+	statsInstall = func(*core.Session) error {
+		f.installs.Add(1)
+		if f.blockWrite != nil {
+			<-f.blockWrite
+		}
+		return f.writeErr
+	}
 	statsUninstall = func(*core.Session) error { f.removes.Add(1); return f.writeErr }
 	statsNow = func() time.Time { return core.DayStart(tDay0).Add(20 * time.Hour) }
 }
@@ -537,5 +550,122 @@ func TestStatsReadAbortedNote(t *testing.T) {
 	v.rebuild()
 	if !strings.Contains(v.notes.Text, "идёт чтение") {
 		t.Errorf("пометка во время чтения: %q", v.notes.Text)
+	}
+}
+
+// TestStatsBusyDuringWrite — аудит AU-GUI-STATS-1, M1(а): пока идёт
+// установка, смена периода (rebuild) не включает кнопки. Доезд: кнопка →
+// «Да» → запись в горутине висит → пользователь меняет период.
+func TestStatsBusyDuringWrite(t *testing.T) {
+	block := make(chan struct{})
+	f := &statsFake{
+		st:         core.CollectorStatus{State: core.CollectorPartial},
+		after:      core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectPending},
+		log:        tStatsLog(),
+		blockWrite: block,
+	}
+	v := openStats(t, f)
+	if v.refreshBtn.Disabled() {
+		t.Fatal("до записи «Обновить» выключена — проверка ничего не значит")
+	}
+	test.Tap(v.installBtn)
+	test.Tap(buttonByText(t, topPopup(t, v.win.Canvas()), "Да"))
+	v.periodSel.SetSelected(statsPeriodWeek)
+	v.groupSel.SetSelected(statsGroupDay)
+	for name, b := range map[string]*widget.Button{"Обновить": v.refreshBtn, "Установить": v.installBtn, "Снять": v.removeBtn, "CSV": v.csvBtn} {
+		if !b.Disabled() {
+			t.Errorf("во время записи кнопка «%s» включена после смены периода", name)
+		}
+	}
+	close(block)
+	waitGUIGoroutines(t)
+	if v.refreshBtn.Disabled() {
+		t.Error("после записи и перечитывания «Обновить» осталась выключенной")
+	}
+}
+
+// TestStatsStaleReadDropped — аудит AU-GUI-STATS-1, M1(б), признак 4:
+// чтение A начато раньше, а закончилось позже чтения B — его результат на
+// экран не попадает. Доезд: оба чтения — настоящий reload в горутинах.
+func TestStatsStaleReadDropped(t *testing.T) {
+	f := &statsFake{st: core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectWorking}, log: tStatsLog()}
+	v := openStats(t, f)
+	releaseA := make(chan struct{})
+	var calls atomic.Int32
+	f.readHook = func() (*core.TrafficLog, error) {
+		if calls.Add(1) == 1 {
+			<-releaseA
+			return nil, errors.New("устаревшее чтение A")
+		}
+		return tStatsLog(), nil
+	}
+	finished := make(chan struct{}, 4)
+	old := uiDo
+	t.Cleanup(func() { uiDo = old })
+	uiDo = func(fn func()) { old(fn); finished <- struct{}{} }
+	v.reload() // A — висит
+	v.reload() // B — завершается сразу
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("чтение B не завершилось")
+	}
+	if r, _ := v.tableSize(); r == 0 {
+		t.Fatalf("после B таблица пуста — проверка ничего не значит; пометки %q", v.notes.Text)
+	}
+	close(releaseA)
+	waitGUIGoroutines(t)
+	if calls.Load() != 2 {
+		t.Fatalf("чтений %d, ждали 2", calls.Load())
+	}
+	if r, _ := v.tableSize(); r == 0 || strings.Contains(v.notes.Text, "устаревшее чтение A") {
+		t.Errorf("результат устаревшего чтения A попал на экран: строк %d, пометки %q", r, v.notes.Text)
+	}
+	if v.refreshBtn.Disabled() {
+		t.Error("после обоих чтений «Обновить» выключена")
+	}
+}
+
+// TestStatsCSVKeepsStatus — L1: итог выгрузки CSV — отдельной строкой,
+// строка состояния сборщика остаётся.
+func TestStatsCSVKeepsStatus(t *testing.T) {
+	v := openStats(t, &statsFake{st: core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectWorking}, log: tStatsLog()})
+	data, n, err := v.csvData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "s.csv")
+	w, err := storage.Writer(storage.NewFileURI(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.setCSVInfo(statsCSVResult(w, data, n))
+	if !strings.Contains(v.status.Text, "сбор работает") {
+		t.Errorf("строка состояния сборщика затёрта: %q", v.status.Text)
+	}
+	if !v.csvInfo.Visible() || !strings.Contains(v.csvInfo.Text, "CSV записан") {
+		t.Errorf("итога CSV не видно: %q", v.csvInfo.Text)
+	}
+}
+
+// TestStatsCSVSameMomentAsTable — L2: CSV считает период от момента
+// чтения, как таблица, а не от нового «сейчас». Доезд: чтение в горутине
+// запомнило момент; затем часы ушли на 30 суток вперёд.
+func TestStatsCSVSameMomentAsTable(t *testing.T) {
+	v := openStats(t, &statsFake{st: core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectWorking}, log: tStatsLog()})
+	v.periodSel.SetSelected(statsPeriodWeek)
+	if got := viewRow(t, v, "Alice")[statsColTotal]; got == "нет данных" {
+		t.Fatalf("в таблице за неделю у Alice %q — проверка ничего не значит", got)
+	}
+	statsNow = func() time.Time { return core.DayStart(tDay0 + 30).Add(20 * time.Hour) }
+	data, _, err := v.csvData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), v.periodLbl) {
+		t.Errorf("период CSV не тот, что в таблице (%q):\n%s", v.periodLbl, data)
+	}
+	if !strings.Contains(string(data), ";Alice;KA=;3000;5000;8000;") {
+		t.Errorf("в CSV у Alice не те цифры, что в таблице:\n%s", data)
 	}
 }
