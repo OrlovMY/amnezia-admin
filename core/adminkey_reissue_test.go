@@ -32,6 +32,10 @@ func TestAdminKeyReissuePlan(t *testing.T) {
 		{name: "незнакомый контейнер — в Gaps, не молча", setup: func(s *fakesrv.Server) {
 			s.Names = []string{"amnezia-awg2", "amnezia-foo"}
 		}, wantIn: []string{"amnezia-awg2"}, wantGaps: []string{"amnezia-foo"}, def: "amnezia-awg2"},
+		// тест различения: служба без параметров ≠ незнакомый контейнер
+		{name: "amnezia-dns — не пробел", setup: func(s *fakesrv.Server) {
+			s.Names = []string{"amnezia-awg2", "amnezia-dns"}
+		}, wantIn: []string{"amnezia-awg2"}, complete: true, def: "amnezia-awg2"},
 		{name: "предпочтённого по умолчанию нет — первый", prefer: "amnezia-xray", wantIn: []string{"amnezia-awg2"}, complete: true, def: "amnezia-awg2"},
 		{name: "список контейнеров не прочитан", setup: func(s *fakesrv.Server) { s.Names = nil }, wantErr: true},
 	}

@@ -41,6 +41,15 @@ func (r AdminKeyReissue) Complete() bool { return len(r.Gaps) == 0 && len(r.Cont
 // прочитаны: ключ без протоколов не выдаётся даже с согласием на неполный.
 var ErrAdminKeyNoContainers = errors.New("ни у одного контейнера параметры не прочитаны — ключ не выдаётся")
 
+// adminKeyNoParams — закрытый список официальных контейнеров Amnezia без
+// клиентских параметров протокола: их отсутствие в ключе — не пробел
+// (решение ядра по PR #75). Кладёт ли приложение 5.1.0.6 amnezia-dns в
+// ключ «полный доступ», по исходникам НЕ сверено (их нет под рукой) —
+// поэтому по решению ядра «если не подтверждено — пропускать». Остальные
+// известные типы (OpenVPN, Cloak, SFTP…) параметры имеют, программа их не
+// читает — они остаются пробелом.
+var adminKeyNoParams = map[string]bool{"amnezia-dns": true}
+
 // adminKeyContainerFrom — параметры протокола одного найденного контейнера.
 func (s *Session) adminKeyContainerFrom(c *Container) (AdminKeyContainer, string, error) {
 	n := c.Name
@@ -86,6 +95,10 @@ func (s *Session) AdminKeyReissuePlan(preferDefault string) (AdminKeyReissue, er
 	var r AdminKeyReissue
 	for i := range found {
 		c := &found[i]
+		if adminKeyNoParams[c.Name] {
+			r.Notes = append(r.Notes, c.Name+": служба Amnezia без клиентских параметров — в ключ не кладётся, это не пробел")
+			continue
+		}
 		if _, ok := adminKeyProto(c.Name); !ok {
 			r.Gaps = append(r.Gaps, AdminKeyGap{Container: c.Name, Reason: "тип контейнера в ключ не кладётся (программа знает формат ключа только для AWG, AWG2, WireGuard и XRay)"})
 			continue

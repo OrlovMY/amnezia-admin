@@ -130,6 +130,9 @@ func TestAdminKeyCLI(t *testing.T) {
 			e.srv.Names = []string{"amnezia-awg2", "amnezia-foo"}
 		}, includePw: true, partial: true, wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2"},
 			wantOut: []string{"БЕЗ: amnezia-foo", "Ключ НЕПОЛНЫЙ: в нём нет amnezia-foo"}},
+		{name: "amnezia-dns — ключ полный, без -allow-partial", setup: func(e *akEnv) {
+			e.srv.Names = []string{"amnezia-awg2", "amnezia-dns"}
+		}, includePw: true, wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2"}, wantOut: []string{"amnezia-dns: служба Amnezia без клиентских параметров"}},
 		{name: "список контейнеров не прочитан", setup: func(e *akEnv) { e.srv.Names = nil }, includePw: true,
 			wantCode: exitAdminKeyUnknown, wantOut: []string{"состояние сервера неизвестно"}},
 		{name: "без согласия и без терминала", wantCode: exitAdminKeyUsage, wantOut: []string{"-include-password"}},
