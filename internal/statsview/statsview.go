@@ -328,11 +328,18 @@ func CellText(c core.TrafficCell, v func(rx, tx int64) int64) string {
 
 // SeenText — последнее подключение за период.
 func SeenText(c core.TrafficCell) string {
-	if _, _, rank := CellNums(c); rank == 2 {
+	rx, tx, rank := CellNums(c)
+	if rank == 2 {
 		return CellText(c, nil)
 	}
 	if c.LastHandshake.IsZero() {
-		return "не подключался"
+		// «не подключался» — только когда это измерено: трафика ровно 0 и
+		// ничего не потеряно. Трафик есть или часть потеряна — время
+		// рукопожатия просто неизвестно (признак 2: ноль не ответ).
+		if rank == 0 && rx+tx == 0 {
+			return "не подключался"
+		}
+		return "время неизвестно"
 	}
 	return c.LastHandshake.UTC().Format("2006-01-02 15:04")
 }

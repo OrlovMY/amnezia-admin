@@ -19,9 +19,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -55,9 +55,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -91,9 +91,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -127,9 +127,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -163,9 +163,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -199,9 +199,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -235,9 +235,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -271,9 +271,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -307,9 +307,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -345,9 +345,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -383,9 +383,9 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     (нет в списке клиентов) WA=       1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
 2   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       2024-10-04 13:07
-3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
+3   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
 4   awg           Bob                               0 B          0 B          0 B          не подключался
-5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+5   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 6   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 
 amnezia-awg: учтены сутки (UTC) с 2024-10-04 по 2024-10-07, всего 2.
@@ -406,8 +406,8 @@ amnezia-wireguard: учтены сутки (UTC) с 2024-10-05 по 2024-10-05, 
 [1m#   Протокол      Имя                               Принято      Отправлено   Всего        Последнее подключение (UTC)[0m
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 1   wireguard     Роутер                            1.5 MB       2.5 GB       2.5 GB       2024-10-05 13:07
-2   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         не подключался
-3   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   не подключался
+2   awg           (нет в списке клиентов) KZ=       7 B          9 B          16 B         время неизвестно
+3   awg           Carl                              ≥ 100.0 KB   ≥ 1 B        ≥ 100.0 KB   время неизвестно
 4   awg           =Alice                            нет данных   нет данных   нет данных   нет данных
 5   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 6   awg           Bob                               нет данных   нет данных   нет данных   нет данных
@@ -743,6 +743,994 @@ WantedBy=timers.target
 --- out
 Сборщик не установлен — снимать нечего.
 --- err
+##### install -yes ok (код 0, установок 1, снятий 0)
+--- out
+Сейчас: не установлен (установить: amnezia-admin stats install)
+Будет выполнено на сервере (от root): mkdir -p /opt/amnezia/traffic-stats; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):
+
+── /opt/amnezia/traffic-stats/collect.sh (права 0755) ──
+#!/bin/sh
+# amnezia-admin: сборщик статистики трафика VPN, формат v1.
+# Читает счётчики wg/awg и дописывает снимок в /opt/amnezia/traffic-stats.
+# Снять: amnezia-admin stats uninstall
+set -u
+umask 077
+cd /opt/amnezia/traffic-stats || exit 1
+if [ -e FULL ]; then exit 0; fi
+dg=0
+if [ -e daily.log ]; then dg=$(awk -v add=0 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+if [ ! -e snapshots.log ]; then
+  printf 'H v1 %s\n' "$dg" > snapshots.log
+fi
+rg=$(awk 'NR == 1 { if ($1 == "H" && $2 == "v1" && $3 ~ /^[0-9]+$/ && length($3) <= 15) printf "%d\n", $3; exit }' snapshots.log) || exit 1
+if [ -n "$rg" ] && [ "$rg" -lt "$dg" ]; then
+  rm -f snap.new
+  printf 'H v1 %s\n' "$dg" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f snap.new
+    exit 1
+  fi
+  mv snap.new snapshots.log
+fi
+ts=$(date +%s)
+rm -f block.tmp
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
+if names=$(timeout 30 docker ps --format "{{.Names}}" 2>/dev/null); then
+  :
+else
+  names=""
+  printf '\nF %s - ps\n' "$ts" >> block.tmp
+fi
+all=$(timeout 30 docker ps -a --format "{{.Names}}" 2>/dev/null) || all=""
+for spec in amnezia-awg:wg:wg0 amnezia-wireguard:wg:wg0 amnezia-awg2:awg:awg0; do
+  c=${spec%%:*}
+  r=${spec#*:}
+  t=${r%%:*}
+  i=${r#*:}
+  found=0
+  for x in $names; do
+    if [ "$x" = "$c" ]; then found=1; fi
+  done
+  if [ "$found" = 0 ]; then
+    for x in $all; do
+      if [ "$x" = "$c" ]; then found=2; fi
+    done
+    if [ "$found" = 2 ]; then printf '\nF %s %s stopped\n' "$ts" "$c" >> block.tmp; fi
+    continue
+  fi
+  st=$(timeout 30 docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
+  if out=$(timeout 30 docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
+    if blk=$(printf '%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" 'BEGIN { FS = "\t"; n = 0; bad = 0 }
+NR == 1 { next }
+NF == 0 { next }
+{
+  if (NF < 8 || $1 !~ /^[A-Za-z0-9+\/=]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || length($5) > 15 || length($6) > 15 || length($7) > 15) { bad = 1; exit 1 }
+  n++
+  p[n] = "P " $1 " " $6 " " $7 " " $5
+}
+END {
+  if (bad) exit 1
+  if (b !~ /^[0-9a-f-]+$/) b = "-"
+  if (s !~ /^[0-9A-Za-z:.+-]+$/) s = "-"
+  printf "S %s %s %d %s %s\n", ts, c, n, b, s
+  for (k = 1; k <= n; k++) print p[k]
+  printf "E %s %s %d\n", ts, c, n
+}'); then
+      printf '\n%s\n' "$blk" >> block.tmp
+    else
+      printf '\nF %s %s parse\n' "$ts" "$c" >> block.tmp
+    fi
+  else
+    printf '\nF %s %s exec\n' "$ts" "$c" >> block.tmp
+  fi
+done
+if [ -s block.tmp ]; then cat block.tmp >> snapshots.log; fi
+rm -f block.tmp
+sz=$(wc -c < snapshots.log) || exit 1
+if [ "$sz" -gt 16000000 ]; then
+  printf 'raw\n' > FULL
+  exit 0
+fi
+if [ "$sz" -gt 8000000 ]; then
+  ds=0
+  if [ -e daily.log ]; then ds=$(wc -c < daily.log) || exit 1; fi
+  if [ "$ds" -gt 30000000 ]; then
+    printf 'daily\n' > FULL
+    exit 0
+  fi
+  gen=1
+  if [ -e daily.log ]; then gen=$(awk -v add=1 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+  rm -f daily.new snap.new
+  if [ -e daily.log ]; then cat daily.log > daily.new || exit 1; fi
+  if ! awk -v gen="$gen" 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs, gap, part) {
+  blkno++
+  day = int(bts / 86400)
+  known = (bsig != "" && (bc in psig) && psig[bc] != "")
+  rs = (known && psig[bc] != bsig)
+  gap = ((bc in plast) && bts - plast[bc] > 660)
+  for (j = 1; j <= m; j++) {
+    key = bc SUBSEP pk[j]
+    has = 0
+    part = 0
+    if (key in prv) {
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j]; if (gap) part = 1 } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      has = 1
+      if (!known) hc[day SUBSEP bc]++
+    } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
+    if (has) {
+      ak = day SUBSEP key
+      arx[ak] += dx; atx[ak] += dt; an[ak]++; ap[ak] += part
+      if (!(ak in ahs) || phs[j] > ahs[ak]) ahs[ak] = phs[j]
+    }
+    prv[key] = prx[j]; ptv[key] = ptx[j]; cur[key] = blkno
+  }
+  nd = 0
+  for (k in prv) { split(k, a, SUBSEP); if (a[1] == bc && cur[k] != blkno) dl[++nd] = k }
+  for (j = 1; j <= nd; j++) { delete prv[dl[j]]; delete ptv[dl[j]] }
+  if (bc in seen) cov[day SUBSEP bc]++
+  seen[bc] = 1
+  psig[bc] = bsig
+  plast[bc] = bts
+}
+END {
+  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak], ap[ak] + 0 }
+  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
+}' snapshots.log >> daily.new; then
+    rm -f daily.new
+    exit 1
+  fi
+  printf 'H v1 %s\n' "$gen" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f daily.new snap.new
+    exit 1
+  fi
+  mv daily.new daily.log
+  mv snap.new snapshots.log
+fi
+
+── /etc/systemd/system/amnezia-traffic-stats.service (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=300s
+ExecStart=/bin/sh /opt/amnezia/traffic-stats/collect.sh
+
+── /etc/systemd/system/amnezia-traffic-stats.timer (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+
+затем: systemctl daemon-reload; systemctl enable --now amnezia-traffic-stats.timer
+Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в /opt/amnezia/traffic-stats; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall
+Готово. Сборщик: установлен, первый снимок ожидается до 14:35 UTC
+--- err
+##### install -yes не то состояние (код 1, установок 1, снятий 0)
+--- out
+Сейчас: не установлен (установить: amnezia-admin stats install)
+Будет выполнено на сервере (от root): mkdir -p /opt/amnezia/traffic-stats; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):
+
+── /opt/amnezia/traffic-stats/collect.sh (права 0755) ──
+#!/bin/sh
+# amnezia-admin: сборщик статистики трафика VPN, формат v1.
+# Читает счётчики wg/awg и дописывает снимок в /opt/amnezia/traffic-stats.
+# Снять: amnezia-admin stats uninstall
+set -u
+umask 077
+cd /opt/amnezia/traffic-stats || exit 1
+if [ -e FULL ]; then exit 0; fi
+dg=0
+if [ -e daily.log ]; then dg=$(awk -v add=0 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+if [ ! -e snapshots.log ]; then
+  printf 'H v1 %s\n' "$dg" > snapshots.log
+fi
+rg=$(awk 'NR == 1 { if ($1 == "H" && $2 == "v1" && $3 ~ /^[0-9]+$/ && length($3) <= 15) printf "%d\n", $3; exit }' snapshots.log) || exit 1
+if [ -n "$rg" ] && [ "$rg" -lt "$dg" ]; then
+  rm -f snap.new
+  printf 'H v1 %s\n' "$dg" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f snap.new
+    exit 1
+  fi
+  mv snap.new snapshots.log
+fi
+ts=$(date +%s)
+rm -f block.tmp
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
+if names=$(timeout 30 docker ps --format "{{.Names}}" 2>/dev/null); then
+  :
+else
+  names=""
+  printf '\nF %s - ps\n' "$ts" >> block.tmp
+fi
+all=$(timeout 30 docker ps -a --format "{{.Names}}" 2>/dev/null) || all=""
+for spec in amnezia-awg:wg:wg0 amnezia-wireguard:wg:wg0 amnezia-awg2:awg:awg0; do
+  c=${spec%%:*}
+  r=${spec#*:}
+  t=${r%%:*}
+  i=${r#*:}
+  found=0
+  for x in $names; do
+    if [ "$x" = "$c" ]; then found=1; fi
+  done
+  if [ "$found" = 0 ]; then
+    for x in $all; do
+      if [ "$x" = "$c" ]; then found=2; fi
+    done
+    if [ "$found" = 2 ]; then printf '\nF %s %s stopped\n' "$ts" "$c" >> block.tmp; fi
+    continue
+  fi
+  st=$(timeout 30 docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
+  if out=$(timeout 30 docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
+    if blk=$(printf '%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" 'BEGIN { FS = "\t"; n = 0; bad = 0 }
+NR == 1 { next }
+NF == 0 { next }
+{
+  if (NF < 8 || $1 !~ /^[A-Za-z0-9+\/=]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || length($5) > 15 || length($6) > 15 || length($7) > 15) { bad = 1; exit 1 }
+  n++
+  p[n] = "P " $1 " " $6 " " $7 " " $5
+}
+END {
+  if (bad) exit 1
+  if (b !~ /^[0-9a-f-]+$/) b = "-"
+  if (s !~ /^[0-9A-Za-z:.+-]+$/) s = "-"
+  printf "S %s %s %d %s %s\n", ts, c, n, b, s
+  for (k = 1; k <= n; k++) print p[k]
+  printf "E %s %s %d\n", ts, c, n
+}'); then
+      printf '\n%s\n' "$blk" >> block.tmp
+    else
+      printf '\nF %s %s parse\n' "$ts" "$c" >> block.tmp
+    fi
+  else
+    printf '\nF %s %s exec\n' "$ts" "$c" >> block.tmp
+  fi
+done
+if [ -s block.tmp ]; then cat block.tmp >> snapshots.log; fi
+rm -f block.tmp
+sz=$(wc -c < snapshots.log) || exit 1
+if [ "$sz" -gt 16000000 ]; then
+  printf 'raw\n' > FULL
+  exit 0
+fi
+if [ "$sz" -gt 8000000 ]; then
+  ds=0
+  if [ -e daily.log ]; then ds=$(wc -c < daily.log) || exit 1; fi
+  if [ "$ds" -gt 30000000 ]; then
+    printf 'daily\n' > FULL
+    exit 0
+  fi
+  gen=1
+  if [ -e daily.log ]; then gen=$(awk -v add=1 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+  rm -f daily.new snap.new
+  if [ -e daily.log ]; then cat daily.log > daily.new || exit 1; fi
+  if ! awk -v gen="$gen" 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs, gap, part) {
+  blkno++
+  day = int(bts / 86400)
+  known = (bsig != "" && (bc in psig) && psig[bc] != "")
+  rs = (known && psig[bc] != bsig)
+  gap = ((bc in plast) && bts - plast[bc] > 660)
+  for (j = 1; j <= m; j++) {
+    key = bc SUBSEP pk[j]
+    has = 0
+    part = 0
+    if (key in prv) {
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j]; if (gap) part = 1 } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      has = 1
+      if (!known) hc[day SUBSEP bc]++
+    } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
+    if (has) {
+      ak = day SUBSEP key
+      arx[ak] += dx; atx[ak] += dt; an[ak]++; ap[ak] += part
+      if (!(ak in ahs) || phs[j] > ahs[ak]) ahs[ak] = phs[j]
+    }
+    prv[key] = prx[j]; ptv[key] = ptx[j]; cur[key] = blkno
+  }
+  nd = 0
+  for (k in prv) { split(k, a, SUBSEP); if (a[1] == bc && cur[k] != blkno) dl[++nd] = k }
+  for (j = 1; j <= nd; j++) { delete prv[dl[j]]; delete ptv[dl[j]] }
+  if (bc in seen) cov[day SUBSEP bc]++
+  seen[bc] = 1
+  psig[bc] = bsig
+  plast[bc] = bts
+}
+END {
+  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak], ap[ak] + 0 }
+  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
+}' snapshots.log >> daily.new; then
+    rm -f daily.new
+    exit 1
+  fi
+  printf 'H v1 %s\n' "$gen" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f daily.new snap.new
+    exit 1
+  fi
+  mv daily.new daily.log
+  mv snap.new snapshots.log
+fi
+
+── /etc/systemd/system/amnezia-traffic-stats.service (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=300s
+ExecStart=/bin/sh /opt/amnezia/traffic-stats/collect.sh
+
+── /etc/systemd/system/amnezia-traffic-stats.timer (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+
+затем: systemctl daemon-reload; systemctl enable --now amnezia-traffic-stats.timer
+Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в /opt/amnezia/traffic-stats; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall
+Готово. Сборщик: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
+--- err
+##### install -yes ошибка (код 1, установок 1, снятий 0)
+--- out
+Сейчас: не установлен (установить: amnezia-admin stats install)
+Будет выполнено на сервере (от root): mkdir -p /opt/amnezia/traffic-stats; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):
+
+── /opt/amnezia/traffic-stats/collect.sh (права 0755) ──
+#!/bin/sh
+# amnezia-admin: сборщик статистики трафика VPN, формат v1.
+# Читает счётчики wg/awg и дописывает снимок в /opt/amnezia/traffic-stats.
+# Снять: amnezia-admin stats uninstall
+set -u
+umask 077
+cd /opt/amnezia/traffic-stats || exit 1
+if [ -e FULL ]; then exit 0; fi
+dg=0
+if [ -e daily.log ]; then dg=$(awk -v add=0 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+if [ ! -e snapshots.log ]; then
+  printf 'H v1 %s\n' "$dg" > snapshots.log
+fi
+rg=$(awk 'NR == 1 { if ($1 == "H" && $2 == "v1" && $3 ~ /^[0-9]+$/ && length($3) <= 15) printf "%d\n", $3; exit }' snapshots.log) || exit 1
+if [ -n "$rg" ] && [ "$rg" -lt "$dg" ]; then
+  rm -f snap.new
+  printf 'H v1 %s\n' "$dg" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f snap.new
+    exit 1
+  fi
+  mv snap.new snapshots.log
+fi
+ts=$(date +%s)
+rm -f block.tmp
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
+if names=$(timeout 30 docker ps --format "{{.Names}}" 2>/dev/null); then
+  :
+else
+  names=""
+  printf '\nF %s - ps\n' "$ts" >> block.tmp
+fi
+all=$(timeout 30 docker ps -a --format "{{.Names}}" 2>/dev/null) || all=""
+for spec in amnezia-awg:wg:wg0 amnezia-wireguard:wg:wg0 amnezia-awg2:awg:awg0; do
+  c=${spec%%:*}
+  r=${spec#*:}
+  t=${r%%:*}
+  i=${r#*:}
+  found=0
+  for x in $names; do
+    if [ "$x" = "$c" ]; then found=1; fi
+  done
+  if [ "$found" = 0 ]; then
+    for x in $all; do
+      if [ "$x" = "$c" ]; then found=2; fi
+    done
+    if [ "$found" = 2 ]; then printf '\nF %s %s stopped\n' "$ts" "$c" >> block.tmp; fi
+    continue
+  fi
+  st=$(timeout 30 docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
+  if out=$(timeout 30 docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
+    if blk=$(printf '%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" 'BEGIN { FS = "\t"; n = 0; bad = 0 }
+NR == 1 { next }
+NF == 0 { next }
+{
+  if (NF < 8 || $1 !~ /^[A-Za-z0-9+\/=]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || length($5) > 15 || length($6) > 15 || length($7) > 15) { bad = 1; exit 1 }
+  n++
+  p[n] = "P " $1 " " $6 " " $7 " " $5
+}
+END {
+  if (bad) exit 1
+  if (b !~ /^[0-9a-f-]+$/) b = "-"
+  if (s !~ /^[0-9A-Za-z:.+-]+$/) s = "-"
+  printf "S %s %s %d %s %s\n", ts, c, n, b, s
+  for (k = 1; k <= n; k++) print p[k]
+  printf "E %s %s %d\n", ts, c, n
+}'); then
+      printf '\n%s\n' "$blk" >> block.tmp
+    else
+      printf '\nF %s %s parse\n' "$ts" "$c" >> block.tmp
+    fi
+  else
+    printf '\nF %s %s exec\n' "$ts" "$c" >> block.tmp
+  fi
+done
+if [ -s block.tmp ]; then cat block.tmp >> snapshots.log; fi
+rm -f block.tmp
+sz=$(wc -c < snapshots.log) || exit 1
+if [ "$sz" -gt 16000000 ]; then
+  printf 'raw\n' > FULL
+  exit 0
+fi
+if [ "$sz" -gt 8000000 ]; then
+  ds=0
+  if [ -e daily.log ]; then ds=$(wc -c < daily.log) || exit 1; fi
+  if [ "$ds" -gt 30000000 ]; then
+    printf 'daily\n' > FULL
+    exit 0
+  fi
+  gen=1
+  if [ -e daily.log ]; then gen=$(awk -v add=1 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+  rm -f daily.new snap.new
+  if [ -e daily.log ]; then cat daily.log > daily.new || exit 1; fi
+  if ! awk -v gen="$gen" 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs, gap, part) {
+  blkno++
+  day = int(bts / 86400)
+  known = (bsig != "" && (bc in psig) && psig[bc] != "")
+  rs = (known && psig[bc] != bsig)
+  gap = ((bc in plast) && bts - plast[bc] > 660)
+  for (j = 1; j <= m; j++) {
+    key = bc SUBSEP pk[j]
+    has = 0
+    part = 0
+    if (key in prv) {
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j]; if (gap) part = 1 } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      has = 1
+      if (!known) hc[day SUBSEP bc]++
+    } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
+    if (has) {
+      ak = day SUBSEP key
+      arx[ak] += dx; atx[ak] += dt; an[ak]++; ap[ak] += part
+      if (!(ak in ahs) || phs[j] > ahs[ak]) ahs[ak] = phs[j]
+    }
+    prv[key] = prx[j]; ptv[key] = ptx[j]; cur[key] = blkno
+  }
+  nd = 0
+  for (k in prv) { split(k, a, SUBSEP); if (a[1] == bc && cur[k] != blkno) dl[++nd] = k }
+  for (j = 1; j <= nd; j++) { delete prv[dl[j]]; delete ptv[dl[j]] }
+  if (bc in seen) cov[day SUBSEP bc]++
+  seen[bc] = 1
+  psig[bc] = bsig
+  plast[bc] = bts
+}
+END {
+  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak], ap[ak] + 0 }
+  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
+}' snapshots.log >> daily.new; then
+    rm -f daily.new
+    exit 1
+  fi
+  printf 'H v1 %s\n' "$gen" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f daily.new snap.new
+    exit 1
+  fi
+  mv daily.new daily.log
+  mv snap.new snapshots.log
+fi
+
+── /etc/systemd/system/amnezia-traffic-stats.service (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=300s
+ExecStart=/bin/sh /opt/amnezia/traffic-stats/collect.sh
+
+── /etc/systemd/system/amnezia-traffic-stats.timer (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+
+затем: systemctl daemon-reload; systemctl enable --now amnezia-traffic-stats.timer
+Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в /opt/amnezia/traffic-stats; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall
+--- err
+Ошибка: scp: обрыв
+##### install tty y (код 0, установок 1, снятий 0)
+--- out
+Сейчас: не установлен (установить: amnezia-admin stats install)
+Будет выполнено на сервере (от root): mkdir -p /opt/amnezia/traffic-stats; каждый файл пишется во временный <путь>.new, получает права и переносится на место (mv):
+
+── /opt/amnezia/traffic-stats/collect.sh (права 0755) ──
+#!/bin/sh
+# amnezia-admin: сборщик статистики трафика VPN, формат v1.
+# Читает счётчики wg/awg и дописывает снимок в /opt/amnezia/traffic-stats.
+# Снять: amnezia-admin stats uninstall
+set -u
+umask 077
+cd /opt/amnezia/traffic-stats || exit 1
+if [ -e FULL ]; then exit 0; fi
+dg=0
+if [ -e daily.log ]; then dg=$(awk -v add=0 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+if [ ! -e snapshots.log ]; then
+  printf 'H v1 %s\n' "$dg" > snapshots.log
+fi
+rg=$(awk 'NR == 1 { if ($1 == "H" && $2 == "v1" && $3 ~ /^[0-9]+$/ && length($3) <= 15) printf "%d\n", $3; exit }' snapshots.log) || exit 1
+if [ -n "$rg" ] && [ "$rg" -lt "$dg" ]; then
+  rm -f snap.new
+  printf 'H v1 %s\n' "$dg" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f snap.new
+    exit 1
+  fi
+  mv snap.new snapshots.log
+fi
+ts=$(date +%s)
+rm -f block.tmp
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot="-"
+if names=$(timeout 30 docker ps --format "{{.Names}}" 2>/dev/null); then
+  :
+else
+  names=""
+  printf '\nF %s - ps\n' "$ts" >> block.tmp
+fi
+all=$(timeout 30 docker ps -a --format "{{.Names}}" 2>/dev/null) || all=""
+for spec in amnezia-awg:wg:wg0 amnezia-wireguard:wg:wg0 amnezia-awg2:awg:awg0; do
+  c=${spec%%:*}
+  r=${spec#*:}
+  t=${r%%:*}
+  i=${r#*:}
+  found=0
+  for x in $names; do
+    if [ "$x" = "$c" ]; then found=1; fi
+  done
+  if [ "$found" = 0 ]; then
+    for x in $all; do
+      if [ "$x" = "$c" ]; then found=2; fi
+    done
+    if [ "$found" = 2 ]; then printf '\nF %s %s stopped\n' "$ts" "$c" >> block.tmp; fi
+    continue
+  fi
+  st=$(timeout 30 docker inspect -f "{{.State.StartedAt}}" "$c" 2>/dev/null) || st="-"
+  if out=$(timeout 30 docker exec "$c" "$t" show "$i" dump 2>/dev/null); then
+    if blk=$(printf '%s\n' "$out" | awk -v ts="$ts" -v c="$c" -v b="$boot" -v s="$st" 'BEGIN { FS = "\t"; n = 0; bad = 0 }
+NR == 1 { next }
+NF == 0 { next }
+{
+  if (NF < 8 || $1 !~ /^[A-Za-z0-9+\/=]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || length($5) > 15 || length($6) > 15 || length($7) > 15) { bad = 1; exit 1 }
+  n++
+  p[n] = "P " $1 " " $6 " " $7 " " $5
+}
+END {
+  if (bad) exit 1
+  if (b !~ /^[0-9a-f-]+$/) b = "-"
+  if (s !~ /^[0-9A-Za-z:.+-]+$/) s = "-"
+  printf "S %s %s %d %s %s\n", ts, c, n, b, s
+  for (k = 1; k <= n; k++) print p[k]
+  printf "E %s %s %d\n", ts, c, n
+}'); then
+      printf '\n%s\n' "$blk" >> block.tmp
+    else
+      printf '\nF %s %s parse\n' "$ts" "$c" >> block.tmp
+    fi
+  else
+    printf '\nF %s %s exec\n' "$ts" "$c" >> block.tmp
+  fi
+done
+if [ -s block.tmp ]; then cat block.tmp >> snapshots.log; fi
+rm -f block.tmp
+sz=$(wc -c < snapshots.log) || exit 1
+if [ "$sz" -gt 16000000 ]; then
+  printf 'raw\n' > FULL
+  exit 0
+fi
+if [ "$sz" -gt 8000000 ]; then
+  ds=0
+  if [ -e daily.log ]; then ds=$(wc -c < daily.log) || exit 1; fi
+  if [ "$ds" -gt 30000000 ]; then
+    printf 'daily\n' > FULL
+    exit 0
+  fi
+  gen=1
+  if [ -e daily.log ]; then gen=$(awk -v add=1 'BEGIN { g = 0 }
+($1 == "D" || $1 == "N") && $2 ~ /^[0-9]+$/ && $2 + 0 > g { g = $2 + 0 }
+END { printf "%d\n", g + add }' daily.log) || exit 1; fi
+  rm -f daily.new snap.new
+  if [ -e daily.log ]; then cat daily.log > daily.new || exit 1; fi
+  if ! awk -v gen="$gen" 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text,   j, key, has, dx, dt, day, ak, k, a, nd, known, rs, gap, part) {
+  blkno++
+  day = int(bts / 86400)
+  known = (bsig != "" && (bc in psig) && psig[bc] != "")
+  rs = (known && psig[bc] != bsig)
+  gap = ((bc in plast) && bts - plast[bc] > 660)
+  for (j = 1; j <= m; j++) {
+    key = bc SUBSEP pk[j]
+    has = 0
+    part = 0
+    if (key in prv) {
+      if (rs || prx[j] < prv[key] || ptx[j] < ptv[key]) { dx = prx[j]; dt = ptx[j]; if (gap) part = 1 } else { dx = prx[j] - prv[key]; dt = ptx[j] - ptv[key] }
+      has = 1
+      if (!known) hc[day SUBSEP bc]++
+    } else if (bc in seen) { dx = prx[j]; dt = ptx[j]; has = 1 }
+    if (has) {
+      ak = day SUBSEP key
+      arx[ak] += dx; atx[ak] += dt; an[ak]++; ap[ak] += part
+      if (!(ak in ahs) || phs[j] > ahs[ak]) ahs[ak] = phs[j]
+    }
+    prv[key] = prx[j]; ptv[key] = ptx[j]; cur[key] = blkno
+  }
+  nd = 0
+  for (k in prv) { split(k, a, SUBSEP); if (a[1] == bc && cur[k] != blkno) dl[++nd] = k }
+  for (j = 1; j <= nd; j++) { delete prv[dl[j]]; delete ptv[dl[j]] }
+  if (bc in seen) cov[day SUBSEP bc]++
+  seen[bc] = 1
+  psig[bc] = bsig
+  plast[bc] = bts
+}
+END {
+  for (ak in arx) { split(ak, a, SUBSEP); printf "D %s %s %s %s %.0f %.0f %.0f %d %d\n", gen, a[1], a[2], a[3], arx[ak], atx[ak], ahs[ak], an[ak], ap[ak] + 0 }
+  for (ak in cov) { split(ak, a, SUBSEP); printf "N %s %s %s %d %d\n", gen, a[1], a[2], cov[ak], hc[ak] + 0 }
+}' snapshots.log >> daily.new; then
+    rm -f daily.new
+    exit 1
+  fi
+  printf 'H v1 %s\n' "$gen" > snap.new
+  if ! awk 'function num(v) { return v ~ /^[0-9]+$/ && length(v) <= 15 }
+function sig(v) { return v ~ /^[0-9A-Za-z:.+-]+$/ }
+NF == 0 { next }
+$1 == "S" {
+  if ((NF == 4 || (NF == 6 && sig($5) && sig($6))) && num($2) && num($4) && $3 ~ /^[a-z0-9-]+$/) {
+    inb = 1; bts = $2; bc = $3; bn = $4 + 0; m = 0; buf = $0; bsig = ""
+    if (NF == 6 && $5 != "-" && $6 != "-") bsig = $5 " " $6
+  } else { inb = 0 }
+  next
+}
+$1 == "P" {
+  if (inb && NF == 5 && $2 ~ /^[A-Za-z0-9+\/=]+$/ && num($3) && num($4) && num($5)) { m++; pk[m] = $2; prx[m] = $3 + 0; ptx[m] = $4 + 0; phs[m] = $5 + 0; buf = buf "\n" $0 } else { inb = 0 }
+  next
+}
+$1 == "E" {
+  if (inb && NF == 4 && $2 == bts && $3 == bc && num($4) && $4 + 0 == bn && m == bn) { blk(buf "\n" $0) }
+  inb = 0
+  next
+}
+{ inb = 0 }
+function blk(text) { last[bc] = text }
+END { for (c in last) printf "\n%s\n", last[c] }' snapshots.log >> snap.new; then
+    rm -f daily.new snap.new
+    exit 1
+  fi
+  mv daily.new daily.log
+  mv snap.new snapshots.log
+fi
+
+── /etc/systemd/system/amnezia-traffic-stats.service (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=300s
+ExecStart=/bin/sh /opt/amnezia/traffic-stats/collect.sh
+
+── /etc/systemd/system/amnezia-traffic-stats.timer (права 0644) ──
+[Unit]
+Description=amnezia-admin traffic statistics every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+
+затем: systemctl daemon-reload; systemctl enable --now amnezia-traffic-stats.timer
+Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в /opt/amnezia/traffic-stats; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall
+Установить сборщик статистики? (y/n): Готово. Сборщик: установлен, первый снимок ожидается до 14:35 UTC
+--- err
+##### uninstall -yes ok (код 0, установок 0, снятий 1)
+--- out
+Сейчас: установлен, первый снимок ожидается до 14:35 UTC
+Будет: systemctl disable --now amnezia-traffic-stats.timer; удалены /etc/systemd/system/amnezia-traffic-stats.timer, /etc/systemd/system/amnezia-traffic-stats.service, /opt/amnezia/traffic-stats/collect.sh.
+Накопленные данные (/opt/amnezia/traffic-stats/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r /opt/amnezia/traffic-stats
+Готово. Сборщик: не установлен (установить: amnezia-admin stats install)
+--- err
+##### uninstall -yes не то состояние (код 1, установок 0, снятий 1)
+--- out
+Сейчас: установлен, первый снимок ожидается до 14:35 UTC
+Будет: systemctl disable --now amnezia-traffic-stats.timer; удалены /etc/systemd/system/amnezia-traffic-stats.timer, /etc/systemd/system/amnezia-traffic-stats.service, /opt/amnezia/traffic-stats/collect.sh.
+Накопленные данные (/opt/amnezia/traffic-stats/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r /opt/amnezia/traffic-stats
+Готово. Сборщик: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
+--- err
+##### uninstall -yes ошибка (код 1, установок 0, снятий 1)
+--- out
+Сейчас: установлен, первый снимок ожидается до 14:35 UTC
+Будет: systemctl disable --now amnezia-traffic-stats.timer; удалены /etc/systemd/system/amnezia-traffic-stats.timer, /etc/systemd/system/amnezia-traffic-stats.service, /opt/amnezia/traffic-stats/collect.sh.
+Накопленные данные (/opt/amnezia/traffic-stats/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r /opt/amnezia/traffic-stats
+--- err
+Ошибка: systemctl: отказ
+##### uninstall tty y (код 0, установок 0, снятий 1)
+--- out
+Сейчас: установлен, первый снимок ожидается до 14:35 UTC
+Будет: systemctl disable --now amnezia-traffic-stats.timer; удалены /etc/systemd/system/amnezia-traffic-stats.timer, /etc/systemd/system/amnezia-traffic-stats.service, /opt/amnezia/traffic-stats/collect.sh.
+Накопленные данные (/opt/amnezia/traffic-stats/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r /opt/amnezia/traffic-stats
+Снять сборщик статистики? (y/n): Готово. Сборщик: не установлен (установить: amnezia-admin stats install)
+--- err
+##### show -by без -csv (код 1)
+--- out
+--- err
+stats: -by действует только с -csv
+##### show -by неверное (код 1)
+--- out
+--- err
+stats: -by — day или month
 ##### show raw (код 0)
 --- out
 Сборщик статистики: установлен, сбор работает (последний снимок 4 мин назад, снимок раз в 5 минут)
@@ -750,7 +1738,7 @@ WantedBy=timers.target
 
 [1m#   Протокол      Имя                               Принято      Отправлено   Всего        Последнее подключение (UTC)[0m
 [90m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-1   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       не подключался
+1   awg           =Alice                            3.0 KB       5.0 KB       8.0 KB       время неизвестно
 2   awg           Abe                               нет данных   нет данных   нет данных   нет данных
 3   awg           Bob                               нет данных   нет данных   нет данных   нет данных
 4   awg           Carl                              нет данных   нет данных   нет данных   нет данных

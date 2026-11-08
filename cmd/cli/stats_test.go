@@ -32,6 +32,10 @@ type fakeStats struct {
 	clients   map[string][]core.ClientEntry
 	installed int
 	removed   int
+	// installErr/removeErr — ошибка записи (запись при этом считается
+	// состоявшейся: перечитывается after).
+	installErr error
+	removeErr  error
 }
 
 func (f *fakeStats) StatsStatus() core.CollectorStatus {
@@ -44,8 +48,8 @@ func (f *fakeStats) ReadTraffic() (*core.TrafficLog, error) { return f.log, f.re
 func (f *fakeStats) LoadClients(c *core.Container) ([]core.ClientEntry, error) {
 	return f.clients[c.Name], nil
 }
-func (f *fakeStats) StatsInstall() error   { f.installed++; return nil }
-func (f *fakeStats) StatsUninstall() error { f.removed++; return nil }
+func (f *fakeStats) StatsInstall() error   { f.installed++; return f.installErr }
+func (f *fakeStats) StatsUninstall() error { f.removed++; return f.removeErr }
 
 func client(id, name string) core.ClientEntry {
 	return core.ClientEntry{ClientID: id, UserData: map[string]any{"clientName": name}}

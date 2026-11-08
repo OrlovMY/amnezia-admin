@@ -53,7 +53,7 @@ func TestCellTextThreeStates(t *testing.T) {
 	}{
 		{"KA=", [4]string{"3.0 KB", "5.0 KB", "8.0 KB", "2025-11-08 10:00"}},
 		{"KB=", [4]string{"0 B", "0 B", "0 B", "не подключался"}},
-		{"KC=", [4]string{"≥ 100.0 KB", "≥ 1 B", "≥ 100.0 KB", "не подключался"}},
+		{"KC=", [4]string{"≥ 100.0 KB", "≥ 1 B", "≥ 100.0 KB", "время неизвестно"}},
 		{"KD=", [4]string{"нет данных", "нет данных", "нет данных", "нет данных"}},
 	}
 	for _, c := range cases {
@@ -74,6 +74,35 @@ func TestCellTextThreeStates(t *testing.T) {
 	}
 	if got := CellText(empty.Cell(core.TrafficKey{}, core.AllTime, core.CollectorUnknown), Total); got != "?" {
 		t.Errorf("неизвестно: %q", got)
+	}
+}
+
+// TestSeenTextNotZero — ревью GUI-STATS-1, L1 (признак 2): нулевое время
+// рукопожатия — «не подключался» только при измеренном нуле трафика. Трафик
+// измерен, но рукопожатия нет, или часть потеряна (даже «≥ 0 B») — время
+// неизвестно. Доезд: ячейки из разбора журнала, не присваиванием.
+func TestSeenTextNotZero(t *testing.T) {
+	daily := fmt.Sprintf("D 1 %d amnezia-awg KB= 0 0 0 5\n", day0) +
+		fmt.Sprintf("D 1 %d amnezia-awg KE= 7 9 0 5\n", day0) +
+		fmt.Sprintf("D 1 %d amnezia-awg KC= 100000 1 0 5 1\n", day0) +
+		fmt.Sprintf("D 1 %d amnezia-awg KZ= 0 0 0 5 1\n", day0) +
+		fmt.Sprintf("N 1 %d amnezia-awg 5\n", day0)
+	l := core.ParseTrafficLog(daily, true, "", false)
+	cases := []struct{ pub, total, seen string }{
+		{"KB=", "0 B", "не подключался"},
+		{"KE=", "16 B", "время неизвестно"},
+		{"KC=", "≥ 100.0 KB", "время неизвестно"},
+		{"KZ=", "≥ 0 B", "время неизвестно"},
+		{"KD=", "нет данных", "нет данных"},
+	}
+	for _, c := range cases {
+		cell := cellOf(t, l, core.AllTime, c.pub)
+		if got := CellText(cell, Total); got != c.total {
+			t.Errorf("%s: всего %q, ждали %q — случай не тот", c.pub, got, c.total)
+		}
+		if got := SeenText(cell); got != c.seen {
+			t.Errorf("%s: %q, ждали %q", c.pub, got, c.seen)
+		}
 	}
 }
 

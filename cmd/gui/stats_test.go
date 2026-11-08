@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -161,6 +162,8 @@ type statsFake struct {
 	after     core.CollectorStatus
 	log       *core.TrafficLog
 	err       error
+	writeErr  error // ошибка установки/снятия (after всё равно перечитывается)
+	panicRead bool  // чтение журнала обрывается аварийно (чтение прервано)
 	installs  atomic.Int32
 	removes   atomic.Int32
 	statusAsk atomic.Int32
@@ -179,10 +182,15 @@ func stubStats(t *testing.T, f *statsFake) {
 		}
 		return f.st
 	}
-	statsReadTraffic = func(*core.Session) (*core.TrafficLog, error) { return f.log, f.err }
+	statsReadTraffic = func(*core.Session) (*core.TrafficLog, error) {
+		if f.panicRead {
+			runtime.Goexit() // аварийный выход горутины (как в wishes_r2_test)
+		}
+		return f.log, f.err
+	}
 	statsLoadClients = func(*core.Session, *core.Container) ([]core.ClientEntry, error) { return tStatsClients(), nil }
-	statsInstall = func(*core.Session) error { f.installs.Add(1); return nil }
-	statsUninstall = func(*core.Session) error { f.removes.Add(1); return nil }
+	statsInstall = func(*core.Session) error { f.installs.Add(1); return f.writeErr }
+	statsUninstall = func(*core.Session) error { f.removes.Add(1); return f.writeErr }
 	statsNow = func() time.Time { return core.DayStart(tDay0).Add(20 * time.Hour) }
 }
 
@@ -418,5 +426,116 @@ func TestStatsShots(t *testing.T) {
 			}
 			f.Close()
 		}
+	}
+	// Ревью GUI-STATS-1, M1: «Свой интервал» показывает поля дат — минимум
+	// окна обязан остаться в 900 и в этом состоянии (было 949).
+	v.periodSel.SetSelected(statsPeriodCustom)
+	if !v.customRow.Visible() {
+		t.Fatal("«Свой интервал» не показал поля дат — замер ничего не значит")
+	}
+	for _, sz := range []fyne.Size{{Width: 900, Height: 600}} {
+		v.win.Resize(sz)
+		cs := v.win.Canvas().Size()
+		tp, ts := v.table.Position(), v.table.Size()
+		minW := v.win.Content().MinSize().Width
+		t.Logf("«Свой интервал», окно %.0fx%.0f: канва %.0fx%.0f, таблица (%.0f,%.0f) %.0fx%.0f, минимум содержимого %.0f",
+			sz.Width, sz.Height, cs.Width, cs.Height, tp.X, tp.Y, ts.Width, ts.Height, minW)
+		if minW > 900 {
+			t.Errorf("«Свой интервал»: минимум окна статистики %.0f шире 900", minW)
+		}
+		if tp.X+ts.Width > cs.Width+0.5 || tp.Y+ts.Height > cs.Height+0.5 {
+			t.Errorf("«Свой интервал»: таблица вылезает за окно")
+		}
+		if dir != "" {
+			f, err := os.Create(filepath.Join(dir, "статистика-свой-интервал-900x600.png"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := png.Encode(f, v.win.Canvas().Capture()); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}
+	}
+}
+
+// shownText — текст верхнего диалога окна статистики.
+func shownText(t *testing.T, v *statsView) string {
+	t.Helper()
+	var s string
+	for _, l := range msgTextsIn(topPopup(t, v.win.Canvas())) {
+		s += l.Text + "\n"
+	}
+	return s
+}
+
+// TestStatsWriteOutcome — ревью GUI-STATS-1, M2: исход установки/снятия
+// определяется по состоянию, ПЕРЕЧИТАННОМУ после записи. Различение: ошибка
+// записи / успех, но состояние не то / успех — три разных текста. Доезд:
+// боевой путь «кнопка → Да → запись в горутине → перечитывание → диалог».
+// Подмена «всегда Готово» роняет случаи ошибки и не того состояния.
+func TestStatsWriteOutcome(t *testing.T) {
+	notI := core.CollectorStatus{State: core.CollectorNotInstalled}
+	inst := core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectPending}
+	part := core.CollectorStatus{State: core.CollectorPartial, Detail: []string{"нет таймера"}}
+	cases := []struct {
+		name       string
+		st, after  core.CollectorStatus
+		werr       error
+		remove     bool
+		want, deny string
+	}{
+		{"установка: ошибка записи", notI, notI, errors.New("обрыв"), false,
+			"Установка не подтверждена: обрыв\nСборщик сейчас: не установлен", "Готово"},
+		{"установка: состояние не то", notI, part, nil, false,
+			"Установка выполнена, но состояние не то, что ожидалось.\nСборщик сейчас: установлен не полностью", "Готово"},
+		{"установка: успех", notI, inst, nil, false, "Готово. Сборщик: установлен", "не подтверждена"},
+		{"снятие: ошибка записи", inst, inst, errors.New("отказ"), true,
+			"Снятие не подтверждена: отказ\nСборщик сейчас: установлен", "Готово"},
+		{"снятие: состояние не то", inst, part, nil, true,
+			"Снятие выполнена, но состояние не то, что ожидалось.", "Готово"},
+		{"снятие: успех", inst, notI, nil, true, "Готово. Сборщик: не установлен", "не то"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &statsFake{st: c.st, after: c.after, writeErr: c.werr, log: core.ParseTrafficLog("", false, "", false)}
+			v := openStats(t, f)
+			btn := v.installBtn
+			if c.remove {
+				btn = v.removeBtn
+			}
+			test.Tap(btn)
+			test.Tap(buttonByText(t, topPopup(t, v.win.Canvas()), "Да"))
+			waitGUIGoroutines(t)
+			if n := f.installs.Load() + f.removes.Load(); n != 1 {
+				t.Fatalf("записей %d, ждали 1", n)
+			}
+			got := shownText(t, v)
+			if !strings.Contains(got, c.want) || strings.Contains(got, c.deny) {
+				t.Errorf("диалог %q\nждали %q и без %q", got, c.want, c.deny)
+			}
+		})
+	}
+}
+
+// TestStatsReadAbortedNote — ревью GUI-STATS-1, L2: чтение оборвалось
+// (аварийный выход горутины) — пометка говорит «прервано», а не «идёт чтение»,
+// в согласии со строкой состояния. Различение: во время чтения — «идёт».
+func TestStatsReadAbortedNote(t *testing.T) {
+	v := openStats(t, &statsFake{st: core.CollectorStatus{State: core.CollectorInstalled}, panicRead: true})
+	if !strings.Contains(v.status.Text, "чтение прервано") {
+		t.Fatalf("статус: %q — обрыв не дошёл, проверка ничего не значит", v.status.Text)
+	}
+	if strings.Contains(v.notes.Text, "идёт чтение") || !strings.Contains(v.notes.Text, "чтение прервано") {
+		t.Errorf("пометка при прерванном чтении: %q", v.notes.Text)
+	}
+	if r, _ := v.tableSize(); r != 0 {
+		t.Errorf("строк %d при прерванном чтении", r)
+	}
+	// Различение: пока чтение идёт — «идёт чтение».
+	v.loaded, v.aborted = false, false
+	v.rebuild()
+	if !strings.Contains(v.notes.Text, "идёт чтение") {
+		t.Errorf("пометка во время чтения: %q", v.notes.Text)
 	}
 }

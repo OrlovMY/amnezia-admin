@@ -108,6 +108,27 @@ func TestStatsGoldenOutput(t *testing.T) {
 	run("show notinstalled empty", fn, fn, "", statsFlags{})
 	run("install notinstalled", fn, fn, "install", statsFlags{})
 	run("uninstall notinstalled", fn, fn, "uninstall", statsFlags{})
+	// Ревью GUI-STATS-1, L3: запись после -yes и после ответа «y» в
+	// терминале — итог по перечитанному состоянию: успех, не то состояние,
+	// ошибка записи; и ошибки флага -by.
+	write := func(name string, st, after core.CollectorStatus, tty bool, in string, sub string, iErr, rErr error) {
+		w := goldenFake(st)
+		w.after, w.installErr, w.removeErr = after, iErr, rErr
+		var out, errb bytes.Buffer
+		code := runStats(strings.NewReader(in), &out, &errb, tty, !tty, w, w, goldenConts, sub, statsFlags{})
+		fmt.Fprintf(&b, "##### %s (код %d, установок %d, снятий %d)\n--- out\n%s--- err\n%s", name, code, w.installed, w.removed, out.String(), errb.String())
+	}
+	notI, inst := states["notinstalled"], states["pending"]
+	write("install -yes ok", notI, inst, false, "", "install", nil, nil)
+	write("install -yes не то состояние", notI, states["partial"], false, "", "install", nil, nil)
+	write("install -yes ошибка", notI, states["unknown"], false, "", "install", errors.New("scp: обрыв"), nil)
+	write("install tty y", notI, inst, true, "y\n", "install", nil, nil)
+	write("uninstall -yes ok", inst, notI, false, "", "uninstall", nil, nil)
+	write("uninstall -yes не то состояние", inst, states["partial"], false, "", "uninstall", nil, nil)
+	write("uninstall -yes ошибка", inst, inst, false, "", "uninstall", nil, errors.New("systemctl: отказ"))
+	write("uninstall tty y", inst, notI, true, "yes\n", "uninstall", nil, nil)
+	run("show -by без -csv", f, f, "", statsFlags{by: "day"})
+	run("show -by неверное", f, f, "", statsFlags{csv: "x.csv", by: "week"})
 	// Свежий журнал: последний снимок, сбой счётчиков, оборванный хвост.
 	fr := goldenFake(states["working"])
 	fr.log = core.ParseTrafficLog("", false, "H v1 0\n"+tBlk(tDay*86400, "amnezia-awg", "KA= 100 200 0")+

@@ -215,7 +215,10 @@ type statsView struct {
 
 	// Прочитанное. loaded=false — данных на экране нет (идёт чтение или
 	// не удалось): таблица пуста, а не показывает прежнее.
-	loaded  bool
+	loaded bool
+	// aborted — последнее чтение прервано (паника/обрыв в горутине): данных
+	// нет, и это не «идёт чтение».
+	aborted bool
 	st      core.CollectorStatus
 	log     *core.TrafficLog
 	readErr error
@@ -317,7 +320,10 @@ func newStatsView(u *ui) *statsView {
 	top := container.NewVBox(
 		withCopy(v.status),
 		container.NewHBox(v.refreshBtn, v.installBtn, v.removeBtn, v.csvBtn),
-		container.NewHBox(msgLabel("Период:"), statsSelectBox(v.periodSel), v.customRow, msgLabel("Разбивка:"), statsSelectBox(v.groupSel)),
+		container.NewHBox(msgLabel("Период:"), statsSelectBox(v.periodSel), msgLabel("Разбивка:"), statsSelectBox(v.groupSel)),
+		// Поля дат — отдельной строкой: в одной строке с «Период/Разбивка»
+		// минимум окна был 949 > 900 (ревью GUI-STATS-1, M1).
+		v.customRow,
 	)
 	notes := container.NewVScroll(withCopy(v.notes))
 	notes.SetMinSize(fyne.NewSize(0, 110))
@@ -457,7 +463,7 @@ func (v *statsView) hasTable() bool {
 // reload — перечитать всё с сервера. Прежние цифры убираются с экрана
 // сразу (признак 4: не показывать старое, не сказав, что оно старое).
 func (v *statsView) reload() {
-	v.loaded, v.log, v.readErr, v.clients = false, nil, nil, nil
+	v.loaded, v.aborted, v.log, v.readErr, v.clients = false, false, nil, nil, nil
 	v.st = core.CollectorStatus{}
 	v.status.SetText("Сборщик статистики: читаю с сервера…")
 	v.rebuild()
@@ -477,6 +483,7 @@ func (v *statsView) reload() {
 					v.st, v.log, v.readErr, v.clients, v.loaded = st, l, err, clients, true
 					v.status.SetText("Сборщик статистики: " + collectorText(st))
 				} else {
+					v.aborted = true
 					v.status.SetText("Сборщик статистики: чтение прервано — данных нет. Нажмите «Обновить».")
 				}
 				v.rebuild()
@@ -499,6 +506,8 @@ func (v *statsView) rebuild() {
 	v.grouped = v.groupSel.Selected == statsGroupDay || v.groupSel.Selected == statsGroupMonth
 	var notes []string
 	switch {
+	case !v.loaded && v.aborted:
+		notes = append(notes, "Данных на экране нет: чтение прервано. Нажмите «Обновить».")
 	case !v.loaded:
 		notes = append(notes, "Данных на экране нет: идёт чтение с сервера.")
 	case v.readErr != nil:
