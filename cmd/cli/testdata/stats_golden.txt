@@ -1217,7 +1217,7 @@ WantedBy=timers.target
 
 затем: systemctl daemon-reload; systemctl enable --now amnezia-traffic-stats.timer
 Сборщик раз в 5 минут читает счётчики wg/awg (только чтение) и дописывает снимок в /opt/amnezia/traffic-stats; объём — не более 100 МБ (старые снимки сворачиваются в суточные итоги). Снять: amnezia-admin stats uninstall
-Готово. Сборщик: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
+Запись выполнена, но состояние сборщика не то: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
 --- err
 ##### install -yes ошибка (код 1, установок 1, снятий 0)
 --- out
@@ -1707,7 +1707,7 @@ WantedBy=timers.target
 Сейчас: установлен, первый снимок ожидается до 14:35 UTC
 Будет: systemctl disable --now amnezia-traffic-stats.timer; удалены /etc/systemd/system/amnezia-traffic-stats.timer, /etc/systemd/system/amnezia-traffic-stats.service, /opt/amnezia/traffic-stats/collect.sh.
 Накопленные данные (/opt/amnezia/traffic-stats/snapshots.log, daily.log) ОСТАЮТСЯ; удалить их вручную: rm -r /opt/amnezia/traffic-stats
-Готово. Сборщик: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
+Запись выполнена, но состояние сборщика не то: установлен не полностью или другой версии: нет таймера; скрипт другой версии (переустановить: amnezia-admin stats install)
 --- err
 ##### uninstall -yes ошибка (код 1, установок 0, снятий 1)
 --- out

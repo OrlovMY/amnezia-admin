@@ -230,10 +230,12 @@ func runStatsInstall(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src s
 		return 1
 	}
 	after := src.StatsStatus()
-	fmt.Fprintln(out, "Готово. Сборщик: "+collectorText(after))
 	if after.State != core.CollectorInstalled {
+		// Не «Готово»: запись прошла, но перечитанное состояние не то (код 1).
+		fmt.Fprintln(out, "Запись выполнена, но состояние сборщика не то: "+collectorText(after))
 		return 1
 	}
+	fmt.Fprintln(out, "Готово. Сборщик: "+collectorText(after))
 	return 0
 }
 
@@ -254,9 +256,11 @@ func runStatsUninstall(in io.Reader, out, errOut io.Writer, isTTY, yes bool, src
 		return 1
 	}
 	after := src.StatsStatus()
-	fmt.Fprintln(out, "Готово. Сборщик: "+collectorText(after))
 	if after.State != core.CollectorNotInstalled {
+		// Не «Готово»: запись прошла, но перечитанное состояние не то (код 1).
+		fmt.Fprintln(out, "Запись выполнена, но состояние сборщика не то: "+collectorText(after))
 		return 1
 	}
+	fmt.Fprintln(out, "Готово. Сборщик: "+collectorText(after))
 	return 0
 }
