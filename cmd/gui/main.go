@@ -146,6 +146,7 @@ type ui struct {
 	toHostConnShown *toHostConnView
 	toHostShown     *toHostView
 	toHostReviewed  *toHostReview
+	toHostWiped     *toHostWipe
 	// toHostLogin — пароль входа нового сервера; затирается в closeMigDst
 	// (любое закрытие: «Назад», смена источника, выход, конец операции).
 	toHostLogin *core.Secret

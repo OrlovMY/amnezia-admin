@@ -622,7 +622,7 @@ func Install(sess *Session, plan InstallPlan, opt InstallOptions) InstallResult 
 	if len(dirty) > 0 {
 		sort.Strings(dirty)
 		return refuse("сервер не чистый: уже есть " + strings.Join(dirty, ", ") +
-			" — установка только на чистый сервер; снос с подтверждением и копией цели в этой версии не сделан")
+			" — установка только на чистый сервер; сначала снос с подтверждением и копией (migrate -to-host -wipe-target; GUI — окно сноса)")
 	}
 
 	for _, cs := range all {

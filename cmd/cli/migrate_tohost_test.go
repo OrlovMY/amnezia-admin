@@ -69,10 +69,11 @@ type thEnv struct {
 	pwAsked   int
 	pwAnswer  string
 	keyDir    string
+	dstFP     string // отпечаток ключа хоста цели ("" — не получен)
 }
 
 func newTHEnv(t *testing.T) *thEnv {
-	e := &thEnv{t: t, dst: &thRec{f: healthyProvCLI()}, backup: thBackup(), pwAnswer: thPw, keyDir: t.TempDir()}
+	e := &thEnv{t: t, dst: &thRec{f: healthyProvCLI()}, backup: thBackup(), pwAnswer: thPw, keyDir: t.TempDir(), dstFP: "SHA256:dst"}
 	// маркер незавершённой операции — свой у каждого теста: оставленный
 	// одним тестом не должен останавливать следующий
 	mkPath := filepath.Join(t.TempDir(), "marker.json")
@@ -111,7 +112,7 @@ func newTHEnv(t *testing.T) *thEnv {
 			clear(b) // как ядро: срез обнуляется после попытки
 		}
 		s := core.NewSessionWithRunner(e.dst, &core.ServerCreds{Host: host, Port: port, User: user})
-		s.HostKeyFingerprint = "SHA256:dst"
+		s.HostKeyFingerprint = e.dstFP
 		return s, att, nil
 	}
 	toHostCollect = func(context.Context, *core.Session, time.Time, core.ProgressFunc) (*core.Backup, error) {
@@ -363,7 +364,7 @@ func TestToHostExitCodes(t *testing.T) {
 		{"не чистый", func(e *thEnv) {
 			e.dst.f[core.ProvDockerTag] = "DOCKER=yes\nSRVRC=0\nSRV=27.1.1\nEND\n"
 			e.dst.f[core.ProvCtrTag] = "RC=0\nN=amnezia-awg2|\nEND\n"
-		}, true, "", ap, 1, "не чистый", 0},
+		}, true, "", ap, 4, "это не «клиентов нет»", 0}, // доезд: настоящий PlanTeardown, состав не прочитан
 		{"порт копии занят", func(e *thEnv) {
 			e.dst.f[core.ProvPortsTag] = "SSRC=0\nL=tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nL=udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*\nEND\n"
 		}, true, "", ap, 1, "порт из копии", 0},
