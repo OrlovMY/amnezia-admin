@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -357,6 +358,12 @@ func (p *TeardownPlan) InventoryLines() []string {
 	}
 	if len(inv.Volumes) > 0 {
 		out = append(out, "  тома: "+strings.Join(inv.Volumes, ", "))
+		for _, v := range inv.Volumes {
+			ctr := strings.TrimSuffix(v, "-data")
+			if !slices.Contains(inv.Containers, ctr) {
+				out = append(out, "  ВНИМАНИЕ: будет удалён том "+v+" (XRay: ключи и конфигурация) без контейнера "+ctr+" — в копию он НЕ попадёт, восстановить его будет не из чего.")
+			}
+		}
 	}
 	if len(inv.Images) > 0 {
 		out = append(out, "  образы: "+strings.Join(inv.Images, ", "))
@@ -446,6 +453,12 @@ func (s *Session) ExecuteTeardown(p *TeardownPlan, opt TeardownOptions) Teardown
 	}
 	if err := canceled(ctx); err != nil {
 		return refuse("отменено до копии — снос не выполнялся")
+	}
+	// TOCTOU (аудит AU M1): между подтверждением и сносом цель могла
+	// измениться. Состав и копия снимаются заново и сверяются с планом;
+	// пишется и сносится именно свежий снимок.
+	if why := s.recheckTeardown(ctx, p, opt); why != "" {
+		return refuse(why)
 	}
 	res := TeardownResult{}
 	if p.CopyState() != CopyNone {
@@ -547,22 +560,73 @@ func verifyCopyFile(path string, want *Backup, layer BackupLayer) error {
 	if teardownVerifyHook != nil {
 		teardownVerifyHook(got)
 	}
+	if why := backupDiff(want, got); why != "" {
+		return errors.New("в перечитанной копии " + why)
+	}
+	return nil
+}
+
+// backupDiff — "" если контейнеры, статусы и байты файлов совпадают; иначе
+// — что именно (без содержимого).
+func backupDiff(want, got *Backup) string {
 	if len(got.Containers) != len(want.Containers) {
-		return errors.New("в перечитанной копии другое число контейнеров")
+		return "другое число контейнеров"
 	}
 	for i, wc := range want.Containers {
 		gc := got.Containers[i]
 		if gc.Name != wc.Name || gc.Status != wc.Status || len(gc.Files) != len(wc.Files) {
-			return fmt.Errorf("в перечитанной копии контейнер %s не совпал", wc.Name)
+			return "контейнер " + wc.Name + " не совпал"
 		}
 		for j, wf := range wc.Files {
 			gf := gc.Files[j]
 			if gf.Name != wf.Name || gf.Status != wf.Status || !bytes.Equal(gf.Data.Bytes(), wf.Data.Bytes()) {
-				return fmt.Errorf("в перечитанной копии файл %s/%s не совпал", wc.Name, wf.Name)
+				return "файл " + wc.Name + "/" + wf.Name + " не совпал"
 			}
 		}
 	}
-	return nil
+	return ""
+}
+
+// TeardownChangedText — состав цели изменился после подтверждения.
+const TeardownChangedText = "состав нового сервера изменился после подтверждения — снос не выполнялся, запустите заново"
+
+// recheckTeardown — состав и копия цели заново; "" — совпало с планом
+// (p.Copy заменяется свежим снимком), иначе — причина отказа.
+func (s *Session) recheckTeardown(ctx context.Context, p *TeardownPlan, opt TeardownOptions) string {
+	inv, err := s.InspectTarget()
+	if err != nil {
+		return "состав нового сервера перечитать перед сносом не удалось (" + MaskText(err.Error()) + ") — снос не выполнялся"
+	}
+	eq := func(a, b []string) bool { return strings.Join(a, "|") == strings.Join(b, "|") }
+	o := p.Inv
+	if !eq(inv.Containers, o.Containers) || !eq(inv.Volumes, o.Volumes) || !eq(inv.Images, o.Images) || !eq(inv.Foreign, o.Foreign) {
+		return TeardownChangedText + " (другой набор контейнеров, томов или образов)"
+	}
+	for _, c := range inv.Containers {
+		if o.State != nil && inv.State[c] != o.State[c] {
+			return TeardownChangedText + " (" + c + ": состояние " + dash(o.State[c]) + " → " + dash(inv.State[c]) + ")"
+		}
+	}
+	if len(o.Containers) == 0 {
+		return ""
+	}
+	b, cerr := teardownCollect(ctx, s, opt.Tool, opt.Now, nil, opt.Progress)
+	if errors.Is(cerr, ErrCanceled) {
+		return "отменено до копии — снос не выполнялся"
+	}
+	switch {
+	case cerr != nil && p.Copy == nil:
+		return "" // копии не было и нет — согласие на это уже дано
+	case cerr != nil:
+		return "копию нового сервера перед сносом снять заново не удалось (" + MaskText(cerr.Error()) + ") — снос не выполнялся"
+	case p.Copy == nil:
+		return TeardownChangedText + " (копия теперь снимается, а при подтверждении — нет)"
+	}
+	if why := backupDiff(p.Copy, b); why != "" {
+		return TeardownChangedText + " (" + why + ")"
+	}
+	p.Copy = b
+	return ""
 }
 
 // TeardownWouldClear — «нельзя ставить» в предпроверке вызвано ТОЛЬКО

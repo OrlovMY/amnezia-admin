@@ -453,3 +453,21 @@ func TestTeardownCanceled(t *testing.T) {
 		t.Fatalf("отмена: %v %v %q", r.State, f.rmCalls, r.CopyPath)
 	}
 }
+
+// M2 (аудит AU): том XRay без контейнера назван отдельно; с контейнером — нет.
+func TestTeardownOrphanXRayVolumeWarned(t *testing.T) {
+	const warn = "будет удалён том amnezia-xray-data (XRay: ключи и конфигурация) без контейнера amnezia-xray — в копию он НЕ попадёт"
+	for _, c := range []struct {
+		name string
+		ctrs []string
+		want bool
+	}{
+		{"том без контейнера", []string{"amnezia-awg2"}, true},
+		{"том с контейнером", []string{"amnezia-awg2", "amnezia-xray"}, false},
+	} {
+		p := &TeardownPlan{Inv: &TargetInventory{Containers: c.ctrs, Volumes: []string{"amnezia-xray-data"}, PortsKnown: true, Ports: map[string]string{}}}
+		if got := strings.Contains(strings.Join(p.InventoryLines(), "\n"), warn); got != c.want {
+			t.Errorf("%s: предупреждение %v, ждали %v", c.name, got, c.want)
+		}
+	}
+}

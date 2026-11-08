@@ -25,6 +25,8 @@ type wipeFix struct {
 	calls   int
 	opt     core.TeardownOptions
 	dir     string
+	// afterProv — предпроверка после сноса (nil — чисто)
+	afterProv *core.ProvisionReport
 }
 
 func dirtyProv() core.ProvisionReport {
@@ -62,6 +64,9 @@ func newWipeFix(t *testing.T) *wipeFix {
 		switch f.res.State {
 		case core.TeardownDone:
 			f.prov = core.ProvisionReport{Items: []core.ProvItem{{What: "ОС", State: core.ProvOK, Reason: "ок"}}}
+			if f.afterProv != nil {
+				f.prov = *f.afterProv
+			}
 		case core.TeardownUnknown:
 			// как ядро: маркер сноса оставлен
 			if err := core.WriteOpMarker(core.OpMarker{Target: "x", Step: "снос Amnezia на новом сервере"}); err != nil {
@@ -260,5 +265,32 @@ func TestGUIToHostWipeStoppedAndCtx(t *testing.T) {
 	}
 	if f.opt.Ctx.Err() == nil {
 		t.Error("контекст сноса не связан с окном (после итога должен быть закрыт)")
+	}
+}
+
+// L1 (аудит AU): после сноса GUI повторяет предпроверку; появившийся чужой
+// amnezia-* назван в итоге, установка не начинается.
+func TestGUIToHostWipeRecheckAfter(t *testing.T) {
+	f := newWipeFix(t)
+	f.afterProv = &core.ProvisionReport{Items: []core.ProvItem{{What: "контейнеры amnezia-*", State: core.ProvBad, Reason: "уже есть: amnezia-mystery"}}}
+	w := f.toWipe(t)
+	w.check.SetChecked(true)
+	test.Tap(w.ok)
+	test.Tap(f.choices(t).apply)
+	waitGUIGoroutines(t)
+	txt := f.allText()
+	if f.installed != 0 || !strings.Contains(txt, "предпроверка после сноса") || !strings.Contains(txt, "amnezia-mystery") ||
+		!strings.Contains(txt, "Amnezia на новом сервере снесена") {
+		t.Fatalf("установок %d:\n%s", f.installed, txt)
+	}
+}
+
+// M2 (аудит AU): том XRay без контейнера — отдельное предупреждение.
+func TestGUIToHostWipeOrphanXRayVolume(t *testing.T) {
+	f := newWipeFix(t)
+	f.plan.Inv.Volumes = []string{"amnezia-xray-data"}
+	w := f.toWipe(t)
+	if !strings.Contains(w.text, "будет удалён том amnezia-xray-data (XRay: ключи и конфигурация)") || !strings.Contains(w.text, "в копию он НЕ попадёт") {
+		t.Fatalf("нет предупреждения о томе XRay:\n%s", w.text)
 	}
 }
