@@ -242,8 +242,10 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	}
 	fmt.Fprintln(w, sideLine("Источник (только чтение)", src))
 	fmt.Fprintln(w, sideLine("Новый сервер (сюда будет записано)", dst))
-	if src.HostKeyFingerprint != "" && src.HostKeyFingerprint == dst.HostKeyFingerprint {
-		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: у источника и нового сервера один ключ хоста — это один и тот же сервер.")
+	// Три исхода (как GUI): продолжаем только при измеренном «разные»;
+	// «не удалось узнать» — тоже остановка (ревью-1 M1).
+	if sv, why := core.SameServer(src, dst, toHostResolve); sv != core.SameNo {
+		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: источник и новый сервер — "+sv.String()+" ("+why+"). Ничего не изменено.")
 		return exitToHostUnknown
 	}
 	if strings.TrimSpace(o.clientHost) != "" {
@@ -385,15 +387,19 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	if hasXRay && !o.mf.skipXRay {
 		xrayNote = " (XRay на новом сервере будет перезапущен)"
 	}
-	if td != nil && !toHostWipeConsent(in, w, isTTY, o, td) {
-		return exitToHostUsage
+	wipeNoCopy := false
+	if td != nil {
+		var ok bool
+		if ok, wipeNoCopy = toHostWipeConsent(in, w, isTTY, o, td); !ok {
+			return exitToHostUsage
+		}
 	}
 	if !o.mf.yes && !askYes(in, w, "Поставить Amnezia на новый сервер и перенести на него клиентов источника"+xrayNote+"? (y/n): ") {
 		fmt.Fprintln(w, "Отменено: ничего не записано.")
 		return exitToHostUsage
 	}
 	if td != nil {
-		if code := toHostRunTeardown(ctx, w, errOut, isTTY, dst, b, td, layer, now); code != 0 {
+		if code := toHostRunTeardown(ctx, w, errOut, isTTY, dst, b, td, layer, wipeNoCopy, now); code != 0 {
 			return code
 		}
 	}
@@ -480,39 +486,39 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 // toHostWipeConsent — согласие на снос: флаг -wipe-target или отдельный
 // вопрос на терминале; без полной копии — ещё одно отдельное согласие.
 // -yes ни одного из них не даёт.
-func toHostWipeConsent(in io.Reader, w io.Writer, isTTY bool, o toHostOpts, td *core.TeardownPlan) bool {
+func toHostWipeConsent(in io.Reader, w io.Writer, isTTY bool, o toHostOpts, td *core.TeardownPlan) (ok, noCopy bool) {
 	if !o.wipe {
 		if !isTTY {
 			fmt.Fprintln(w, "ОСТАНОВЛЕНО: новый сервер не чистый (состав — выше). Снос требует отдельного флага -wipe-target (-yes его не даёт). Ничего не изменено.")
-			return false
+			return false, false
 		}
 		if !askYes(in, w, "Снести перечисленное выше на НОВОМ сервере (после записи и проверки копии)? (y/n): ") {
 			fmt.Fprintln(w, "Снос не подтверждён — ничего не изменено.")
-			return false
+			return false, false
 		}
 	}
 	if td.NeedsNoCopyConfirm() && !o.wipeNoCopy {
 		if !isTTY {
 			fmt.Fprintln(w, "ОСТАНОВЛЕНО: полной копии нового сервера не будет (см. выше) — снос без неё требует ещё флага -wipe-without-copy. Ничего не изменено.")
-			return false
+			return false, false
 		}
 		if !askYes(in, w, "Полной копии НЕ БУДЕТ — настройки и клиенты этих контейнеров пропадут безвозвратно. Всё равно снести? (y/n): ") {
 			fmt.Fprintln(w, "Снос без копии не подтверждён — ничего не изменено.")
-			return false
+			return false, false
 		}
 	}
-	return true
+	return true, td.NeedsNoCopyConfirm()
 }
 
 // toHostRunTeardown — копия → проверка → снос → повторная предпроверка.
 // 0 — цель чистая, можно ставить.
-func toHostRunTeardown(ctx context.Context, w, errOut io.Writer, isTTY bool, dst *core.Session, b *core.Backup, td *core.TeardownPlan, layer core.BackupLayer, now time.Time) int {
+func toHostRunTeardown(ctx context.Context, w, errOut io.Writer, isTTY bool, dst *core.Session, b *core.Backup, td *core.TeardownPlan, layer core.BackupLayer, noCopy bool, now time.Time) int {
 	dir, err := userBackupsDir()
 	if err != nil {
 		backupErr(errOut, "Каталог копии нового сервера не определён — снос не выполнялся: ", err)
 		return exitToHostNo
 	}
-	r := toHostTeardown(dst, td, core.TeardownOptions{Confirmed: true, NoCopyConfirmed: true, CopyDir: dir, Layer: layer, Now: now,
+	r := toHostTeardown(dst, td, core.TeardownOptions{Confirmed: true, NoCopyConfirmed: noCopy, CopyDir: dir, Layer: layer, Now: now,
 		Tool: version.String(), Ctx: ctx, Progress: cliProgress(errOut, isTTY)})
 	endProgress(errOut, isTTY)
 	if r.CopyPath != "" {

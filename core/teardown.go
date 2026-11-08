@@ -73,8 +73,10 @@ type TargetInventory struct {
 	Images     []string          // образы Amnezia (закрытый список)
 	Ports      map[string]string // контейнер → опубликованные порты (как в docker ps)
 	PortsKnown bool              // false — порты прочитать не удалось
-	Foreign    []string          // amnezia-* вне закрытого списка — сносить нельзя
-	Clients    []TargetClients   // по контейнерам Containers
+	// State — состояние контейнера по docker ps -a (running, exited, …).
+	State   map[string]string
+	Foreign []string        // amnezia-* вне закрытого списка — сносить нельзя
+	Clients []TargetClients // по контейнерам Containers
 }
 
 // Empty — Amnezia на цели нет (по закрытому списку и вне его).
@@ -183,20 +185,22 @@ var ErrTargetNotRead = errors.New("состав нового сервера пр
 // InspectTarget — состав цели (только чтение). Ошибка — список контейнеров,
 // томов или образов не получен: состав неизвестен, а не «пусто».
 func (s *Session) InspectTarget() (*TargetInventory, error) {
-	inv := &TargetInventory{Ports: map[string]string{}}
-	st, body, _ := s.instStep(rcTail(`if ! command -v docker >/dev/null 2>&1; then exit 0; fi; sudo -n docker ps -a --format "{{.Names}}|{{.Ports}}"`), nil)
+	inv := &TargetInventory{Ports: map[string]string{}, State: map[string]string{}}
+	st, body, _ := s.instStep(rcTail(`if ! command -v docker >/dev/null 2>&1; then exit 0; fi; sudo -n docker ps -a --format "{{.Names}}|{{.State}}|{{.Ports}}"`), nil)
 	if st != stepOK {
 		return nil, fmt.Errorf("%w: список контейнеров не получен", ErrTargetNotRead)
 	}
 	inv.PortsKnown = true
 	for _, l := range strings.Split(body, "\n") {
-		n, ports, _ := strings.Cut(strings.TrimSpace(l), "|")
+		n, rest, _ := strings.Cut(strings.TrimSpace(l), "|")
+		state, ports, _ := strings.Cut(rest, "|")
 		if !strings.HasPrefix(n, "amnezia-") {
 			continue
 		}
 		if TeardownAllowed("container", n) {
 			inv.Containers = append(inv.Containers, n)
 			inv.Ports[n] = strings.TrimSpace(ports)
+			inv.State[n] = strings.TrimSpace(state)
 		} else {
 			inv.Foreign = append(inv.Foreign, "контейнер "+n)
 		}
@@ -307,6 +311,10 @@ func (p *TeardownPlan) InventoryLines() []string {
 	}
 	inv := p.Inv
 	out := []string{"Состав нового сервера (Amnezia):"}
+	notCopied := map[string]bool{}
+	for _, c := range p.NotCopied() {
+		notCopied[c] = true
+	}
 	for i, c := range inv.Containers {
 		l := "  контейнер " + c
 		if ct, _, ok := lookupContainer(c); ok && ct.Proto != "" {
@@ -330,6 +338,20 @@ func (p *TeardownPlan) InventoryLines() []string {
 				out = append(out, "      клиенты: нет ("+dash(tc.Why)+")")
 			default:
 				out = append(out, fmt.Sprintf("      клиенты (%d): %s", len(tc.Names), strings.Join(tc.Names, ", ")))
+			}
+			if notCopied[c] {
+				why := "его конфигурация не прочитана"
+				if st := inv.State[c]; st != "" && st != "running" {
+					why = "контейнер остановлен (" + st + "), программа читает только запущенные"
+				}
+				who := "клиенты: не удалось прочитать"
+				if tc.Known {
+					who = "клиенты: нет"
+					if len(tc.Names) > 0 {
+						who = "клиенты: " + strings.Join(tc.Names, ", ")
+					}
+				}
+				out = append(out, "      В КОПИЮ НЕ ПОПАДЁТ ("+why+"); после сноса пропадут безвозвратно — "+who)
 			}
 		}
 	}
@@ -421,6 +443,9 @@ func (s *Session) ExecuteTeardown(p *TeardownPlan, opt TeardownOptions) Teardown
 	ctx := opt.Ctx
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := canceled(ctx); err != nil {
+		return refuse("отменено до копии — снос не выполнялся")
 	}
 	res := TeardownResult{}
 	if p.CopyState() != CopyNone {

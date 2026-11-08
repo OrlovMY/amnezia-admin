@@ -238,3 +238,27 @@ func TestGUIToHostWipeBack(t *testing.T) {
 		t.Fatalf("после «Назад» нет просмотра или был снос (%d)", f.calls)
 	}
 }
+
+// L4/L2 (ревью-1): остановленный контейнер назван в окне сноса как «в копию
+// не попадёт»; снос получает контекст отмены окна прогресса.
+func TestGUIToHostWipeStoppedAndCtx(t *testing.T) {
+	f := newWipeFix(t)
+	f.plan.Inv.Containers = append(f.plan.Inv.Containers, "amnezia-wireguard")
+	f.plan.Inv.State = map[string]string{"amnezia-awg": "running", "amnezia-wireguard": "exited"}
+	f.plan.Inv.Clients = append(f.plan.Inv.Clients, core.TargetClients{Container: "amnezia-wireguard", Why: "не удалось прочитать (контейнер не запущен)"})
+	w := f.toWipe(t)
+	if !strings.Contains(w.text, "В КОПИЮ НЕ ПОПАДЁТ (контейнер остановлен (exited)") || w.noCopy == nil {
+		t.Fatalf("остановленный контейнер не назван или нет второй галки:\n%s", w.text)
+	}
+	w.check.SetChecked(true)
+	w.noCopy.SetChecked(true)
+	test.Tap(w.ok)
+	test.Tap(f.choices(t).apply)
+	waitGUIGoroutines(t)
+	if f.opt.Ctx == nil {
+		t.Fatal("снос без контекста отмены")
+	}
+	if f.opt.Ctx.Err() == nil {
+		t.Error("контекст сноса не связан с окном (после итога должен быть закрыт)")
+	}
+}

@@ -42,6 +42,7 @@ type tdEnv struct {
 	tdCalls   int
 	tdOpt     core.TeardownOptions
 	stayDirty bool
+	host      string // "" — thHost
 }
 
 func newTDEnv(t *testing.T) *tdEnv {
@@ -72,7 +73,11 @@ func newTDEnv(t *testing.T) *tdEnv {
 
 func (e *tdEnv) runW(tty bool, stdin string, mf migrateFlags, wipe, noCopy bool) (int, string) {
 	var out, errOut bytes.Buffer
-	o := toHostOpts{srcKey: thSrcKey(e.t), host: thHost, port: "22", user: "root", knownHostsPath: filepath.Join(e.t.TempDir(), "kh"), mf: mf, noAgent: true,
+	host := thHost
+	if e.host != "" {
+		host = e.host
+	}
+	o := toHostOpts{srcKey: thSrcKey(e.t), host: host, port: "22", user: "root", knownHostsPath: filepath.Join(e.t.TempDir(), "kh"), mf: mf, noAgent: true,
 		wipe: wipe, wipeNoCopy: noCopy}
 	code := runMigrateToHost(context.Background(), strings.NewReader(stdin), &out, &errOut, tty, o, time.Unix(1700000000, 0))
 	return code, out.String() + errOut.String()
@@ -149,6 +154,72 @@ func TestToHostWipe(t *testing.T) {
 			}
 			if e.tdCalls > 0 && (!e.tdOpt.Confirmed || e.tdOpt.Layer == nil || e.tdOpt.CopyDir == "") {
 				t.Errorf("снос без подтверждения/слоя/каталога копии: %+v", e.tdOpt)
+			}
+		})
+	}
+}
+
+// L1 (ревью-1): согласие «без копии» доходит до ядра только при флаге или
+// ответе «да»; при полной копии — не передаётся.
+func TestToHostWipeNoCopyConsentPassedOnlyWhenGiven(t *testing.T) {
+	apY := migrateFlags{apply: true, noPw: true, yes: true}
+	for _, c := range []struct {
+		name         string
+		full         bool
+		tty          bool
+		stdin        string
+		noCopy, want bool
+	}{
+		{"полная копия, без флага", true, false, "", false, false},
+		{"полная копия, флаг лишний — согласия нет и не нужно", true, false, "", true, false},
+		{"без копии, флаг", false, false, "", true, true},
+		{"без копии, ответ «y»", false, true, "n\ny\ny\ny\n", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newTDEnv(t)
+			e.keyAuth = !c.tty
+			e.plan = thTDPlan(c.full, c.full)
+			mf := apY
+			if c.tty {
+				mf = migrateFlags{apply: true, noPw: true}
+			}
+			code, out := e.runW(c.tty, c.stdin, mf, !c.tty, c.noCopy)
+			if code != 0 || e.tdCalls != 1 {
+				t.Fatalf("код %d, сносов %d\n%s", code, e.tdCalls, out)
+			}
+			if e.tdOpt.NoCopyConfirmed != c.want {
+				t.Errorf("NoCopyConfirmed = %v, ждали %v", e.tdOpt.NoCopyConfirmed, c.want)
+			}
+		})
+	}
+}
+
+// M1 (ревью-1): «один ли сервер» — три исхода; продолжаем только при
+// «разные». Отпечаток цели не получен и адреса не сверить — НЕ «разные»:
+// остановка до предпроверки и тем более до сноса.
+func TestToHostSameServerThreeStates(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		dstFP string
+		host  string
+		code  int
+		want  string
+	}{
+		{"разные (отпечатки различны)", "SHA256:dst", "", 0, "сухой прогон"},
+		{"тот же отпечаток", "SHA256:src", "", exitToHostUnknown, "ПЕРЕЕЗД ОСТАНОВЛЕН"},
+		{"отпечаток не получен, адрес — разные IP: измеренное «разные»", "", "", 0, "сухой прогон"},
+		{"отпечаток не получен, имя не разрешилось — неизвестно", "", "new.example.invalid", exitToHostUnknown, "узнать не удалось"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newTDEnv(t)
+			e.keyAuth = true
+			e.dstFP, e.host = c.dstFP, c.host
+			code, out := e.runW(false, "", migrateFlags{}, true, true)
+			if code != c.code || !strings.Contains(out, c.want) {
+				t.Fatalf("код %d (ждали %d), нет %q:\n%s", code, c.code, c.want, out)
+			}
+			if c.code != 0 && (e.tdCalls != 0 || strings.Contains(out, "Предпроверка")) {
+				t.Errorf("после остановки шли дальше:\n%s", out)
 			}
 		})
 	}

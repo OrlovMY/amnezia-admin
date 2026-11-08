@@ -23,6 +23,7 @@ type tdFake struct {
 	failInventory        bool              // docker ps -a с портами не отвечает
 	failMeasure          bool              // после сноса списки не отвечают
 	keep                 string            // это имя docker rm не удаляет
+	stopped              map[string]bool   // остановленные контейнеры
 	rmCalls              []string
 	all                  []string
 	rmStarted, collected bool
@@ -61,15 +62,19 @@ func (f *tdFake) Run(cmd string, _ []byte) (string, error) {
 	}
 	measureDown := f.failMeasure && f.rmStarted
 	switch {
-	case strings.Contains(cmd, "{{.Names}}|{{.Ports}}"):
+	case strings.Contains(cmd, "{{.Names}}|{{.State}}|{{.Ports}}"):
 		if f.failInventory {
 			return "", errors.New("связь оборвалась")
 		}
 		var lines []string
 		for n, p := range f.ctrs {
-			lines = append(lines, n+"|"+p)
+			st := "running"
+			if f.stopped[n] {
+				st = "exited"
+			}
+			lines = append(lines, n+"|"+st+"|"+p)
 		}
-		lines = append(lines, "web|0.0.0.0:80->80/tcp")
+		lines = append(lines, "web|running|0.0.0.0:80->80/tcp")
 		sort.Strings(lines)
 		return instOK(strings.Join(lines, "\n") + "\n"), nil
 	case strings.Contains(cmd, "docker ps -a"):
@@ -408,5 +413,43 @@ func TestTeardownWouldClear(t *testing.T) {
 		if got := TeardownWouldClear(ProvisionReport{Items: c.items}); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// Остановленный контейнер: в копию не попадает, и это сказано прямо —
+// с клиентами поимённо, если прочитаны, иначе «не удалось прочитать».
+func TestTeardownStoppedContainerNamed(t *testing.T) {
+	f := newTDFake()
+	f.ctrs["amnezia-wireguard"] = ""
+	f.stopped = map[string]bool{"amnezia-wireguard": true}
+	withTDCollect(t, tdCopy(CtrSaved), nil) // копия — только запущенные
+	p, err := tdSess(f).PlanTeardown(context.Background(), "t", time.Now(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(p.InventoryLines(), "\n")
+	want := "В КОПИЮ НЕ ПОПАДЁТ (контейнер остановлен (exited), программа читает только запущенные); после сноса пропадут безвозвратно — клиенты: не удалось прочитать"
+	if !strings.Contains(text, want) || p.CopyState() != CopyPartial {
+		t.Fatalf("нет %q (копия %v):\n%s", want, p.CopyState(), text)
+	}
+	if strings.Count(text, "В КОПИЮ НЕ ПОПАДЁТ") != 1 {
+		t.Errorf("пометка не только у остановленного:\n%s", text)
+	}
+	// клиенты прочитаны, а контейнера в копии нет — поимённо
+	p.Inv.Clients[1] = TargetClients{Container: "amnezia-wireguard", Known: true, Names: []string{"Пётр"}}
+	if text := strings.Join(p.InventoryLines(), "\n"); !strings.Contains(text, "пропадут безвозвратно — клиенты: Пётр") {
+		t.Errorf("клиенты не названы поимённо:\n%s", text)
+	}
+}
+
+// Отмена до сноса: ни копии, ни команд сноса.
+func TestTeardownCanceled(t *testing.T) {
+	withTDMarker(t)
+	f := newTDFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r, _ := tdRun(t, f, tdCopy(CtrSaved), TeardownOptions{Confirmed: true, Ctx: ctx})
+	if r.State != TeardownRefused || len(f.rmCalls) != 0 || r.CopyPath != "" || !strings.Contains(r.Why, "отменено до копии") {
+		t.Fatalf("отмена: %v %v %q", r.State, f.rmCalls, r.CopyPath)
 	}
 }

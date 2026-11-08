@@ -69,10 +69,11 @@ type thEnv struct {
 	pwAsked   int
 	pwAnswer  string
 	keyDir    string
+	dstFP     string // отпечаток ключа хоста цели ("" — не получен)
 }
 
 func newTHEnv(t *testing.T) *thEnv {
-	e := &thEnv{t: t, dst: &thRec{f: healthyProvCLI()}, backup: thBackup(), pwAnswer: thPw, keyDir: t.TempDir()}
+	e := &thEnv{t: t, dst: &thRec{f: healthyProvCLI()}, backup: thBackup(), pwAnswer: thPw, keyDir: t.TempDir(), dstFP: "SHA256:dst"}
 	// маркер незавершённой операции — свой у каждого теста: оставленный
 	// одним тестом не должен останавливать следующий
 	mkPath := filepath.Join(t.TempDir(), "marker.json")
@@ -111,7 +112,7 @@ func newTHEnv(t *testing.T) *thEnv {
 			clear(b) // как ядро: срез обнуляется после попытки
 		}
 		s := core.NewSessionWithRunner(e.dst, &core.ServerCreds{Host: host, Port: port, User: user})
-		s.HostKeyFingerprint = "SHA256:dst"
+		s.HostKeyFingerprint = e.dstFP
 		return s, att, nil
 	}
 	toHostCollect = func(context.Context, *core.Session, time.Time, core.ProgressFunc) (*core.Backup, error) {

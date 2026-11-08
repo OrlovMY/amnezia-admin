@@ -906,7 +906,7 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		// маркер незавершённой операции — ДО первой записи на цель; без него
 		// обрыв посреди установки не оставил бы следа (аудит AU M1)
 		if st.wipe {
-			o.td = toHostRunWipe(st, layer, pv)
+			o.td = toHostRunWipe(ctx, st, layer, pv)
 			if o.td.State != core.TeardownDone {
 				// свой маркер снос снял сам при измеренном итоге или оставил
 				// при неизвестном; чужой — не трогать
@@ -992,14 +992,14 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 }
 
 // toHostRunWipe — снос с копией (слой — тот же, что у автокопии).
-func toHostRunWipe(st *toHostState, layer core.BackupLayer, pv *progressView) *core.TeardownResult {
+func toHostRunWipe(ctx context.Context, st *toHostState, layer core.BackupLayer, pv *progressView) *core.TeardownResult {
 	pv.report(core.Progress{Text: "Перед установкой: копия нового сервера, её проверка и снос Amnezia на нём…"})
 	dir, err := toHostBackupsDir()
 	if err != nil {
 		return &core.TeardownResult{State: core.TeardownRefused, Why: "каталог копии не определён: " + core.MaskText(err.Error()) + " — снос не выполнялся"}
 	}
 	r := toHostTeardown(st.dst, st.td, core.TeardownOptions{Confirmed: st.wipe, NoCopyConfirmed: st.wipeNoCopy, CopyDir: dir, Layer: layer,
-		Now: time.Now(), Tool: version.String(), Progress: pv.report})
+		Now: time.Now(), Tool: version.String(), Ctx: ctx, Progress: pv.report})
 	return &r
 }
 
