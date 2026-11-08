@@ -145,7 +145,7 @@ func TestStatsGoldenOutput(t *testing.T) {
 		var out, errb bytes.Buffer
 		runStats(strings.NewReader(""), &out, &errb, false, false, f, f, goldenConts, "", statsFlags{csv: p, by: by})
 		data, _ := os.ReadFile(p)
-		fmt.Fprintf(&b, "##### csv by=%q\n%s\n--- out\n%s", by, data, strings.ReplaceAll(out.String(), dir, "<DIR>"))
+		fmt.Fprintf(&b, "##### csv by=%q\n%s\n--- out\n%s", by, data, strings.ReplaceAll(strings.ReplaceAll(out.String(), dir+string(os.PathSeparator), "<DIR>/"), dir, "<DIR>"))
 	}
 
 	got := b.String()
