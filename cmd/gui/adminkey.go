@@ -115,7 +115,10 @@ func adminKeyPlanLines(r core.AdminKeyReissue, user, host string) (lines []strin
 // lines — что сказать человеку.
 func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta) (core.AdminKey, []string) {
 	c := sess.Creds
-	if c == nil || c.Password == "" {
+	if c == nil {
+		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: у открытого сервера нет данных входа (адрес, пользователь, пароль) — переподключитесь к серверу."}
+	}
+	if c.Password == "" {
 		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: в ключе открытого сервера нет пароля SSH, а выдаваемому ключу нужен способ входа. Окно программы пароль не спрашивает — выдайте ключ командой: amnezia-admin admin-key -host " + c.Host + " -user " + c.User + " -out <файл> (она спросит пароль в терминале)."}
 	}
 	port := 0
