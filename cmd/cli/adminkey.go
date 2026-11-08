@@ -259,6 +259,15 @@ func runAdminKey(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY b
 	}
 
 	// --- согласие на пароль в ключе ---
+	// При входе ключами ПК пароля у программы нет — сказать это ДО вопроса
+	// о согласии (ревью PR #75, L1).
+	if byKeys {
+		fmt.Fprintln(w, "Вход был по ключу ПК — пароля для ключа vpn:// у программы нет: его придётся ввести.")
+		if !isTTY {
+			fmt.Fprintln(errOut, "Ключ не выдан: без терминала пароль для ключа не спрашивается.")
+			return exitAdminKeyUsage
+		}
+	}
 	consent := o.includePw
 	if !consent {
 		if !isTTY {
@@ -272,11 +281,6 @@ func runAdminKey(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY b
 		}
 	}
 	if byKeys {
-		fmt.Fprintln(w, "Вход был по ключу ПК — пароля для ключа vpn:// у программы нет.")
-		if !isTTY {
-			fmt.Fprintln(errOut, "Ключ не выдан: без терминала пароль для ключа не спрашивается.")
-			return exitAdminKeyUsage
-		}
 		if pw = askKeyPassword(ctx, w, user, host); pw.Len() == 0 {
 			fmt.Fprintln(w, "Пароль не введён — ключ не выдан.")
 			return exitAdminKeyUsage

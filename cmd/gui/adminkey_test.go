@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/test"
@@ -16,6 +18,8 @@ import (
 )
 
 const guiAKPw = "Canary-GUI-AK-5d1e!"
+
+var guiAKNow = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 
 var guiAKBody = regexp.MustCompile(`vpn://[A-Za-z0-9_-]{8}`)
 
@@ -40,13 +44,13 @@ func newGUIAKFixture(t *testing.T, setup func(*fakesrv.Server)) *guiAKFixture {
 	v0, s0 := guiAdminKeyVerify, guiAdminKeySave
 	t.Cleanup(func() { guiAdminKeyVerify, guiAdminKeySave = v0, s0 })
 	guiAdminKeyVerify = func(core.AdminKey, core.AdminKeyInput, string, string) error { return f.verify }
-	guiAdminKeySave = func(_ *ui, _ string, key core.AdminKey, done func(string, error)) {
-		w, err := storage.Writer(storage.NewFileURI(f.out))
-		if err != nil {
-			done("", err)
-			return
+	f.u.keyMeta = adminKeyMeta{Description: "Мой сервер", DNS1: "9.9.9.9", DNS2: "1.0.0.1", Default: "amnezia-awg2"}
+	guiAdminKeySave = func(_ *ui, host string, key core.AdminKey, done func(string, error)) {
+		p, err := adminKeySaveTo(storage.NewFileURI(filepath.Dir(f.out)), host, key, guiAKNow)
+		if err == nil {
+			err = os.Rename(p, f.out)
 		}
-		done(writeChosenAdminKey(w, key))
+		done(f.out, err)
 	}
 	return f
 }
@@ -127,6 +131,10 @@ func TestGUIAdminKey(t *testing.T) {
 			if c, err := core.CredsFromConfig(cfg); err != nil || c.Password != guiAKPw {
 				t.Fatal("в ключе не тот пароль")
 			}
+			// M1: описание и DNS — из ключа открытого сервера, как в CLI
+			if core.Str(cfg, "description") != "Мой сервер" || core.Str(cfg, "dns1") != "9.9.9.9" || core.Str(cfg, "dns2") != "1.0.0.1" {
+				t.Fatalf("не перенесены description/dns: %q %q %q", core.Str(cfg, "description"), core.Str(cfg, "dns1"), core.Str(cfg, "dns2"))
+			}
 			if n := len(cfg["containers"].([]any)); n != 1 {
 				t.Fatalf("контейнеров в ключе %d", n)
 			}
@@ -153,6 +161,42 @@ func TestGUIAdminKeyPlanLines(t *testing.T) {
 		}
 		if len(tc.r.Gaps) > 0 && !strings.Contains(strings.Join(lines, "\n"), "НЕ в ключ: amnezia-xray") {
 			t.Errorf("%s: пробел не назван", tc.name)
+		}
+	}
+}
+
+// M2/L1 (ревью PR #75): существующий файл не перезаписывается (содержимое
+// цело), место не в файловой системе — отказ, а не «записан, 0600».
+func TestGUIAdminKeySaveTo(t *testing.T) {
+	key, err := core.BuildAdminKey(core.AdminKeyInput{Host: "h", Port: 22, User: "root", Password: core.NewSecret([]byte(guiAKPw)), PasswordConsent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	prev := filepath.Join(dir, core.AdminKeyFileName("h", guiAKNow))
+	if err := os.WriteFile(prev, []byte("прежнее"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminKeySaveTo(storage.NewFileURI(dir), "h", key, guiAKNow); err == nil || !strings.Contains(err.Error(), "не перезаписываю") {
+		t.Fatalf("существующий файл: %v", err)
+	}
+	if b, _ := os.ReadFile(prev); string(b) != "прежнее" {
+		t.Fatal("прежнее содержимое файла потеряно")
+	}
+	other, _ := storage.ParseURI("content://provider/dir")
+	if _, err := adminKeySaveTo(other, "h", key, guiAKNow); !errors.Is(err, errAdminKeyNotFS) {
+		t.Fatalf("не file: %v", err)
+	}
+	p, err := adminKeySaveTo(storage.NewFileURI(dir), "h", key, guiAKNow.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); strings.TrimSpace(string(b)) != key.Reveal() {
+		t.Fatal("в файле не тот ключ")
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+			t.Fatalf("права %v", st.Mode().Perm())
 		}
 	}
 }

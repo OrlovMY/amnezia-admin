@@ -3,18 +3,20 @@ package main
 // «Выдать ключ vpn://…» — повторная выдача админского ключа для открытого
 // сервера (то же, что команда admin-key CLI). Ключ собирается из
 // ФАКТИЧЕСКОГО состояния сервера (core.AdminKeyReissuePlan), проверяется
-// VerifyAdminKey и пишется только в файл, выбранный в системном окне
-// сохранения (права 0600). На экран ключ не выводится: в окнах — путь к
-// файлу и перечень контейнеров.
+// VerifyAdminKey и пишется только в НОВЫЙ файл в каталоге, выбранном в
+// системном окне (core.WriteAdminKeyFile: O_EXCL, права 0600 при создании;
+// существующий файл не перезаписывается, место не в файловой системе —
+// отказ). На экран ключ не выводится: в окнах — путь и перечень контейнеров.
+// Описание, DNS и контейнер по умолчанию переносятся из ключа открытого
+// сервера (как в CLI).
 //
 // Порядок: чтение сервера (фон) → окно согласия: что войдёт в ключ, чего
 // НЕ будет (неполный ключ — отдельной надписью кнопки), предупреждение о
-// пароле → сборка и проверка входом (фон) → окно сохранения → итог.
+// пароле → сборка и проверка входом (фон) → выбор каталога → итог.
 
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -22,7 +24,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 
 	"amnezia-admin/core"
 )
@@ -36,58 +37,52 @@ const (
 	adminKeyReadingText = "Читаю с сервера контейнеры и параметры протоколов…"
 )
 
+// adminKeyMeta — поля ключа открытого сервера, которые переносятся в
+// выдаваемый ключ (ревью PR #75, M1).
+type adminKeyMeta struct {
+	Description, DNS1, DNS2, Default string
+}
+
+func adminKeyMetaOf(cfg map[string]any) adminKeyMeta {
+	return adminKeyMeta{Description: core.Str(cfg, "description"), DNS1: core.Str(cfg, "dns1"),
+		DNS2: core.Str(cfg, "dns2"), Default: core.Str(cfg, "defaultContainer")}
+}
+
 // Швы теста.
 var (
-	guiAdminKeyPlan = func(s *core.Session) (core.AdminKeyReissue, error) {
-		return s.AdminKeyReissuePlan("")
+	guiAdminKeyPlan = func(s *core.Session, preferDefault string) (core.AdminKeyReissue, error) {
+		return s.AdminKeyReissuePlan(preferDefault)
 	}
 	guiAdminKeyVerify = core.VerifyAdminKey
-	// guiAdminKeySave — выбор файла и запись; done получает путь или ошибку
-	// (путь "" и ошибка nil — человек отменил выбор).
+	// guiAdminKeySave — выбор каталога и запись; done получает путь или
+	// ошибку (путь "" и ошибка nil — человек отменил выбор).
 	guiAdminKeySave = func(u *ui, host string, key core.AdminKey, done func(string, error)) {
-		fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+		fd := dialog.NewFolderOpen(func(dir fyne.ListableURI, err error) {
 			if err != nil {
 				done("", err)
 				return
 			}
-			if w == nil {
+			if dir == nil {
 				done("", nil)
 				return
 			}
-			done(writeChosenAdminKey(w, key))
+			done(adminKeySaveTo(dir, host, key, time.Now()))
 		}, u.win)
-		fd.SetFileName(core.AdminKeyFileName(host, time.Now()))
-		fd.SetFilter(storage.NewExtensionFileFilter([]string{".txt"}))
 		fd.Show()
 	}
 )
 
-// writeChosenAdminKey — ключ (только Reveal) в выбранный файл, права 0600;
-// не вышло — файл удаляется, текст ошибки без содержимого ключа.
-func writeChosenAdminKey(w fyne.URIWriteCloser, key core.AdminKey) (string, error) {
-	where := w.URI().Path()
-	isFile := w.URI().Scheme() == "file"
-	if isFile {
-		// права — ДО записи секрета: файл, созданный окном выбора, мог
-		// получить права по umask
-		if err := chmodChosen(where, 0o600); err != nil {
-			_ = w.Close()
-			_ = os.Remove(where)
-			return "", fmt.Errorf("ключ НЕ записан в %s: %w (%v) — файл с паролем сервера могли бы прочитать другие пользователи", where, errPermsNotLimited, err)
-		}
+// errAdminKeyNotFS — выбранное место не каталог файловой системы: права
+// 0600 там не установить, а «записан, права не известны» — не ответ.
+var errAdminKeyNotFS = errors.New("выбранное место — не каталог файловой системы: права 0600 там не установить, ключ не записан; выберите обычный каталог")
+
+// adminKeySaveTo — ключ в НОВЫЙ файл каталога dir (O_EXCL, 0600);
+// существующий файл не перезаписывается.
+func adminKeySaveTo(dir fyne.URI, host string, key core.AdminKey, now time.Time) (string, error) {
+	if dir.Scheme() != "file" {
+		return "", errAdminKeyNotFS
 	}
-	_, werr := w.Write([]byte(key.Reveal() + "\n"))
-	cerr := w.Close()
-	if werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		if isFile {
-			_ = os.Remove(where)
-		}
-		return "", fmt.Errorf("ключ НЕ записан в %s", where)
-	}
-	return where, nil
+	return core.WriteAdminKeyFile(filepath.Join(dir.Path(), core.AdminKeyFileName(host, now)), key)
 }
 
 // adminKeyPlanLines — что войдёт в ключ и чего НЕ будет; can — можно ли
@@ -118,17 +113,17 @@ func adminKeyPlanLines(r core.AdminKeyReissue, user, host string) (lines []strin
 
 // adminKeyIssue — сборка и проверка входом (фон). key.Len()==0 — не выдан;
 // lines — что сказать человеку.
-func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue) (core.AdminKey, []string) {
+func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta) (core.AdminKey, []string) {
 	c := sess.Creds
 	if c == nil || c.Password == "" {
-		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: в ключе открытого сервера нет пароля SSH — ключ без способа входа бесполезен."}
+		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: в ключе открытого сервера нет пароля SSH, а выдаваемому ключу нужен способ входа. Окно программы пароль не спрашивает — выдайте ключ командой: amnezia-admin admin-key -host " + c.Host + " -user " + c.User + " -out <файл> (она спросит пароль в терминале)."}
 	}
 	port := 0
 	if _, err := fmt.Sscanf(c.Port, "%d", &port); err != nil || port < 1 || port > 65535 {
 		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: порт SSH открытого сервера не 1…65535."}
 	}
 	in := core.AdminKeyInput{Host: c.Host, Port: port, User: c.User, Password: core.NewSecret([]byte(c.Password)), PasswordConsent: true,
-		Containers: r.Containers, DefaultContainer: r.Default, Description: c.Host}
+		Containers: r.Containers, DefaultContainer: r.Default, Description: meta.Description, DNS1: meta.DNS1, DNS2: meta.DNS2}
 	key, err := core.BuildAdminKey(in)
 	if err != nil {
 		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: " + core.MaskText(err.Error())}
@@ -136,7 +131,7 @@ func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue) (core.AdminKey, [
 	verr := guiAdminKeyVerify(key, in, sess.HostKeyFingerprint, filepath.Join(core.DefaultVaultDir(), "known_hosts"))
 	switch {
 	case errors.Is(verr, core.ErrAdminKeyAuthRejected):
-		return core.AdminKey{}, []string{"Ключ НЕ годится: сервер не принял пароль из ключа — пароль не подошёл или вход по паролю на сервере выключен (PasswordAuthentication no). Ключ vpn:// не выдан."}
+		return core.AdminKey{}, []string{"Ключ НЕ годится: сервер не принял пароль из ключа — пароль не подошёл или вход по паролю на сервере выключен (PasswordAuthentication no). Ключ vpn:// не выдан. С другим паролем — командой amnezia-admin admin-key -host " + c.Host + " -out <файл> (спросит пароль в терминале)."}
 	case errors.Is(verr, core.ErrAdminKeyMismatch):
 		return core.AdminKey{}, []string{"Ключ vpn:// НЕ выдан — собранный ключ не совпал с ожидаемым: " + core.MaskText(verr.Error())}
 	case verr != nil:
@@ -151,7 +146,7 @@ func adminKeyResultText(path string, err error, user string, partial []string, l
 	case err != nil:
 		return "Ключ vpn:// НЕ записан: " + core.MaskText(err.Error())
 	case path == "":
-		return "Ключ vpn:// не записан: файл не выбран."
+		return "Ключ vpn:// не записан: каталог не выбран."
 	}
 	perm := "права 0600 — только владелец"
 	if runtime.GOOS == "windows" {
@@ -170,13 +165,13 @@ func (u *ui) adminKeyAsk() {
 	if u.busy || u.sess == nil {
 		return
 	}
-	sess := u.sess
+	sess, meta := u.sess, u.keyMeta
 	u.setBusy(true)
 	if u.status != nil {
 		u.status.SetText(adminKeyReadingText)
 	}
 	goSafe(func() {
-		r, err := guiAdminKeyPlan(sess)
+		r, err := guiAdminKeyPlan(sess, meta.Default)
 		uiDo(func() {
 			u.setBusy(false)
 			if u.sess != sess {
@@ -186,13 +181,13 @@ func (u *ui) adminKeyAsk() {
 				u.showInfo(adminKeyTitle, "Ключ vpn:// не выдан — состояние сервера неизвестно: "+core.MaskText(err.Error()))
 				return
 			}
-			u.adminKeyConfirm(sess, r)
+			u.adminKeyConfirm(sess, r, meta)
 		})
 	})
 }
 
 // adminKeyConfirm — окно согласия по прочитанному плану.
-func (u *ui) adminKeyConfirm(sess *core.Session, r core.AdminKeyReissue) {
+func (u *ui) adminKeyConfirm(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta) {
 	user, host := "", ""
 	if sess.Creds != nil {
 		user, host = sess.Creds.User, sess.Creds.Host
@@ -209,7 +204,7 @@ func (u *ui) adminKeyConfirm(sess *core.Session, r core.AdminKeyReissue) {
 	u.confirmWindowBtn(adminKeyTitle, []fyne.CanvasObject{wrapLabel(strings.Join(lines, "\n"), false)}, okText, true, func() {
 		u.setBusy(true)
 		goSafe(func() {
-			key, res := adminKeyIssue(sess, r)
+			key, res := adminKeyIssue(sess, r, meta)
 			uiDo(func() {
 				u.setBusy(false)
 				if key.Len() == 0 {

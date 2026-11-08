@@ -44,7 +44,7 @@ var cliUsage = map[string][]string{
 	"stats":           {"stats [status|install|uninstall] -key vpn://... [-from ГГГГ-ММ-ДД] [-to ГГГГ-ММ-ДД] [-csv файл]"},
 	"admin-key": {
 		"admin-key (-key-file файл | -key vpn://...) -out файл [-include-password] [-allow-partial]  — выдать ключ vpn:// заново",
-		"admin-key -host IP|имя [-port 22] [-user root] -out файл [-include-password] [-allow-partial]",
+		"admin-key -host IP|имя [-port 22] [-user root] [-hostkey SHA256:…] -out файл [-include-password] [-allow-partial]",
 	},
 }
 

@@ -47,6 +47,9 @@ type clientEntry struct {
 type Server struct {
 	// Names — контейнеры, которые "запущены" на сервере (вернёт `docker ps`).
 	Names []string
+	// Stopped — контейнеры, которые есть, но остановлены (видны только
+	// `docker ps -a`).
+	Stopped []string
 
 	// FailRead — путь → ошибка для `docker exec … cat <path>`. Общий хук на
 	// чтение файла: PR-2 пользуется этим же полем, а не заводит своё.
@@ -346,7 +349,9 @@ func (s *Server) RuntimePeers() []string {
 // сверяются в коде — Go/RE2 не поддерживает обратные ссылки в самом паттерне.
 var (
 	reDockerPS = `docker ps --format '{{.Names}}'`
-	reCat      = regexp.MustCompile(`^docker exec (\S+) cat (\S+)$`)
+	// reDockerPSAll — все контейнеры, и остановленные (повторная выдача ключа).
+	reDockerPSAll = `docker ps -a --format '{{.Names}}'`
+	reCat         = regexp.MustCompile(`^docker exec (\S+) cat (\S+)$`)
 	// reCASWrite — A3б: запись обоих файлов со сверкой под flock на каталоге
 	// /run/lock. Тело скрипта берётся из команды и ИСПОЛНЯЕТСЯ настоящим sh
 	// (execScript); побайтно текст сверяет TestServerCommandsUnchanged в core.
@@ -597,6 +602,12 @@ func (s *Server) legacySplit(cmd, path string, stdin []byte, gap time.Duration) 
 
 func (s *Server) dispatch(cmd string, stdin []byte) (string, error) {
 	switch {
+	case cmd == reDockerPSAll:
+		if s.FailDockerPS != nil {
+			return "", s.FailDockerPS
+		}
+		return strings.Join(append(append([]string{}, s.Names...), s.Stopped...), "\n"), nil
+
 	case cmd == reDockerPS:
 		if s.FailDockerPS != nil {
 			return "", s.FailDockerPS

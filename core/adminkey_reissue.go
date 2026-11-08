@@ -16,6 +16,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // AdminKeyGap — контейнер сервера, которого в ключе НЕ будет, и почему.
@@ -41,15 +42,6 @@ func (r AdminKeyReissue) Complete() bool { return len(r.Gaps) == 0 && len(r.Cont
 // прочитаны: ключ без протоколов не выдаётся даже с согласием на неполный.
 var ErrAdminKeyNoContainers = errors.New("ни у одного контейнера параметры не прочитаны — ключ не выдаётся")
 
-// adminKeyNoParams — закрытый список официальных контейнеров Amnezia без
-// клиентских параметров протокола: их отсутствие в ключе — не пробел
-// (решение ядра по PR #75). Кладёт ли приложение 5.1.0.6 amnezia-dns в
-// ключ «полный доступ», по исходникам НЕ сверено (их нет под рукой) —
-// поэтому по решению ядра «если не подтверждено — пропускать». Остальные
-// известные типы (OpenVPN, Cloak, SFTP…) параметры имеют, программа их не
-// читает — они остаются пробелом.
-var adminKeyNoParams = map[string]bool{"amnezia-dns": true}
-
 // adminKeyContainerFrom — параметры протокола одного найденного контейнера.
 func (s *Session) adminKeyContainerFrom(c *Container) (AdminKeyContainer, string, error) {
 	n := c.Name
@@ -58,6 +50,10 @@ func (s *Session) adminKeyContainerFrom(c *Container) (AdminKeyContainer, string
 	}
 	var conf []byte
 	note := ""
+	if n == "amnezia-dns" {
+		// у DNS параметров нет — читать нечего (ключ: {"dns":{}})
+		return AdminKeyContainer{Name: n, Protocol: map[string]any{}}, "", nil
+	}
 	if n == "amnezia-xray" {
 		raw, rerr := s.catIn(c, c.Dir+"/"+xrayConfFile)
 		if rerr != nil {
@@ -92,13 +88,25 @@ func (s *Session) AdminKeyReissuePlan(preferDefault string) (AdminKeyReissue, er
 	if err != nil {
 		return AdminKeyReissue{}, fmt.Errorf("ключ: список контейнеров на сервере не прочитан: %w", err)
 	}
+	// Остановленные: docker ps без -a их не видит, а «не видно» — не «нет»
+	// (ревью PR #75, H2). Параметры читаются docker exec, которому нужен
+	// запущенный контейнер, — поэтому остановленный идёт в пробелы.
+	allOut, err := s.docker("docker ps -a --format '{{.Names}}'", nil)
+	if err != nil {
+		return AdminKeyReissue{}, fmt.Errorf("ключ: список всех контейнеров (docker ps -a) не прочитан: %w", err)
+	}
+	running := map[string]bool{}
+	for _, c := range found {
+		running[c.Name] = true
+	}
 	var r AdminKeyReissue
+	for _, n := range strings.Fields(allOut) {
+		if strings.HasPrefix(n, "amnezia-") && !running[n] {
+			r.Gaps = append(r.Gaps, AdminKeyGap{Container: n, Reason: "контейнер остановлен — параметры протокола без запуска не читаются; запустите его (docker start " + n + ") и повторите"})
+		}
+	}
 	for i := range found {
 		c := &found[i]
-		if adminKeyNoParams[c.Name] {
-			r.Notes = append(r.Notes, c.Name+": служба Amnezia без клиентских параметров — в ключ не кладётся, это не пробел")
-			continue
-		}
 		if _, ok := adminKeyProto(c.Name); !ok {
 			r.Gaps = append(r.Gaps, AdminKeyGap{Container: c.Name, Reason: "тип контейнера в ключ не кладётся (программа знает формат ключа только для AWG, AWG2, WireGuard и XRay)"})
 			continue

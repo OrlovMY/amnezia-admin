@@ -109,6 +109,10 @@ func adminKeyProto(container string) (string, bool) {
 		return "wireguard", true
 	case "amnezia-xray":
 		return "xray", true
+	case "amnezia-dns":
+		// Proto::Dns (containerUtils.cpp:232), DnsProtocolConfig::toJson —
+		// пустой объект (dnsProtocolConfig.cpp, ac175c8).
+		return "dns", true
 	}
 	return "", false
 }
@@ -284,6 +288,8 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 				}
 			}
 		}
+	case "amnezia-dns":
+		return p, nil // параметров нет: {"dns":{}}, как у приложения
 	case "amnezia-xray":
 		// Строгий разбор; пустой список клиентов допустим — flow для ключа
 		// не нужен (ревью PR #70-2, M1; R3).

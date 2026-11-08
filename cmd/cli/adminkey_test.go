@@ -132,7 +132,10 @@ func TestAdminKeyCLI(t *testing.T) {
 			wantOut: []string{"БЕЗ: amnezia-foo", "Ключ НЕПОЛНЫЙ: в нём нет amnezia-foo"}},
 		{name: "amnezia-dns — ключ полный, без -allow-partial", setup: func(e *akEnv) {
 			e.srv.Names = []string{"amnezia-awg2", "amnezia-dns"}
-		}, includePw: true, wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2"}, wantOut: []string{"amnezia-dns: служба Amnezia без клиентских параметров"}},
+		}, includePw: true, wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2", "amnezia-dns"}, wantOut: []string{"В ключ: amnezia-dns"}},
+		{name: "остановленный контейнер — пробел, без -allow-partial не выдан", setup: func(e *akEnv) {
+			e.srv.Stopped = []string{"amnezia-xray"}
+		}, includePw: true, wantCode: exitAdminKeyUnknown, wantOut: []string{"НЕ в ключ: amnezia-xray — контейнер остановлен"}},
 		{name: "список контейнеров не прочитан", setup: func(e *akEnv) { e.srv.Names = nil }, includePw: true,
 			wantCode: exitAdminKeyUnknown, wantOut: []string{"состояние сервера неизвестно"}},
 		{name: "без согласия и без терминала", wantCode: exitAdminKeyUsage, wantOut: []string{"-include-password"}},
@@ -151,7 +154,7 @@ func TestAdminKeyCLI(t *testing.T) {
 		{name: "адресом: ключ ПК, без терминала пароля нет", host: true, setup: func(e *akEnv) { e.keyAuth = true }, includePw: true,
 			wantCode: exitAdminKeyUsage, wantOut: []string{"пароль для ключа не спрашивается"}},
 		{name: "адресом: ключ ПК, пароль спрошен в терминале", host: true, tty: true, setup: func(e *akEnv) { e.keyAuth = true }, includePw: true,
-			wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2"}, wantOut: []string{"пароля для ключа vpn:// у программы нет"}},
+			wantCode: 0, wantFile: true, wantIn: []string{"amnezia-awg2"}, wantOut: []string{"пароля для ключа vpn:// у программы нет: его придётся ввести"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,7 +211,7 @@ func TestAdminKeyCLI(t *testing.T) {
 				m := c.(map[string]any)
 				got = append(got, core.Str(m, "container"))
 				// параметры — с сервера (fakesrv: H1 = 100-200), а не из старого ключа (H1 = 1)
-				if p, _ := m["awg"].(map[string]any); core.Str(p, "H1") != "100-200" {
+				if p, ok := m["awg"].(map[string]any); core.Str(m, "container") == "amnezia-awg2" && (!ok || core.Str(p, "H1") != "100-200") {
 					t.Fatalf("параметры не с сервера: H1=%q", core.Str(p, "H1"))
 				}
 			}
