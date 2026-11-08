@@ -363,7 +363,7 @@ func TestToHostExitCodes(t *testing.T) {
 		{"не чистый", func(e *thEnv) {
 			e.dst.f[core.ProvDockerTag] = "DOCKER=yes\nSRVRC=0\nSRV=27.1.1\nEND\n"
 			e.dst.f[core.ProvCtrTag] = "RC=0\nN=amnezia-awg2|\nEND\n"
-		}, true, "", ap, 1, "не чистый", 0},
+		}, true, "", ap, 4, "это не «клиентов нет»", 0}, // доезд: настоящий PlanTeardown, состав не прочитан
 		{"порт копии занят", func(e *thEnv) {
 			e.dst.f[core.ProvPortsTag] = "SSRC=0\nL=tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nL=udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*\nEND\n"
 		}, true, "", ap, 1, "порт из копии", 0},

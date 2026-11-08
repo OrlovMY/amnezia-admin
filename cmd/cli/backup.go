@@ -29,7 +29,10 @@ const (
 	exitRestoreStopped   = 4
 )
 
-func userBackupsDir() (string, error) { return core.UserBackupsDir() }
+// userBackupsDirFn — шов теста: каталог копий.
+var userBackupsDirFn = core.UserBackupsDir
+
+func userBackupsDir() (string, error) { return userBackupsDirFn() }
 
 func printLines(w io.Writer, lines []string) {
 	for _, l := range lines {

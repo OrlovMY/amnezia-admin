@@ -97,6 +97,15 @@ var (
 	}
 	toHostProvCheck = func(s *core.Session, b *core.Backup) core.ProvisionReport { return s.ProvisionCheckFor(b) }
 	toHostInstall   = core.Install
+	// toHostTeardownPlan / toHostTeardown — состав нечистой цели и снос
+	// (копия → проверка копии → маркер → снос → измерение).
+	toHostTeardownPlan = func(ctx context.Context, s *core.Session, now time.Time) (*core.TeardownPlan, error) {
+		return s.PlanTeardown(ctx, version.String(), now, backupResolve, nil)
+	}
+	toHostTeardown = func(s *core.Session, p *core.TeardownPlan, opt core.TeardownOptions) core.TeardownResult {
+		return s.ExecuteTeardown(p, opt)
+	}
+	toHostBackupsDir = core.UserBackupsDir
 	// toHostApply — перенос клиентов на поставленный сервер: тот же путь,
 	// что режим «ключ vpn://» (PrepareMigration + Apply), с уже прочитанной
 	// копией источника.
@@ -250,6 +259,11 @@ type toHostState struct {
 	previewErr       error
 	needAddr         bool
 	addrText         string
+	// td — состав нечистой цели (снос возможен с согласия); tdErr — состав
+	// прочитать не удалось. wipe/wipeNoCopy — согласия из окна сноса.
+	td               *core.TeardownPlan
+	tdErr            error
+	wipe, wipeNoCopy bool
 }
 
 // toHostConnectRun — вход и всё чтение до окна подтверждения — в фоне.
@@ -357,6 +371,13 @@ func (u *ui) toHostPrepare(ctx context.Context, src *core.Session, host, port, u
 	st.plan = core.PlanInstall(b, nil)
 	st.preview, st.previewErr = core.InstallPreview(st.plan)
 	st.needAddr, st.addrText = core.TargetAddressCheck(b, host, backupResolve)
+	if st.rep.Verdict() == core.ProvVerdictNo && toHostNotClean(st.rep) && core.TeardownWouldClear(st.rep) {
+		pv.report(core.Progress{Text: "состав нового сервера и его клиенты (только чтение)…"})
+		st.td, st.tdErr = toHostTeardownPlan(ctx, dst, time.Now())
+		if errors.Is(st.tdErr, core.ErrCanceled) {
+			return st, "", "", core.ErrCanceled
+		}
+	}
 	if ctx.Err() != nil {
 		return st, "", "", core.ErrCanceled
 	}
@@ -473,12 +494,22 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	case core.ProvVerdictUnknown:
 		vl = append(vl, "Часть пунктов узнать не удалось — это не «годится». Ничего не изменено.")
 	case core.ProvVerdictNo:
-		if toHostNotClean(st.rep) {
-			vl = append(vl, "Новый сервер не чистый: на нём уже есть контейнеры Amnezia. Снос существующего — отдельный шаг, в этой версии его нет. Если у вас есть его ключ vpn:// — выберите режим «"+migrateModeKey+"».")
+		switch {
+		case toHostWipeable(st):
+			vl = append(vl, "Новый сервер не чистый: на нём уже стоит Amnezia (состав ниже). Её можно снести перед установкой — после записи и проверки копии; «"+toHostNextText+"» откроет окно сноса с явным подтверждением. Если клиентов этого сервера надо сохранить и у вас есть его ключ vpn:// — выберите режим «"+migrateModeKey+"».")
+		case st.tdErr != nil:
+			vl = append(vl, "Новый сервер не чистый, но "+core.MaskText(st.tdErr.Error())+". Какие на нём клиенты — неизвестно (это не «клиентов нет»).")
+		case st.td != nil:
+			vl = append(vl, "Снос невозможен: "+st.td.Refusal()+".")
+		case toHostNotClean(st.rep):
+			vl = append(vl, "Новый сервер не чистый, и кроме Amnezia есть другие препятствия или непроверенные пункты (см. выше): снос их не устранит, поэтому не предлагается.")
 		}
 		vl = append(vl, "Ничего не изменено.")
 	}
 	add(vl, true, widget.MediumImportance)
+	if st.td != nil {
+		add(st.td.InventoryLines(), false, widget.WarningImportance)
+	}
 	add(toHostPlanLines(st.plan), false, widget.MediumImportance)
 	if st.previewErr != nil {
 		add([]string{"Перечень изменений на хосте не составлен — установка не начнётся: " + core.MaskText(st.previewErr.Error())}, true, widget.DangerImportance)
@@ -492,7 +523,7 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	r.text = strings.Join(all, "\n")
 	reason := ""
 	switch {
-	case verdict != core.ProvVerdictYes:
+	case verdict != core.ProvVerdictYes && !toHostWipeable(st):
 		reason = toHostReasonProv
 	case !st.plan.Ready() || st.previewErr != nil:
 		reason = toHostReasonPlan
@@ -501,7 +532,11 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	if reason == "" {
 		r.reason.SetText(toHostReasonNext)
 	}
-	cw := u.confirmWindowPinned(toHostReviewTitle, sections, []fyne.CanvasObject{r.reason}, toHostNextText, false, func() { u.toHostChoices(st) }, 900)
+	next := func() { u.toHostChoices(st) }
+	if verdict != core.ProvVerdictYes {
+		next = func() { u.toHostWipeWindow(st) }
+	}
+	cw := u.confirmWindowPinned(toHostReviewTitle, sections, []fyne.CanvasObject{r.reason}, toHostNextText, false, next, 900)
 	r.d, r.next, r.back = cw.d, cw.ok, cw.cancel
 	r.back.SetText(toHostBackText)
 	cw.onCancel(func() { // «Назад»/Esc — к окну адреса; цель закрыта
@@ -515,6 +550,85 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	// просмотр — на всё окно: прокрутка не по содержимому, а по окну
 	sizeDialog(r.d, u.win.Canvas().Size())
 	return r
+}
+
+// toHostWipeable — цель не чистая только из-за Amnezia, состав прочитан,
+// посторонних amnezia-* нет: снос можно предложить.
+func toHostWipeable(st *toHostState) bool {
+	return st.td != nil && st.tdErr == nil && st.td.Refusal() == "" && core.TeardownWouldClear(st.rep)
+}
+
+const (
+	toHostWipeTitle    = "Снести Amnezia на новом сервере?"
+	toHostWipeOK       = "Снести после копии и продолжить"
+	toHostWipeCheck    = "Понимаю: перечисленные контейнеры, тома и образы Amnezia на НОВОМ сервере будут удалены, клиенты на нём перестанут работать"
+	toHostWipeNoCopy   = "Понимаю: полной копии НЕ БУДЕТ — настройки и клиенты не скопированных контейнеров пропадут безвозвратно"
+	toHostWipeReason   = "«" + toHostWipeOK + "» недоступна: подтвердите снос (галка выше)."
+	toHostWipeReasonNC = "«" + toHostWipeOK + "» недоступна: подтвердите снос без полной копии (вторая галка)."
+	toHostWipeReady    = "Снос подтверждён. Сам снос — после выборов на следующем шаге, перед установкой: сначала копия и её проверка, затем снос."
+)
+
+// toHostWipe — окно сноса (поля — для тестов).
+type toHostWipe struct {
+	d              dialog.Dialog
+	ok             *escButton
+	check, noCopy  *widget.Check
+	reason         *msgText
+	text, copyPath string
+}
+
+// toHostWipeWindow — состав цели, клиенты, путь будущей копии и явное
+// подтверждение: кнопка погашена, пока галки не стоят; фокус — на «Назад».
+func (u *ui) toHostWipeWindow(st *toHostState) *toHostWipe {
+	w := &toHostWipe{}
+	u.toHostWiped = w
+	lines := append([]string{}, st.td.InventoryLines()...)
+	if st.td.CopyState() != core.CopyNone {
+		dir, err := toHostBackupsDir()
+		if err != nil {
+			w.copyPath = "каталог копий не определён (" + core.MaskText(err.Error()) + ") — снос не выполнится"
+		} else {
+			w.copyPath = filepath.Join(dir, core.TeardownCopyName(st.host, time.Now()))
+		}
+		lines = append(lines, "", "Копия нового сервера будет записана (имя уточнится по времени записи; права — только владелец) и перечитана до сноса: "+w.copyPath,
+			"Не записалась или не сверилась — снос не выполняется. Слой копии (с паролем или без) — тот же, что у автокопии на следующем шаге.")
+	}
+	lines = append(lines, "Если снос оборвётся, при следующем запуске программа скажет, что его итог неизвестен.")
+	w.text = strings.Join(lines, "\n")
+	w.reason = wrapLabel(toHostWipeReason, true)
+	var update func()
+	w.check = widget.NewCheck(toHostWipeCheck, func(bool) { update() })
+	pinned := []fyne.CanvasObject{w.check}
+	if st.td.NeedsNoCopyConfirm() {
+		w.noCopy = widget.NewCheck(toHostWipeNoCopy, func(bool) { update() })
+		pinned = append(pinned, w.noCopy)
+	}
+	pinned = append(pinned, w.reason)
+	cw := u.confirmWindowPinned(toHostWipeTitle, []fyne.CanvasObject{newMsgText(w.text, fyne.TextAlignLeading, fyne.TextStyle{})}, pinned, toHostWipeOK, true, func() {
+		st.wipe, st.wipeNoCopy = true, w.noCopy != nil && w.noCopy.Checked
+		u.toHostChoices(st)
+	}, 760)
+	w.d, w.ok = cw.d, cw.ok
+	cw.cancel.SetText(toHostBackText)
+	cw.onCancel(func() {
+		st.wipe, st.wipeNoCopy = false, false
+		u.toHostWindow(st)
+	})
+	update = func() {
+		switch {
+		case !w.check.Checked:
+			w.reason.SetText(toHostWipeReason)
+			w.ok.Disable()
+		case w.noCopy != nil && !w.noCopy.Checked:
+			w.reason.SetText(toHostWipeReasonNC)
+			w.ok.Disable()
+		default:
+			w.reason.SetText(toHostWipeReady)
+			w.ok.Enable()
+		}
+	}
+	update()
+	return w
 }
 
 // toHostSummary — краткая сводка плана: одна строка на контейнер.
@@ -541,6 +655,9 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 	summary := toHostSummary(st.plan)
 	v.text = strings.Join(summary, "\n")
 	sections := []fyne.CanvasObject{wrapLabel(v.text, false), wrapLabel(migrateAutoCopyNote, false)}
+	if st.wipe {
+		sections = append(sections, wrapLabel("Перед установкой: копия нового сервера (тем же слоем, что автокопия), её проверка и снос Amnezia на нём — подтверждено в окне сноса.", true))
+	}
 	warn := wrapLabel("", false)
 	sections = append(sections, warn)
 	xray := false
@@ -617,7 +734,7 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 		}
 		reason := ""
 		switch {
-		case st.rep.Verdict() != core.ProvVerdictYes:
+		case st.rep.Verdict() != core.ProvVerdictYes && !(st.wipe && toHostWipeable(st)):
 			reason = toHostReasonProv
 		case !st.plan.Ready() || st.previewErr != nil:
 			reason = toHostReasonPlan
@@ -678,12 +795,27 @@ type toHostOutcome struct {
 	markerErr error
 	addr      bool // адрес выдачи подтверждался
 	xraySkip  bool // XRay оставлен как есть
+	// td — итог сноса (nil — снос не выполнялся: цель была чистой)
+	td *core.TeardownResult
 }
 
 // toHostVerdict — один из трёх исходов. «Неизвестно» проверяется раньше
 // остальных: неизмеренная установка — НЕИЗВЕСТНО. «Отмена» установку не
 // прерывает (ядро её не принимает): итог установки — измеренный, как есть.
 func toHostVerdict(o toHostOutcome) (migState, string) {
+	if o.td != nil {
+		switch o.td.State {
+		case core.TeardownUnknown:
+			return migUnknown, "НЕИЗВЕСТНО — снос Amnezia на новом сервере оборвался: что на нём осталось, программа не знает. Установка не начиналась, клиенты не перенесены. Проверьте сервер вручную (docker ps -a)."
+		case core.TeardownRefused:
+			return migNotDone, "НЕ ПЕРЕНЕСЕНО — снос не выполнялся, на новом сервере ничего не изменено (подробности ниже)."
+		case core.TeardownFailed:
+			return migNotDone, "НЕ ПЕРЕНЕСЕНО — снос Amnezia на новом сервере выполнен не полностью; установка не начиналась."
+		}
+		if o.res.Refused != "" {
+			return migNotDone, "НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере снесена (копия — ниже), установка не начиналась (подробности ниже)."
+		}
+	}
 	r := o.res
 	if !r.ReadyForRestore() {
 		switch {
@@ -773,8 +905,28 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 		}
 		// маркер незавершённой операции — ДО первой записи на цель; без него
 		// обрыв посреди установки не оставил бы следа (аудит AU M1)
+		if st.wipe {
+			o.td = toHostRunWipe(st, layer, pv)
+			if o.td.State != core.TeardownDone {
+				// свой маркер снос снял сам при измеренном итоге или оставил
+				// при неизвестном; чужой — не трогать
+				o.markerErr = errors.New("снос не завершён")
+				o.res = core.InstallResult{Refused: "снос не завершён: " + o.td.State.String()}
+			} else if rep := toHostProvCheck(st.dst, st.b); rep.Verdict() != core.ProvVerdictYes {
+				o.markerErr = errors.New("предпроверка после сноса")
+				var why []string
+				for _, it := range rep.Items {
+					if it.State != core.ProvOK {
+						why = append(why, it.What+": "+it.State.String()+" — "+it.Reason)
+					}
+				}
+				o.res = core.InstallResult{Refused: "предпроверка после сноса: " + rep.Verdict().String() + " (" + strings.Join(why, "; ") + ")"}
+			}
+		}
 		mk := core.OpMarker{Target: st.host, Started: time.Now(), Step: "установка Amnezia", Installed: o.names, Tool: version.String()}
-		if err := core.BeginOpMarker(mk); err != nil {
+		if o.markerErr != nil {
+			// снос не дал чистой цели — установка не начинается
+		} else if err := core.BeginOpMarker(mk); err != nil {
 			o.markerErr = err
 			why := " — без него обрыв посреди установки остался бы без следа"
 			if errors.Is(err, core.ErrOpMarkerPending) {
@@ -837,6 +989,32 @@ func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 			u.refresh()
 		})
 	})
+}
+
+// toHostRunWipe — снос с копией (слой — тот же, что у автокопии).
+func toHostRunWipe(st *toHostState, layer core.BackupLayer, pv *progressView) *core.TeardownResult {
+	pv.report(core.Progress{Text: "Перед установкой: копия нового сервера, её проверка и снос Amnezia на нём…"})
+	dir, err := toHostBackupsDir()
+	if err != nil {
+		return &core.TeardownResult{State: core.TeardownRefused, Why: "каталог копии не определён: " + core.MaskText(err.Error()) + " — снос не выполнялся"}
+	}
+	r := toHostTeardown(st.dst, st.td, core.TeardownOptions{Confirmed: st.wipe, NoCopyConfirmed: st.wipeNoCopy, CopyDir: dir, Layer: layer,
+		Now: time.Now(), Tool: version.String(), Progress: pv.report})
+	return &r
+}
+
+// toHostWipeLines — шаг «снос» в итоге.
+func toHostWipeLines(r *core.TeardownResult) []string {
+	out := []string{"Снос Amnezia на новом сервере: " + r.State.String()}
+	if r.Why != "" {
+		out = append(out, "  "+r.Why)
+	}
+	if r.CopyPath != "" {
+		out = append(out, "  Копия нового сервера до сноса: "+r.CopyPath)
+	} else {
+		out = append(out, "  Копия нового сервера не записывалась.")
+	}
+	return out
 }
 
 // toHostKeyAllowed — выдавать ли ключ: согласие, установка готова и либо
@@ -942,7 +1120,7 @@ func toHostInstallFailedLines(res core.InstallResult) []string {
 	}
 	switch {
 	case len(left) > 0:
-		out = append(out, "На новом сервере осталось: "+strings.Join(left, ", ")+". Повторная установка откажет («сервер не чистый»); снос — в следующей версии, вручную: docker rm -f <контейнер> (и docker volume rm для тома XRay).")
+		out = append(out, "На новом сервере осталось: "+strings.Join(left, ", ")+". Повторная установка предложит снести их (с подтверждением и копией нового сервера).")
 	case unknown || res.Measure == nil:
 		out = append(out, "Что осталось на новом сервере — неизвестно; проверьте docker ps -a перед повтором.")
 	default:
@@ -966,7 +1144,11 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 		hl.Importance = widget.DangerImportance
 	}
 	var body []string
-	body = append(body, migrateSrcSafeText, "", "Шаг 1. Установка Amnezia:")
+	body = append(body, migrateSrcSafeText)
+	if o.td != nil {
+		body = append(append(body, ""), toHostWipeLines(o.td)...)
+	}
+	body = append(body, "", "Шаг 1. Установка Amnezia:")
 	body = append(body, o.res.Lines()...)
 	installed := o.res.ReadyForRestore()
 	if !installed {
@@ -1011,7 +1193,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 				" (ключ читается из файла напрямую — не копируйте его через буфер обмена).",
 				"Или командой: "+sh, "PowerShell: "+ps)
 		default:
-			body = append(body, "Ключ нового сервера не выдан — продолжить можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ «полный доступ»; затем режим «"+migrateModeKey+"». Повторная установка откажет: сервер уже не чистый.")
+			body = append(body, "Ключ нового сервера не выдан — продолжить можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ «полный доступ»; затем режим «"+migrateModeKey+"». Повторная установка предложит снести поставленное (с подтверждением и копией).")
 		}
 	} else if transferred && o.keyPath == "" {
 		body = append(body, "", "Перенос выполнен, но ключ vpn:// нового сервера не выдан. Программа управляет сервером только по ключу: добавьте новый сервер в приложение Amnezia (адрес "+st.host+", пользователь "+st.user+", пароль) и выгрузите из него ключ «полный доступ».")
