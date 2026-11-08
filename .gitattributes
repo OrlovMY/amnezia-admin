@@ -15,3 +15,6 @@
 # строк git менять не должен (core.autocrlf=true). Эта строка стоит после
 # *.sh и перекрывает его: text снят, eol=lf у *.sh для этих файлов не действует.
 core/provision/scripts/** -text
+# Эталон вывода stats (cmd/cli/stats_golden_test.go): сверка по байтам, в нём
+# CSV с CRLF и ANSI-цвета — перевод строк git менять не должен.
+cmd/cli/testdata/stats_golden.txt -text
