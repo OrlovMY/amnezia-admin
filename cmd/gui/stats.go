@@ -619,15 +619,16 @@ func (v *statsView) write(what string, do func(*core.Session) error, want core.C
 			after core.CollectorStatus
 			done  bool
 		)
+		e := statsGenderEnd(what)
 		defer func() {
 			uiDo(func() {
 				switch {
 				case !done:
-					v.showText(what, what+" прервана; что на сервере — неизвестно. Нажмите «Обновить».")
+					v.showText(what, what+" прерван"+e+"; что на сервере — неизвестно. Нажмите «Обновить».")
 				case err != nil:
-					v.showText(what, what+" не подтверждена: "+err.Error()+"\nСборщик сейчас: "+collectorText(after))
+					v.showText(what, what+" не подтвержден"+e+": "+err.Error()+"\nСборщик сейчас: "+collectorText(after))
 				case after.State != want:
-					v.showText(what, what+" выполнена, но состояние не то, что ожидалось.\nСборщик сейчас: "+collectorText(after))
+					v.showText(what, what+" выполнен"+e+", но состояние не то, что ожидалось.\nСборщик сейчас: "+collectorText(after))
 				default:
 					v.showText(what, "Готово. Сборщик: "+collectorText(after))
 				}
@@ -638,6 +639,15 @@ func (v *statsView) write(what string, do func(*core.Session) error, want core.C
 		after = statsReadStatus(sess)
 		done = true
 	})
+}
+
+// statsGenderEnd — окончание причастия под род слова: «Установка
+// выполнена», «Снятие выполнено» (ревью GUI-STATS-2, N2).
+func statsGenderEnd(what string) string {
+	if what == "Снятие" {
+		return "о"
+	}
+	return "а"
 }
 
 // exportCSV — «Выгрузить CSV…»: период и разбивка — как на экране, строки

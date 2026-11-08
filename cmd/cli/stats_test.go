@@ -154,7 +154,7 @@ func TestStatsCSV(t *testing.T) {
 	}
 	for _, want := range []string{
 		"за всё время;awg;Alice;KA=;3000;5000;8000;",
-		"за всё время;awg;Bob;KB=;0;0;0;;измерено",
+		"за всё время;awg;Bob;KB=;0;0;0;не подключался;измерено",
 		"за всё время;awg;Abe;KC=;;;;;нет данных",
 		"'=HYPERLINK(1)",
 	} {

@@ -106,6 +106,47 @@ func TestSeenTextNotZero(t *testing.T) {
 	}
 }
 
+// TestSeenOrderAndCSV — ревью GUI-STATS-2, N1: «время неизвестно» (трафик
+// был) не сливается с «не подключался» ни в сортировке, ни в CSV.
+// Различение: три исхода — три места и три значения. Доезд: ячейки из
+// разбора журнала. Порядок исходов не зависит от направления.
+func TestSeenOrderAndCSV(t *testing.T) {
+	hs := core.DayStart(day0).Add(10 * time.Hour).Unix()
+	daily := fmt.Sprintf("D 1 %d amnezia-awg KA= 3000 5000 %d 5\n", day0, hs) +
+		fmt.Sprintf("D 1 %d amnezia-awg KF= 1 1 %d 5\n", day0, hs-3600) +
+		fmt.Sprintf("D 1 %d amnezia-awg KB= 0 0 0 5\n", day0) +
+		fmt.Sprintf("D 1 %d amnezia-awg KE= 7 9 0 5\n", day0) +
+		fmt.Sprintf("N 1 %d amnezia-awg 5\n", day0)
+	l := core.ParseTrafficLog(daily, true, "", false)
+	known, earlier, never, unknown := cellOf(t, l, core.AllTime, "KA="), cellOf(t, l, core.AllTime, "KF="), cellOf(t, l, core.AllTime, "KB="), cellOf(t, l, core.AllTime, "KE=")
+	for _, desc := range []bool{true, false} {
+		for _, k := range []core.TrafficCell{known, earlier} {
+			if Compare(k, unknown, ColSeen, desc) >= 0 || Compare(unknown, k, ColSeen, desc) <= 0 {
+				t.Errorf("desc=%v: известное время не выше «время неизвестно»", desc)
+			}
+		}
+		if Compare(unknown, never, ColSeen, desc) >= 0 || Compare(never, unknown, ColSeen, desc) <= 0 {
+			t.Errorf("desc=%v: «время неизвестно» не выше «не подключался» — незнание слито с «никогда»", desc)
+		}
+	}
+	if Compare(known, earlier, ColSeen, true) >= 0 || Compare(known, earlier, ColSeen, false) <= 0 {
+		t.Error("направление внутри известных времён не работает")
+	}
+	cl := func(id, n string) core.ClientEntry {
+		return core.ClientEntry{ClientID: id, UserData: map[string]any{"clientName": n}}
+	}
+	rows, _ := Rows([]ContainerClients{{C: awg, Read: true, Clients: []core.ClientEntry{cl("KB=", "Bob"), cl("KE=", "Eve")}}}, l)
+	data, _, err := CSV(rows, l, core.CollectorInstalled, Periods(l, core.AllTime, "за всё время", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{";KB=;0;0;0;не подключался;", ";KE=;7;9;16;время неизвестно;"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("в CSV нет %q:\n%s", want, data)
+		}
+	}
+}
+
 // TestCompareRanksFixed — «нет данных» ниже нуля, «≥» между, в любом
 // столбце и направлении.
 func TestCompareRanksFixed(t *testing.T) {
@@ -182,9 +223,9 @@ func TestCSVNoDataEmptyNotZero(t *testing.T) {
 	for _, want := range []string{
 		UTF8BOM + "Период;Протокол;Клиент;Публичный ключ;Принято, байт;Отправлено, байт;Всего, байт;Последнее подключение (UTC);Состояние\r\n",
 		"за всё время;AmneziaWG;Abe;KD=;;;;;нет данных\r\n",
-		"за всё время;AmneziaWG;Bob;KB=;0;0;0;;измерено\r\n",
+		"за всё время;AmneziaWG;Bob;KB=;0;0;0;не подключался;измерено\r\n",
 		"за всё время;AmneziaWG;Alice;KA=;3000;5000;8000;2025-11-08 10:00;измерено\r\n",
-		"за всё время;AmneziaWG;Carl;KC=;100000;1;100001;;неполные (не меньше)\r\n",
+		"за всё время;AmneziaWG;Carl;KC=;100000;1;100001;время неизвестно;неполные (не меньше)\r\n",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("нет %q в\n%s", want, s)

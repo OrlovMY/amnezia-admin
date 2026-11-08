@@ -398,7 +398,16 @@ func Compare(a, b core.TrafficCell, col Col, desc bool) int {
 	case ColTotal:
 		x, y = ra+ta, rb+tb
 	case ColSeen:
-		x, y = seenKey(a.LastHandshake), seenKey(b.LastHandshake)
+		// Внутри исхода — тоже закреплённый порядок, не зависящий от
+		// направления: известное время, затем «время неизвестно» (трафик
+		// был), затем «не подключался» (ревью GUI-STATS-2, N1).
+		if sa, sb := seenRank(a), seenRank(b); sa != sb {
+			if sa < sb {
+				return -1
+			}
+			return 1
+		}
+		x, y = a.LastHandshake.Unix(), b.LastHandshake.Unix()
 	}
 	c := 0
 	switch {
@@ -413,12 +422,17 @@ func Compare(a, b core.TrafficCell, col Col, desc bool) int {
 	return c
 }
 
-// seenKey — «не подключался» старше любого подключения.
-func seenKey(t time.Time) int64 {
-	if t.IsZero() {
-		return -1 << 62
+// seenRank — исход столбца «Последнее подключение» у ячейки с цифрами:
+// 0 — время известно, 1 — «время неизвестно», 2 — «не подключался».
+// Три состояния, как у SeenText: незнание не сливается с «никогда».
+func seenRank(c core.TrafficCell) int {
+	if !c.LastHandshake.IsZero() {
+		return 0
 	}
-	return t.Unix()
+	if rx, tx, rank := CellNums(c); rank == 0 && rx+tx == 0 {
+		return 2
+	}
+	return 1
 }
 
 // SortByTotal — порядок таблицы CLI: по убыванию «всего», без данных — в
@@ -545,9 +559,9 @@ func CSV(rows []Row, l *core.TrafficLog, cs core.CollectorState, periods []Perio
 			rec := []string{p.Name, row.Proto, row.Name, row.Key.PubKey, "", "", "", "", StateText(c)}
 			if rx, tx, rank := CellNums(c); rank < 2 {
 				rec[4], rec[5], rec[6] = fmt.Sprint(rx), fmt.Sprint(tx), fmt.Sprint(rx+tx)
-				if !c.LastHandshake.IsZero() {
-					rec[7] = c.LastHandshake.UTC().Format("2006-01-02 15:04")
-				}
+				// Время, «время неизвестно» или «не подключался» — словами:
+				// пустая ячейка сливала бы незнание с «никогда» (N1).
+				rec[7] = SeenText(c)
 			}
 			for i := range rec {
 				rec[i] = CSVSafe(rec[i]) // все ячейки, не только имя
