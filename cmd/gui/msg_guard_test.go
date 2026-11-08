@@ -49,6 +49,7 @@ var msgAllowedCtors = map[string]string{
 	"widget.ShowPopUpMenuAtPosition": "контекстное меню",
 	"widget.NewSimpleRenderer":       "отрисовщик своего виджета",
 	"widget.NewTextGridFromString":   "предпросмотр diff (данные, не сообщение)",
+	"widget.NewTable":                "таблица статистики (stats.go): ячейки — msgLabel, заголовки — кнопки сортировки",
 	"canvas.NewRectangle":            "подложка",
 	"canvas.NewImageFromResource":    "картинка",
 	"dialog.NewCustom":               "диалог со своим (выделяемым) содержимым",
