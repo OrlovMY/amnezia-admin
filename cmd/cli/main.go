@@ -18,7 +18,7 @@
 //	amnezia-admin diagnose -key vpn://... [-fix [-yes]]
 //	amnezia-admin restore -key vpn://НОВОГО-сервера... -file файл.aabk [-password-file файл] [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
-//	amnezia-admin migrate (-key-file файл | -key vpn://ИСТОЧНИКА...) -to-host IP|имя [-to-port 22] [-to-user root] [-to-hostkey SHA256:...] [-key-out файл] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-yes]
+//	amnezia-admin migrate (-key-file файл | -key vpn://ИСТОЧНИКА...) -to-host IP|имя [-to-port 22] [-to-user root] [-to-hostkey SHA256:...] [-key-out файл] [-wipe-target [-wipe-without-copy]] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin provision-check -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...]
 //	amnezia-admin admin-key (-key-file файл | -key vpn://... | -host IP|имя [-port 22] [-user root]) -out файл [-include-password] [-allow-partial]
 //	amnezia-admin version
@@ -1037,6 +1037,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	toPort := fs.String("to-port", "22", "migrate -to-host: порт SSH нового сервера")
 	toUser := fs.String("to-user", "root", "migrate -to-host: пользователь SSH нового сервера")
 	keyOut := fs.String("key-out", "", "migrate -to-host: файл для нового ключа vpn:// (на Linux/macOS права 0600, на Windows — права каталога; по умолчанию — каталог данных пользователя, «Ключи доступа»)")
+	wipeTarget := fs.Bool("wipe-target", false, "migrate -to-host: согласие снести Amnezia на НЕчистом новом сервере (только контейнеры, тома и образы Amnezia по закрытому списку) после записи и проверки его копии; -yes снос не подразумевает")
+	wipeNoCopy := fs.Bool("wipe-without-copy", false, "migrate -to-host -wipe-target: отдельное согласие на снос, если полной копии нового сервера не будет (копировать нечего или прочитать не удалось)")
 	keyFile := fs.String("key-file", "", "ключ vpn:// из файла вместо -key (ключ не попадает в командную строку процесса); взаимоисключающий с -key")
 	toKeyFile := fs.String("to-key-file", "", "migrate, provision-check: ключ vpn:// цели из файла вместо -to-key; взаимоисключающий с -to-key")
 	statsFrom := fs.String("from", "", "stats: начало периода ГГГГ-ММ-ДД (UTC)")
@@ -1125,10 +1127,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 			return runMigrateToHost(ctx, stdin, stdout, stderr, stdinIsTTY(), toHostOpts{
 				srcKey: *key, srcKeyFile: *keyFile, srcHostkey: *hostkey, host: *toHost, port: *toPort, user: *toUser,
 				hostkey: *toHostkey, keyOut: *keyOut, knownHostsPath: knownHostsPath,
-				clientHost: *clientHost, clientHostOK: *clientHostOK, mf: mf}, time.Now())
+				clientHost: *clientHost, clientHostOK: *clientHostOK, mf: mf, wipe: *wipeTarget, wipeNoCopy: *wipeNoCopy}, time.Now())
 		}
-		if set["to-port"] || set["to-user"] || set["key-out"] {
-			fmt.Fprintln(stderr, "migrate: -to-port, -to-user и -key-out — только вместе с -to-host.")
+		if set["to-port"] || set["to-user"] || set["key-out"] || set["wipe-target"] || set["wipe-without-copy"] {
+			fmt.Fprintln(stderr, "migrate: -to-port, -to-user, -key-out, -wipe-target и -wipe-without-copy — только вместе с -to-host.")
 			return 1
 		}
 		return runMigrateCmd(ctx, stdin, stdout, stderr, stdinIsTTY(), *key, *toKey, *hostkey, *toHostkey, knownHostsPath, *clientHost, *clientHostOK,

@@ -3,12 +3,12 @@ package main
 // Перенос на ЧИСТЫЙ сервер (PR 7а плана «перенос на чистый сервер»):
 //
 //	migrate -key <источник> -to-host <ip|имя> [-to-port 22] [-to-user root]
-//	        [-to-hostkey SHA256:…] [-key-out <файл>] [-yes] [-apply]
+//	        [-to-hostkey SHA256:…] [-key-out <файл>] [-wipe-target [-wipe-without-copy]] [-yes] [-apply]
 //
 // Решения владельца (05.11): цель задаётся адресом, ключа vpn:// у нового
 // сервера нет; вход ключами ПК, не вышло — пароль (один раз, без эха, не
 // сохраняется); ставится свежая закреплённая версия, если совместима; цель
-// не чистая — в ЭТОМ PR отказ с причиной (снос — отдельно); новый vpn:// с
+// не чистая — снос с подтверждением и копией (core/teardown.go); новый vpn:// с
 // паролем — только с согласия на экране; источник продолжает работать;
 // ключ vpn:// и пароль не печатаются (ключ — только Reveal() в файл; на
 // Linux/macOS права 0600, на Windows — права каталога).
@@ -70,6 +70,10 @@ type toHostOpts struct {
 	mf                  migrateFlags
 	authKeyDir, agentFS string // шов теста: каталог ключей ПК / сокет агента
 	noAgent             bool
+	// wipe — согласие на снос Amnezia на НЕчистой цели (-wipe-target);
+	// -yes его не даёт. wipeNoCopy — отдельное согласие на снос без полной
+	// копии цели (-wipe-without-copy).
+	wipe, wipeNoCopy bool
 }
 
 // Швы теста: каждое обращение к серверу или к диску вне конфигов.
@@ -78,8 +82,14 @@ var (
 	toHostCollect    = func(ctx context.Context, s *core.Session, now time.Time, p core.ProgressFunc) (*core.Backup, error) {
 		return s.CollectBackupCtx(ctx, version.String(), now, net.LookupIP, p)
 	}
-	toHostProvCheck     = func(s *core.Session, b *core.Backup) core.ProvisionReport { return s.ProvisionCheckFor(b) }
-	toHostInstall       = core.Install
+	toHostProvCheck    = func(s *core.Session, b *core.Backup) core.ProvisionReport { return s.ProvisionCheckFor(b) }
+	toHostInstall      = core.Install
+	toHostTeardownPlan = func(ctx context.Context, s *core.Session, now time.Time) (*core.TeardownPlan, error) {
+		return s.PlanTeardown(ctx, version.String(), now, net.LookupIP, nil)
+	}
+	toHostTeardown = func(s *core.Session, p *core.TeardownPlan, opt core.TeardownOptions) core.TeardownResult {
+		return s.ExecuteTeardown(p, opt)
+	}
 	toHostMigrate       = runMigrate
 	toHostKeyContainers = func(s *core.Session, names []string) ([]core.AdminKeyContainer, []string, error) {
 		return s.AdminKeyContainersFromServer(names)
@@ -232,8 +242,10 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	}
 	fmt.Fprintln(w, sideLine("Источник (только чтение)", src))
 	fmt.Fprintln(w, sideLine("Новый сервер (сюда будет записано)", dst))
-	if src.HostKeyFingerprint != "" && src.HostKeyFingerprint == dst.HostKeyFingerprint {
-		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: у источника и нового сервера один ключ хоста — это один и тот же сервер.")
+	// Три исхода (как GUI): продолжаем только при измеренном «разные»;
+	// «не удалось узнать» — тоже остановка (ревью-1 M1).
+	if sv, why := core.SameServer(src, dst, toHostResolve); sv != core.SameNo {
+		fmt.Fprintln(w, "ПЕРЕЕЗД ОСТАНОВЛЕН: источник и новый сервер — "+sv.String()+" ("+why+"). Ничего не изменено.")
 		return exitToHostUnknown
 	}
 	if strings.TrimSpace(o.clientHost) != "" {
@@ -264,13 +276,32 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	}
 	v := rep.Verdict()
 	fmt.Fprintln(w, "Итог предпроверки: "+v.String()+".")
+	var td *core.TeardownPlan // не nil — цель не чистая, снос возможен с согласия
 	switch v {
 	case core.ProvVerdictNo:
-		if toHostNotClean(rep) {
-			fmt.Fprintln(w, "Новый сервер не чистый: на нём уже есть контейнеры Amnezia. Снос существующего (с подтверждением и копией) — отдельный шаг, в этой версии его нет. Если на сервере уже стоит Amnezia и у вас есть его ключ vpn:// — используйте migrate -to-key.")
+		if !toHostNotClean(rep) || !core.TeardownWouldClear(rep) {
+			if toHostNotClean(rep) {
+				fmt.Fprintln(w, "Новый сервер не чистый, и кроме Amnezia есть другие препятствия или непроверенные пункты (см. выше): снос их не устранит, поэтому не предлагается.")
+			}
+			fmt.Fprintln(w, "Ничего не изменено.")
+			return exitToHostNo
 		}
-		fmt.Fprintln(w, "Ничего не изменено.")
-		return exitToHostNo
+		var err error
+		if td, err = toHostTeardownPlan(ctx, dst, now); err != nil {
+			if errors.Is(err, core.ErrCanceled) {
+				fmt.Fprintln(w, "Отменено — на серверах ничего не изменено.")
+				return exitToHostUsage
+			}
+			fmt.Fprintln(w, "Новый сервер не чистый, но "+core.MaskText(err.Error())+". Какие на нём клиенты — неизвестно (это не «клиентов нет»). Ничего не изменено.")
+			return exitToHostUnknown
+		}
+		fmt.Fprintln(w, "Новый сервер не чистый: на нём уже стоит Amnezia.")
+		printLines(w, td.InventoryLines())
+		if why := td.Refusal(); why != "" {
+			fmt.Fprintln(w, "Снос невозможен: "+why+". Ничего не изменено.")
+			return exitToHostNo
+		}
+		fmt.Fprintln(w, "Его можно снести (только перечисленное) после записи и проверки копии — флаг -wipe-target или ответ «y» на вопрос; -yes снос не подразумевает. Если клиентов этого сервера надо сохранить и у вас есть его ключ vpn:// — используйте migrate -to-key.")
 	case core.ProvVerdictUnknown:
 		fmt.Fprintln(w, "Часть пунктов узнать не удалось — это не «годится». Ничего не изменено.")
 		return exitToHostUnknown
@@ -295,6 +326,13 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	fmt.Fprintln(w, "Источник после переезда продолжит работать. Клиенты, подключённые по DNS-имени, перейдут на новый сервер после смены записи DNS.")
 	if !o.mf.apply {
 		fmt.Fprintln(w, "\nЭто сухой прогон: на серверах ничего не изменено, на диск ничего не записано. Чтобы выполнить — добавьте -apply.")
+		if td != nil {
+			extra := ""
+			if td.NeedsNoCopyConfirm() {
+				extra = " и -wipe-without-copy (полной копии не будет)"
+			}
+			fmt.Fprintln(w, "Перед установкой понадобится снос Amnezia на новом сервере: -wipe-target"+extra+".")
+		}
 		return 0
 	}
 	// --- ВСЕ вопросы и известные заранее проверки — ДО установки (ревью
@@ -349,9 +387,21 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	if hasXRay && !o.mf.skipXRay {
 		xrayNote = " (XRay на новом сервере будет перезапущен)"
 	}
+	wipeNoCopy := false
+	if td != nil {
+		var ok bool
+		if ok, wipeNoCopy = toHostWipeConsent(in, w, isTTY, o, td); !ok {
+			return exitToHostUsage
+		}
+	}
 	if !o.mf.yes && !askYes(in, w, "Поставить Amnezia на новый сервер и перенести на него клиентов источника"+xrayNote+"? (y/n): ") {
 		fmt.Fprintln(w, "Отменено: ничего не записано.")
 		return exitToHostUsage
+	}
+	if td != nil {
+		if code := toHostRunTeardown(ctx, w, errOut, isTTY, dst, b, td, layer, wipeNoCopy, now); code != 0 {
+			return code
+		}
 	}
 
 	// Маркер незавершённой операции — до первой записи на цель; снимается
@@ -423,14 +473,87 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 			fmt.Fprintln(w, "  "+sh)
 			fmt.Fprintln(w, "  PowerShell: "+ps)
 		} else {
-			fmt.Fprintln(w, "Ключ нового сервера не выдан — продолжить командой migrate -to-key-file можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ. Повторный запуск -to-host откажет: сервер уже не чистый.")
+			fmt.Fprintln(w, "Ключ нового сервера не выдан — продолжить командой migrate -to-key-file можно, только добавив сервер в приложение Amnezia (логин и пароль) и взяв из него ключ. Повторный запуск -to-host предложит снести поставленное (флаг -wipe-target, с копией).")
 		}
 	} else if keyPath == "" {
 		// M3 (аудит AU-1): перенос сделан, ключа нет — как управлять дальше.
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Перенос выполнен, но ключ vpn:// нового сервера не выдан. Команды amnezia-admin работают только по ключу: добавьте новый сервер в приложение Amnezia (адрес "+host+", пользователь "+user+", пароль), выгрузите из него ключ «полный доступ» в файл и передавайте его через -key-file. Повторный запуск -to-host откажет: сервер уже не чистый.")
+		fmt.Fprintln(w, "Перенос выполнен, но ключ vpn:// нового сервера не выдан. Команды amnezia-admin работают только по ключу: добавьте новый сервер в приложение Amnezia (адрес "+host+", пользователь "+user+", пароль), выгрузите из него ключ «полный доступ» в файл и передавайте его через -key-file. Повторный запуск -to-host предложит снести поставленное (флаг -wipe-target, с копией).")
 	}
 	return code
+}
+
+// toHostWipeConsent — согласие на снос: флаг -wipe-target или отдельный
+// вопрос на терминале; без полной копии — ещё одно отдельное согласие.
+// -yes ни одного из них не даёт.
+func toHostWipeConsent(in io.Reader, w io.Writer, isTTY bool, o toHostOpts, td *core.TeardownPlan) (ok, noCopy bool) {
+	if !o.wipe {
+		if !isTTY {
+			fmt.Fprintln(w, "ОСТАНОВЛЕНО: новый сервер не чистый (состав — выше). Снос требует отдельного флага -wipe-target (-yes его не даёт). Ничего не изменено.")
+			return false, false
+		}
+		if !askYes(in, w, "Снести перечисленное выше на НОВОМ сервере (после записи и проверки копии)? (y/n): ") {
+			fmt.Fprintln(w, "Снос не подтверждён — ничего не изменено.")
+			return false, false
+		}
+	}
+	if td.NeedsNoCopyConfirm() && !o.wipeNoCopy {
+		if !isTTY {
+			fmt.Fprintln(w, "ОСТАНОВЛЕНО: полной копии нового сервера не будет (см. выше) — снос без неё требует ещё флага -wipe-without-copy. Ничего не изменено.")
+			return false, false
+		}
+		if !askYes(in, w, "Полной копии НЕ БУДЕТ — настройки и клиенты этих контейнеров пропадут безвозвратно. Всё равно снести? (y/n): ") {
+			fmt.Fprintln(w, "Снос без копии не подтверждён — ничего не изменено.")
+			return false, false
+		}
+	}
+	return true, td.NeedsNoCopyConfirm()
+}
+
+// toHostRunTeardown — копия → проверка → снос → повторная предпроверка.
+// 0 — цель чистая, можно ставить.
+func toHostRunTeardown(ctx context.Context, w, errOut io.Writer, isTTY bool, dst *core.Session, b *core.Backup, td *core.TeardownPlan, layer core.BackupLayer, noCopy bool, now time.Time) int {
+	dir, err := userBackupsDir()
+	if err != nil {
+		backupErr(errOut, "Каталог копии нового сервера не определён — снос не выполнялся: ", err)
+		return exitToHostNo
+	}
+	r := toHostTeardown(dst, td, core.TeardownOptions{Confirmed: true, NoCopyConfirmed: noCopy, CopyDir: dir, Layer: layer, Now: now,
+		Tool: version.String(), Ctx: ctx, Progress: cliProgress(errOut, isTTY)})
+	endProgress(errOut, isTTY)
+	if r.CopyPath != "" {
+		fmt.Fprintln(w, "Копия нового сервера перед сносом: "+r.CopyPath)
+	}
+	line := "Снос: " + r.State.String()
+	if r.Why != "" {
+		line += " — " + r.Why
+	}
+	fmt.Fprintln(w, line)
+	switch r.State {
+	case core.TeardownRefused:
+		fmt.Fprintln(w, "Установка не начиналась.")
+		return exitToHostNo
+	case core.TeardownFailed:
+		fmt.Fprintln(w, "Установка не начиналась: сервер не чистый после сноса. Проверьте docker ps -a на новом сервере.")
+		return exitToHostNo
+	case core.TeardownUnknown:
+		fmt.Fprintln(w, "Установка не начиналась. Маркер незавершённой операции оставлен: программа напомнит о нём при следующем запуске migrate.")
+		return exitToHostUnknown
+	}
+	rep := toHostProvCheck(dst, b)
+	if v := rep.Verdict(); v != core.ProvVerdictYes {
+		fmt.Fprintln(w, "Предпроверка после сноса:")
+		for _, it := range rep.Items {
+			fmt.Fprintf(w, "  %s: %s — %s\n", it.What, it.State, it.Reason)
+		}
+		fmt.Fprintln(w, "Итог: "+v.String()+". Amnezia на новом сервере снесена, установка не начиналась.")
+		if v == core.ProvVerdictNo {
+			return exitToHostNo
+		}
+		return exitToHostUnknown
+	}
+	fmt.Fprintln(w, "Предпроверка после сноса: можно ставить.")
+	return 0
 }
 
 // pwCancelHint — как отменить ввод пароля. На Windows Ctrl+C во время
@@ -516,7 +639,7 @@ func printInstallFailed(w io.Writer, res core.InstallResult) {
 	}
 	switch {
 	case len(left) > 0:
-		fmt.Fprintln(w, "На новом сервере осталось: "+strings.Join(left, ", ")+". Повторный запуск -to-host откажет («сервер не чистый»); снос — в следующей версии, вручную: docker rm -f <контейнер> (и docker volume rm для тома XRay).")
+		fmt.Fprintln(w, "На новом сервере осталось: "+strings.Join(left, ", ")+". Повторный запуск -to-host предложит снести их (флаг -wipe-target, с копией нового сервера).")
 	case unknown:
 		fmt.Fprintln(w, "Что осталось на новом сервере — неизвестно; проверьте docker ps -a перед повтором.")
 	default:

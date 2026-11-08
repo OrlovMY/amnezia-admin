@@ -523,8 +523,11 @@ func publishedPorts(d, c probe) pubPorts {
 	return pp
 }
 
+// provCtrWhat — подпись пункта о контейнерах Amnezia.
+const provCtrWhat = "контейнеры amnezia-*"
+
 func classifyContainers(d, c probe) ProvItem {
-	const what = "контейнеры amnezia-*"
+	const what = provCtrWhat
 	switch {
 	case d.ok && d.get("DOCKER") == "no":
 		return ProvItem{what, ProvOK, "нет (Docker не установлен)"}
