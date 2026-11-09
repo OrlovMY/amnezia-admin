@@ -23,7 +23,16 @@ func TestParseAWGFormat(t *testing.T) {
 		{"AWG3: HeaderProtectionKey", "HeaderProtectionKey = x\n", FormatKnown, "3.1", ""},
 		{"AWG3: MaxHandshakeAttempts", "MaxHandshakeAttempts = 15-20\n", FormatKnown, "3.1", ""},
 		{"AWG3: RandomTrailers = on", "RandomTrailers = on\n", FormatKnown, "3.1", ""},
-		{"AWG3: DisableCookies = yes (не off — включено)", "DisableCookies = yes\n", FormatKnown, "3.1", ""},
+		// AWG 3.1 (amneziawg-tools ee0f0a9a, parse_bool): on/off или число;
+		// иное утилита не примет — формат не известен, а не «3.1».
+		{"AWG3: DisableCookies = yes — утилита не примет", "DisableCookies = yes\n", FormatUnknownKey, "", "DisableCookies"},
+		{"AWG3: RandomTrailers = 1x — утилита не примет", "RandomTrailers = 1x\n", FormatUnknownKey, "", "RandomTrailers"},
+		{"AWG3: RandomTrailers пустое — утилита не примет", "RandomTrailers =\n", FormatUnknownKey, "", "RandomTrailers"},
+		{"AWG3: RandomTrailers = ON", "RandomTrailers = ON\n", FormatKnown, "3.1", ""},
+		{"AWG3: DisableCookies = 1", "DisableCookies = 1\n", FormatKnown, "3.1", ""},
+		// «0» утилита читает как off, а клиент Amnezia (isToggleEnabled) — как
+		// включено; версию считаем как клиент, значение допустимое.
+		{"AWG3: DisableCookies = 0 — допустимо, версия как у клиента", "DisableCookies = 0\n", FormatKnown, "3.1", ""},
 		{"RandomTrailers = off — не AWG3", "RandomTrailers = off\nDisableCookies = OFF\n", FormatKnown, "", ""},
 		{"RandomTrailers = off и S3 — AWG2", "RandomTrailers = off\nS3 = 15\n", FormatKnown, "2", ""},
 		{"AWG2: S4", "S4 = 25\n", FormatKnown, "2", ""},

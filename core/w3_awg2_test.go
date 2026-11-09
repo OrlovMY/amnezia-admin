@@ -243,3 +243,31 @@ func TestAWG2ClientConfigToggleOff(t *testing.T) {
 		t.Errorf("прочие параметры потеряны:\n%s", u.Config)
 	}
 }
+
+// TestAWG31BadToggleViewOnly — доезд (AWG 3.1): переключатель со значением,
+// которое amneziawg-tools не принимает (parse_bool, ee0f0a9a), боевым путём
+// даёт «только просмотр» без версии и без значения в подписи, а запись
+// отклоняется и файл не трогается.
+func TestAWG31BadToggleViewOnly(t *testing.T) {
+	srv := awg2With(t, "S3 = 15\nHeaderProtectionKey = hpk\nRandomTrailers = maybeSECRET\n")
+	cs, err := core.NewSessionWithRunner(srv, raceCreds()).FindContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || cs[0].Managed() {
+		t.Fatalf("%+v: ждали один контейнер только для просмотра", cs)
+	}
+	label := guiview.ProtoLabel(cs[0])
+	if !strings.Contains(label, "только просмотр") || !strings.Contains(label, "RandomTrailers") ||
+		strings.Contains(label, "3.1") || strings.Contains(label, "SECRET") {
+		t.Errorf("подпись %q: ждали «только просмотр» по RandomTrailers без версии и значения", label)
+	}
+	before, _ := srv.File("/opt/amnezia/awg/awg0.conf")
+	c := &core.Container{Name: "amnezia-awg2", Dir: "/opt/amnezia/awg", Proto: "AmneziaWG", Support: core.SupportYes}
+	if _, err := core.NewSessionWithRunner(srv, raceCreds()).AddUser(c, "Carol"); err == nil || strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("запись при недопустимом RandomTrailers: %v", err)
+	}
+	if after, _ := srv.File("/opt/amnezia/awg/awg0.conf"); string(after) != string(before) {
+		t.Errorf("awg0.conf изменён, хотя запись отклонена")
+	}
+}
