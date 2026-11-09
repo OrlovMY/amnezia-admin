@@ -217,7 +217,7 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 			return b, nil
 		}
 	}
-	pol := hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, o.knownHostsPath)
+	pol := hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, "-to-hostkey", o.knownHostsPath)
 	dst, att, err := toHostConnectNew(host, strconv.Itoa(port), user, auth, pol)
 	if err != nil {
 		var ae *core.AuthError
@@ -267,6 +267,17 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 		return exitToHostNo
 	}
 	fmt.Fprintln(w, "Источник прочитан в память (на диск не записывается).")
+	// -skip-xray: XRay исключается из копии ДО предпроверки — не проверяется
+	// его порт, не ставится, не переносится и не попадает в ключ vpn://.
+	var xraySkipped core.SkippedContainer
+	if o.mf.skipXRay {
+		b, xraySkipped = core.BackupWithout(b, core.XRayContainer)
+		if xraySkipped.Present {
+			printLines(w, core.SkippedXRayLines(xraySkipped))
+		} else {
+			fmt.Fprintln(w, "Выбрано -skip-xray, но XRay в источнике нет — исключать нечего.")
+		}
+	}
 
 	// --- предпроверка нового сервера с портами копии ---
 	rep := toHostProvCheck(dst, b)
@@ -333,6 +344,10 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 			}
 			fmt.Fprintln(w, "Перед установкой понадобится снос Amnezia на новом сервере: -wipe-target"+extra+".")
 		}
+		if xraySkipped.Present {
+			fmt.Fprintln(w)
+			printLines(w, core.SkippedXRayLines(xraySkipped))
+		}
 		return 0
 	}
 	// --- ВСЕ вопросы и известные заранее проверки — ДО установки (ревью
@@ -386,6 +401,9 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 	xrayNote := ""
 	if hasXRay && !o.mf.skipXRay {
 		xrayNote = " (XRay на новом сервере будет перезапущен)"
+	}
+	if xraySkipped.Present {
+		xrayNote = " БЕЗ XRay (его клиенты на новом сервере работать не будут)"
 	}
 	wipeNoCopy := false
 	if td != nil {
@@ -479,6 +497,16 @@ func runMigrateToHost(ctx context.Context, in io.Reader, w, errOut io.Writer, is
 		// M3 (аудит AU-1): перенос сделан, ключа нет — как управлять дальше.
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Перенос выполнен, но ключ vpn:// нового сервера не выдан. Команды amnezia-admin работают только по ключу: добавьте новый сервер в приложение Amnezia (адрес "+host+", пользователь "+user+", пароль), выгрузите из него ключ «полный доступ» в файл и передавайте его через -key-file. Повторный запуск -to-host предложит снести поставленное (флаг -wipe-target, с копией).")
+	}
+	// Итог при -skip-xray — громко и последним; перенос частичный (по
+	// согласию), код 1 — как migrate -to-key -skip-xray (XRay — RestoreSkipped).
+	if xraySkipped.Present {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "ИТОГ: ПЕРЕНЕСЕНО ЧАСТИЧНО — без XRay.")
+		printLines(w, core.SkippedXRayLines(xraySkipped))
+		if code == 0 {
+			code = exitToHostNo
+		}
 	}
 	return code
 }

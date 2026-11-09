@@ -63,7 +63,7 @@ func migrateConnect(role, key, hostkey, hostkeyFlag, knownHostsPath string, in i
 		fmt.Fprintln(errOut, "Ошибка ("+role+"): "+core.MaskText(err.Error()))
 		return nil, 1
 	}
-	sess, err := migrateDial(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, hostkey, knownHostsPath))
+	sess, err := migrateDial(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, hostkey, hostkeyFlag, knownHostsPath))
 	if err != nil {
 		fmt.Fprintln(errOut, "SSH ("+role+"):", core.MaskText(err.Error()))
 		if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {

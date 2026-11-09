@@ -574,6 +574,16 @@ func listenPorts(lines []string) (map[string]bool, int) {
 	return m, n
 }
 
+// portBusyAdvice — что делать с занятым портом: только существующие пути.
+// Выбрать другой порт при установке программа не умеет; без протокола
+// переносить умеет только XRay (migrate -to-host -skip-xray).
+func portBusyAdvice(name string) string {
+	if strings.Contains(strings.ToLower(name), "xray") {
+		return "освободите порт или перенесите без XRay (командная строка: migrate -to-host -skip-xray)"
+	}
+	return "освободите порт (выбрать другой порт при установке программа не умеет)"
+}
+
 func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem {
 	what := fmt.Sprintf("%s %d/%s (порт по умолчанию)", name, port, proto)
 	key := proto + ":" + strconv.Itoa(port)
@@ -585,7 +595,7 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		if !pub.known {
 			note = " (список портов контейнеров неполный: " + pub.why + ")"
 		}
-		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — освободите его или выберите другой порт при установке" + note}
+		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — " + portBusyAdvice(name) + note}
 	case !p.ok:
 		return notRan(what, p)
 	case p.has("SS"):
@@ -599,7 +609,7 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		// На живом сервере слушает хотя бы sshd: пустой список — не «свободно».
 		return unk(what, "ss не показал ни одного прослушиваемого сокета (даже SSH) — данным не верим")
 	case m[key]:
-		return ProvItem{what, ProvBad, "порт занят другой программой — освободите его или выберите другой порт при установке"}
+		return ProvItem{what, ProvBad, "порт занят другой программой — " + portBusyAdvice(name)}
 	case !pub.known:
 		// ss не видит порты контейнеров с выключенным docker-proxy.
 		why := pub.why

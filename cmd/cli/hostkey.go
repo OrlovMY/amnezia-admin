@@ -53,11 +53,14 @@ func cliHostKeyChanged(errOut io.Writer, knownHostsPath string) func(host, known
 // С TTY — Prompt печатает вопрос в out и читает ответ из in. Без TTY —
 // Prompt == nil: неизвестный сервер без -hostkey отклоняется без вопроса
 // (см. run(), ветка ErrHostKeyUnknown, код выхода 2).
-func hostKeyPolicyForCLI(in io.Reader, out, errOut io.Writer, isTTY bool, hostkey, knownHostsPath string) core.HostKeyPolicy {
+func hostKeyPolicyForCLI(in io.Reader, out, errOut io.Writer, isTTY bool, hostkey, hostkeyFlag, knownHostsPath string) core.HostKeyPolicy {
 	pol := core.HostKeyPolicy{
 		KnownHostsPath:      knownHostsPath,
 		OnChanged:           cliHostKeyChanged(errOut, knownHostsPath),
 		ExpectedFingerprint: strings.TrimSpace(hostkey),
+	}
+	if pol.ExpectedFingerprint != "" {
+		pol.ExpectedFrom = hostkeyFlag
 	}
 	if isTTY {
 		pol.Prompt = cliHostKeyPrompt(in, out)
