@@ -137,6 +137,7 @@ func peerTouch(t *testing.T, f *fakeServer) {
 // окне — НЕ ПРОЙДЕН; снимок после К6 не снят — НЕ ПРОВЕРЕНО. Правки и
 // обрыв — боевым путём через fakesrv, не присваиванием полей Env.
 func TestP0K6Window(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name         string
 		inK6, atLock func(t *testing.T, f *fakeServer, id string)
@@ -230,6 +231,7 @@ func TestP0K6Window(t *testing.T) {
 			status: NotChecked, want: []string{"снимок после К6 не снят"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			heavy(t)
 			f, id := withAdmin(t, true)
 			if c.pre != nil {
 				c.pre(t, f, id)
@@ -300,6 +302,7 @@ func TestP0K6Window(t *testing.T) {
 // открывается; не исчез или lslocks не ответил — вопрос К6 не задан, К6
 // НЕ ПРОВЕРЕНО, П0-итог сверяет «начало → конец» (QA-01 р10 Н12).
 func TestP0K6LockBeforeWindow(t *testing.T) {
+	t.Parallel()
 	const held = "rc=0\nCOMMAND PID TYPE PATH\nflock 4242 FLOCK /run/lock/\n"
 	for _, c := range []struct {
 		name   string
@@ -327,6 +330,7 @@ func TestP0K6LockBeforeWindow(t *testing.T) {
 		{"свободен сразу", func(int, *fakeServer, string) (string, error) { return "rc=0\nCOMMAND PID TYPE PATH\n", nil }, 1, false, true, Pass, "появилось allowed_ips"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			heavy(t)
 			f, id := withAdmin(t, true)
 			preflight(t, f)
 			real := f.env.Remote
@@ -388,6 +392,7 @@ func TestP0K6LockBeforeWindow(t *testing.T) {
 // вопросом берётся из пробного прогона того же стенда; обрыв обязан
 // прийтись на последнюю команду перед вопросом — иначе тест падает.
 func TestP0K6BeforeUnread(t *testing.T) {
+	heavy(t)
 	run := func(breakAt int) (k6, p0 Result, atAsk int, adjacent bool) {
 		f, id := withAdmin(t, true)
 		preflight(t, f)

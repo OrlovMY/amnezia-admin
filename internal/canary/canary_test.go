@@ -761,7 +761,7 @@ func TestClassifyRace(t *testing.T) {
 // '…' на хосте). Без sh (Windows без Git) — тест падает, а не пропускается:
 // в CI (Linux) sh есть.
 func TestWgWrapperRealShell(t *testing.T) {
-	sh, err := exec.LookPath("sh")
+	sh, err := fakesrv.FindSh()
 	if err != nil {
 		t.Fatalf("sh не найден — обёртку проверить нечем: %v", err)
 	}
@@ -776,16 +776,16 @@ func TestWgWrapperRealShell(t *testing.T) {
 	if strings.Contains(cmd, "'") {
 		t.Fatalf("в команде одинарная кавычка — сломает sh -c '…': %s", cmd)
 	}
-	if out, err := exec.Command(sh, "-c", cmd).CombinedOutput(); err != nil {
+	if out, err := fakesrv.ShCommand(sh, "-c", cmd).CombinedOutput(); err != nil {
 		t.Fatalf("установка обёртки: %v %s", err, out)
 	}
-	if out, err := exec.Command(sh, p, "syncconf", "wg0", "/dev/null").CombinedOutput(); err == nil {
+	if out, err := fakesrv.ShCommand(sh, p, "syncconf", "wg0", "/dev/null").CombinedOutput(); err == nil {
 		t.Errorf("syncconf прошёл через обёртку: %s", out)
 	}
 	if b, _ := os.ReadFile(log); len(b) != 0 {
 		t.Errorf("настоящий wg вызван на syncconf: %q", b)
 	}
-	out, err := exec.Command(sh, p, "show", "wg0", "dump").CombinedOutput()
+	out, err := fakesrv.ShCommand(sh, p, "show", "wg0", "dump").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "real-ok") {
 		t.Fatalf("wg show не дошёл до настоящего wg: %v %s", err, out)
 	}

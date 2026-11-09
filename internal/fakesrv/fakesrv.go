@@ -899,7 +899,9 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, st
 			}
 		}
 	}
-	env := os.Environ()
+	// Без обёрток утилиты берутся рядом с оболочкой (Git for Windows:
+	// usr\bin), даже если этого каталога нет в PATH процесса.
+	env := append(os.Environ(), "PATH="+filepath.Dir(sh)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if s.FailMvTo != "" || s.MissingTool != "" || s.FailTool != "" {
 		shim, err := s.toolShim(sh, tmp)
 		if err != nil {
@@ -941,18 +943,56 @@ func (s *Server) execScript(script, label, dir, wantWg, wantTbl, file string, st
 
 // FindSh — путь к POSIX sh: из PATH, а на Windows ещё и из Git for Windows.
 // Ошибка называет причину: без sh fakesrv не может исполнить скрипт записи.
+//
+// На Windows Git\bin\sh.exe — не оболочка, а запускалка: она ставит
+// /usr/bin и /mingw64/bin В НАЧАЛО PATH и лишь затем запускает
+// Git\usr\bin\sh.exe. Обёртки toolShim (PATH = только каталог обёрток) при
+// ней не действуют: mv, sha256sum, base64 берутся настоящие, и случаи
+// «частично», «нет утилиты», «утилита упала» проходят записью. Так было у
+// всех, кто запускал go test из PowerShell/cmd (sh не в PATH → запасной
+// путь Git\bin\sh.exe), и выглядело «нестабильностью под нагрузкой».
+// Поэтому запускалка заменяется настоящей оболочкой рядом с ней, а
+// toolShim сверх того проверяет, что обёртки действительно взяты.
 func FindSh() (string, error) {
 	if p, err := exec.LookPath("sh"); err == nil {
-		return p, nil
+		return realSh(p), nil
 	}
 	if runtime.GOOS == "windows" {
-		for _, p := range []string{`C:\Program Files\Git\bin\sh.exe`, `C:\Program Files\Git\usr\bin\sh.exe`} {
+		for _, p := range []string{`C:\Program Files\Git\usr\bin\sh.exe`, `C:\Program Files\Git\bin\sh.exe`} {
 			if _, err := os.Stat(p); err == nil {
-				return p, nil
+				return realSh(p), nil
 			}
 		}
 	}
 	return "", errors.New("fakesrv: не найден POSIX sh — скрипт записи (core.CASWriteScript) исполняется настоящей оболочкой, без неё проверка невозможна; на Windows установите Git for Windows (Git\\bin\\sh.exe)")
+}
+
+// ShCommand — exec.Command(sh, args...) с каталогом оболочки в начале PATH:
+// утилиты (grep, mv, sha256sum…) Git for Windows лежат рядом с
+// usr\bin\sh.exe, а в PATH процесса (PowerShell, cmd) его может не быть.
+// Тесты с настоящим sh берут оболочку из FindSh и запускают её этим.
+func ShCommand(sh string, args ...string) *exec.Cmd {
+	cmd := exec.Command(sh, args...)
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(sh)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return cmd
+}
+
+// realSh — для запускалки Git for Windows (<Git>\bin\sh.exe) настоящая
+// оболочка <Git>\usr\bin\sh.exe, если она есть; иначе путь как есть.
+func realSh(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	bin := filepath.Dir(p)
+	root := filepath.Dir(bin)
+	if !strings.EqualFold(filepath.Base(bin), "bin") || strings.EqualFold(filepath.Base(root), "usr") {
+		return p
+	}
+	real := filepath.Join(root, "usr", "bin", filepath.Base(p))
+	if _, err := os.Stat(real); err == nil {
+		return real
+	}
+	return p
 }
 
 // casTools — внешние утилиты скрипта записи в контейнере.
@@ -962,7 +1002,11 @@ var casTools = []string{"sha256sum", "base64", "mv", "rm"}
 // над настоящими утилитами, кроме MissingTool (её нет вовсе), FailTool
 // (падает) и mv на FailMvTo (Permission denied).
 func (s *Server) toolShim(sh, tmp string) (string, error) {
-	out, err := exec.Command(sh, "-c", "for t in "+strings.Join(casTools, " ")+"; do command -v $t || exit 1; done").Output()
+	// Утилиты ищутся рядом с оболочкой: у Git for Windows они в одном
+	// каталоге с usr\bin\sh.exe, а в PATH процесса его может не быть.
+	look := exec.Command(sh, "-c", "for t in "+strings.Join(casTools, " ")+"; do command -v $t || exit 1; done")
+	look.Env = append(os.Environ(), "PATH="+filepath.Dir(sh)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := look.Output()
 	if err != nil {
 		return "", fmt.Errorf("fakesrv: не найдены утилиты для скрипта записи (%s) в sh: %w", strings.Join(casTools, ", "), err)
 	}
@@ -993,7 +1037,38 @@ func (s *Server) toolShim(sh, tmp string) (string, error) {
 			return "", fmt.Errorf("fakesrv: %w", err)
 		}
 	}
+	// Обёртки обязаны действовать: оболочка, сама дописывающая свои
+	// каталоги в PATH, тихо обошла бы их, и сбой стал бы записью.
+	if err := checkShim(sh, shim, s.MissingTool); err != nil {
+		return "", err
+	}
 	return shim, nil
+}
+
+// checkShim — громкий отказ, если sh с PATH=shim находит утилиту не в shim
+// (или находит ту, которой там нет).
+func checkShim(sh, shim, missing string) error {
+	probe := exec.Command(sh, "-c", "for t in "+strings.Join(casTools, " ")+"; do command -v $t || echo \"-:$t\"; done")
+	probe.Env = append(os.Environ(), "PATH="+shim)
+	got, err := probe.Output()
+	if err != nil {
+		return fmt.Errorf("fakesrv: проверка обёрток утилит: %w", err)
+	}
+	lines := strings.Fields(string(got))
+	if len(lines) != len(casTools) {
+		return fmt.Errorf("fakesrv: проверка обёрток утилит: %q", got)
+	}
+	for i, p := range lines {
+		tool := casTools[i]
+		ok := strings.HasSuffix(filepath.ToSlash(p), "/shim/"+tool)
+		if tool == missing {
+			ok = p == "-:"+tool
+		}
+		if !ok {
+			return fmt.Errorf("fakesrv: оболочка %s не берёт обёртки утилит (%s → %s): PATH обёрток не действует, сбой записи не смоделировать", sh, tool, p)
+		}
+	}
+	return nil
 }
 
 // wgTriple — согласованы ли утилита, интерфейс и (если задан) файл:
