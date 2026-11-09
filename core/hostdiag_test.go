@@ -11,7 +11,6 @@ package core_test
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -268,7 +267,7 @@ func runSh(t *testing.T, shim, script string) string {
 		t.Fatal(err)
 	}
 	full := `PATH="$(cd "` + filepath.ToSlash(shim) + `" && pwd):$PATH"; ` + script
-	out, err := exec.Command(sh, "-c", full).CombinedOutput()
+	out, err := fakesrv.ShCommand(sh, "-c", full).CombinedOutput()
 	if err != nil {
 		t.Fatalf("sh: %v\n%s", err, out)
 	}

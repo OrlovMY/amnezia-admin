@@ -77,6 +77,7 @@ func byID(rs []Result) map[string]Result {
 // так же, как на пустом сервере (те же исходы каждого шага), П0-итог
 // ПРОЙДЕН, клиент на месте.
 func TestExistingClientKept(t *testing.T) {
+	heavy(t)
 	fe, _ := withAdmin(t, false)
 	fe.env.ServerIP = "" // эталон: пустой сервер, прежний П0
 	empty, err := Run(fe.env)
@@ -128,6 +129,7 @@ func TestExistingClientKept(t *testing.T) {
 // посреди прогона клиента администратора удаляют — П0-итог НЕ ПРОЙДЕН.
 // Вторая подмена — меняют его запись в таблице (имя) — тоже НЕ ПРОЙДЕН.
 func TestExistingClientErasedFails(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name string
 		hit  func(f *fakeServer, id string) error
@@ -139,6 +141,7 @@ func TestExistingClientErasedFails(t *testing.T) {
 		}, "изменилась"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			heavy(t)
 			f, id := withAdmin(t, true)
 			preflight(t, f)
 			real := f.env.Remote

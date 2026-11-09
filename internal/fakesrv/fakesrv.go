@@ -967,6 +967,16 @@ func FindSh() (string, error) {
 	return "", errors.New("fakesrv: не найден POSIX sh — скрипт записи (core.CASWriteScript) исполняется настоящей оболочкой, без неё проверка невозможна; на Windows установите Git for Windows (Git\\bin\\sh.exe)")
 }
 
+// ShCommand — exec.Command(sh, args...) с каталогом оболочки в начале PATH:
+// утилиты (grep, mv, sha256sum…) Git for Windows лежат рядом с
+// usr\bin\sh.exe, а в PATH процесса (PowerShell, cmd) его может не быть.
+// Тесты с настоящим sh берут оболочку из FindSh и запускают её этим.
+func ShCommand(sh string, args ...string) *exec.Cmd {
+	cmd := exec.Command(sh, args...)
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(sh)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return cmd
+}
+
 // realSh — для запускалки Git for Windows (<Git>\bin\sh.exe) настоящая
 // оболочка <Git>\usr\bin\sh.exe, если она есть; иначе путь как есть.
 func realSh(p string) string {
