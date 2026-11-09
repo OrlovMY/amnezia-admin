@@ -120,9 +120,10 @@ func (u *ui) backupMenu() {
 	save := widget.NewButtonWithIcon(backupSaveText, theme.DocumentSaveIcon(), func() { d.Hide(); u.backupDialog() })
 	restore := widget.NewButtonWithIcon(backupRestoreText, theme.FolderOpenIcon(), func() { d.Hide(); u.restorePick() })
 	migrate := widget.NewButtonWithIcon(migrateMenuText, theme.MailForwardIcon(), func() { d.Hide(); u.migrateAsk() })
+	adminKey := widget.NewButtonWithIcon(adminKeyMenuText, theme.LoginIcon(), func() { d.Hide(); u.adminKeyAsk() })
 	body := container.NewVBox(
 		wrapLabel("Копия нужна для переезда на новый сервер: ключ сервера, клиенты, параметры протоколов. "+core.IssuedConfigsNote, false),
-		save, restore, migrate)
+		save, restore, migrate, adminKey)
 	d = dialog.NewCustom(backupMenuTitle, "Закрыть", body, u.win)
 	u.fitDialog(d, body, nil, 560)
 	d.Show()

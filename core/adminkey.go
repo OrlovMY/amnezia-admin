@@ -109,6 +109,10 @@ func adminKeyProto(container string) (string, bool) {
 		return "wireguard", true
 	case "amnezia-xray":
 		return "xray", true
+	case "amnezia-dns":
+		// Proto::Dns (containerUtils.cpp:232), DnsProtocolConfig::toJson —
+		// пустой объект (dnsProtocolConfig.cpp, ac175c8).
+		return "dns", true
 	}
 	return "", false
 }
@@ -284,6 +288,8 @@ func ProtocolParamsFromServer(container string, conf []byte) (map[string]any, er
 				}
 			}
 		}
+	case "amnezia-dns":
+		return p, nil // параметров нет: {"dns":{}}, как у приложения
 	case "amnezia-xray":
 		// Строгий разбор; пустой список клиентов допустим — flow для ключа
 		// не нужен (ревью PR #70-2, M1; R3).
@@ -393,31 +399,17 @@ func (s *Session) AdminKeyContainersFromServer(names []string) (cs []AdminKeyCon
 				c = &found[i]
 			}
 		}
-		if c == nil || c.Dir == "" {
+		if c == nil {
 			return nil, nil, fmt.Errorf("ключ: контейнера %q на сервере не видно — параметры не прочитаны", n)
 		}
-		var conf []byte
-		if n == "amnezia-xray" {
-			raw, rerr := s.catIn(c, c.Dir+"/"+xrayConfFile)
-			if rerr != nil {
-				return nil, nil, fmt.Errorf("ключ: контейнер %q, server.json не прочитан: %w", n, rerr)
-			}
-			conf = []byte(raw)
-			if srv, perr := parseXRayServerEmptyOK(conf); perr == nil && len(srv.ids) == 0 {
-				notes = append(notes, XRayNoClientsNote)
-			}
-		} else {
-			out, rerr := s.catConf(c)
-			if rerr != nil {
-				return nil, nil, fmt.Errorf("ключ: контейнер %q, конфигурация не прочитана: %w", n, rerr)
-			}
-			conf = []byte(out)
+		kc, note, kerr := s.adminKeyContainerFrom(c)
+		if kerr != nil {
+			return nil, nil, kerr
 		}
-		p, perr := ProtocolParamsFromServer(n, conf)
-		if perr != nil {
-			return nil, nil, perr
+		if note != "" {
+			notes = append(notes, note)
 		}
-		cs = append(cs, AdminKeyContainer{Name: n, Protocol: p})
+		cs = append(cs, kc)
 	}
 	return cs, notes, nil
 }

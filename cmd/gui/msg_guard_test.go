@@ -57,6 +57,7 @@ var msgAllowedCtors = map[string]string{
 	"dialog.NewCustomWithoutButtons": "окно со своим содержимым",
 	"dialog.NewFileOpen":             "выбор файла",
 	"dialog.NewFileSave":             "выбор файла",
+	"dialog.NewFolderOpen":           "выбор каталога (ключ vpn://, adminkey.go): системное окно без наших сообщений",
 }
 
 // textAssignHomes — где разрешено присваивать поле .Text: конструктор

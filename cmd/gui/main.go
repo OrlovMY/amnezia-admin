@@ -59,8 +59,11 @@ type ui struct {
 	clientHostShown     *clientHostView
 	clientHostPinShown  dialog.Dialog
 
-	win        fyne.Window
-	sess       *core.Session
+	win  fyne.Window
+	sess *core.Session
+	// keyMeta — описание, DNS и контейнер по умолчанию из ключа открытого
+	// сервера: «Выдать ключ vpn://…» переносит их, как CLI admin-key.
+	keyMeta    adminKeyMeta
 	containers []core.Container
 	cur        *core.Container
 
@@ -1189,6 +1192,7 @@ func (u *ui) attemptConnect(key string, vc *vaultCtx, connectBtn *widget.Button,
 		uiDo(func() {
 			u.closeMigDst() // цель прежнего источника не должна пережить смену источника
 			u.sess = sess
+			u.keyMeta = adminKeyMetaOf(cfg)
 			u.vaultPath, u.clientHostSet = "", core.ClientHostSetting{}
 			if vc != nil {
 				u.vaultPath, u.clientHostSet = vc.path, vc.payload.ClientHostSetting()

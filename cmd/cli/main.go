@@ -20,6 +20,7 @@
 //	amnezia-admin migrate -key vpn://ИСТОЧНИКА... -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-replace-users] [-yes]
 //	amnezia-admin migrate (-key-file файл | -key vpn://ИСТОЧНИКА...) -to-host IP|имя [-to-port 22] [-to-user root] [-to-hostkey SHA256:...] [-key-out файл] [-wipe-target [-wipe-without-copy]] (-password-file файл | -no-password) [-apply] [-address-changes] [-skip-xray] [-yes]
 //	amnezia-admin provision-check -to-key vpn://ЦЕЛИ... [-to-hostkey SHA256:...]
+//	amnezia-admin admin-key (-key-file файл | -key vpn://... | -host IP|имя [-port 22] [-user root]) -out файл [-include-password] [-allow-partial]
 //	amnezia-admin version
 //	amnezia-admin check
 //
@@ -989,12 +990,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 		return runBackupInfo(stdout, stderr, args[1:])
 	}
 
+	// admin-key — свои флаги (вход ключом ИЛИ адресом), см. adminkey.go.
+	if cmd == "admin-key" {
+		return runAdminKeyCmd(args[1:], stdin, stdout, stderr, knownHostsPath)
+	}
+
 	// help и неизвестная команда — до разбора флагов и до требования ключа:
 	// раньше список команд печатался только ПОСЛЕ подключения к серверу, и
 	// без ключа человек получал «Не задан ключ» вместо списка.
 	if cmd == "help" || cmd == "-h" || cmd == "-help" || cmd == "--help" {
-		fmt.Fprintln(stdout, "Команды: "+cliCommandList)
-		fmt.Fprintln(stdout, "Справка по флагам: amnezia-admin <команда> -h")
+		printCLIHelp(stdout)
 		return 0
 	}
 	if !knownCLICommand(cmd) {
