@@ -53,7 +53,7 @@ func TestGUIAdminKeyMetaFromRealConnect(t *testing.T) {
 	if f.u.sess == nil || f.u.sess.Creds.Host != host {
 		t.Fatalf("не подключились: %s", info.Text)
 	}
-	f.run(t, adminKeyOKFull)
+	f.run(t, adminKeyOKFull, adminKeyPwCheck)
 	if f.written == "" {
 		t.Fatal("ключ не выдан")
 	}
@@ -70,7 +70,7 @@ func TestGUIAdminKeyMetaFromRealConnect(t *testing.T) {
 // nil Creds — отказ словами, без паники (ревью-2 PR #75, п. 1).
 func TestGUIAdminKeyIssueNilCreds(t *testing.T) {
 	s := core.NewSessionWithRunner(fakesrv.NewAWG2(), nil)
-	k, lines := adminKeyIssue(s, core.AdminKeyReissue{}, adminKeyMeta{})
+	k, _, lines := adminKeyIssue(s, core.AdminKeyReissue{}, adminKeyMeta{}, true, false)
 	if k.Len() != 0 || len(lines) == 0 || !strings.Contains(lines[0], "не выдан") {
 		t.Fatalf("len=%d lines=%v", k.Len(), lines)
 	}

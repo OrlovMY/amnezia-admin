@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"amnezia-admin/core"
 	"amnezia-admin/internal/fakesrv"
@@ -31,6 +33,13 @@ type guiAKFixture struct {
 	out     string
 	verify  error
 	written string
+	// savedName — имя файла, переданное в окно сохранения
+	savedName string
+	// okDisabled — кнопка выдачи была погашена в момент нажатия
+	okDisabled bool
+	// forceEnable — включить погашенную кнопку перед нажатием: согласие
+	// обязан проверить обработчик, а не только кнопка
+	forceEnable bool
 }
 
 func newGUIAKFixture(t *testing.T, setup func(*fakesrv.Server)) *guiAKFixture {
@@ -45,8 +54,9 @@ func newGUIAKFixture(t *testing.T, setup func(*fakesrv.Server)) *guiAKFixture {
 	t.Cleanup(func() { guiAdminKeyVerify, guiAdminKeySave = v0, s0 })
 	guiAdminKeyVerify = func(core.AdminKey, core.AdminKeyInput, string, string) error { return f.verify }
 	f.u.keyMeta = adminKeyMeta{Description: "Мой сервер", DNS1: "9.9.9.9", DNS2: "1.0.0.1", Default: "amnezia-awg2"}
-	guiAdminKeySave = func(_ *ui, host string, key core.AdminKey, done func(string, error)) {
-		p, err := adminKeySaveTo(storage.NewFileURI(filepath.Dir(f.out)), host, key, guiAKNow)
+	guiAdminKeySave = func(_ *ui, name string, key core.AdminKey, done func(string, error)) {
+		f.savedName = name
+		p, err := adminKeySaveTo(storage.NewFileURI(filepath.Dir(f.out)), name, key)
 		if err == nil {
 			err = os.Rename(p, f.out)
 		}
@@ -55,22 +65,52 @@ func newGUIAKFixture(t *testing.T, setup func(*fakesrv.Server)) *guiAKFixture {
 	return f
 }
 
+// akChecks — флажки окна согласия по надписи.
+func akChecks(root fyne.CanvasObject) map[string]*widget.Check {
+	m := map[string]*widget.Check{}
+	walkObjects(root, func(o fyne.CanvasObject) {
+		if c, ok := o.(*widget.Check); ok {
+			m[c.Text] = c
+		}
+	})
+	return m
+}
+
 // run — пункт меню «Копия» → «Выдать ключ vpn://…» и, если окно согласия
-// есть, кнопка ok ("" — окна согласия быть не должно).
-func (f *guiAKFixture) run(t *testing.T, ok string) string {
+// есть, отметить флажки tick и нажать ok ("" — окна согласия быть не
+// должно). Нажатие на погашенную кнопку ничего не делает — как у человека.
+func (f *guiAKFixture) run(t *testing.T, ok string, tick ...string) string {
 	t.Helper()
 	f.u.backupMenu()
 	test.Tap(buttonByText(t, topPopup(t, f.u.win.Canvas()), adminKeyMenuText))
 	waitGUIGoroutines(t)
 	if ok != "" {
-		b := findEsc(f.u.win.Canvas().Overlays().Top(), ok)
+		top := f.u.win.Canvas().Overlays().Top()
+		b := findEsc(top, ok)
 		if b == nil {
 			t.Fatalf("нет кнопки %q в окне:\n%s", ok, topOverlay(t, f.u))
 		}
 		for _, other := range []string{adminKeyOKFull, adminKeyOKPartial} {
-			if other != ok && findEsc(f.u.win.Canvas().Overlays().Top(), other) != nil {
+			if other != ok && findEsc(top, other) != nil {
 				t.Fatalf("в окне и %q, и %q", ok, other)
 			}
+		}
+		checks := akChecks(top)
+		for _, c := range checks {
+			if c.Checked {
+				t.Fatalf("флажок %q отмечен заранее", c.Text)
+			}
+		}
+		for _, n := range tick {
+			c := checks[n]
+			if c == nil {
+				t.Fatalf("нет флажка %q", n)
+			}
+			test.Tap(c)
+		}
+		f.okDisabled = b.Disabled()
+		if f.forceEnable {
+			b.Enable()
 		}
 		test.Tap(b)
 		waitGUIGoroutines(t)
@@ -92,31 +132,62 @@ func TestGUIAdminKey(t *testing.T) {
 		setup    func(*fakesrv.Server)
 		verify   error
 		ok       string
+		tick     []string
 		wantFile bool
-		want     []string
+		// head — итог первой строкой: одно из четырёх состояний кодов CLI
+		head adminKeyOutcome
+		// noHead — окна итога нет (кнопка погашена — окно согласия на месте)
+		noHead bool
+		want   []string
 	}{
-		{name: "полный: записан и проверен", ok: adminKeyOKFull, wantFile: true, want: []string{"Ключ vpn:// записан в файл", "Ключ проверен"}},
+		{name: "полный: записан и проверен", ok: adminKeyOKFull, tick: []string{adminKeyPwCheck}, wantFile: true, head: akIssued,
+			want: []string{"Ключ vpn:// записан в файл", "Ключ проверен"}},
 		// доезд: «не прочитан» — ошибка cat с сервера; протоколов не осталось
-		{name: "параметры не прочитаны — не выдаётся", setup: func(s *fakesrv.Server) {
+		{name: "параметры не прочитаны — не выдаётся, неизвестно", setup: func(s *fakesrv.Server) {
 			s.FailRead = map[string]error{conf: errors.New("Permission denied")}
-		}, want: []string{"НЕ в ключ: amnezia-awg2", "Ключ не выдаётся"}},
-		{name: "часть не прочитана — только явная кнопка неполного", setup: func(s *fakesrv.Server) {
+		}, head: akUnknown, want: []string{"НЕ в ключ: amnezia-awg2", "Ключ не выдаётся"}},
+		{name: "часть не прочитана — флажок и явная кнопка неполного", setup: func(s *fakesrv.Server) {
 			s.Names = []string{"amnezia-awg2", "amnezia-foo"}
-		}, ok: adminKeyOKPartial, wantFile: true, want: []string{"Ключ НЕПОЛНЫЙ: в нём нет amnezia-foo"}},
-		{name: "список контейнеров не прочитан", setup: func(s *fakesrv.Server) { s.Names = nil }, want: []string{"состояние сервера неизвестно"}},
-		{name: "сервер не принял пароль", verify: core.ErrAdminKeyAuthRejected, ok: adminKeyOKFull, want: []string{"НЕ годится"}},
-		{name: "проверить не удалось — записан с оговоркой", verify: errors.New("сеть"), ok: adminKeyOKFull, wantFile: true,
-			want: []string{"Ключ проверить не удалось", "записан в файл"}},
+		}, ok: adminKeyOKPartial, tick: []string{adminKeyPwCheck, adminKeyPartialCheck}, wantFile: true, head: akIssued,
+			want: []string{"Ключ НЕПОЛНЫЙ: в нём нет amnezia-foo"}},
+		{name: "часть не прочитана, без согласия на неполный — кнопка погашена", setup: func(s *fakesrv.Server) {
+			s.Names = []string{"amnezia-awg2", "amnezia-foo"}
+		}, ok: adminKeyOKPartial, tick: []string{adminKeyPwCheck}, noHead: true, want: []string{adminKeyNeedPartial}},
+		{name: "без согласия на пароль — кнопка погашена, ключа нет", ok: adminKeyOKFull, noHead: true, want: []string{adminKeyNeedPw}},
+		// доезд третьего состояния: ошибка docker ps с сервера
+		{name: "список контейнеров не прочитан", setup: func(s *fakesrv.Server) { s.Names = nil }, head: akUnknown, want: []string{"состояние сервера неизвестно"}},
+		{name: "сервер не принял пароль", verify: core.ErrAdminKeyAuthRejected, ok: adminKeyOKFull, tick: []string{adminKeyPwCheck}, head: akNotIssued, want: []string{"НЕ годится"}},
+		// доезд: VerifyAdminKey вернул не-«нет» и не-«да» — итог «неизвестно», не «выдан и проверен»
+		{name: "проверить не удалось — записан, итог неизвестно", verify: errors.New("сеть"), ok: adminKeyOKFull, tick: []string{adminKeyPwCheck}, wantFile: true,
+			head: akUnknown, want: []string{"Ключ проверить не удалось", "записан в файл"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGUIAKFixture(t, tc.setup)
 			f.verify = tc.verify
-			all := f.run(t, tc.ok)
+			all := f.run(t, tc.ok, tc.tick...)
 			for _, w := range tc.want {
 				if !strings.Contains(all, w) {
 					t.Errorf("нет %q в окне:\n%s", w, all)
 				}
+			}
+			heads := 0
+			for _, o := range []adminKeyOutcome{akIssued, akNotIssued, akNoConsent, akUnknown} {
+				if strings.Contains(all, adminKeyOutcomeHead(o)) {
+					heads++
+					if tc.noHead || o != tc.head {
+						t.Errorf("итог %q, ожидался %v (нет итога: %v):\n%s", adminKeyOutcomeHead(o), adminKeyOutcomeHead(tc.head), tc.noHead, all)
+					}
+				}
+			}
+			if !tc.noHead && heads != 1 {
+				t.Errorf("строк итога %d, нужна одна:\n%s", heads, all)
+			}
+			if tc.noHead != f.okDisabled && tc.ok != "" {
+				t.Errorf("кнопка погашена=%v, ожидалось %v", f.okDisabled, tc.noHead)
+			}
+			if tc.wantFile && !strings.HasPrefix(f.savedName, "admin-203.0.113.31-") {
+				t.Errorf("имя файла по умолчанию: %q", f.savedName)
 			}
 			if (f.written != "") != tc.wantFile {
 				t.Fatalf("файл ключа: есть=%v, ожидалось %v", f.written != "", tc.wantFile)
@@ -177,19 +248,35 @@ func TestGUIAdminKeySaveTo(t *testing.T) {
 	if err := os.WriteFile(prev, []byte("прежнее"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adminKeySaveTo(storage.NewFileURI(dir), "h", key, guiAKNow); err == nil || !strings.Contains(err.Error(), "не перезаписываю") {
+	if _, err := adminKeySaveTo(storage.NewFileURI(dir), filepath.Base(prev), key); err == nil || !strings.Contains(err.Error(), "не перезаписываю") {
 		t.Fatalf("существующий файл: %v", err)
 	}
 	if b, _ := os.ReadFile(prev); string(b) != "прежнее" {
 		t.Fatal("прежнее содержимое файла потеряно")
 	}
 	other, _ := storage.ParseURI("content://provider/dir")
-	if _, err := adminKeySaveTo(other, "h", key, guiAKNow); !errors.Is(err, errAdminKeyNotFS) {
+	if _, err := adminKeySaveTo(other, "k.txt", key); !errors.Is(err, errAdminKeyNotFS) {
 		t.Fatalf("не file: %v", err)
 	}
-	p, err := adminKeySaveTo(storage.NewFileURI(dir), "h", key, guiAKNow.Add(time.Second))
+	// имя с каталогом — отказ, файл вне выбранного каталога не создаётся
+	// H1/M1: имена устройств Windows (на всех ОС) и хвостовые точки — отказ
+	// до записи; в устройство тест не пишет: имя отклоняется раньше OpenFile.
+	for _, bad := range []string{"", "  ", ".", "..", "../k.txt", `..\k.txt`, "sub/k.txt", "C:k.txt",
+		"NUL", "nul", "nul.txt", "CON", "con.vpn.txt", "PRN", "aux", "COM1", "com9.txt", "LPT1", "lpt0", "COM¹", "lpt³.txt", "NUL .txt",
+		"k.", "k2. .", "k. "} {
+		if _, err := adminKeySaveTo(storage.NewFileURI(dir), bad, key); err == nil {
+			t.Errorf("имя %q принято", bad)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "k.txt")); err == nil {
+		t.Fatal("файл записан вне выбранного каталога")
+	}
+	p, err := adminKeySaveTo(storage.NewFileURI(dir), " мой-ключ.txt ", key)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if p != filepath.Join(dir, "мой-ключ.txt") {
+		t.Fatalf("путь %q", p)
 	}
 	if b, _ := os.ReadFile(p); strings.TrimSpace(string(b)) != key.Reveal() {
 		t.Fatal("в файле не тот ключ")
@@ -198,5 +285,135 @@ func TestGUIAdminKeySaveTo(t *testing.T) {
 		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
 			t.Fatalf("права %v", st.Mode().Perm())
 		}
+	}
+}
+
+// Тест различения: четыре итога (коды CLI 0/1/2/4) различимы первой строкой;
+// «записан, но не проверен» — НЕИЗВЕСТНО, а не «выдан и проверен».
+func TestGUIAdminKeyResultOutcome(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "k.txt")
+	for _, tc := range []struct {
+		name     string
+		path     string
+		err      error
+		verified adminKeyOutcome
+		want     adminKeyOutcome
+	}{
+		{"записан и проверен", p, nil, akIssued, akIssued},
+		{"записан, проверить не удалось", p, nil, akUnknown, akUnknown},
+		{"не записан", "", errors.New("диск"), akIssued, akNotIssued},
+		{"не записан, не проверен", "", errors.New("диск"), akUnknown, akNotIssued},
+		{"каталог не выбран", "", nil, akIssued, akNoConsent},
+	} {
+		o, text := adminKeyResultText(tc.path, tc.err, "root", nil, tc.verified, nil)
+		if o != tc.want || !strings.HasPrefix(text, adminKeyOutcomeHead(tc.want)+"\n") {
+			t.Errorf("%s: итог %d, текст:\n%s", tc.name, o, text)
+		}
+	}
+	seen := map[string]bool{}
+	for _, o := range []adminKeyOutcome{akIssued, akNotIssued, akNoConsent, akUnknown} {
+		seen[adminKeyOutcomeHead(o)] = true
+	}
+	if len(seen) != 4 {
+		t.Fatal("строки итога совпадают")
+	}
+}
+
+// Согласие на пароль: без него adminKeyIssue ключ не собирает (даже если
+// кнопку как-то нажали), а погашенная кнопка называет причину.
+func TestGUIAdminKeyConsent(t *testing.T) {
+	f := newGUIAKFixture(t, nil)
+	r, err := guiAdminKeyPlan(f.u.sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, false, true); k.Len() != 0 || o != akNoConsent {
+		t.Fatalf("без согласия: len=%d итог=%d", k.Len(), o)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, false); k.Len() == 0 || o != akIssued {
+		t.Fatalf("с согласием: len=%d итог=%d", k.Len(), o)
+	}
+	for _, tc := range []struct {
+		pw, part bool
+		name     string
+		want     string
+	}{
+		{false, true, "k.txt", adminKeyNeedPw},
+		{true, false, "k.txt", adminKeyNeedPartial},
+		{true, true, "../k.txt", "Кнопка погашена: имя файла"},
+		{true, true, "NUL", "Кнопка погашена: имя файла"},
+		{true, true, "nul.txt", "Кнопка погашена: имя файла"},
+		{true, true, "Com1", "Кнопка погашена: имя файла"},
+		{true, true, "k.", "Кнопка погашена: имя файла"},
+		{true, true, "nullable.txt", ""},
+		{true, true, "k.txt", ""},
+	} {
+		got := adminKeyGate(tc.pw, tc.part, tc.name)
+		if (tc.want == "") != (got == "") || !strings.HasPrefix(got, tc.want) {
+			t.Errorf("%+v: %q", tc, got)
+		}
+	}
+}
+
+// L1/L2: согласие проверяет обработчик кнопки, а не только её погашенность.
+// Кнопку включают принудительно при снятом флажке — итог «нет согласия»,
+// файла нет. Подмены consent:=true / partialConsent:=true в обработчике
+// (или удаление проверки в adminKeyIssue) роняют тест.
+func TestGUIAdminKeyConsentForcedButton(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakesrv.Server)
+		ok    string
+		tick  []string
+		want  string
+	}{
+		{"пароль: флажок снят", nil, adminKeyOKFull, nil, "нет согласия положить в него пароль"},
+		{"неполный: флажок снят", func(s *fakesrv.Server) { s.Names = []string{"amnezia-awg2", "amnezia-foo"} },
+			adminKeyOKPartial, []string{adminKeyPwCheck}, "нет согласия на неполный ключ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGUIAKFixture(t, tc.setup)
+			f.forceEnable = true
+			all := f.run(t, tc.ok, tc.tick...)
+			if !f.okDisabled {
+				t.Fatal("кнопка не была погашена")
+			}
+			if !strings.Contains(all, adminKeyOutcomeHead(akNoConsent)) || !strings.Contains(all, tc.want) {
+				t.Fatalf("итог не «нет согласия»:\n%s", all)
+			}
+			if f.written != "" || f.savedName != "" {
+				t.Fatal("ключ записан без согласия")
+			}
+		})
+	}
+}
+
+// L2: adminKeyIssue сам требует согласия на неполный ключ, если есть пробелы.
+func TestGUIAdminKeyIssuePartialConsent(t *testing.T) {
+	f := newGUIAKFixture(t, func(s *fakesrv.Server) { s.Names = []string{"amnezia-awg2", "amnezia-foo"} })
+	r, err := guiAdminKeyPlan(f.u.sess, "")
+	if err != nil || len(r.Gaps) == 0 {
+		t.Fatalf("нет пробелов в плане: %v", err)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, false); k.Len() != 0 || o != akNoConsent {
+		t.Fatalf("неполный без согласия: len=%d итог=%d", k.Len(), o)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, true); k.Len() == 0 || o != akIssued {
+		t.Fatalf("неполный с согласием: len=%d итог=%d", k.Len(), o)
+	}
+}
+
+// L3: нет пароля в ключе открытого сервера — тот же исход, что у CLI
+// (cmd/cli/adminkey.go: «в текущем ключе нет пароля SSH» → exitAdminKeyNo = 1).
+func TestGUIAdminKeyNoPasswordMatchesCLI(t *testing.T) {
+	f := newGUIAKFixture(t, nil)
+	r, err := guiAdminKeyPlan(f.u.sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.u.sess.Creds.Password = ""
+	k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, true)
+	if k.Len() != 0 || o != 1 {
+		t.Fatalf("без пароля: len=%d итог=%d, у CLI код 1", k.Len(), o)
 	}
 }
