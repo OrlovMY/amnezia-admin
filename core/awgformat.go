@@ -135,6 +135,13 @@ func ParseAWGFormat(text string) AWGFormat {
 			if !awg2ServerKeys[k] {
 				return unknown(n, k, "— незнакомый параметр")
 			}
+			if awgBoolKeys[k] && !awgBoolValid(kv[1]) {
+				// Утилита awg такое значение не примет (parse_bool), и что
+				// сервер с ним делает, программа не знает — только просмотр.
+				// Значение в причину не попадает (SEC W3-R2).
+				return AWGFormat{State: FormatUnknownKey, Key: k,
+					Reason: "у параметра «" + k + "» значение, которое AmneziaWG не принимает (ждали on, off или число)"}
+			}
 			ifaceKeys[k] = true
 		case "p":
 			if !awg2PeerKeys[k] {
@@ -156,6 +163,31 @@ func ParseAWGFormat(text string) AWGFormat {
 		}
 	}
 	return AWGFormat{State: FormatKnown, Version: awgVersionOf(parseWgConf(text).iface, awgSpecialJunk(text))}
+}
+
+// awgBoolKeys — переключатели AmneziaWG 3.1 (amneziawg-tools ee0f0a9a,
+// src/config.c process_line: RandomTrailers, DisableCookies → parse_bool).
+var awgBoolKeys = map[string]bool{"RandomTrailers": true, "DisableCookies": true}
+
+// awgBoolValid — значение, которое примет parse_bool amneziawg-tools
+// (ee0f0a9a, src/config.c:414-446): on/off без учёта регистра или
+// десятичное число; пустое, «yes», «1x» и прочее утилита отвергает. Строже
+// утилиты (она удаляет пробелы внутри строки и комментарий после «#») —
+// сомнение уходит в «только просмотр», а не в «формат известен».
+func awgBoolValid(v string) bool {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "on") || strings.EqualFold(v, "off") {
+		return true
+	}
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isToggleEnabled — как AwgProtocolConfig::isToggleEnabled
