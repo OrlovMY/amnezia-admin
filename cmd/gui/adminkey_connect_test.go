@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,10 @@ import (
 // выданный ключ несёт description/dns1/dns2/defaultContainer прежнего.
 func TestGUIAdminKeyMetaFromRealConnect(t *testing.T) {
 	serialUI(t) // fyne.Do тестового драйвера не сериализует — как в тестах переноса
+	// known_hosts пишется в каталог хранилищ бинарника: свой, пустой, убирается
+	// после теста — иначе соседние тесты находят чужой «Настройки»
+	vd := vaultDirForTest(t)
+	t.Cleanup(func() { os.RemoveAll(vd) })
 	f := newGUIAKFixture(t, nil)
 	f.u.keyMeta = adminKeyMeta{} // заполнить должен только attemptConnect
 	hk, err := fakesrv.NewHostKey()

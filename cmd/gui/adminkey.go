@@ -16,9 +16,9 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,8 +121,8 @@ func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta
 	if c.Password == "" {
 		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: в ключе открытого сервера нет пароля SSH, а выдаваемому ключу нужен способ входа. Окно программы пароль не спрашивает — выдайте ключ командой: amnezia-admin admin-key -host " + c.Host + " -user " + c.User + " -out <файл> (она спросит пароль в терминале)."}
 	}
-	port := 0
-	if _, err := fmt.Sscanf(c.Port, "%d", &port); err != nil || port < 1 || port > 65535 {
+	port, err := strconv.Atoi(c.Port)
+	if err != nil || port < 1 || port > 65535 {
 		return core.AdminKey{}, []string{"Ключ vpn:// не выдан: порт SSH открытого сервера не 1…65535."}
 	}
 	in := core.AdminKeyInput{Host: c.Host, Port: port, User: c.User, Password: core.NewSecret([]byte(c.Password)), PasswordConsent: true,
