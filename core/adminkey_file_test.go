@@ -48,3 +48,55 @@ func TestWriteAdminKeyFile(t *testing.T) {
 		t.Error("пустой ключ записан")
 	}
 }
+
+// H1/M1: имена устройств Windows и хвостовые точки — отказ на всех ОС,
+// файл не создаётся; путь вне каталога или путь устройства — отказ;
+// не обычный файл — отказ. В устройство тест не пишет.
+// Подмены: убрать проверку имени / adminKeyTargetErr / adminKeyRegularErr → падает.
+func TestWriteAdminKeyFileReserved(t *testing.T) {
+	key, err := BuildAdminKey(adminInputT(t, adminKeyPw, 22))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, n := range []string{"NUL", "nul.txt", "Con", "PRN.vpn", "aux", "COM0", "com9", "LPT5.txt", "COM²", "LPT¹", "CONIN$", "NUL .txt", "k.", "k2. .", "k "} {
+		if _, err := WriteAdminKeyFile(filepath.Join(dir, n), key); err == nil {
+			t.Errorf("имя %q принято", n)
+		} else if strings.Contains(err.Error(), adminKeyPw) {
+			t.Error("пароль в ошибке")
+		}
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("создано файлов: %d", len(ents))
+	}
+	for _, ok := range []string{"nullable.txt", "con1", "COM10", "my.nul"} {
+		if err := AdminKeyFileNameErr(ok); err != nil {
+			t.Errorf("обычное имя %q отклонено: %v", ok, err)
+		}
+	}
+	p := filepath.Join(dir, "k.txt")
+	abs, _ := filepath.Abs(p)
+	if err := adminKeyTargetErr(p, abs); err != nil {
+		t.Errorf("обычный путь отклонён: %v", err)
+	}
+	for _, bad := range []string{`\\.\NUL`, `\\?\` + abs, filepath.Join(filepath.Dir(filepath.Dir(abs)), "k.txt"), filepath.Join(filepath.Dir(abs), "other.txt")} {
+		if err := adminKeyTargetErr(p, bad); err == nil {
+			t.Errorf("путь %q принят", bad)
+		}
+	}
+	if err := adminKeyRegularErr(fakeFI{os.ModeDevice | os.ModeCharDevice}); err == nil {
+		t.Error("устройство принято за файл")
+	}
+	if err := adminKeyRegularErr(fakeFI{0}); err != nil {
+		t.Error("обычный файл отклонён")
+	}
+}
+
+type fakeFI struct{ m os.FileMode }
+
+func (f fakeFI) Name() string       { return "x" }
+func (f fakeFI) Size() int64        { return 0 }
+func (f fakeFI) Mode() os.FileMode  { return f.m }
+func (f fakeFI) ModTime() time.Time { return time.Time{} }
+func (f fakeFI) IsDir() bool        { return false }
+func (f fakeFI) Sys() any           { return nil }

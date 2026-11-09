@@ -74,13 +74,12 @@ func adminKeyOutcomeHead(o adminKeyOutcome) string {
 	return "Итог: НЕИЗВЕСТНО — это не «выдан и годен» и не «не выдан»; подробности ниже."
 }
 
-// adminKeyNameErr — имя файла ключа: только имя, без каталога.
+// adminKeyNameErr — имя файла ключа (после обрезки пробелов по краям):
+// только имя, без каталога; не имя устройства Windows (NUL, CON, COM1,
+// «nul.txt»… — на всех ОС); без хвостовых точек. Вторая защита — в
+// core.WriteAdminKeyFile (путь обязан остаться обычным файлом в каталоге).
 func adminKeyNameErr(name string) error {
-	n := strings.TrimSpace(name)
-	if n == "" || n == "." || n == ".." || strings.ContainsAny(n, `/\:`) {
-		return errors.New("имя файла ключа — только имя, без каталога и двоеточия; каталог выбирается в следующем окне")
-	}
-	return nil
+	return core.AdminKeyFileNameErr(strings.TrimSpace(name))
 }
 
 // adminKeyMeta — поля ключа открытого сервера, которые переносятся в
@@ -162,15 +161,23 @@ func adminKeyPlanLines(r core.AdminKeyReissue, user, host string) (lines []strin
 
 // adminKeyIssue — сборка и проверка входом (фон). key.Len()==0 — не выдан;
 // o — итог (для выданного: akIssued — проверен, akUnknown — не проверен);
-// lines — что сказать человеку. consent — согласие на пароль в ключе.
-func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta, consent bool) (core.AdminKey, adminKeyOutcome, []string) {
+// lines — что сказать человеку. consent — согласие на пароль в ключе;
+// partialConsent — на неполный ключ (нужно, только если есть пробелы).
+// Проверяются здесь, а не только погашенной кнопкой (второй слой).
+func adminKeyIssue(sess *core.Session, r core.AdminKeyReissue, meta adminKeyMeta, consent, partialConsent bool) (core.AdminKey, adminKeyOutcome, []string) {
 	if !consent {
 		return core.AdminKey{}, akNoConsent, []string{"Ключ vpn:// не выдан: нет согласия положить в него пароль."}
+	}
+	if len(r.Gaps) > 0 && !partialConsent {
+		return core.AdminKey{}, akNoConsent, []string{"Ключ vpn:// не выдан: нет согласия на неполный ключ."}
 	}
 	c := sess.Creds
 	if c == nil {
 		return core.AdminKey{}, akNoConsent, []string{"Ключ vpn:// не выдан: у открытого сервера нет данных входа (адрес, пользователь, пароль) — переподключитесь к серверу."}
 	}
+	// Как CLI (cmd/cli/adminkey.go, «в текущем ключе нет пароля SSH» →
+	// exitAdminKeyNo = 1): в ключе открытого сервера нет пароля — измерено
+	// «не выдан», а не ошибка использования.
 	if c.Password == "" {
 		return core.AdminKey{}, akNotIssued, []string{"Ключ vpn:// не выдан: в ключе открытого сервера нет пароля SSH, а выдаваемому ключу нужен способ входа. Окно программы пароль не спрашивает — выдайте ключ командой: amnezia-admin admin-key -host " + c.Host + " -user " + c.User + " -out <файл> (она спросит пароль в терминале)."}
 	}
@@ -292,9 +299,10 @@ func (u *ui) adminKeyConfirm(sess *core.Session, r core.AdminKeyReissue, meta ad
 	pinned = append(pinned, reason)
 	cw := u.confirmWindowPinned(adminKeyTitle, []fyne.CanvasObject{wrapLabel(strings.Join(lines, "\n"), false)}, pinned, okText, true, func() {
 		consent, fileName := pwCheck.Checked, strings.TrimSpace(name.Text)
+		partialConsent := partCheck != nil && partCheck.Checked
 		u.setBusy(true)
 		goSafe(func() {
-			key, verified, res := adminKeyIssue(sess, r, meta, consent)
+			key, verified, res := adminKeyIssue(sess, r, meta, consent, partialConsent)
 			uiDo(func() {
 				u.setBusy(false)
 				if key.Len() == 0 {

@@ -37,6 +37,9 @@ type guiAKFixture struct {
 	savedName string
 	// okDisabled — кнопка выдачи была погашена в момент нажатия
 	okDisabled bool
+	// forceEnable — включить погашенную кнопку перед нажатием: согласие
+	// обязан проверить обработчик, а не только кнопка
+	forceEnable bool
 }
 
 func newGUIAKFixture(t *testing.T, setup func(*fakesrv.Server)) *guiAKFixture {
@@ -106,6 +109,9 @@ func (f *guiAKFixture) run(t *testing.T, ok string, tick ...string) string {
 			test.Tap(c)
 		}
 		f.okDisabled = b.Disabled()
+		if f.forceEnable {
+			b.Enable()
+		}
 		test.Tap(b)
 		guiGoroutines.Wait()
 	}
@@ -253,7 +259,11 @@ func TestGUIAdminKeySaveTo(t *testing.T) {
 		t.Fatalf("не file: %v", err)
 	}
 	// имя с каталогом — отказ, файл вне выбранного каталога не создаётся
-	for _, bad := range []string{"", "  ", ".", "..", "../k.txt", `..\k.txt`, "sub/k.txt", "C:k.txt"} {
+	// H1/M1: имена устройств Windows (на всех ОС) и хвостовые точки — отказ
+	// до записи; в устройство тест не пишет: имя отклоняется раньше OpenFile.
+	for _, bad := range []string{"", "  ", ".", "..", "../k.txt", `..\k.txt`, "sub/k.txt", "C:k.txt",
+		"NUL", "nul", "nul.txt", "CON", "con.vpn.txt", "PRN", "aux", "COM1", "com9.txt", "LPT1", "lpt0", "COM¹", "lpt³.txt", "NUL .txt",
+		"k.", "k2. .", "k. "} {
 		if _, err := adminKeySaveTo(storage.NewFileURI(dir), bad, key); err == nil {
 			t.Errorf("имя %q принято", bad)
 		}
@@ -317,10 +327,10 @@ func TestGUIAdminKeyConsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, false); k.Len() != 0 || o != akNoConsent {
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, false, true); k.Len() != 0 || o != akNoConsent {
 		t.Fatalf("без согласия: len=%d итог=%d", k.Len(), o)
 	}
-	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true); k.Len() == 0 || o != akIssued {
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, false); k.Len() == 0 || o != akIssued {
 		t.Fatalf("с согласием: len=%d итог=%d", k.Len(), o)
 	}
 	for _, tc := range []struct {
@@ -331,11 +341,79 @@ func TestGUIAdminKeyConsent(t *testing.T) {
 		{false, true, "k.txt", adminKeyNeedPw},
 		{true, false, "k.txt", adminKeyNeedPartial},
 		{true, true, "../k.txt", "Кнопка погашена: имя файла"},
+		{true, true, "NUL", "Кнопка погашена: имя файла"},
+		{true, true, "nul.txt", "Кнопка погашена: имя файла"},
+		{true, true, "Com1", "Кнопка погашена: имя файла"},
+		{true, true, "k.", "Кнопка погашена: имя файла"},
+		{true, true, "nullable.txt", ""},
 		{true, true, "k.txt", ""},
 	} {
 		got := adminKeyGate(tc.pw, tc.part, tc.name)
 		if (tc.want == "") != (got == "") || !strings.HasPrefix(got, tc.want) {
 			t.Errorf("%+v: %q", tc, got)
 		}
+	}
+}
+
+// L1/L2: согласие проверяет обработчик кнопки, а не только её погашенность.
+// Кнопку включают принудительно при снятом флажке — итог «нет согласия»,
+// файла нет. Подмены consent:=true / partialConsent:=true в обработчике
+// (или удаление проверки в adminKeyIssue) роняют тест.
+func TestGUIAdminKeyConsentForcedButton(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakesrv.Server)
+		ok    string
+		tick  []string
+		want  string
+	}{
+		{"пароль: флажок снят", nil, adminKeyOKFull, nil, "нет согласия положить в него пароль"},
+		{"неполный: флажок снят", func(s *fakesrv.Server) { s.Names = []string{"amnezia-awg2", "amnezia-foo"} },
+			adminKeyOKPartial, []string{adminKeyPwCheck}, "нет согласия на неполный ключ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGUIAKFixture(t, tc.setup)
+			f.forceEnable = true
+			all := f.run(t, tc.ok, tc.tick...)
+			if !f.okDisabled {
+				t.Fatal("кнопка не была погашена")
+			}
+			if !strings.Contains(all, adminKeyOutcomeHead(akNoConsent)) || !strings.Contains(all, tc.want) {
+				t.Fatalf("итог не «нет согласия»:\n%s", all)
+			}
+			if f.written != "" || f.savedName != "" {
+				t.Fatal("ключ записан без согласия")
+			}
+		})
+	}
+}
+
+// L2: adminKeyIssue сам требует согласия на неполный ключ, если есть пробелы.
+func TestGUIAdminKeyIssuePartialConsent(t *testing.T) {
+	f := newGUIAKFixture(t, func(s *fakesrv.Server) { s.Names = []string{"amnezia-awg2", "amnezia-foo"} })
+	r, err := guiAdminKeyPlan(f.u.sess, "")
+	if err != nil || len(r.Gaps) == 0 {
+		t.Fatalf("нет пробелов в плане: %v", err)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, false); k.Len() != 0 || o != akNoConsent {
+		t.Fatalf("неполный без согласия: len=%d итог=%d", k.Len(), o)
+	}
+	if k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, true); k.Len() == 0 || o != akIssued {
+		t.Fatalf("неполный с согласием: len=%d итог=%d", k.Len(), o)
+	}
+}
+
+// L3: нет пароля в ключе открытого сервера — тот же исход, что у CLI
+// (cmd/cli/adminkey.go: «в текущем ключе нет пароля SSH» → exitAdminKeyNo = 1).
+func TestGUIAdminKeyNoPasswordMatchesCLI(t *testing.T) {
+	f := newGUIAKFixture(t, nil)
+	r, err := guiAdminKeyPlan(f.u.sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.u.sess.Creds.Password = ""
+	k, o, _ := adminKeyIssue(f.u.sess, r, adminKeyMeta{}, true, true)
+	if k.Len() != 0 || o != 1 {
+		t.Fatalf("без пароля: len=%d итог=%d, у CLI код 1", k.Len(), o)
 	}
 }
