@@ -31,7 +31,7 @@ func TestShimTakesEffect(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			sh, err := FindSh()
 			if err != nil {
-				t.Skip(err)
+				t.Fatalf("sh не найден — проверка обёрток не выполнилась бы: %v", err)
 			}
 			s := &Server{FailMvTo: c.mvTo, MissingTool: c.missing, FailTool: c.fail}
 			tmp := t.TempDir()
