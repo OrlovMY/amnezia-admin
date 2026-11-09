@@ -122,7 +122,13 @@ func (m *Migration) DNSLines() []string {
 	}
 	switch m.DstDNS.State {
 	case DNSPresent:
-		return []string{head + "; на новом сервере он уже есть — не трогается."}
+		switch m.DstDNS.Running {
+		case CompatMatch:
+			return []string{head + "; на новом сервере он уже есть и запущен — не трогается."}
+		case CompatMismatch:
+			return []string{head + "; на новом сервере он уже есть, но ОСТАНОВЛЕН — не трогается (не запускается и не переставляется), итог переноса будет «частично»: запустите его сами (docker start " + DNSContainer + ")."}
+		}
+		return []string{head + "; на новом сервере он уже есть, но запущен ли — прочитать не удалось; не трогается, итог переноса будет «частично»."}
 	case DNSAbsent:
 		return []string{head + "; на новом сервере его нет — после переноса клиентов он будет поставлен официальными скриптами Amnezia [скрипты " + dnsRevision() +
 			"]: образ собирается FROM mvance/unbound:latest (плавающий тег, версия не закреплена), контейнер amnezia-dns в сети amnezia-dns-net с адресом 172.29.172.254, --restart always, портов наружу не открывает."}
@@ -147,7 +153,17 @@ func (m *Migration) applyDNS() (RestoreOutcome, bool) {
 	}
 	switch m.DstDNS.State {
 	case DNSPresent:
-		o.State, o.Checked = RestoreDone, "AmneziaDNS на новом сервере уже был — не трогался"
+		// Три состояния «запущен»: только измеренное «да» — полный перенос.
+		// Остановленный не запускаем: это чужое на цели, и решение о нём —
+		// за человеком; честно говорим «частично».
+		switch m.DstDNS.Running {
+		case CompatMatch:
+			o.State, o.Checked = RestoreDone, "AmneziaDNS на новом сервере уже был и запущен — не трогался"
+		case CompatMismatch:
+			o.State, o.Err = RestoreNotWritten, errors.New("AmneziaDNS на новом сервере уже есть, но остановлен — не трогался; клиенты с DNS 172.29.172.254 останутся без разрешения имён, пока вы его не запустите (docker start "+DNSContainer+")")
+		default:
+			o.State, o.Err = RestoreNotWritten, errors.New("AmneziaDNS на новом сервере уже есть, но запущен ли он, узнать не удалось — не трогался; проверьте docker ps на новом сервере")
+		}
 		return o, true
 	case DNSUnknown:
 		o.State, o.Err = RestoreNotWritten, errors.New("есть ли AmneziaDNS на новом сервере, узнать не удалось — не ставился")
@@ -176,7 +192,7 @@ func (s *Session) InstallAmneziaDNS(rev string) RestoreOutcome {
 			return ""
 		}
 		var out string
-		out, err = renderFor(rev, file, vars)
+		out, err = dnsRender(rev, file, vars)
 		return out
 	}
 	prepare, dockerfile, build := r("prepare_host.sh"), r("dns/Dockerfile"), r("build_container.sh")
@@ -247,17 +263,28 @@ func (s *Session) InstallAmneziaDNS(rev string) RestoreOutcome {
 	return o
 }
 
+// dnsRender — подстановка скриптов AmneziaDNS; переменная — чтобы тест мог
+// подать непустой configure_container.sh.
+var dnsRender = renderFor
+
+// dnsBaseImage — базовый образ dns/Dockerfile (FROM mvance/unbound:latest);
+// remove_container.sh его не удаляет.
+const dnsBaseImage = "mvance/unbound"
+
 // dnsRollback — remove_container.sh и измерение: остались ли контейнер и
 // образ amnezia-dns.
 func (s *Session) dnsRollback(o RestoreOutcome, remove, why string) RestoreOutcome {
 	s.instStep(hostScriptCmd, []byte(remove)) // исход — по измерению ниже
 	var left []string
-	unknown := false
+	unknown, baseLeft := false, false
 	for _, kind := range []string{"container", "image"} {
 		names, ok := s.listNames(kind)
 		if !ok {
 			unknown = true
 			continue
+		}
+		if kind == "image" && hasName(strings.Join(names, " "), dnsBaseImage) {
+			baseLeft = true
 		}
 		if hasName(strings.Join(names, " "), DNSContainer) {
 			left = append(left, map[string]string{"container": "контейнер ", "image": "образ "}[kind]+DNSContainer)
@@ -269,7 +296,11 @@ func (s *Session) dnsRollback(o RestoreOutcome, remove, why string) RestoreOutco
 	case unknown:
 		o.State, o.Err = RestoreUnknown, errors.New("AmneziaDNS: "+why+"; откат: удалено ли всё, узнать не удалось")
 	default:
-		o.State, o.Err = RestoreRolledBack, errors.New("AmneziaDNS: "+why+"; снят откатом (контейнера и образа amnezia-dns нет — измерено)")
+		tail := ""
+		if baseLeft {
+			tail = "; базовый образ " + dnsBaseImage + ":latest остался на новом сервере (откат Amnezia его не удаляет; удалить: docker rmi " + dnsBaseImage + ":latest)"
+		}
+		o.State, o.Err = RestoreRolledBack, errors.New("AmneziaDNS: "+why+"; снят откатом (контейнера и образа amnezia-dns нет — измерено)"+tail)
 	}
 	return o
 }

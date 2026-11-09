@@ -16,12 +16,16 @@ import (
 // отвечает кодом 1; dropStep — связь обрывается на шаге.
 type dnsRunner struct {
 	*fakesrv.Server
-	mu                 sync.Mutex
-	failListAll        bool
-	failStep, dropStep string
-	dead               bool
-	ctrs, imgs         map[string]bool
-	steps              []string
+	mu          sync.Mutex
+	failListAll bool
+	// failRunAfterAll — `docker ps` (только запущенные), идущий сразу за
+	// `docker ps -a`, падает: так ProbeAmneziaDNS получает «запущен ли — не
+	// прочитано» настоящей ошибкой чтения, а не присваиванием.
+	failRunAfterAll, afterAll bool
+	failStep, dropStep        string
+	dead                      bool
+	ctrs, imgs                map[string]bool
+	steps                     []string
 }
 
 func newDNSRunner(s *fakesrv.Server) *dnsRunner {
@@ -30,8 +34,15 @@ func newDNSRunner(s *fakesrv.Server) *dnsRunner {
 
 func (r *dnsRunner) Run(cmd string, stdin []byte) (string, error) {
 	if !strings.Contains(cmd, instRC) {
+		r.mu.Lock()
+		after := r.afterAll
+		r.afterAll = strings.HasSuffix(cmd, dnsListCmd)
+		r.mu.Unlock()
 		if r.failListAll && strings.HasSuffix(cmd, dnsListCmd) {
 			return "", errors.New("ssh: связь оборвалась (модель)")
+		}
+		if r.failRunAfterAll && after && strings.HasSuffix(cmd, "docker ps --format '{{.Names}}'") {
+			return "", errors.New("ssh: связь оборвалась на docker ps (модель)")
 		}
 		return r.Server.Run(cmd, stdin)
 	}
@@ -84,6 +95,7 @@ func (r *dnsRunner) Run(cmd string, stdin []byte) (string, error) {
 		return instOK(join(r.imgs)), nil
 	case "build":
 		r.imgs[DNSContainer] = true
+		r.imgs[dnsBaseImage] = true // FROM mvance/unbound:latest
 	case "run":
 		r.ctrs[DNSContainer] = true
 	case "remove":
@@ -116,7 +128,9 @@ func TestMigrateAmneziaDNS(t *testing.T) {
 		name                string
 		srcRun, srcStop     bool // amnezia-dns на источнике запущен / остановлен
 		srcFail, dstFail    bool // docker ps -a падает
-		dstHas              bool
+		dstRun, dstStop     bool // amnezia-dns на цели запущен / остановлен
+		dstRunFail          bool // на цели «запущен ли» не прочитано
+		raceCtr, raceImg    bool // к Apply на цели появился контейнер / образ
 		failStep, dropStep  string
 		want                RestoreState
 		wantLine, installed bool
@@ -126,9 +140,13 @@ func TestMigrateAmneziaDNS(t *testing.T) {
 		{name: "источник: узнать не удалось", srcFail: true, wantLine: true, want: RestoreNotWritten, wantText: "узнать не удалось"},
 		{name: "запущен → ставится", srcRun: true, wantLine: true, want: RestoreDone, installed: true, wantText: "поставлен официальными скриптами"},
 		{name: "остановлен → тоже ставится", srcStop: true, wantLine: true, want: RestoreDone, installed: true},
-		{name: "на цели уже есть", srcRun: true, dstHas: true, wantLine: true, want: RestoreDone, wantText: "уже был"},
+		{name: "на цели уже есть и запущен", srcRun: true, dstRun: true, wantLine: true, want: RestoreDone, installed: true, wantText: "уже был и запущен"},
+		{name: "на цели есть, но остановлен", srcRun: true, dstStop: true, wantLine: true, want: RestoreNotWritten, wantText: "но остановлен"},
+		{name: "на цели есть, запущен ли — не прочитано", srcRun: true, dstStop: true, dstRunFail: true, wantLine: true, want: RestoreNotWritten, wantText: "запущен ли он, узнать не удалось"},
+		{name: "к Apply на цели появился контейнер", srcRun: true, raceCtr: true, wantLine: true, want: RestoreNotWritten, installed: true, wantText: "уже есть контейнер или образ"},
+		{name: "к Apply на цели появился образ", srcRun: true, raceImg: true, wantLine: true, want: RestoreNotWritten, wantText: "уже есть контейнер или образ"},
 		{name: "цель: узнать не удалось", srcRun: true, dstFail: true, wantLine: true, want: RestoreNotWritten, wantText: "на новом сервере, узнать не удалось"},
-		{name: "run упал → откат", srcRun: true, failStep: "run", wantLine: true, want: RestoreRolledBack, wantText: "снят откатом"},
+		{name: "run упал → откат", srcRun: true, failStep: "run", wantLine: true, want: RestoreRolledBack, wantText: "снят откатом (контейнера и образа amnezia-dns нет — измерено); базовый образ mvance/unbound:latest остался"},
 		{name: "обрыв на сборке", srcRun: true, dropStep: "build", wantLine: true, want: RestoreUnknown},
 	}
 	for _, c := range cases {
@@ -140,10 +158,17 @@ func TestMigrateAmneziaDNS(t *testing.T) {
 			if c.srcStop {
 				src.Stopped = append(src.Stopped, DNSContainer)
 			}
-			if c.dstHas {
+			if c.dstRun {
+				tgt.Names = append(tgt.Names, DNSContainer)
+			}
+			if c.dstStop {
 				tgt.Stopped = append(tgt.Stopped, DNSContainer)
 			}
 			sr, tr := newDNSRunner(src), newDNSRunner(tgt)
+			tr.failRunAfterAll = c.dstRunFail
+			if c.dstRun {
+				tr.ctrs[DNSContainer] = true // та же цель в модели установки
+			}
 			sr.failListAll, tr.failListAll = c.srcFail, c.dstFail
 			tr.failStep, tr.dropStep = c.failStep, c.dropStep
 			t.Cleanup(SetXRayWaits(0, 0))
@@ -156,6 +181,12 @@ func TestMigrateAmneziaDNS(t *testing.T) {
 			}
 			if (m.DNSLines() != nil) != c.wantLine {
 				t.Errorf("строка предпросмотра: %v", m.DNSLines())
+			}
+			if c.raceCtr {
+				tr.ctrs[DNSContainer] = true
+			}
+			if c.raceImg {
+				tr.imgs[DNSContainer] = true
 			}
 			auto, outs, err := m.Apply(migApply(t.TempDir()))
 			if err != nil {
@@ -188,6 +219,16 @@ func TestMigrateAmneziaDNS(t *testing.T) {
 			if (o.State != RestoreDone) != strings.Contains(lines, "ЧАСТИЧНО") {
 				t.Errorf("частичность итога не совпала с исходом %v:\n%s", o.State, lines)
 			}
+			if c.raceCtr || c.raceImg {
+				for _, st := range tr.steps {
+					if st != "sudo" && st != "list" && st != "images" {
+						t.Errorf("при существующем amnezia-dns на цели выполнен шаг %q (шаги %v)", st, tr.steps)
+					}
+				}
+				if c.raceImg && !tr.imgs[DNSContainer] {
+					t.Errorf("существовавший образ amnezia-dns удалён")
+				}
+			}
 			if len(sr.steps) != 0 {
 				t.Errorf("на источник ушли команды установки: %v", sr.steps)
 			}
@@ -217,5 +258,28 @@ func TestPlanInstallDNS(t *testing.T) {
 	b.SourceDNS = DNSProbe{State: DNSAbsent}
 	if l := strings.Join(SourceDNSLines(PlanInstall(b, nil).DNS), ""); !strings.Contains(l, "нет") {
 		t.Errorf("нет: %q", l)
+	}
+}
+
+// TestInstallDNSRefusesNonEmptyConfigure — L1: непустой
+// configure_container.sh — отказ до первой записи на сервер.
+func TestInstallDNSRefusesNonEmptyConfigure(t *testing.T) {
+	old := dnsRender
+	t.Cleanup(func() { dnsRender = old })
+	dnsRender = func(rev, file string, vars map[string]string) (string, error) {
+		out, err := old(rev, file, vars)
+		if file == "dns/configure_container.sh" {
+			out = "echo configure"
+		}
+		return out, err
+	}
+	_, tgt := migrationPair(t)
+	tr := newDNSRunner(tgt)
+	o := NewSessionWithRunner(tr, &ServerCreds{Host: migDstHost}).InstallAmneziaDNS(dnsRevision())
+	if o.State != RestoreNotWritten || o.Err == nil || !strings.Contains(o.Err.Error(), "configure_container.sh") {
+		t.Fatalf("исход %v (%v), ждали отказ из-за configure_container.sh", o.State, o.Err)
+	}
+	if len(tr.steps) != 0 {
+		t.Errorf("до отказа на сервер ушли шаги: %v", tr.steps)
 	}
 }
