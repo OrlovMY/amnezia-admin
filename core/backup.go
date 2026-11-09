@@ -205,6 +205,10 @@ type Backup struct {
 	} `json:"server"`
 	IssuedAddress IssuedAddress     `json:"issued_address"`
 	Containers    []BackupContainer `json:"containers"`
+	// SourceDNS — есть ли на сервере amnezia-dns (docker ps -a, и
+	// остановленный). Только в памяти: в файл копии не пишется (формат не
+	// меняется); у копии из файла — нулевое «узнать не удалось».
+	SourceDNS DNSProbe `json:"-"`
 }
 
 // ---------- слои ----------
@@ -760,5 +764,6 @@ func (s *Session) CollectBackupCtx(ctx context.Context, toolVersion string, now 
 		}
 		b.Containers = append(b.Containers, bc)
 	}
+	b.SourceDNS = s.ProbeAmneziaDNS()
 	return b, nil
 }

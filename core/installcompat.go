@@ -83,6 +83,10 @@ type InstallSkip struct {
 type InstallPlan struct {
 	Items   []InstallItem
 	Skipped []InstallSkip
+	// DNS — AmneziaDNS на источнике (Backup.SourceDNS). Он не входит ни в
+	// Items, ни в Skipped: ставится после переноса клиентов (Migration.Apply).
+	// Нулевое — «узнать не удалось»; печатать — SourceDNSLines.
+	DNS DNSProbe
 }
 
 // Ready — все контейнеры совместимы ПО СКРИПТАМ; иначе установка — стоп.
@@ -124,8 +128,12 @@ func PlanInstall(b *Backup, prefs []string) InstallPlan {
 	if b == nil {
 		return p
 	}
+	p.DNS = b.SourceDNS
 	for i := range b.Containers {
 		bc := &b.Containers[i]
+		if bc.Name == DNSContainer && bc.Status == CtrNotIncluded {
+			continue // AmneziaDNS — p.DNS
+		}
 		if bc.Status == CtrNotIncluded {
 			p.Skipped = append(p.Skipped, InstallSkip{bc.Name, bc.Reason})
 			continue
