@@ -35,20 +35,30 @@ func vaultDirForTest(t *testing.T) string {
 	if !insideTempDir(dir) {
 		t.Fatalf("каталог хранилищ %s не во временном каталоге %s — тест его не трогает", dir, os.TempDir())
 	}
+	aside := dir + ".a1b-aside"
+	moved := false
+	// Восстановление регистрируется ДО переноса и первым делом дожидается
+	// фоновых операций goSafe (ОТЧЁТ-TIMING-FLAKES-2): иначе зависшее
+	// сохранение ключа досрочно упавшего теста дописывало файл в каталог
+	// ПОСЛЕ уборки, возврат отложенного не удавался, и «Настройки» с
+	// «Настройки.a1b-aside» каскадом роняли другие тесты пакета.
+	t.Cleanup(func() {
+		guiGoroutines.Wait()
+		os.RemoveAll(dir)
+		if moved {
+			if err := os.Rename(aside, dir); err != nil {
+				t.Errorf("не удалось вернуть %s: %v", dir, err)
+			}
+		}
+	})
 	if _, err := os.Stat(dir); err == nil {
-		aside := dir + ".a1b-aside"
 		if _, err := os.Stat(aside); err == nil {
 			t.Fatalf("%s уже существует — отложить %s некуда", aside, dir)
 		}
 		if err := os.Rename(dir, aside); err != nil {
 			t.Fatalf("не удалось отложить %s: %v", dir, err)
 		}
-		t.Cleanup(func() {
-			os.RemoveAll(dir)
-			if err := os.Rename(aside, dir); err != nil {
-				t.Errorf("не удалось вернуть %s: %v", dir, err)
-			}
-		})
+		moved = true
 	}
 	return dir
 }
@@ -135,6 +145,14 @@ func hasTextContaining(texts []string, sub string) bool {
 // состояния главного окна и путь нового файла.
 func saveKeyThroughDialog(t *testing.T, dir string) (status, saved string) {
 	t.Helper()
+	// Шифрование — настоящим путём диалога, но с лёгкими параметрами Argon2:
+	// боевые (512 МиБ × 4 прохода) под -race на macOS CI не укладывались в
+	// 30 с ожидания goSafe (ОТЧЁТ-TIMING-FLAKES-2). Проверяется подпись и
+	// номер, а не стойкость KDF. Возврат параметров ждёт фоновые операции,
+	// чтобы не гоняться с ещё работающей горутиной сохранения.
+	oldArgon := core.ProdArgonParams
+	core.ProdArgonParams = core.ArgonParams{MemoryKiB: 64, Time: 1, Threads: 1}
+	t.Cleanup(func() { guiGoroutines.Wait(); core.ProdArgonParams = oldArgon })
 	before := map[string]bool{}
 	if es, err := os.ReadDir(dir); err == nil {
 		for _, e := range es {
@@ -345,4 +363,60 @@ func TestA1bActivityUnknownWhenStatsFail(t *testing.T) {
 			t.Errorf("сервер ответил «рукопожатий не было», а «Активность» строки %d — %q, ожидалось «—»", row+1, got)
 		}
 	}
+}
+
+// TestVaultDirRestoredAfterLateGoSafeWrite — уборка vaultDirForTest
+// дожидается фоновых операций goSafe: операция, отпущенная уже на уборке
+// (как зависшее сохранение ключа досрочно упавшего теста), не должна
+// оставить ни каталога с чужим файлом, ни «.a1b-aside» для следующих тестов.
+func TestVaultDirRestoredAfterLateGoSafeWrite(t *testing.T) {
+	dir := core.DefaultVaultDir()
+	aside := dir + ".a1b-aside"
+	// Заранее заведённый каталог — то, что уборка обязана вернуть как было.
+	if !insideTempDir(dir) {
+		t.Fatalf("каталог хранилищ %s не во временном каталоге — тест его не трогает", dir)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		// Оставлен другим тестом пакета (ui.json) — пусть и он вернётся.
+		t.Cleanup(func() { os.Remove(filepath.Join(dir, "прежнее.txt")) })
+	} else {
+		t.Cleanup(func() { os.RemoveAll(dir) })
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "прежнее.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := dirNames(t, dir)
+	t.Run("досрочный", func(st *testing.T) {
+		d := vaultDirForTest(st)
+		gate := make(chan struct{})
+		goSafe(func() {
+			<-gate
+			os.MkdirAll(d, 0o700)
+			os.WriteFile(filepath.Join(d, "поздний.avlt"), nil, 0o600)
+		})
+		st.Cleanup(func() { close(gate) }) // выполняется ПЕРВЫМ (LIFO)
+	})
+	guiGoroutines.Wait()
+	if _, err := os.Stat(aside); err == nil {
+		t.Errorf("%s остался после уборки — следующий тест упадёт «отложить некуда»", aside)
+	}
+	if got := dirNames(t, dir); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("после уборки в каталоге %v, ожидалось %v — поздняя запись goSafe пережила уборку", got, want)
+	}
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("каталог %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	return names
 }

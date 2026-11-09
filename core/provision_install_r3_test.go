@@ -129,7 +129,9 @@ func TestInstallKeepalive(t *testing.T) {
 	)
 	// run прогоняет шаги по одному такту на шаг; возвращает номер шага
 	// (с 1), на котором связь закрыта, или 0.
-	run := func(steps ...string) int {
+	// kills — сколько раз вызван kill: после закрытия цикл обязан выйти
+	// (аудит L1), повторный kill на боевом пути — дефект.
+	run := func(steps ...string) (killedAt, kills int) {
 		tick := make(chan time.Time) // без буфера: приём такта = прошлый шаг обработан
 		done := make(chan struct{})
 		finished := make(chan struct{})
@@ -142,7 +144,6 @@ func TestInstallKeepalive(t *testing.T) {
 		// взял свой номер (started).
 		var sends, deadlines atomic.Int32
 		started := make(chan struct{})
-		killedAt := 0
 		step := func(n int32) string {
 			if int(n) < len(steps) {
 				return steps[n]
@@ -169,7 +170,7 @@ func TestInstallKeepalive(t *testing.T) {
 		}
 		go func() {
 			defer close(finished)
-			keepaliveLoop(send, func() { killedAt = int(deadlines.Load()) }, 3, tick, deadline, done)
+			keepaliveLoop(send, func() { killedAt = int(deadlines.Load()); kills++ }, 3, tick, deadline, done)
 		}()
 		for i := 0; i <= len(steps); i++ { // последний такт — страж
 			select {
@@ -182,7 +183,7 @@ func TestInstallKeepalive(t *testing.T) {
 		close(done)
 		<-finished
 		close(release)
-		return killedAt
+		return killedAt, kills
 	}
 	cases := []struct {
 		name  string
@@ -194,10 +195,21 @@ func TestInstallKeepalive(t *testing.T) {
 		{"живая связь", []string{ok, ok, ok, ok, ok, ok}, 0},
 		{"пропуски не подряд", []string{fail, fail, ok, fail, fail, ok, silent, fail, ok}, 0},
 		{"сброс счёта после ответа", []string{fail, fail, ok, fail, silent, fail}, 6},
+		// После закрытия ещё два пропуска: цикл, продолживший работу после
+		// kill, вызвал бы kill снова на шагах 4 и 5.
+		{"после закрытия — выход", []string{fail, fail, fail, fail, fail}, 3},
 	}
 	for _, c := range cases {
-		if got := run(c.steps...); got != c.want {
+		got, kills := run(c.steps...)
+		if got != c.want {
 			t.Errorf("%s: связь закрыта на шаге %d, ждали %d", c.name, got, c.want)
+		}
+		wantKills := 0
+		if c.want > 0 {
+			wantKills = 1
+		}
+		if kills != wantKills {
+			t.Errorf("%s: kill вызван %d раз, ждали %d — после закрытия цикл обязан выйти", c.name, kills, wantKills)
 		}
 	}
 }
