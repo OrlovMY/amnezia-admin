@@ -393,11 +393,11 @@ func TestTeardownUnknownLeavesMarkerForNextRun(t *testing.T) {
 
 // Снос предлагается, только если «нельзя» вызвано одной Amnezia.
 func TestTeardownWouldClear(t *testing.T) {
-	ok := ProvItem{"ОС", ProvOK, "ок"}
-	ctr := ProvItem{provCtrWhat, ProvBad, "уже есть: amnezia-awg2"}
-	amzPort := ProvItem{"порт amnezia-awg2 51820/udp (порт из копии)", ProvBad, "порт опубликован контейнером amnezia-awg2 — освободите его"}
-	otherPort := ProvItem{"порт amnezia-xray 443/tcp (порт из копии)", ProvBad, "порт занят другой программой"}
-	unknown := ProvItem{"свободное место", ProvUnknown, "df не ответил"}
+	ok := ProvItem{What: "ОС", State: ProvOK, Reason: "ок"}
+	ctr := ProvItem{What: provCtrWhat, State: ProvBad, Reason: "уже есть: amnezia-awg2"}
+	amzPort := ProvItem{What: "порт amnezia-awg2 51820/udp (порт из копии)", State: ProvBad, Reason: "порт опубликован контейнером amnezia-awg2 — освободите его"}
+	otherPort := ProvItem{What: "порт amnezia-xray 443/tcp (порт из копии)", State: ProvBad, Reason: "порт занят другой программой"}
+	unknown := ProvItem{What: "свободное место", State: ProvUnknown, Reason: "df не ответил"}
 	for _, c := range []struct {
 		name  string
 		items []ProvItem

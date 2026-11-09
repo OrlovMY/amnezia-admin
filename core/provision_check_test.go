@@ -188,7 +188,7 @@ func TestProvVerdictOrder(t *testing.T) {
 	mk := func(ss ...ProvState) ProvisionReport {
 		var r ProvisionReport
 		for _, s := range ss {
-			r.Items = append(r.Items, ProvItem{"x", s, "y"})
+			r.Items = append(r.Items, ProvItem{What: "x", State: s, Reason: "y"})
 		}
 		return r
 	}

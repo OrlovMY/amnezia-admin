@@ -176,3 +176,36 @@ func TestProvisionCheckForUsesBackupPorts(t *testing.T) {
 		}
 	}
 }
+
+// TestProvisionItemContainer — признак контейнера у пункта порта — в
+// структуре (Container), а не только в словах What: занятый 443 копии
+// несёт amnezia-xray (боевой путь ProvisionCheckFor), нечитаемый порт —
+// свой контейнер, порт по умолчанию и прочие пункты — "".
+func TestProvisionItemContainer(t *testing.T) {
+	b := &Backup{Containers: []BackupContainer{
+		{Name: "amnezia-awg2", Status: CtrSaved, Port: "51820"},
+		{Name: XRayContainer, Status: CtrSaved, Port: "443"},
+	}}
+	f := healthyFake()
+	f.out[ProvPortsTag] = "SSRC=0\nL=tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nL=tcp LISTEN 0 128 0.0.0.0:443 0.0.0.0:*\nEND\n"
+	r := NewSessionWithRunner(f, &ServerCreds{Host: "h", Port: "22", User: "root"}).ProvisionCheckFor(b)
+	got := map[string]ProvState{}
+	for _, it := range r.Items {
+		if it.Container != "" {
+			got[it.Container] = it.State
+		}
+	}
+	if len(got) != 2 || got[XRayContainer] != ProvBad || got["amnezia-awg2"] != ProvOK {
+		t.Fatalf("пункты по контейнерам: %v", got)
+	}
+	b.Containers[1].Port = "x"
+	_, bad := ProvisionPortsFromBackup(b)
+	if len(bad) != 1 || bad[0].Container != XRayContainer {
+		t.Fatalf("нечитаемый порт XRay без признака: %v", bad)
+	}
+	for _, it := range NewSessionWithRunner(healthyFake(), &ServerCreds{Host: "h", Port: "22", User: "root"}).ProvisionCheck().Items {
+		if it.Container != "" {
+			t.Fatalf("порт по умолчанию с признаком контейнера: %v", it)
+		}
+	}
+}

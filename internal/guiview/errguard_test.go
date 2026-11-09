@@ -68,7 +68,12 @@ const guiPkgFiles = "../../cmd/gui"
 // не потому, что его вычеркнули, а потому, что исчезло само место: A4в убрал
 // из writeConfigFile вычисление абсолютного пути вовсе, каталог теперь
 // абсолютен по построению (core.UserConfigsDir). Долг погашен, а не списан.
-var discardExceptions = map[string]string{}
+var discardExceptions = map[string]string{
+	// Второе значение migrateVerdict — текст заголовка, а не ошибка: сторож
+	// узнаёт форму C по положению блэнка, без типов. Состояние (migUnknown /
+	// migNotDone / migDone) берётся целиком, незнание не теряется.
+	"toHostAllButXRay/migrateVerdict": "второе значение — текст заголовка (string), не ошибка",
+}
 
 // discardFinding — одно найденное место.
 type discardFinding struct {
