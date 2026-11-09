@@ -174,7 +174,7 @@ func runAdminKey(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY b
 			fmt.Fprintln(errOut, "Ошибка: порт SSH в ключе не 1…65535")
 			return exitAdminKeyUsage
 		}
-		s, err := adminKeyDial(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, o.knownHostsPath))
+		s, err := adminKeyDial(creds, hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, "-hostkey", o.knownHostsPath))
 		if err != nil {
 			fmt.Fprintln(errOut, "SSH: "+core.MaskText(err.Error()))
 			if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {
@@ -218,7 +218,7 @@ func runAdminKey(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY b
 				return b, nil
 			}
 		}
-		s, att, err := adminKeyConnectNew(host, strconv.Itoa(port), user, auth, hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, o.knownHostsPath))
+		s, att, err := adminKeyConnectNew(host, strconv.Itoa(port), user, auth, hostKeyPolicyForCLI(in, w, errOut, isTTY, o.hostkey, "-hostkey", o.knownHostsPath))
 		if err != nil {
 			var ae *core.AuthError
 			if errors.As(err, &ae) {

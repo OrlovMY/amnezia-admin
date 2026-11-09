@@ -1027,7 +1027,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	pwFile := fs.String("password-file", "", "backup/restore: файл с паролем копии (пароль аргументом не передаётся)")
 	noPw := fs.Bool("no-password", false, "backup: сохранить копию без пароля (файл НЕ зашифрован)")
 	fixDiag := fs.Bool("fix", false, "diagnose: исправить найденную проблему (после подтверждения y/N или -yes); коды diagnose: 0 нет проблем, 1 проблема/не исправлено, 2 не подтверждено, 3 не удалось узнать")
-	skipXRay := fs.Bool("skip-xray", false, "restore: перенести без XRay (XRay на новом сервере останется прежним)")
+	skipXRay := fs.Bool("skip-xray", false, "restore и migrate -to-key: перенести без XRay (XRay на цели останется прежним); migrate -to-host: не проверять порт XRay, не ставить и не переносить XRay — его клиенты на новом сервере работать не будут, итог «частично» (код 1)")
 	clientHost := fs.String("client-host", os.Getenv("AMNEZIA_CLIENT_HOST"), "add/rekey/show-config XRay/backup: DNS-имя сервера для конфигов клиентов (вместо IP из ключа; проверяется, что имя указывает на этот сервер); keep-ip — явно оставить IP")
 	clientHostOK := fs.Bool("client-host-confirm", false, "add/rekey: выдать конфиг с -client-host, даже если имя указывает на другие адреса или проверить его не удалось")
 	replaceUsers := fs.Bool("replace-users", false, "restore: записать, хотя на новом сервере есть пользователи или конфликты с копией (без терминала и с -yes — обязателен в этом случае)")
@@ -1158,7 +1158,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, knownHostsPat
 	}
 
 	isTTY := stdinIsTTY()
-	sess, err := core.ConnectWithHostKey(creds, hostKeyPolicyForCLI(stdin, stdout, stderr, isTTY, *hostkey, knownHostsPath))
+	sess, err := core.ConnectWithHostKey(creds, hostKeyPolicyForCLI(stdin, stdout, stderr, isTTY, *hostkey, "-hostkey", knownHostsPath))
 	if err != nil {
 		if !isTTY && errors.Is(err, core.ErrHostKeyUnknown) {
 			fmt.Fprintln(stderr, "SSH:", err)

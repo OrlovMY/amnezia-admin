@@ -55,6 +55,12 @@ type HostKeyPolicy struct {
 	// разошлись, и это тоже отказ (не тихое доверие тому, что скажет
 	// known_hosts).
 	ExpectedFingerprint string
+	// ExpectedFrom — откуда взят ExpectedFingerprint: "" — сохранённый
+	// (хранилище .avlt, измеренный в этой же сессии); иначе — имя флага,
+	// которым человек передал отпечаток явно («-hostkey», «-to-hostkey»).
+	// Различает «сохранённый не совпал» и «переданный не совпал» в тексте
+	// отказа: у второго сохранённого ключа может не быть вовсе.
+	ExpectedFrom string
 }
 
 var (
@@ -96,7 +102,12 @@ type HostKeyError struct {
 	Addr        string
 	KnownFp     string
 	PresentedFp string
-	text        string
+	// PresentedType — тип предъявленного ключа (ssh-ed25519,
+	// ecdsa-sha2-nistp256, …); "" — неизвестен.
+	PresentedType string
+	// ExpectedFrom — копия HostKeyPolicy.ExpectedFrom для ErrHostKeyMismatch.
+	ExpectedFrom string
+	text         string
 }
 
 func (e *HostKeyError) Error() string { return e.text }
@@ -240,6 +251,32 @@ func hostKeyCallback(pol HostKeyPolicy, acceptedFp *string) ssh.HostKeyCallback 
 // как его требует cb из knownhosts.New — см. lookupKnownHost) для самой
 // сверки; remote — фактический адрес соединения (нужен только knownhosts-у
 // для внутренней проверки, приоритет всегда у lookupAddr).
+// expectedFromText — откуда ожидаемый отпечаток (для текста ошибки).
+func expectedFromText(pol HostKeyPolicy) string {
+	if pol.ExpectedFrom != "" {
+		return "передан в " + pol.ExpectedFrom
+	}
+	return "из хранилища"
+}
+
+// explicitNote — пометка явно переданного отпечатка ("" — прежний текст).
+func explicitNote(pol HostKeyPolicy) string {
+	if pol.ExpectedFrom != "" {
+		return " (передан в " + pol.ExpectedFrom + ")"
+	}
+	return ""
+}
+
+// mismatchError —дополняет ErrHostKeyMismatch источником ожидаемого
+// отпечатка и типом предъявленного ключа.
+func mismatchError(pol HostKeyPolicy, key ssh.PublicKey, e *HostKeyError) *HostKeyError {
+	e.ExpectedFrom = pol.ExpectedFrom
+	if key != nil {
+		e.PresentedType = key.Type()
+	}
+	return e
+}
+
 func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, fp string, key ssh.PublicKey) (accepted bool, err error) {
 	keyErr, err := lookupKnownHost(pol.KnownHostsPath, lookupAddr, remote, key)
 	if err != nil {
@@ -249,9 +286,9 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 	if keyErr == nil {
 		// Шаг 3: ключ принят по known_hosts (записан и совпал).
 		if pol.ExpectedFingerprint != "" && pol.ExpectedFingerprint != fp {
-			return false, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
-				"адрес %s, ожидался %s (из хранилища), известный и предъявленный ключ сервера — %s",
-				addr, pol.ExpectedFingerprint, fp)
+			return false, mismatchError(pol, key, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
+				"адрес %s, ожидался %s (%s), известный и предъявленный ключ сервера — %s",
+				addr, pol.ExpectedFingerprint, expectedFromText(pol), fp))
 		}
 		return true, nil
 	}
@@ -272,8 +309,8 @@ func checkHostKey(pol HostKeyPolicy, addr, lookupAddr string, remote net.Addr, f
 	// Шаг 2: записи нет — неизвестный сервер.
 	if pol.ExpectedFingerprint != "" {
 		if pol.ExpectedFingerprint != fp {
-			return false, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
-				"адрес %s, ожидался %s, предъявлен %s", addr, pol.ExpectedFingerprint, fp)
+			return false, mismatchError(pol, key, newHostKeyError(ErrHostKeyMismatch, addr, pol.ExpectedFingerprint, fp,
+				"адрес %s, ожидался %s%s, предъявлен %s", addr, pol.ExpectedFingerprint, explicitNote(pol), fp))
 		}
 		return recordKnownHost(pol, addr, lookupAddr, remote, fp, key)
 	}
