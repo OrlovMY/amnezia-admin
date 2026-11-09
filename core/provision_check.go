@@ -74,6 +74,10 @@ type ProvItem struct {
 	What   string // что проверялось (для человека)
 	State  ProvState
 	Reason string // что увидели / почему не годится / почему узнать не удалось
+	// Container — контейнер копии, к которому относится пункт (порт из
+	// копии, в том числе нечитаемый); "" — пункт не про контейнер копии.
+	// По нему, а не по словам в What, интерфейс узнаёт пункт порта XRay.
+	Container string
 }
 
 // ProvisionReport — итог предпроверки цели.
@@ -177,6 +181,7 @@ type ProvPort struct {
 	Name, Proto string
 	Port        int
 	Note        string // «порт по умолчанию» / «порт из копии»
+	Container   string // контейнер копии ("" — порт по умолчанию)
 }
 
 // ProvisionPortsFromBackup — порты контейнеров копии, которые будут
@@ -196,10 +201,12 @@ func ProvisionPortsFromBackup(b *Backup) (ports []ProvPort, bad []ProvItem) {
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(c.Port))
 		if err != nil || n < 1 || n > 65535 {
-			bad = append(bad, unk("порт "+c.Name+" (из копии)", fmt.Sprintf("порт в копии не читается числом: %q", c.Port)))
+			it := unk("порт "+c.Name+" (из копии)", fmt.Sprintf("порт в копии не читается числом: %q", c.Port))
+			it.Container = c.Name
+			bad = append(bad, it)
 			continue
 		}
-		ports = append(ports, ProvPort{Name: "порт " + c.Name, Proto: proto, Port: n, Note: "порт из копии"})
+		ports = append(ports, ProvPort{Name: "порт " + c.Name, Proto: proto, Port: n, Note: "порт из копии", Container: c.Name})
 	}
 	if len(ports) == 0 && len(bad) == 0 {
 		bad = append(bad, unk("порты из копии", "в копии нет ни одного контейнера, который будет поставлен"))
@@ -237,6 +244,7 @@ func (s *Session) provisionCheck(ports []ProvPort, portItems []ProvItem) Provisi
 		if pp.Note != "порт по умолчанию" {
 			it.What = strings.Replace(it.What, "(порт по умолчанию)", "("+pp.Note+")", 1)
 		}
+		it.Container = pp.Container
 		r.Items = append(r.Items, it)
 	}
 	r.Items = append(r.Items, portItems...)
@@ -251,7 +259,7 @@ func (s *Session) provisionCheck(ports []ProvPort, portItems []ProvItem) Provisi
 	return r
 }
 
-func unk(what, why string) ProvItem { return ProvItem{what, ProvUnknown, why} }
+func unk(what, why string) ProvItem { return ProvItem{What: what, State: ProvUnknown, Reason: why} }
 
 func notRan(what string, p probe) ProvItem {
 	return unk(what, "проверка не выполнилась: "+p.err)
@@ -290,9 +298,9 @@ func classifyOS(p probe) ProvItem {
 		return unk(what, label+": версию «"+ver+"» разобрать не удалось")
 	}
 	if v < min {
-		return ProvItem{what, ProvBad, fmt.Sprintf("%s: слишком старая версия, нужна не ниже %g", label, min)}
+		return ProvItem{What: what, State: ProvBad, Reason: fmt.Sprintf("%s: слишком старая версия, нужна не ниже %g", label, min)}
 	}
-	return ProvItem{what, ProvOK, label}
+	return ProvItem{What: what, State: ProvOK, Reason: label}
 }
 
 // kernelMajorMinor — «5.15.0-91-generic» → 5, 15.
@@ -327,9 +335,9 @@ func classifyKernel(p probe) ProvItem {
 	case !ok:
 		return unk(what, "версию ядра «"+k+"» разобрать не удалось")
 	case maj < 3 || (maj == 3 && mn < 10):
-		return ProvItem{what, ProvBad, k + ": Docker требует ядро не ниже 3.10"}
+		return ProvItem{What: what, State: ProvBad, Reason: k + ": Docker требует ядро не ниже 3.10"}
 	}
-	return ProvItem{what, ProvOK, k}
+	return ProvItem{What: what, State: ProvOK, Reason: k}
 }
 
 func classifyArch(p probe) ProvItem {
@@ -341,7 +349,7 @@ func classifyArch(p probe) ProvItem {
 	case a == "":
 		return unk(what, "uname -m ничего не вернул")
 	case a == "x86_64" || a == "amd64" || a == "aarch64" || a == "arm64":
-		return ProvItem{what, ProvOK, a}
+		return ProvItem{What: what, State: ProvOK, Reason: a}
 	}
 	// Аудит AU р1, L1: проверенного источника о годности других архитектур
 	// нет (контейнеры собираются на сервере из Dockerfile) — «не знаем», а
@@ -358,15 +366,15 @@ func classifyProvAppArmor(h probe) ProvItem {
 	case !h.ok:
 		return notRan(what, h)
 	case h.get("AA") == "none":
-		return ProvItem{what, ProvOK, "AppArmor на сервере нет"}
+		return ProvItem{What: what, State: ProvOK, Reason: "AppArmor на сервере нет"}
 	case h.get("AA") != "yes":
 		return unk(what, "наличие AppArmor определить не удалось")
 	case h.get("PROF") != "readable":
 		return unk(what, "AppArmor есть, список профилей прочитать не удалось (нужны права root)")
 	case len(loaded) > 0:
-		return ProvItem{what, ProvBad, "загружены профили " + strings.Join(loaded, ", ") + " — они не дают поднять WireGuard/AmneziaWG в контейнерах; выгрузите их (diagnose -fix после установки или apparmor_parser -R)"}
+		return ProvItem{What: what, State: ProvBad, Reason: "загружены профили " + strings.Join(loaded, ", ") + " — они не дают поднять WireGuard/AmneziaWG в контейнерах; выгрузите их (diagnose -fix после установки или apparmor_parser -R)"}
 	}
-	return ProvItem{what, ProvOK, "AppArmor есть, профилей wg/wg-quick нет"}
+	return ProvItem{What: what, State: ProvOK, Reason: "AppArmor есть, профилей wg/wg-quick нет"}
 }
 
 func classifySudo(p probe) ProvItem {
@@ -375,15 +383,15 @@ func classifySudo(p probe) ProvItem {
 	case !p.ok:
 		return notRan(what, p)
 	case p.get("UID") == "0":
-		return ProvItem{what, ProvOK, "вход под root"}
+		return ProvItem{What: what, State: ProvOK, Reason: "вход под root"}
 	case p.get("UID") == "":
 		return unk(what, "id -u ничего не вернул")
 	case p.has("SUDO"):
-		return ProvItem{what, ProvBad, "не root и sudo не установлен"}
+		return ProvItem{What: what, State: ProvBad, Reason: "не root и sudo не установлен"}
 	case p.get("SUDORC") == "0":
-		return ProvItem{what, ProvOK, "sudo без пароля работает"}
+		return ProvItem{What: what, State: ProvOK, Reason: "sudo без пароля работает"}
 	case p.get("SUDORC") != "":
-		return ProvItem{what, ProvBad, "не root и sudo без пароля не разрешён: " + srvText(p.get("SUDOERR"))}
+		return ProvItem{What: what, State: ProvBad, Reason: "не root и sudo без пароля не разрешён: " + srvText(p.get("SUDOERR"))}
 	}
 	return unk(what, "проверить sudo не удалось")
 }
@@ -400,17 +408,17 @@ func classifyDocker(p probe) ProvItem {
 	case !p.ok:
 		return notRan(what, p)
 	case p.get("DOCKER") == "no":
-		return ProvItem{what, ProvOK, "не установлен — установщик Amnezia поставит его сам"}
+		return ProvItem{What: what, State: ProvOK, Reason: "не установлен — установщик Amnezia поставит его сам"}
 	case p.get("DOCKER") != "yes":
 		return unk(what, "наличие Docker определить не удалось")
 	case dockerUsable(p):
-		return ProvItem{what, ProvOK, "версия " + srv + ", демон работает"}
+		return ProvItem{What: what, State: ProvOK, Reason: "версия " + srv + ", демон работает"}
 	case deniedIn(srv):
 		return unk(what, "Docker установлен, а спросить демон не хватило прав: "+srv)
 	// Решение ядра (ревью р1, M1): остановленный демон — поправимо, официальный
 	// установщик сам делает systemctl enable --now docker. Не «нельзя».
 	case dockerStopped(p):
-		return ProvItem{what, ProvOK, "Docker установлен, демон остановлен — официальный установщик запустит его (" + srv + ")"}
+		return ProvItem{What: what, State: ProvOK, Reason: "Docker установлен, демон остановлен — официальный установщик запустит его (" + srv + ")"}
 	case srv == "":
 		return unk(what, "Docker установлен, демон не ответил (пустой вывод)")
 	}
@@ -530,7 +538,7 @@ func classifyContainers(d, c probe) ProvItem {
 	const what = provCtrWhat
 	switch {
 	case d.ok && d.get("DOCKER") == "no":
-		return ProvItem{what, ProvOK, "нет (Docker не установлен)"}
+		return ProvItem{What: what, State: ProvOK, Reason: "нет (Docker не установлен)"}
 	case !dockerUsable(d):
 		return unk(what, "Docker недоступен — список контейнеров не получить")
 	case !c.ok:
@@ -546,9 +554,9 @@ func classifyContainers(d, c probe) ProvItem {
 		}
 	}
 	if len(found) > 0 {
-		return ProvItem{what, ProvBad, "уже есть: " + strings.Join(found, ", ") + " — сервер не пустой, установка «с нуля» их затронет"}
+		return ProvItem{What: what, State: ProvBad, Reason: "уже есть: " + strings.Join(found, ", ") + " — сервер не пустой, установка «с нуля» их затронет"}
 	}
-	return ProvItem{what, ProvOK, "нет"}
+	return ProvItem{What: what, State: ProvOK, Reason: "нет"}
 }
 
 // listenPorts — «proto:port» прослушиваемых сокетов из вывода ss -lntu.
@@ -595,7 +603,7 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		if !pub.known {
 			note = " (список портов контейнеров неполный: " + pub.why + ")"
 		}
-		return ProvItem{what, ProvBad, "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — " + portBusyAdvice(name) + note}
+		return ProvItem{What: what, State: ProvBad, Reason: "порт опубликован контейнером " + srvText(pub.busy(proto, port)) + " — " + portBusyAdvice(name) + note}
 	case !p.ok:
 		return notRan(what, p)
 	case p.has("SS"):
@@ -609,7 +617,7 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		// На живом сервере слушает хотя бы sshd: пустой список — не «свободно».
 		return unk(what, "ss не показал ни одного прослушиваемого сокета (даже SSH) — данным не верим")
 	case m[key]:
-		return ProvItem{what, ProvBad, "порт занят другой программой — " + portBusyAdvice(name)}
+		return ProvItem{What: what, State: ProvBad, Reason: "порт занят другой программой — " + portBusyAdvice(name)}
 	case !pub.known:
 		// ss не видит порты контейнеров с выключенным docker-proxy.
 		why := pub.why
@@ -618,5 +626,5 @@ func classifyPort(p probe, pub pubPorts, name, proto string, port int) ProvItem 
 		}
 		return unk(what, "по ss свободен, но "+why)
 	}
-	return ProvItem{what, ProvOK, "свободен (по ss и docker ps; ss не видит порты контейнеров с выключенным docker-proxy, их сверили по docker ps)"}
+	return ProvItem{What: what, State: ProvOK, Reason: "свободен (по ss и docker ps; ss не видит порты контейнеров с выключенным docker-proxy, их сверили по docker ps)"}
 }

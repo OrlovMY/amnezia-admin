@@ -49,8 +49,10 @@ func wipePlan(known, copy bool) *core.TeardownPlan {
 	return p
 }
 
-func newWipeFix(t *testing.T) *wipeFix {
-	f := &wipeFix{thFixture: newTHFixture(t), plan: wipePlan(true, true), dir: t.TempDir()}
+func newWipeFix(t *testing.T) *wipeFix { return newWipeFixOn(t, newTHFixture(t)) }
+
+func newWipeFixOn(t *testing.T, th *thFixture) *wipeFix {
+	f := &wipeFix{thFixture: th, plan: wipePlan(true, true), dir: t.TempDir()}
 	f.keysOut = core.KeysAccepted
 	f.prov = dirtyProv()
 	f.res = core.TeardownResult{State: core.TeardownDone, CopyPath: f.dir + "/203.0.113.5-перед-сносом.aabk"}

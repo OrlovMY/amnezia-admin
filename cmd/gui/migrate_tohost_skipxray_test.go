@@ -47,9 +47,103 @@ func thXRayProv(busy bool, seen *[]bool) func(*core.Session, *core.Backup) core.
 			if busy {
 				st, why = core.ProvBad, "порт занят другой программой"
 			}
-			r.Items = append(r.Items, core.ProvItem{What: "порт amnezia-xray 443/tcp (порт из копии)", State: st, Reason: why})
+			// признак — Container (как ставит ProvisionCheckFor); в словах What
+			// «xray» нет нарочно: кнопка обязана опираться на структуру
+			r.Items = append(r.Items, core.ProvItem{What: "порт 443/tcp (порт из копии)", State: st, Reason: why, Container: core.XRayContainer})
 		}
 		return r
+	}
+}
+
+// TestGUIToHostSkipXRayNotByWords — L1: пункт со словами «порт XRay», но
+// без признака контейнера, кнопку «Перенести без XRay» не вызывает.
+// Подмена «искать по словам в What» роняет.
+func TestGUIToHostSkipXRayNotByWords(t *testing.T) {
+	f := newTHFixtureOn(t, newMigFixtureOn(t, awgXRayServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst))
+	f.keysOut = core.KeysAccepted
+	f.prov = core.ProvisionReport{Items: []core.ProvItem{{What: "порт XRay 443/tcp (порт по умолчанию)", State: core.ProvBad, Reason: "занят"}}}
+	f.startHost(t)
+	if r := f.u.toHostReviewed; r == nil || r.skip != nil {
+		t.Fatal("кнопка «" + toHostSkipText + "» по словам в названии пункта, без признака контейнера")
+	}
+}
+
+// TestGUIToHostSkipXRayOnce — L2: кнопка гаснет сразу при нажатии (второе
+// нажатие не открывает второе окно), ответ окна принимается один раз —
+// пересчёт один. Отказ возвращает кнопку.
+func TestGUIToHostSkipXRayOnce(t *testing.T) {
+	f := newTHFixtureOn(t, newMigFixtureOn(t, awgXRayServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst))
+	f.keysOut = core.KeysAccepted
+	var seen []bool
+	toHostProvCheck = thXRayProv(true, &seen)
+	f.startHost(t)
+	r := f.u.toHostReviewed
+	if r == nil || r.skip == nil {
+		t.Fatal("нет кнопки «" + toHostSkipText + "»")
+	}
+	// отказ — кнопка снова доступна
+	test.Tap(r.skip)
+	if !r.skip.Disabled() {
+		t.Fatal("кнопка не погашена сразу при нажатии")
+	}
+	test.Tap(buttonByText(t, f.u.win.Canvas().Overlays().Top(), toHostSkipNoText))
+	if r.skip.Disabled() {
+		t.Fatal("после «" + toHostSkipNoText + "» кнопка осталась погашенной")
+	}
+	// согласие, нажатое дважды, и второе нажатие кнопки
+	test.Tap(r.skip)
+	first := f.u.toHostSkipAsk
+	test.Tap(r.skip)
+	if f.u.toHostSkipAsk != first {
+		t.Fatal("второе нажатие открыло второе окно")
+	}
+	yes := buttonByText(t, f.u.win.Canvas().Overlays().Top(), toHostSkipText)
+	n := len(seen)
+	test.Tap(yes)
+	waitGUIGoroutines(t) // фон пересчёта завершён: второй ответ — в спокойном окне
+	test.Tap(yes)
+	waitGUIGoroutines(t)
+	if len(seen) != n+1 {
+		t.Fatalf("пересчётов %d, ждали один", len(seen)-n)
+	}
+}
+
+// TestGUIToHostSkipXRayResetsWipe — M1: согласие на снос → на шаге выборов
+// «Без XRay» → пересчёт: согласие на снос сброшено (st.wipe, wipeNoCopy),
+// снос не вызывался, окно сноса показывается заново. Подмена «убран сброс»
+// роняет.
+func TestGUIToHostSkipXRayResetsWipe(t *testing.T) {
+	f := newWipeFixOn(t, newTHFixtureOn(t, newMigFixtureOn(t, awgXRayServer(), xrayMigServer(), migTestDstHost, realFpSrc, realFpDst)))
+	w := f.toWipe(t)
+	w.check.SetChecked(true)
+	if w.noCopy != nil {
+		w.noCopy.SetChecked(true)
+	}
+	test.Tap(w.ok)
+	v := f.u.toHostShown
+	if v == nil || v.xrayRadio == nil {
+		t.Fatal("шага выборов с выбором XRay нет")
+	}
+	st := f.u.toHostReviewed.st
+	if !st.wipe {
+		t.Fatal("сцена ничего не значит: согласия на снос нет")
+	}
+	v.xrayRadio.SetSelected(toHostXRaySkipOpt)
+	thConfirmSkip(t, f.thFixture)
+	r := f.u.toHostReviewed
+	if r.st.wipe || r.st.wipeNoCopy {
+		t.Fatalf("согласие на снос пережило пересчёт: wipe=%v noCopy=%v", r.st.wipe, r.st.wipeNoCopy)
+	}
+	if f.calls != 0 {
+		t.Fatalf("снос вызван %d раз", f.calls)
+	}
+	if !r.st.xraySkipped.Present {
+		t.Fatal("XRay не исключён")
+	}
+	test.Tap(r.next)
+	w2 := f.u.toHostWiped
+	if w2 == w || w2.check.Checked || !w2.ok.Disabled() {
+		t.Fatal("окно сноса не показано заново с непоставленной галкой")
 	}
 }
 

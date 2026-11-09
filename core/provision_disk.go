@@ -132,7 +132,7 @@ func measureDisk(what string, p probe, src string) ProvItem {
 	}
 	free := fmt.Sprintf("%.1f ГиБ свободно на %s (%s)", float64(kb)/1024/1024, srvText(p.get("DFPATH")), src)
 	if kb < provMinFreeKB {
-		return ProvItem{what, ProvBad, free + " — нужно не меньше 1 ГиБ"}
+		return ProvItem{What: what, State: ProvBad, Reason: free + " — нужно не меньше 1 ГиБ"}
 	}
-	return ProvItem{what, ProvOK, free}
+	return ProvItem{What: what, State: ProvOK, Reason: free}
 }

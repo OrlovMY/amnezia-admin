@@ -416,8 +416,7 @@ func toHostHasXRay(b *core.Backup) bool {
 // без освобождения порта — перенос без XRay.
 func toHostXRayPortNotOK(r core.ProvisionReport) bool {
 	for _, it := range r.Items {
-		w := strings.ToLower(it.What)
-		if it.State != core.ProvOK && strings.Contains(w, "порт") && strings.Contains(w, "xray") {
+		if it.State != core.ProvOK && it.Container == core.XRayContainer {
 			return true
 		}
 	}
@@ -462,7 +461,12 @@ func (u *ui) toHostAskSkipXRay(st *toHostState, from dialog.Dialog, onNo func())
 	lines := []string{"Клиенты XRay на новом сервере работать не будут."}
 	lines = append(lines, toHostSkipWhoLines(sk)...)
 	lines = append(lines, "XRay не будет ставиться, его порт не проверяется, в ключ vpn:// он не попадёт. Предпроверка и план будут пересчитаны по копии без XRay; итог переноса — «перенесено частично — без XRay».")
+	answered := false
 	cd := u.newConfirm(toHostSkipTitle, strings.Join(lines, "\n"), func(yes bool) {
+		if answered { // ответ принимается один раз: второй пересчёт не запускается
+			return
+		}
+		answered = true
 		if !yes {
 			if onNo != nil {
 				onNo()
@@ -582,6 +586,7 @@ type toHostReview struct {
 	reason *msgText
 	text   string
 	skip   *widget.Button // «Перенести без XRay»; nil — не предлагается
+	st     *toHostState   // состояние шага (для тестов)
 }
 
 // toHostWindow — шаг 1 «Просмотр»: стороны, вход, предпроверка, план,
@@ -589,7 +594,7 @@ type toHostReview struct {
 // к окну адреса (сессия нового сервера закрывается), «Далее: выборы» — к
 // шагу 2. Далее погашена, если ставить нельзя или неизвестно.
 func (u *ui) toHostWindow(st *toHostState) *toHostReview {
-	r := &toHostReview{}
+	r := &toHostReview{st: st}
 	u.toHostReviewed = r
 	var sections []fyne.CanvasObject
 	var all []string
@@ -681,7 +686,10 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	cw := u.confirmWindowPinned(toHostReviewTitle, sections, pinned, toHostNextText, false, next, 900)
 	r.d, r.next, r.back = cw.d, cw.ok, cw.cancel
 	if skipBtn != nil {
-		skipBtn.OnTapped = func() { u.toHostAskSkipXRay(st, r.d, nil) }
+		skipBtn.OnTapped = func() {
+			skipBtn.Disable() // второе нажатие до ответа — не второе окно
+			u.toHostAskSkipXRay(st, r.d, func() { skipBtn.Enable() })
+		}
 	}
 	r.back.SetText(toHostBackText)
 	cw.onCancel(func() { // «Назад»/Esc — к окну адреса; цель закрыта
