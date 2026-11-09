@@ -69,6 +69,13 @@ func TestWriteAdminKeyFileReserved(t *testing.T) {
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Errorf("создано файлов: %d", len(ents))
 	}
+	// проверка имени — сама по себе, без опоры на Abs (на Windows хвостовую
+	// точку срезает GetFullPathName, и отказ дал бы второй слой)
+	for _, n := range []string{"NUL", "nul.txt", "COM¹", "k.", "k2. .", "k "} {
+		if AdminKeyFileNameErr(n) == nil {
+			t.Errorf("AdminKeyFileNameErr(%q) = nil", n)
+		}
+	}
 	for _, ok := range []string{"nullable.txt", "con1", "COM10", "my.nul"} {
 		if err := AdminKeyFileNameErr(ok); err != nil {
 			t.Errorf("обычное имя %q отклонено: %v", ok, err)
