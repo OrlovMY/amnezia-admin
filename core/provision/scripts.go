@@ -8,7 +8,9 @@
 // только файлы пути установки (InstallController::setupContainer):
 // install_docker, prepare_host, remove_container, build_container,
 // setup_host_firewall и <папка протокола>/{Dockerfile, run_container.sh,
-// configure_container.sh, start.sh}. Клиентские шаблоны (template.conf,
+// configure_container.sh, start.sh}; у AmneziaDNS (папка dns) — Dockerfile,
+// run_container.sh и configure_container.sh (в обеих ревизиях пустой), start.sh
+// у него нет. Клиентские шаблоны (template.conf,
 // template.json) к установке не относятся и не вендорены.
 package provision
 
@@ -70,6 +72,9 @@ var revisions = map[string]Revision{
 			"xray/configure_container.sh":       "1341c321dfadfe56afa228ab9f91f2f84612870982063b954ab8b5be7cf87f11",
 			"xray/run_container.sh":             "cf322019d34272b0185ccc138f000866673ac2243866b14c5d57ec7e021cf2a6",
 			"xray/start.sh":                     "026b840844898960fcab2c398c7de18bb2a491b28ff8042692b713d50a21d77e",
+			"dns/Dockerfile":                    "a7699b53ac1bc61c8185579f6cf932e8295f0c985dfd18397693e0bd35c36057",
+			"dns/configure_container.sh":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			"dns/run_container.sh":              "3cea5838895ab9370d696e23d033299d683e2409d8bac37a81162c7cda0628a8",
 		},
 	},
 	Rev5106: {
@@ -98,6 +103,9 @@ var revisions = map[string]Revision{
 			"xray/configure_container.sh":       "c537a921cd9ec167c1aad17d5dd01d1fe65e3d25db7b06ea650d9cc256560061",
 			"xray/run_container.sh":             "c8d10824046f62090a6b89890550bcd5490ed26ba1e53cd9275ab9e441838935",
 			"xray/start.sh":                     "026b840844898960fcab2c398c7de18bb2a491b28ff8042692b713d50a21d77e",
+			"dns/Dockerfile":                    "a7699b53ac1bc61c8185579f6cf932e8295f0c985dfd18397693e0bd35c36057",
+			"dns/configure_container.sh":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			"dns/run_container.sh":              "3cea5838895ab9370d696e23d033299d683e2409d8bac37a81162c7cda0628a8",
 		},
 	},
 }

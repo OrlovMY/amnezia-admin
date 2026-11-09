@@ -118,6 +118,9 @@ type Migration struct {
 	Compat *CompatReport
 	// Plan — nil при Compat.Stop: плана нет, пока цель не исправлена.
 	Plan *RestorePlan
+	// SrcDNS, DstDNS — AmneziaDNS на источнике (из копии в памяти) и на цели
+	// (migrate_dns.go). Нулевые — «узнать не удалось».
+	SrcDNS, DstDNS DNSProbe
 }
 
 // Source — снимок источника в памяти (для сводки; секреты скрыты типом
@@ -146,7 +149,10 @@ func PrepareMigration(ctx context.Context, src, dst *Session, opt MigrationOptio
 	if err != nil {
 		return nil, stopped("%v", err)
 	}
-	m := &Migration{src: b, dst: dst, Compat: compat}
+	m := &Migration{src: b, dst: dst, Compat: compat, SrcDNS: b.SourceDNS}
+	if m.SrcDNS.State == DNSPresent {
+		m.DstDNS = dst.ProbeAmneziaDNS()
+	}
 	if compat.Stop {
 		return m, nil
 	}
@@ -176,7 +182,15 @@ func (m *Migration) Apply(opt MigrateOptions) (autoCopy string, outs []RestoreOu
 	case m.Compat.NeedAddressConfirm && !opt.AddressConfirmed:
 		return "", nil, stopped("адрес выдачи другой или не проверен — нужно отдельное подтверждение")
 	}
-	return m.dst.Restore(m.Plan, opt.RestoreOptions)
+	autoCopy, outs, err = m.dst.Restore(m.Plan, opt.RestoreOptions)
+	if err == nil {
+		// AmneziaDNS — после клиентов: его сбой не мешает переносу, но итог
+		// без него — «частично» (строка в outs не RestoreDone).
+		if o, ok := m.applyDNS(); ok {
+			outs = append(outs, o)
+		}
+	}
+	return autoCopy, outs, err
 }
 
 // MigrationOutcomeLines — итог прямого переезда. От RestoreOutcomeLines

@@ -194,6 +194,7 @@ func runMigrate(ctx context.Context, in io.Reader, w, errOut io.Writer, isTTY bo
 	}
 	fmt.Fprintln(w)
 	printLines(w, core.RestorePlanLines(rp))
+	printLines(w, m.DNSLines())
 	hasXRay := false
 	for _, it := range rp.Items {
 		if it.RestartsXRay {
