@@ -116,31 +116,113 @@ func TestInstallStepTimeout(t *testing.T) {
 }
 
 // M2: keepalive — три пропуска подряд закрывают связь; ответы — нет.
+//
+// Такт и срок ответа подаёт тест (keepaliveLoop), а не настоящие часы:
+// прежний вариант на 5 мс тикере под -race на медленной машине принимал
+// мгновенный ответ за «ответа нет» (срок истекал раньше, чем горутина
+// send успевала ответить), и «пропуски не подряд» закрывали связь.
 func TestInstallKeepalive(t *testing.T) {
-	run := func(send func() error) bool {
-		var killed atomic.Bool
-		stop := keepalive(send, func() { killed.Store(true) }, 5*time.Millisecond, 3)
-		time.Sleep(200 * time.Millisecond)
-		stop()
-		return killed.Load()
-	}
-	if !run(func() error { return errors.New("нет") }) {
-		t.Error("ошибки keepalive не закрыли связь")
-	}
-	if !run(func() error { time.Sleep(time.Second); return nil }) {
-		t.Error("молчание keepalive не закрыло связь")
-	}
-	if run(func() error { return nil }) {
-		t.Error("живая связь закрыта")
-	}
-	var n atomic.Int32
-	if run(func() error {
-		if n.Add(1)%3 == 0 {
-			return nil
+	const (
+		ok     = "ok"
+		fail   = "err"
+		silent = "silent"
+	)
+	// run прогоняет шаги по одному такту на шаг; возвращает номер шага
+	// (с 1), на котором связь закрыта, или 0.
+	run := func(steps ...string) int {
+		tick := make(chan time.Time) // без буфера: приём такта = прошлый шаг обработан
+		done := make(chan struct{})
+		finished := make(chan struct{})
+		release := make(chan struct{})
+		fired := make(chan time.Time)
+		close(fired)
+		// Шаг определяется порядковым номером вызова. Горутины send разных
+		// тактов сами по себе могут стартовать в любом порядке, поэтому
+		// следующий такт подаём только после того, как send текущего
+		// взял свой номер (started).
+		var sends, deadlines atomic.Int32
+		started := make(chan struct{})
+		killedAt := 0
+		step := func(n int32) string {
+			if int(n) < len(steps) {
+				return steps[n]
+			}
+			return "" // страж: не отвечает и срок не истекает
 		}
-		return errors.New("нет")
-	}) {
-		t.Error("пропуски не подряд — связь закрыта")
+		send := func() error {
+			n := sends.Add(1) - 1
+			started <- struct{}{}
+			switch step(n) {
+			case ok:
+				return nil
+			case fail:
+				return errors.New("нет")
+			}
+			<-release
+			return errors.New("поздно")
+		}
+		deadline := func() <-chan time.Time {
+			if step(deadlines.Add(1)-1) == silent {
+				return fired
+			}
+			return nil // срок не истекает: ждём настоящего ответа send
+		}
+		go func() {
+			defer close(finished)
+			keepaliveLoop(send, func() { killedAt = int(deadlines.Load()) }, 3, tick, deadline, done)
+		}()
+		for i := 0; i <= len(steps); i++ { // последний такт — страж
+			select {
+			case tick <- time.Time{}:
+				<-started
+			case <-finished:
+				i = len(steps) + 1
+			}
+		}
+		close(done)
+		<-finished
+		close(release)
+		return killedAt
+	}
+	cases := []struct {
+		name  string
+		steps []string
+		want  int
+	}{
+		{"ошибки закрывают", []string{fail, fail, fail, ok}, 3},
+		{"молчание закрывает", []string{silent, silent, silent, ok}, 3},
+		{"живая связь", []string{ok, ok, ok, ok, ok, ok}, 0},
+		{"пропуски не подряд", []string{fail, fail, ok, fail, fail, ok, silent, fail, ok}, 0},
+		{"сброс счёта после ответа", []string{fail, fail, ok, fail, silent, fail}, 6},
+	}
+	for _, c := range cases {
+		if got := run(c.steps...); got != c.want {
+			t.Errorf("%s: связь закрыта на шаге %d, ждали %d", c.name, got, c.want)
+		}
+	}
+}
+
+// keepalive с настоящими часами: проводка тикера и срока доходит до
+// keepaliveLoop. Исход не зависит от скорости: ошибки и молчание —
+// пропуск при любом раскладе планировщика.
+func TestInstallKeepaliveWired(t *testing.T) {
+	for name, send := range map[string]func() error{
+		"ошибки":   func() error { return errors.New("нет") },
+		"молчание": func() error { time.Sleep(time.Second); return nil },
+	} {
+		killed := make(chan struct{})
+		var once atomic.Bool
+		stop := keepalive(send, func() {
+			if once.CompareAndSwap(false, true) {
+				close(killed)
+			}
+		}, 5*time.Millisecond, 3)
+		select {
+		case <-killed:
+		case <-time.After(time.Minute):
+			t.Errorf("%s: связь не закрыта", name)
+		}
+		stop()
 	}
 }
 

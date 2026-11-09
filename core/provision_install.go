@@ -839,41 +839,48 @@ func (s *Session) noAnswer() string {
 // нет за period) — kill. stop останавливает.
 func keepalive(send func() error, kill func(), period time.Duration, misses int) (stop func()) {
 	done := make(chan struct{})
+	tk := time.NewTicker(period)
 	go func() {
-		tk := time.NewTicker(period)
 		defer tk.Stop()
-		miss := 0
-		for {
-			select {
-			case <-done:
-				return
-			case <-tk.C:
-			}
-			res := make(chan error, 1)
-			go func() { res <- send() }()
-			var err error
-			select {
-			case err = <-res:
-			case <-time.After(period):
-				err = fmt.Errorf("нет ответа")
-			case <-done:
-				return
-			}
-			if err == nil {
-				miss = 0
-				continue
-			}
-			if miss++; miss >= misses {
-				kill()
-				return
-			}
-		}
+		keepaliveLoop(send, kill, misses, tk.C, func() <-chan time.Time { return time.After(period) }, done)
 	}()
 	var once bool
 	return func() {
 		if !once {
 			once = true
 			close(done)
+		}
+	}
+}
+
+// keepaliveLoop — тело keepalive без собственных часов: такт приходит из
+// tick, срок ответа — из канала, который возвращает deadline. Тест подаёт
+// оба канала сам и не зависит от скорости планировщика.
+func keepaliveLoop(send func() error, kill func(), misses int, tick <-chan time.Time, deadline func() <-chan time.Time, done <-chan struct{}) {
+	miss := 0
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick:
+		}
+		res := make(chan error, 1)
+		go func() { res <- send() }()
+		var err error
+		select {
+		case err = <-res:
+		case <-deadline():
+			err = fmt.Errorf("нет ответа")
+		case <-done:
+			return
+		}
+		if err == nil {
+			miss = 0
+			continue
+		}
+		if miss++; miss >= misses {
+			kill()
+			return
 		}
 	}
 }

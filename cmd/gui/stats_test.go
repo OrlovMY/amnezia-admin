@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -590,10 +591,23 @@ func TestStatsBusyDuringWrite(t *testing.T) {
 func TestStatsStaleReadDropped(t *testing.T) {
 	f := &statsFake{st: core.CollectorStatus{State: core.CollectorInstalled, Collect: core.CollectWorking}, log: tStatsLog()}
 	v := openStats(t, f)
+	// Чтение A обязано войти в журнал раньше, чем начнётся B: горутины
+	// goSafe запускаются в любом порядке, и прежде под -race на macOS
+	// первым в readHook приходило B — висло оно, а «устаревшим» становилось
+	// A, и таблица оставалась пустой. Поэтому B запускаем, только когда A
+	// уже висит в readHook.
 	releaseA := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseA) }) }
+	// При досрочном t.Fatal горутина A не должна остаться висеть: иначе
+	// guiGoroutines не опустеет и следующие тесты пакета упадут по чужой
+	// причине (так CSV-тесты и весь пакет падали по таймауту 20 мин).
+	t.Cleanup(release)
+	enteredA := make(chan struct{})
 	var calls atomic.Int32
 	f.readHook = func() (*core.TrafficLog, error) {
 		if calls.Add(1) == 1 {
+			close(enteredA)
 			<-releaseA
 			return nil, errors.New("устаревшее чтение A")
 		}
@@ -604,6 +618,11 @@ func TestStatsStaleReadDropped(t *testing.T) {
 	t.Cleanup(func() { uiDo = old })
 	uiDo = func(fn func()) { old(fn); finished <- struct{}{} }
 	v.reload() // A — висит
+	select {
+	case <-enteredA:
+	case <-time.After(30 * time.Second):
+		t.Fatal("чтение A не дошло до журнала")
+	}
 	v.reload() // B — завершается сразу
 	select {
 	case <-finished:
@@ -613,7 +632,7 @@ func TestStatsStaleReadDropped(t *testing.T) {
 	if r, _ := v.tableSize(); r == 0 {
 		t.Fatalf("после B таблица пуста — проверка ничего не значит; пометки %q", v.notes.Text)
 	}
-	close(releaseA)
+	release()
 	waitGUIGoroutines(t)
 	if calls.Load() != 2 {
 		t.Fatalf("чтений %d, ждали 2", calls.Load())

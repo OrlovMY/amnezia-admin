@@ -61,7 +61,7 @@ func (f *guiAKFixture) run(t *testing.T, ok string) string {
 	t.Helper()
 	f.u.backupMenu()
 	test.Tap(buttonByText(t, topPopup(t, f.u.win.Canvas()), adminKeyMenuText))
-	guiGoroutines.Wait()
+	waitGUIGoroutines(t)
 	if ok != "" {
 		b := findEsc(f.u.win.Canvas().Overlays().Top(), ok)
 		if b == nil {
@@ -73,7 +73,7 @@ func (f *guiAKFixture) run(t *testing.T, ok string) string {
 			}
 		}
 		test.Tap(b)
-		guiGoroutines.Wait()
+		waitGUIGoroutines(t)
 	}
 	all := topOverlay(t, f.u)
 	if b, err := os.ReadFile(f.out); err == nil {
