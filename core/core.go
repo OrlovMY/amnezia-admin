@@ -411,7 +411,13 @@ type ClientEntry struct {
 	UserData map[string]any `json:"userData"`
 }
 
-func (e ClientEntry) Name() string    { return Str(e.UserData, "clientName") }
+// Name — имя клиента без пробельных символов по краям. Приложение Amnezia
+// пишет в clientsTable XRay имя с хвостовым переводом строки («\n», возможен
+// и «\r\n»): живой перенос 77→185 (09.11) печатал его в итоге переноса.
+// Обрезка — здесь, в месте чтения: этим путём имя получают и итоги, и поиск
+// клиента по имени. Сама запись (UserData) не меняется.
+func (e ClientEntry) Name() string { return strings.TrimSpace(Str(e.UserData, "clientName")) }
+
 func (e ClientEntry) Created() string { return Str(e.UserData, "creationDate") }
 
 // EnabledState — включён ли клиент по записи clientsTable. ТРИ состояния
