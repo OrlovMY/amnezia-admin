@@ -75,6 +75,9 @@ var folderContainer = map[string]string{
 	"awg_legacy": "amnezia-awg",
 	"wireguard":  "amnezia-wireguard",
 	"xray":       "amnezia-xray",
+	// AmneziaDNS: данных и клиентов нет, порта наружу нет; ставится при
+	// переносе, если он есть на источнике (core/migrate_dns.go).
+	"dns": "amnezia-dns",
 }
 
 // awgObf — параметры обфускации в awg/configure_container.sh (строки 17-41).
@@ -153,6 +156,9 @@ func specFor(rev, file string) (fileSpec, bool) {
 		}
 		return fileSpec{vars: map[string]rule{}}, true
 	case "run_container.sh":
+		if folder == "dns" {
+			return fileSpec{vars: map[string]rule{"CONTAINER_NAME": cont}}, true
+		}
 		port := map[string]string{"awg": "AWG_SERVER_PORT", "awg_legacy": "AWG_SERVER_PORT",
 			"wireguard": "WIREGUARD_SERVER_PORT", "xray": "XRAY_SERVER_PORT"}[folder]
 		return fileSpec{vars: map[string]rule{"CONTAINER_NAME": cont, "SERVER_IP_ADDRESS": req(kHost), port: req(kPort)}}, true
@@ -167,6 +173,8 @@ func specFor(rev, file string) (fileSpec, bool) {
 		}
 	case "configure_container.sh":
 		switch folder {
+		case "dns":
+			return fileSpec{vars: map[string]rule{}}, true
 		case "awg":
 			v := map[string]rule{"AWG_SERVER_PORT": req(kPort), "AWG_SUBNET_IP": req(kIPv4), "WIREGUARD_SUBNET_CIDR": req(kPrefix)}
 			for _, n := range awgObf {
