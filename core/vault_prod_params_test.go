@@ -25,19 +25,21 @@ func TestProdArgonParamsFloor(t *testing.T) {
 // TestCoreTestsDoNotAssignProdArgon — тест пакета core, подменивший
 // ProdArgonParams до TestProdArgonParamsFloor, обезвредил бы сторожа:
 // подмены лёгкими параметрами допустимы только в других пакетах.
+// Ловит присваивание всей переменной или поля и взятие адреса (&); граница —
+// текстовый поиск: подмену через reflect или unsafe он не увидит.
 func TestCoreTestsDoNotAssignProdArgon(t *testing.T) {
 	files, err := filepath.Glob("*_test.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("файлы тестов core не найдены (%v) — проверка не выполнилась бы", err)
 	}
-	assign := regexp.MustCompile(`ProdArgonParams\s*=[^=]`)
+	assign := regexp.MustCompile(`ProdArgonParams\s*(\.\w+\s*)?=[^=]|&\s*ProdArgonParams\b`)
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("%s не прочитан: %v", f, err)
 		}
 		if assign.Match(b) {
-			t.Errorf("%s присваивает ProdArgonParams — это обезвреживает TestProdArgonParamsFloor", f)
+			t.Errorf("%s присваивает ProdArgonParams или берёт его адрес — это обезвреживает TestProdArgonParamsFloor", f)
 		}
 	}
 }
