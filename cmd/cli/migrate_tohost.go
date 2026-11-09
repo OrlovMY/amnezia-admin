@@ -136,6 +136,7 @@ func printInstallPlan(w io.Writer, plan core.InstallPlan) {
 	for _, s := range plan.Skipped {
 		fmt.Fprintln(w, "  Не ставится: "+s.Container+" — "+s.Reason)
 	}
+	printLines(w, core.SourceDNSLines(plan.DNS))
 	switch {
 	case !plan.Ready():
 		fmt.Fprintln(w, "Готовность: НЕ готов — установка не начнётся.")

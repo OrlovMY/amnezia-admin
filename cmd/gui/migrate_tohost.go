@@ -540,6 +540,7 @@ func toHostPlanLines(plan core.InstallPlan) []string {
 	for _, s := range plan.Skipped {
 		out = append(out, "  Не ставится: "+s.Container+" — "+s.Reason)
 	}
+	out = append(out, core.SourceDNSLines(plan.DNS)...)
 	switch {
 	case !plan.Ready():
 		out = append(out, "Готовность: НЕ готов — установка не начнётся.")

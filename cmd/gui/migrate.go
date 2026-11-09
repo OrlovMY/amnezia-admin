@@ -410,6 +410,7 @@ func (u *ui) migrateWindow(m *core.Migration, dst *core.Session) *migrateView {
 	if rp != nil {
 		add(core.RestorePlanLines(rp), false)
 	}
+	add(m.DNSLines(), false)
 	v.text = strings.Join(all, "\n")
 	xray := false
 	if rp != nil {
