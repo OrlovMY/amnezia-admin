@@ -150,6 +150,8 @@ type ui struct {
 	toHostShown     *toHostView
 	toHostReviewed  *toHostReview
 	toHostWiped     *toHostWipe
+	// toHostSkipAsk — окно «Перенести без XRay?» (для тестов)
+	toHostSkipAsk *dialog.ConfirmDialog
 	// toHostLogin — пароль входа нового сервера; затирается в closeMigDst
 	// (любое закрытие: «Назад», смена источника, выход, конец операции).
 	toHostLogin *core.Secret

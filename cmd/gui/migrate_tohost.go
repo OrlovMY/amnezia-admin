@@ -264,6 +264,11 @@ type toHostState struct {
 	td               *core.TeardownPlan
 	tdErr            error
 	wipe, wipeNoCopy bool
+	// full — полная копия источника; b — то, что ставится и переносится
+	// (после «Перенести без XRay» — копия без XRay, core.BackupWithout).
+	// xraySkipped.Present — XRay исключён по выбору человека.
+	full        *core.Backup
+	xraySkipped core.SkippedContainer
 }
 
 // toHostConnectRun — вход и всё чтение до окна подтверждения — в фоне.
@@ -365,23 +370,144 @@ func (u *ui) toHostPrepare(ctx context.Context, src *core.Session, host, port, u
 		}
 		return st, "", "", errors.New("старый сервер не прочитан: " + core.MaskText(err.Error()))
 	}
-	st.b = b
+	st.full, st.b = b, b
+	return st, "", "", toHostAnalyze(ctx, st, pv)
+}
+
+// toHostAnalyze — предпроверка, план, перечень изменений, адрес и состав
+// нечистой цели — всё по st.b (то, что будет поставлено и перенесено).
+// Вызывается и повторно — после «Перенести без XRay»: предпроверка
+// пересчитывается по копии без XRay, прежние ответы не остаются.
+func toHostAnalyze(ctx context.Context, st *toHostState, pv *progressView) error {
 	pv.report(core.Progress{Text: "предпроверка нового сервера (только чтение)…"})
-	st.rep = toHostProvCheck(dst, b)
-	st.plan = core.PlanInstall(b, nil)
+	st.rep = toHostProvCheck(st.dst, st.b)
+	st.plan = core.PlanInstall(st.b, nil)
 	st.preview, st.previewErr = core.InstallPreview(st.plan)
-	st.needAddr, st.addrText = core.TargetAddressCheck(b, host, backupResolve)
+	st.needAddr, st.addrText = core.TargetAddressCheck(st.b, st.host, backupResolve)
+	st.td, st.tdErr = nil, nil
 	if st.rep.Verdict() == core.ProvVerdictNo && toHostNotClean(st.rep) && core.TeardownWouldClear(st.rep) {
 		pv.report(core.Progress{Text: "состав нового сервера и его клиенты (только чтение)…"})
-		st.td, st.tdErr = toHostTeardownPlan(ctx, dst, time.Now())
+		st.td, st.tdErr = toHostTeardownPlan(ctx, st.dst, time.Now())
 		if errors.Is(st.tdErr, core.ErrCanceled) {
-			return st, "", "", core.ErrCanceled
+			return core.ErrCanceled
 		}
 	}
 	if ctx.Err() != nil {
-		return st, "", "", core.ErrCanceled
+		return core.ErrCanceled
 	}
-	return st, "", "", nil
+	return nil
+}
+
+// toHostHasXRay — XRay в копии (в том, что будет поставлено).
+func toHostHasXRay(b *core.Backup) bool {
+	if b == nil {
+		return false
+	}
+	for _, c := range b.Containers {
+		if c.Name == core.XRayContainer {
+			return true
+		}
+	}
+	return false
+}
+
+// toHostXRayPortNotOK — пункт предпроверки о порте XRay не «годится»
+// (занят или узнать не удалось): «Далее» погашена, и единственный путь
+// без освобождения порта — перенос без XRay.
+func toHostXRayPortNotOK(r core.ProvisionReport) bool {
+	for _, it := range r.Items {
+		w := strings.ToLower(it.What)
+		if it.State != core.ProvOK && strings.Contains(w, "порт") && strings.Contains(w, "xray") {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	toHostSkipText   = "Перенести без XRay"
+	toHostSkipTitle  = "Перенести без XRay?"
+	toHostSkipNoText = "Оставить XRay"
+	// toHostXRaySkipOpt — второй вариант выбора XRay в режиме нового
+	// сервера: «прежнего» XRay на новом сервере нет, поэтому не
+	// migrateXRaySkip; выбор ведёт в то же окно, что кнопка на просмотре.
+	toHostXRaySkipOpt  = "Без XRay (его клиенты на новом сервере работать не будут)"
+	toHostXRayNotMoved = "XRay не перенесён"
+)
+
+// toHostSkipWhoLines — клиенты XRay: поимённо, «нет» или «не удалось
+// прочитать» (три состояния — из core.SkippedXRayLines, без строки про
+// флаг командной строки).
+func toHostSkipWhoLines(sk core.SkippedContainer) []string {
+	l := core.SkippedXRayLines(sk)
+	if len(l) < 2 {
+		return nil
+	}
+	return l[1:]
+}
+
+// toHostSkippedLines — что сказать, когда XRay исключён.
+func toHostSkippedLines(sk core.SkippedContainer) []string {
+	if !sk.Present {
+		return nil
+	}
+	return append([]string{toHostXRayNotMoved + " (выбрано «" + toHostSkipText + "»): его клиенты на новом сервере работать не будут."}, toHostSkipWhoLines(sk)...)
+}
+
+// toHostAskSkipXRay — явный выбор «без XRay» с предупреждением и
+// клиентами XRay. Да — окно from закрывается, копия без XRay, предпроверка
+// и план пересчитываются (toHostSkipRun). Нет — onNo (может быть nil).
+func (u *ui) toHostAskSkipXRay(st *toHostState, from dialog.Dialog, onNo func()) {
+	_, sk := core.BackupWithout(st.full, core.XRayContainer)
+	lines := []string{"Клиенты XRay на новом сервере работать не будут."}
+	lines = append(lines, toHostSkipWhoLines(sk)...)
+	lines = append(lines, "XRay не будет ставиться, его порт не проверяется, в ключ vpn:// он не попадёт. Предпроверка и план будут пересчитаны по копии без XRay; итог переноса — «перенесено частично — без XRay».")
+	cd := u.newConfirm(toHostSkipTitle, strings.Join(lines, "\n"), func(yes bool) {
+		if !yes {
+			if onNo != nil {
+				onNo()
+			}
+			return
+		}
+		if from != nil {
+			from.Hide()
+		}
+		u.toHostSkipRun(st)
+	})
+	cd.SetConfirmText(toHostSkipText)
+	cd.SetDismissText(toHostSkipNoText)
+	u.toHostSkipAsk = cd
+	cd.Show()
+}
+
+// toHostSkipRun — копия без XRay и пересчёт предпроверки (чтение цели) в
+// фоне; затем снова шаг «Просмотр».
+func (u *ui) toHostSkipRun(st *toHostState) {
+	ctx, cancel := context.WithCancel(context.Background())
+	u.setBusy(true)
+	pv := u.progressWindow("Пересчёт без XRay", cancel)
+	u.lastProgress = pv
+	goSafe(func() {
+		defer cancel()
+		st.b, st.xraySkipped = core.BackupWithout(st.full, core.XRayContainer)
+		st.wipe, st.wipeNoCopy = false, false
+		err := toHostAnalyze(ctx, st, pv)
+		uiDo(func() {
+			u.setBusy(false)
+			if u.opFinished(err) {
+				st.loginPw.Wipe()
+				u.closeMigDst()
+				return
+			}
+			if err != nil {
+				st.loginPw.Wipe()
+				u.closeMigDst()
+				u.migrateInfo("Перенос отменён", "Отменено — на серверах ничего не изменено.")
+				return
+			}
+			u.toHostWindow(st)
+		})
+	})
 }
 
 // toHostLoginLine — как выполнен вход (исход ключей — всегда).
@@ -455,6 +581,7 @@ type toHostReview struct {
 	back   *escButton
 	reason *msgText
 	text   string
+	skip   *widget.Button // «Перенести без XRay»; nil — не предлагается
 }
 
 // toHostWindow — шаг 1 «Просмотр»: стороны, вход, предпроверка, план,
@@ -507,6 +634,14 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 		vl = append(vl, "Ничего не изменено.")
 	}
 	add(vl, true, widget.MediumImportance)
+	// порт XRay не «годится» — явный выбор «без XRay» здесь, ДО «Далее»:
+	// иначе занятый порт гасит шаг выборов, где этот выбор был бы
+	skipOffer := toHostHasXRay(st.b) && toHostXRayPortNotOK(st.rep)
+	if skipOffer {
+		_, sk := core.BackupWithout(st.full, core.XRayContainer)
+		add(append([]string{"Порт XRay на новом сервере не годится или не проверен (см. выше). Можно освободить порт и начать заново — или перенести без XRay (кнопка «" + toHostSkipText + "» внизу): клиенты XRay на новом сервере работать не будут."}, toHostSkipWhoLines(sk)...), true, widget.WarningImportance)
+	}
+	add(toHostSkippedLines(st.xraySkipped), true, widget.WarningImportance)
 	if st.td != nil {
 		add(st.td.InventoryLines(), false, widget.WarningImportance)
 	}
@@ -536,8 +671,18 @@ func (u *ui) toHostWindow(st *toHostState) *toHostReview {
 	if verdict != core.ProvVerdictYes {
 		next = func() { u.toHostWipeWindow(st) }
 	}
-	cw := u.confirmWindowPinned(toHostReviewTitle, sections, []fyne.CanvasObject{r.reason}, toHostNextText, false, next, 900)
+	pinned := []fyne.CanvasObject{r.reason}
+	var skipBtn *widget.Button
+	if skipOffer {
+		skipBtn = widget.NewButtonWithIcon(toHostSkipText, theme.WarningIcon(), nil)
+		r.skip = skipBtn
+		pinned = append(pinned, container.NewHBox(skipBtn))
+	}
+	cw := u.confirmWindowPinned(toHostReviewTitle, sections, pinned, toHostNextText, false, next, 900)
 	r.d, r.next, r.back = cw.d, cw.ok, cw.cancel
+	if skipBtn != nil {
+		skipBtn.OnTapped = func() { u.toHostAskSkipXRay(st, r.d, nil) }
+	}
 	r.back.SetText(toHostBackText)
 	cw.onCancel(func() { // «Назад»/Esc — к окну адреса; цель закрыта
 		st.loginPw.Wipe()
@@ -655,6 +800,12 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 	summary := toHostSummary(st.plan)
 	v.text = strings.Join(summary, "\n")
 	sections := []fyne.CanvasObject{wrapLabel(v.text, false), wrapLabel(migrateAutoCopyNote, false)}
+	if st.xraySkipped.Present {
+		l := wrapLabel(strings.Join(toHostSkippedLines(st.xraySkipped), "\n"), true)
+		l.Importance = widget.WarningImportance
+		sections = append(sections, l)
+		v.text += "\n" + strings.Join(toHostSkippedLines(st.xraySkipped), "\n")
+	}
 	if st.wipe {
 		sections = append(sections, wrapLabel("Перед установкой: копия нового сервера (тем же слоем, что автокопия), её проверка и снос Amnezia на нём — подтверждено в окне сноса.", true))
 	}
@@ -674,7 +825,15 @@ func (u *ui) toHostChoices(st *toHostState) *toHostView {
 	}
 	if xray {
 		sections = append(sections, restartSections()...)
-		v.xrayRadio = widget.NewRadioGroup([]string{migrateXRayRestart, migrateXRaySkip}, func(string) { update() })
+		// «без XRay» на новом сервере — не «оставить прежний» (его нет):
+		// выбор ведёт к пересчёту предпроверки и плана по копии без XRay
+		v.xrayRadio = widget.NewRadioGroup([]string{migrateXRayRestart, toHostXRaySkipOpt}, func(sel string) {
+			if sel == toHostXRaySkipOpt {
+				u.toHostAskSkipXRay(st, v.d, func() { v.xrayRadio.SetSelected("") })
+				return
+			}
+			update()
+		})
 		v.xrayRadio.Horizontal = true
 		pinned = append(pinned, container.NewBorder(nil, nil, msgLabelStyle(restoreXRayHint, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, v.xrayRadio))
 	}
@@ -794,9 +953,23 @@ type toHostOutcome struct {
 	// ErrOpMarkerNotWritten): установка не начиналась, маркер не снимается.
 	markerErr error
 	addr      bool // адрес выдачи подтверждался
-	xraySkip  bool // XRay оставлен как есть
+	// xraySkip — XRay не перенесён: исключён из установки, переноса и
+	// ключа по выбору «Перенести без XRay»; xraySkipped — его клиенты.
+	xraySkip    bool
+	xraySkipped core.SkippedContainer
 	// td — итог сноса (nil — снос не выполнялся: цель была чистой)
 	td *core.TeardownResult
+}
+
+const toHostPartialHead = "ПЕРЕНЕСЕНО ЧАСТИЧНО — без XRay: остальные контейнеры перенесены и проверены, XRay не перенесён — его клиенты на новом сервере работать не будут (подробности ниже)."
+
+// toHostAllButXRay — перенесено всё, кроме исключённого XRay.
+func toHostAllButXRay(o toHostOutcome) bool {
+	if !o.xraySkip {
+		return false
+	}
+	st, _ := migrateVerdict(o.err, o.outs)
+	return o.applied && o.res.ReadyForRestore() && st == migDone
 }
 
 // toHostVerdict — один из трёх исходов. «Неизвестно» проверяется раньше
@@ -830,6 +1003,11 @@ func toHostVerdict(o toHostOutcome) (migState, string) {
 		return migNotDone, "НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере поставлена, перенос клиентов не начинался (отменено)."
 	}
 	st, head := migrateVerdict(o.err, o.outs)
+	if st == migDone && o.xraySkip {
+		// всё, что переносилось, перенесено — но XRay исключён: это не
+		// полная копия источника
+		return migNotDone, toHostPartialHead
+	}
 	if o.err != nil && st == migNotDone {
 		head = "НЕ ПЕРЕНЕСЕНО — Amnezia на новом сервере поставлена, клиенты не перенесены: на неё ничего не записано (подробности ниже)."
 	}
@@ -841,7 +1019,7 @@ func toHostVerdict(o toHostOutcome) (migState, string) {
 func (u *ui) toHostRun(st *toHostState, v *toHostView) {
 	o := toHostOutcome{consent: v.consent.Checked, addr: st.needAddr}
 	xrayOK := v.xrayRadio != nil && v.xrayRadio.Selected == migrateXRayRestart
-	o.xraySkip = v.xrayRadio != nil && !xrayOK
+	o.xraySkip, o.xraySkipped = st.xraySkipped.Present, st.xraySkipped
 	addrOK := v.addrCheck == nil || v.addrCheck.Checked
 	layer := v.layer()
 	o.enc = layer != nil && layer.Name() == core.PasswordLayerName
@@ -1180,7 +1358,7 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	default:
 		body = append(body, o.keyLines...)
 	}
-	transferred := s == migDone
+	transferred := s == migDone || toHostAllButXRay(o)
 	if installed && !transferred {
 		body = append(body, "", "ПЕРЕНОС НЕ ЗАВЕРШЁН. На новом сервере поставлены контейнеры Amnezia ("+strings.Join(o.names, ", ")+"); старый сервер не изменён и продолжает работать.")
 		switch {
@@ -1200,6 +1378,9 @@ func (u *ui) toHostResult(st *toHostState, o toHostOutcome) dialog.Dialog {
 	}
 	if len(o.notes) > 0 {
 		body = append(append(body, ""), o.notes...)
+	}
+	if o.xraySkip { // громко и последним, как в CLI
+		body = append(append(body, ""), toHostSkippedLines(o.xraySkipped)...)
 	}
 	var objs []fyne.CanvasObject
 	if o.keyPath != "" {
